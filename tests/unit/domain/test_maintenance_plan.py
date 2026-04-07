@@ -1,5 +1,7 @@
 """Tests for the MaintenancePlan domain entity."""
 
+import pytest
+
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 
 
@@ -48,3 +50,25 @@ class TestMaintenancePlan:
         restored = MaintenancePlan.model_validate(data)
         assert restored.id == sample_maintenance_plan.id
         assert restored.interval.months == sample_maintenance_plan.interval.months
+
+
+class TestMaintenancePlanValidation:
+    """Test field validators."""
+
+    def test_empty_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            MaintenancePlan(
+                id="",
+                asset_id="P-201",
+                name="Quarterly",
+                interval=Interval(months=3),
+            )
+
+    def test_id_stripped(self) -> None:
+        mp = MaintenancePlan(
+            id="  MP-1  ",
+            asset_id="P-201",
+            name="Quarterly",
+            interval=Interval(months=3),
+        )
+        assert mp.id == "MP-1"

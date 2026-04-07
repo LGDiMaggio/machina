@@ -31,6 +31,13 @@ class IncomingMessage:
         user_name: Display name of the sender.
         channel: Channel type (``"telegram"`` or ``"cli"``).
         raw: Raw platform-specific message object.
+
+    Example:
+        ```python
+        from machina.connectors.comms.telegram import IncomingMessage
+
+        msg = IncomingMessage("Check pump P-201", chat_id="123", user_name="Mario")
+        ```
     """
 
     text: str
@@ -126,6 +133,9 @@ class TelegramConnector:
         Args:
             chat_id: The Telegram chat ID.
             text: Message text to send.
+
+        Raises:
+            ConnectorError: If not connected or application not initialised.
         """
         self._ensure_connected()
         if self._application is None:

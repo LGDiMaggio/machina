@@ -31,6 +31,13 @@ class DocumentChunk:
         page: Page number (if available).
         score: Relevance score from the retriever.
         metadata: Additional metadata from the document loader.
+
+    Example:
+        ```python
+        from machina.connectors.docs.document_store import DocumentChunk
+
+        chunk = DocumentChunk("Pump P-201 bearing procedure", source="manual.pdf", page=42)
+        ```
     """
 
     content: str

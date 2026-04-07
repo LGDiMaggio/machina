@@ -81,7 +81,11 @@ class GenericCmmsConnector:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Establish connection or load local data files."""
+        """Establish connection or load local data files.
+
+        Raises:
+            ConnectorError: If neither ``url`` nor ``data_dir`` is provided.
+        """
         if self._data_dir and self._data_dir.exists():
             await self._load_local_data()
         elif self.url:

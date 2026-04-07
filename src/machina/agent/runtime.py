@@ -158,6 +158,9 @@ class Agent:
 
         Returns:
             The agent's response text.
+
+        Raises:
+            LLMError: If the underlying LLM call fails.
         """
         logger.info(
             "message_received",

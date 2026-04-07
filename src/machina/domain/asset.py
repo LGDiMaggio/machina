@@ -11,7 +11,7 @@ from datetime import date  # noqa: TC003
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AssetType(StrEnum):
@@ -69,3 +69,10 @@ class Asset(BaseModel):
     )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("id cannot be empty")
+        return v.strip()

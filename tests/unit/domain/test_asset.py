@@ -91,3 +91,15 @@ class TestCriticality:
     def test_invalid_criticality_rejected(self) -> None:
         with pytest.raises(ValueError):
             Asset(id="X", name="X", type=AssetType.INSTRUMENT, criticality="D")  # type: ignore[arg-type]
+
+    def test_empty_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            Asset(id="", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+
+    def test_whitespace_only_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            Asset(id="   ", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+
+    def test_id_stripped(self) -> None:
+        asset = Asset(id="  P-201  ", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+        assert asset.id == "P-201"

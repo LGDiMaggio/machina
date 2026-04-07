@@ -92,3 +92,19 @@ class TestPriority:
     def test_all_priorities(self) -> None:
         expected = {"emergency", "high", "medium", "low"}
         assert {p.value for p in Priority} == expected
+
+
+class TestWorkOrderValidation:
+    """Test field validators."""
+
+    def test_empty_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            WorkOrder(id="", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+    def test_whitespace_only_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            WorkOrder(id="   ", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+    def test_id_stripped(self) -> None:
+        wo = WorkOrder(id="  WO-1  ", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+        assert wo.id == "WO-1"

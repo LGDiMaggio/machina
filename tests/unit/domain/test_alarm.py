@@ -1,5 +1,7 @@
 """Tests for the Alarm domain entity."""
 
+import pytest
+
 from machina.domain.alarm import Alarm, Severity
 
 
@@ -61,3 +63,29 @@ class TestSeverity:
     def test_all_severities(self) -> None:
         expected = {"critical", "warning", "info"}
         assert {s.value for s in Severity} == expected
+
+
+class TestAlarmValidation:
+    """Test field validators."""
+
+    def test_empty_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="id cannot be empty"):
+            Alarm(
+                id="",
+                asset_id="P-1",
+                severity=Severity.WARNING,
+                parameter="temp",
+                value=90.0,
+                threshold=80.0,
+            )
+
+    def test_id_stripped(self) -> None:
+        alarm = Alarm(
+            id="  A-1  ",
+            asset_id="P-1",
+            severity=Severity.WARNING,
+            parameter="temp",
+            value=90.0,
+            threshold=80.0,
+        )
+        assert alarm.id == "A-1"

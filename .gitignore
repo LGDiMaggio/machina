@@ -2,6 +2,7 @@
 MACHINA_SPEC.md
 CLAUDE.md
 .claude/
+.github/skills/
 
 # === Python ===
 __pycache__/

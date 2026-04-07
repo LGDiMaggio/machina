@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Interval(BaseModel):
@@ -27,6 +27,19 @@ class MaintenancePlan(BaseModel):
 
     Links an asset to a set of inspection or service tasks performed
     at a fixed calendar or operating-hours interval.
+
+    Example:
+        ```python
+        from machina.domain.maintenance_plan import Interval, MaintenancePlan
+
+        plan = MaintenancePlan(
+            id="MP-P201-Q",
+            asset_id="P-201",
+            name="Quarterly Bearing Inspection",
+            interval=Interval(months=3),
+            tasks=["Check vibration levels", "Inspect seal condition"],
+        )
+        ```
     """
 
     id: str = Field(..., description="Plan identifier (e.g. 'MP-P201-QUARTERLY')")
@@ -47,3 +60,10 @@ class MaintenancePlan(BaseModel):
     active: bool = Field(default=True, description="Whether the plan is active")
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("id cannot be empty")
+        return v.strip()

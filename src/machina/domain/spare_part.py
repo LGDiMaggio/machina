@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SparePart(BaseModel):
@@ -26,6 +26,13 @@ class SparePart(BaseModel):
     warehouse_location: str = Field(default="", description="Physical storage location")
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
+
+    @field_validator("sku")
+    @classmethod
+    def _validate_sku(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("sku cannot be empty")
+        return v.strip()
 
     @property
     def needs_reorder(self) -> bool:
