@@ -45,7 +45,9 @@ class TestLLMProviderComplete:
     async def test_complete_returns_text(self) -> None:
         provider = LLMProvider(model="test-model")
         mock_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Bearing replacement procedure"))]
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content="Bearing replacement procedure"))
+            ]
         )
         mock_acompletion = AsyncMock(return_value=mock_response)
         fake_litellm = _make_fake_litellm(mock_acompletion)
@@ -93,8 +95,9 @@ class TestLLMProviderComplete:
     @pytest.mark.asyncio
     async def test_complete_raises_on_missing_litellm(self) -> None:
         provider = LLMProvider()
-        with patch.dict(sys.modules, {"litellm": None}), pytest.raises(
-            ImportError, match="litellm is required"
+        with (
+            patch.dict(sys.modules, {"litellm": None}),
+            pytest.raises(ImportError, match="litellm is required"),
         ):
             await provider.complete(messages=[{"role": "user", "content": "test"}])
 
@@ -107,14 +110,14 @@ class TestLLMProviderCompleteWithTools:
         provider = LLMProvider(model="test-model")
         mock_tool_calls = [
             SimpleNamespace(
-                function=SimpleNamespace(name="create_work_order", arguments='{"asset_id": "P-201"}')
+                function=SimpleNamespace(
+                    name="create_work_order", arguments='{"asset_id": "P-201"}'
+                )
             )
         ]
         mock_response = SimpleNamespace(
             choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=None, tool_calls=mock_tool_calls)
-                )
+                SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=mock_tool_calls))
             ]
         )
         tools = [
@@ -141,9 +144,7 @@ class TestLLMProviderCompleteWithTools:
         provider = LLMProvider(model="test-model")
         mock_response = SimpleNamespace(
             choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="No tool needed", tool_calls=None)
-                )
+                SimpleNamespace(message=SimpleNamespace(content="No tool needed", tool_calls=None))
             ]
         )
         tools = [{"type": "function", "function": {"name": "test_tool"}}]
@@ -163,8 +164,9 @@ class TestLLMProviderCompleteWithTools:
     @pytest.mark.asyncio
     async def test_complete_with_tools_raises_on_missing_litellm(self) -> None:
         provider = LLMProvider()
-        with patch.dict(sys.modules, {"litellm": None}), pytest.raises(
-            ImportError, match="litellm is required"
+        with (
+            patch.dict(sys.modules, {"litellm": None}),
+            pytest.raises(ImportError, match="litellm is required"),
         ):
             await provider.complete_with_tools(
                 messages=[{"role": "user", "content": "test"}],
