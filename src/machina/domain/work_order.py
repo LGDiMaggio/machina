@@ -7,13 +7,13 @@ activities through their full lifecycle from creation to closure.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class WorkOrderType(str, Enum):
+class WorkOrderType(StrEnum):
     """Classification of the maintenance activity."""
 
     CORRECTIVE = "corrective"
@@ -22,7 +22,7 @@ class WorkOrderType(str, Enum):
     IMPROVEMENT = "improvement"
 
 
-class Priority(str, Enum):
+class Priority(StrEnum):
     """Work order urgency level."""
 
     EMERGENCY = "emergency"
@@ -31,7 +31,7 @@ class Priority(str, Enum):
     LOW = "low"
 
 
-class WorkOrderStatus(str, Enum):
+class WorkOrderStatus(StrEnum):
     """Lifecycle state of a work order."""
 
     CREATED = "created"

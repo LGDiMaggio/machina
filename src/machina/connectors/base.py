@@ -7,13 +7,13 @@ the agent works with whatever connectors are configured.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 
-class ConnectorStatus(str, Enum):
+class ConnectorStatus(StrEnum):
     """Health status of a connector."""
 
     HEALTHY = "healthy"

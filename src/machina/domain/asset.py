@@ -8,13 +8,13 @@ known failure modes.
 from __future__ import annotations
 
 from datetime import date  # noqa: TC003
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class AssetType(str, Enum):
+class AssetType(StrEnum):
     """Equipment classification based on ISO 14224 categories."""
 
     ROTATING_EQUIPMENT = "rotating_equipment"
@@ -27,7 +27,7 @@ class AssetType(str, Enum):
     SAFETY = "safety"
 
 
-class Criticality(str, Enum):
+class Criticality(StrEnum):
     """Asset criticality classification for maintenance prioritisation.
 
     A = Critical (production-stopping), B = Important, C = Standard.
