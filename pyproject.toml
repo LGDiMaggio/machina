@@ -80,7 +80,7 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/LGDiMaggio/machina"
-Documentation = "https://machina.readthedocs.io"
+Documentation = "https://machina-ai.readthedocs.io"
 Repository = "https://github.com/LGDiMaggio/machina"
 Issues = "https://github.com/LGDiMaggio/machina/issues"
 Changelog = "https://github.com/LGDiMaggio/machina/blob/main/CHANGELOG.md"
