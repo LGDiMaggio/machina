@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/machina-logo.svg" alt="Machina" width="500"/>
+  <img src="docs/assets/machina-logo.svg" alt="Machina" width="700"/>
   <h1>Machina</h1>
   <p><strong>The open-source Python framework for building AI agents specialized in industrial maintenance.</strong></p>
 
