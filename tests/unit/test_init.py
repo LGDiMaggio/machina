@@ -9,7 +9,7 @@ class TestPublicAPI:
     """Verify that the public API exports are correct and accessible."""
 
     def test_version_is_set(self) -> None:
-        assert machina.__version__ == "0.0.1"
+        assert machina.__version__ == "0.1.0"
 
     def test_all_domain_entities_exported(self) -> None:
         expected_names = [

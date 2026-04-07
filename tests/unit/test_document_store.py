@@ -1,0 +1,117 @@
+"""Tests for the DocumentStoreConnector."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from machina.connectors.docs.document_store import DocumentChunk, DocumentStoreConnector
+from machina.exceptions import ConnectorError
+
+
+@pytest.fixture
+def sample_docs_dir(tmp_path: Path) -> Path:
+    """Create a temp directory with sample documents."""
+    docs_dir = tmp_path / "manuals"
+    docs_dir.mkdir()
+
+    (docs_dir / "pump_manual.txt").write_text(
+        "Pump P-201 Bearing Replacement Procedure\n\n"
+        "Step 1: Lock out / Tag out the motor.\n"
+        "Step 2: Remove coupling.\n"
+        "Step 3: Use bearing puller to remove old bearings.\n"
+        "Step 4: Heat new SKF 6310 bearings to 110°C.\n"
+        "Step 5: Slide bearings onto shaft.\n\n"
+        "Safety: Always wear PPE including safety glasses and gloves.\n\n"
+        "Vibration limits: DE < 4.5 mm/s, NDE < 3.5 mm/s"
+    )
+
+    (docs_dir / "compressor_manual.md").write_text(
+        "# Air Compressor COMP-301 Manual\n\n"
+        "## COMP-301 Filter Replacement\n\n"
+        "Replace COMP-301 intake air filter every 2000 hours.\n"
+        "Part number: FILTER-GA55-INT\n\n"
+        "## Troubleshooting\n\n"
+        "High temperature on COMP-301: Check cooler and oil level.\n"
+        "Oil in air: Replace separator element."
+    )
+
+    return docs_dir
+
+
+class TestDocumentStoreConnector:
+    """Test DocumentStoreConnector in keyword fallback mode."""
+
+    @pytest.mark.asyncio
+    async def test_connect_and_load(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        health = await conn.health_check()
+        assert health.status.value == "healthy"
+        assert health.details["mode"] == "keyword"
+        assert health.details["chunk_count"] > 0
+
+    @pytest.mark.asyncio
+    async def test_search_returns_results(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("bearing replacement")
+        assert len(results) > 0
+        assert any("bearing" in r.content.lower() for r in results)
+
+    @pytest.mark.asyncio
+    async def test_search_with_asset_filter(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("filter replacement", asset_id="COMP-301")
+        assert len(results) > 0
+        assert all("COMP-301" in r.content or "comp-301" in r.content.lower() for r in results)
+
+    @pytest.mark.asyncio
+    async def test_search_no_results(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("quantum physics")
+        assert len(results) == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_directory(self, tmp_path: Path) -> None:
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        conn = DocumentStoreConnector(paths=[empty_dir])
+        await conn.connect()
+        results = await conn.search("anything")
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_disconnect(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        await conn.disconnect()
+        health = await conn.health_check()
+        assert health.status.value == "unhealthy"
+
+    @pytest.mark.asyncio
+    async def test_not_connected_raises(self) -> None:
+        conn = DocumentStoreConnector()
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.search("test")
+
+    def test_capabilities(self) -> None:
+        conn = DocumentStoreConnector()
+        assert "search_documents" in conn.capabilities
+        assert "retrieve_section" in conn.capabilities
+
+
+class TestDocumentChunk:
+    """Test DocumentChunk data class."""
+
+    def test_repr(self) -> None:
+        chunk = DocumentChunk("Short text", source="test.pdf", page=1)
+        assert "test.pdf" in repr(chunk)
+
+    def test_long_text_truncated_in_repr(self) -> None:
+        long_text = "A" * 100
+        chunk = DocumentChunk(long_text, source="test.pdf")
+        assert "..." in repr(chunk)

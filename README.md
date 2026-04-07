@@ -70,9 +70,8 @@ pip install machina-ai[all]       # Everything
 ### Your First Maintenance Agent in 10 Lines
 
 ```python
-from machina import Agent
+from machina import Agent, Plant
 from machina.connectors import DocumentStore, Telegram
-from machina.domain import Plant
 
 # Load equipment manuals for RAG
 docs = DocumentStore(paths=["./manuals/", "./procedures/"])
@@ -310,11 +309,14 @@ See the [MCP Server Guide](https://machina-ai.readthedocs.io/mcp-server) for set
 - [x] LLM abstraction layer (LiteLLM wrapper)
 - [x] Structured logging (structlog)
 - [x] CI/CD pipeline (GitHub Actions)
-- [ ] GenericCmmsConnector
-- [ ] DocumentStore connector with RAG
-- [ ] Telegram connector
-- [ ] Agent runtime with domain-aware prompting
-- [ ] **v0.1 — Maintenance Knowledge Agent** (quickstart in 30 minutes)
+- [x] GenericCmmsConnector
+- [x] DocumentStore connector with RAG
+- [x] Telegram connector + CLI channel
+- [x] Agent runtime with domain-aware prompting
+- [x] Entity resolver (natural language → asset resolution)
+- [x] Action tracing (observability)
+- [x] LLM tool definitions (function calling)
+- [x] **v0.1 — Maintenance Knowledge Agent** (quickstart in 30 minutes)
 - [ ] SAP PM, IBM Maximo, UpKeep, MaintainX connectors
 - [ ] OPC-UA and MQTT connectors
 - [ ] WhatsApp, Slack, Teams, Email connectors
