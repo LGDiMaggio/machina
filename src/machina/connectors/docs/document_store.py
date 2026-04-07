@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
@@ -78,7 +78,7 @@ class DocumentStoreConnector:
         ```
     """
 
-    capabilities = ["search_documents", "retrieve_section"]
+    capabilities: ClassVar[list[str]] = ["search_documents", "retrieve_section"]
 
     def __init__(
         self,
@@ -223,7 +223,7 @@ class DocumentStoreConnector:
         for doc in documents:
             chunks = splitter.split_text(doc["content"])
             for i, chunk_text in enumerate(chunks):
-                chunk_id = hashlib.md5(  # noqa: S324
+                chunk_id = hashlib.md5(
                     f"{doc['source']}:{doc.get('page', 0)}:{i}".encode()
                 ).hexdigest()
                 texts.append(chunk_text)

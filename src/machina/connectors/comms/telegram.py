@@ -7,8 +7,9 @@ Machina agent via Telegram.  Uses ``python-telegram-bot`` under the hood.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Coroutine
-from typing import Any
+import contextlib
+from collections.abc import Callable, Coroutine
+from typing import Any, ClassVar
 
 import structlog
 
@@ -83,7 +84,7 @@ class TelegramConnector:
         ```
     """
 
-    capabilities = ["send_message", "receive_message"]
+    capabilities: ClassVar[list[str]] = ["send_message", "receive_message"]
 
     def __init__(
         self,
@@ -117,10 +118,8 @@ class TelegramConnector:
     async def disconnect(self) -> None:
         """Shut down the Telegram bot."""
         if self._application is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._application.shutdown()
-            except Exception:
-                pass  # Best-effort shutdown
         self._application = None
         self._connected = False
         logger.info("disconnected", connector="TelegramConnector")
@@ -167,8 +166,9 @@ class TelegramConnector:
         if self._application is None:
             raise ConnectorError("Telegram application not initialised")
 
-        from telegram import Update
-        from telegram.ext import ContextTypes, MessageHandler as TGMsgHandler, filters
+        from telegram import Update  # noqa: TC002
+        from telegram.ext import ContextTypes, filters
+        from telegram.ext import MessageHandler as TGMsgHandler
 
         async def _on_message(
             update: Update,
@@ -247,7 +247,7 @@ class CliChannel:
         ```
     """
 
-    capabilities = ["send_message", "receive_message"]
+    capabilities: ClassVar[list[str]] = ["send_message", "receive_message"]
 
     def __init__(self, *, prompt: str = "You> ") -> None:
         self._prompt = prompt
@@ -269,7 +269,7 @@ class CliChannel:
 
     async def send_message(self, chat_id: str | int, text: str) -> None:
         """Print message to stdout."""
-        print(f"\n🤖 {text}")  # noqa: T201
+        print(f"\n🤖 {text}")
 
     async def listen(self, handler: MessageHandler) -> None:
         """Read from stdin in a loop and dispatch to handler.
@@ -278,10 +278,10 @@ class CliChannel:
             handler: Async callback that receives an :class:`IncomingMessage`
                      and returns the response text.
         """
-        print("\n╔══════════════════════════════════════════╗")  # noqa: T201
-        print("║  Machina Agent — CLI Mode                ║")  # noqa: T201
-        print("║  Type your questions. Ctrl+C to exit.    ║")  # noqa: T201
-        print("╚══════════════════════════════════════════╝\n")  # noqa: T201
+        print("\n╔══════════════════════════════════════════╗")
+        print("║  Machina Agent — CLI Mode                ║")
+        print("║  Type your questions. Ctrl+C to exit.    ║")
+        print("╚══════════════════════════════════════════╝\n")
 
         loop = asyncio.get_event_loop()
         try:
@@ -291,7 +291,7 @@ class CliChannel:
                 if not text:
                     continue
                 if text.lower() in ("exit", "quit", "bye"):
-                    print("👋 Goodbye!")  # noqa: T201
+                    print("👋 Goodbye!")
                     break
 
                 msg = IncomingMessage(
@@ -305,4 +305,4 @@ class CliChannel:
                 if response:
                     await self.send_message("cli", response)
         except (EOFError, KeyboardInterrupt):
-            print("\n👋 Goodbye!")  # noqa: T201
+            print("\n👋 Goodbye!")

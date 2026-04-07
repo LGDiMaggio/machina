@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, ClassVar
 
 import pytest
 
 from machina.agent.runtime import Agent
-from machina.connectors.base import ConnectorRegistry
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import LLMError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,7 +34,7 @@ def _make_plant() -> Plant:
 class _FakeConnector:
     """Minimal connector stub implementing the Protocol."""
 
-    capabilities = ["read_assets", "read_work_orders"]
+    capabilities: ClassVar[list[str]] = ["read_assets", "read_work_orders"]
 
     async def connect(self) -> None:
         pass

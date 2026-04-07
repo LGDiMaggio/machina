@@ -18,7 +18,7 @@ from machina.agent.entity_resolver import EntityResolver
 from machina.agent.prompts import build_context_message, build_system_prompt
 from machina.connectors.base import ConnectorRegistry
 from machina.domain.plant import Plant
-from machina.exceptions import AgentError, LLMError
+from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -143,7 +143,7 @@ class Agent:
         """Disconnect all connectors and channels."""
         for channel in self._channels:
             await channel.disconnect()
-        for name, conn in self._registry.all().items():
+        for _name, conn in self._registry.all().items():
             await conn.disconnect()
         logger.info("agent_stopped", agent=self.name)
 
@@ -310,7 +310,7 @@ class Agent:
 
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for name, result in zip(task_names, results):
+            for name, result in zip(task_names, results, strict=False):
                 if isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",
@@ -382,7 +382,7 @@ class Agent:
         """Call the LLM, execute tool calls, and return final response."""
         tools = self._get_available_tools()
 
-        for iteration in range(max_iterations):
+        for _iteration in range(max_iterations):
             with self.tracer.trace(
                 "llm_call",
                 operation="complete_with_tools",

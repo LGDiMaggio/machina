@@ -8,7 +8,7 @@ compliance logging, and understanding agent reasoning.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 class TraceEntry(BaseModel):
     """A single traced action performed by the agent."""
 
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     action: str = Field(..., description="Action name (e.g. 'llm_call', 'connector_query')")
     connector: str = Field(default="", description="Connector involved, if any")
     asset_id: str = Field(default="", description="Asset context, if any")

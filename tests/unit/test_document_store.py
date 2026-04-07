@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from machina.connectors.docs.document_store import DocumentChunk, DocumentStoreConnector
 from machina.exceptions import ConnectorError

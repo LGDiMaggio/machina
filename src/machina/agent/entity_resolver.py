@@ -31,7 +31,7 @@ class ResolvedEntity:
 
     Attributes:
         asset: The matched asset.
-        confidence: Confidence score (0.0–1.0).
+        confidence: Confidence score (0.0-1.0).
         match_reason: How the match was determined.
     """
 
