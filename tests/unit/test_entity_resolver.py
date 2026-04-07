@@ -99,6 +99,16 @@ class TestEntityResolver:
         resolver = EntityResolver(Plant(name="Empty"))
         assert resolver.resolve_best("something") is None
 
+    def test_name_keywords_partial_match(self) -> None:
+        """Test partial name keyword match with score < 1.0."""
+        resolver = EntityResolver(_make_plant())
+        # "cooling pump" matches 2 out of 3 significant words in "Cooling Water Pump"
+        results = resolver.resolve("check the cooling pump")
+        # Should find P-201 via keyword overlap
+        pump_results = [r for r in results if r.asset.id == "P-201"]
+        assert len(pump_results) >= 1
+        assert pump_results[0].match_reason in ("name_keywords", "name_match")
+
     def test_manufacturer_keyword_match(self) -> None:
         resolver = EntityResolver(_make_plant())
         results = resolver.resolve("Where is the Grundfos pump?")

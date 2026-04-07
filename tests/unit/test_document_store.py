@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -220,3 +221,158 @@ class TestDocumentChunk:
         assert chunk.page == 0
         assert chunk.score == 0.0
         assert chunk.metadata == {}
+
+
+class TestDocumentStoreRAG:
+    """Test DocumentStoreConnector with mocked RAG dependencies."""
+
+    @pytest.mark.asyncio
+    async def test_rag_mode_connect(self, sample_docs_dir: Path) -> None:
+        """When langchain is available, connector uses RAG mode."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        mock_chroma_cls = MagicMock()
+        mock_vectorstore = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+
+        health = await conn.health_check()
+        assert health.details["mode"] == "rag"
+        assert health.details["chunk_count"] > 0
+
+    @pytest.mark.asyncio
+    async def test_rag_search(self, sample_docs_dir: Path) -> None:
+        """Test search in RAG mode with mocked vector store."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        # Mock search results
+        mock_doc = MagicMock()
+        mock_doc.page_content = "Pump P-201 maintenance guide"
+        mock_doc.metadata = {"source": "manual.txt", "page": 1}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.return_value = [(mock_doc, 0.85)]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+
+        # Now search — it should use the mocked vectorstore
+        results = await conn.search("pump maintenance")
+        assert len(results) == 1
+        assert results[0].content == "Pump P-201 maintenance guide"
+        assert results[0].score == 0.85
+
+    @pytest.mark.asyncio
+    async def test_rag_search_with_asset_filter(self, sample_docs_dir: Path) -> None:
+        """Test RAG search with asset_id filter."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        mock_doc = MagicMock()
+        mock_doc.page_content = "P-201 bearing specs"
+        mock_doc.metadata = {"source": "p201.txt", "page": 2}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.return_value = [(mock_doc, 0.9)]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+
+        await conn.search("bearing", asset_id="P-201")
+        # Verify the filter was passed
+        call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
+        assert call_kwargs[1].get("filter") is not None
+
+    @pytest.mark.asyncio
+    async def test_rag_search_empty_vectorstore(self, tmp_path: Path) -> None:
+        """RAG search with empty vectorstore returns empty list."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.return_value = []
+        mock_splitter_cls.return_value = mock_splitter
+
+        mock_chroma_cls = MagicMock()
+        # from_texts is never called because texts is empty
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[empty_dir])
+            await conn.connect()
+
+        results = await conn.search("anything")
+        assert results == []

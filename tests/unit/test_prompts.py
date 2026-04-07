@@ -206,3 +206,39 @@ class TestBuildContextMessage:
         )
         assert "P-201" in text
         assert "No work orders" in text
+
+    def test_with_alarms(self) -> None:
+        alarms = [
+            Alarm(
+                id="ALM-1",
+                asset_id="P-201",
+                severity=Severity.WARNING,
+                parameter="vibration",
+                value=7.8,
+                threshold=6.0,
+                unit="mm/s",
+            ),
+        ]
+        text = build_context_message(alarms=alarms)
+        assert "vibration" in text
+
+    def test_with_document_results(self) -> None:
+        results = [
+            {"content": "Replace bearing", "source": "manual.pdf", "page": 5},
+        ]
+        text = build_context_message(document_results=results)
+        assert "manual.pdf" in text
+
+    def test_full_context(self) -> None:
+        """Exercise all branches at once."""
+        asset = Asset(id="P-201", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+        ent = ResolvedEntity(asset, confidence=0.9, match_reason="id")
+        text = build_context_message(
+            resolved_entities=[ent],
+            asset=asset,
+            work_orders=[],
+            alarms=[],
+            spare_parts=[],
+            document_results=[],
+        )
+        assert "P-201" in text

@@ -306,6 +306,31 @@ class TestGenericCmmsConnectorRest:
             await conn.get_asset("P-201")
 
     @pytest.mark.asyncio
+    async def test_rest_read_work_orders_raises(self) -> None:
+        """REST mode read_work_orders raises not-implemented error."""
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
+        await conn.connect()
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await conn.read_work_orders()
+
+    @pytest.mark.asyncio
+    async def test_rest_create_work_order_raises(self) -> None:
+        """REST mode create_work_order raises not-implemented error."""
+        from machina.domain.work_order import WorkOrder, WorkOrderType
+
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-REST",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="Test",
+        )
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await conn.create_work_order(wo)
+
+    @pytest.mark.asyncio
     async def test_health_check_not_connected(self) -> None:
         conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
         health = await conn.health_check()

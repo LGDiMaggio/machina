@@ -238,3 +238,270 @@ class TestCliChannel:
     def test_custom_prompt(self) -> None:
         cli = CliChannel(prompt=">>> ")
         assert cli._prompt == ">>> "
+
+    @pytest.mark.asyncio
+    async def test_listen_handler_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Handler returning empty string should not call send_message."""
+        inputs = iter(["hello", "exit"])
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+        cli = CliChannel()
+        await cli.connect()
+
+        handler = AsyncMock(return_value="")
+        await cli.listen(handler)
+        handler.assert_awaited_once()
+
+
+class TestTelegramListen:
+    """Test TelegramConnector.listen with fully mocked telegram library."""
+
+    @pytest.mark.asyncio
+    async def test_listen_not_initialised(self) -> None:
+        """listen raises if application is None even when connected."""
+        conn = TelegramConnector(bot_token="fake")
+        conn._connected = True
+        conn._application = None
+
+        async def handler(msg: IncomingMessage) -> str:
+            return "ok"
+
+        with pytest.raises(ConnectorError, match="not initialised"):
+            await conn.listen(handler)
+
+    @pytest.mark.asyncio
+    async def test_listen_full_flow(self) -> None:
+        """Test full listen with mocked telegram module and CancelledError."""
+        import asyncio
+
+        # Build mock application
+        mock_app = MagicMock()
+        mock_app.add_handler = MagicMock()
+        mock_app.initialize = AsyncMock()
+        mock_app.start = AsyncMock()
+        mock_app.stop = AsyncMock()
+        mock_updater = MagicMock()
+        mock_updater.start_polling = AsyncMock()
+        mock_updater.stop = AsyncMock()
+        mock_app.updater = mock_updater
+
+        conn = TelegramConnector(bot_token="fake")
+        conn._connected = True
+        conn._application = mock_app
+
+        # Mock telegram imports
+        mock_update = MagicMock()
+        mock_filters = MagicMock()
+        mock_context_types = MagicMock()
+        mock_msg_handler_cls = MagicMock()
+
+        mock_telegram = MagicMock()
+        mock_telegram.Update = mock_update
+
+        mock_telegram_ext = MagicMock()
+        mock_telegram_ext.filters = mock_filters
+        mock_telegram_ext.ContextTypes = mock_context_types
+        mock_telegram_ext.MessageHandler = mock_msg_handler_cls
+
+        # Make Event().wait() raise CancelledError immediately
+        class _ImmediateCancelEvent:
+            async def wait(self) -> None:
+                raise asyncio.CancelledError
+
+        async def handler(msg: IncomingMessage) -> str:
+            return "response"
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"telegram": mock_telegram, "telegram.ext": mock_telegram_ext},
+            ),
+            patch("asyncio.Event", _ImmediateCancelEvent),
+        ):
+            await conn.listen(handler)
+
+        # Verify lifecycle
+        mock_app.add_handler.assert_called_once()
+        mock_app.initialize.assert_awaited_once()
+        mock_app.start.assert_awaited_once()
+        mock_updater.start_polling.assert_awaited_once()
+        mock_updater.stop.assert_awaited_once()
+        mock_app.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_message_callback(self) -> None:
+        """Test the inner _on_message callback with mocked Update."""
+        import asyncio
+
+        # Build mock application
+        mock_app = MagicMock()
+        captured_handler = None
+
+        def _capture_add_handler(h: MagicMock) -> None:
+            nonlocal captured_handler
+            captured_handler = h
+
+        mock_app.add_handler = _capture_add_handler
+        mock_app.initialize = AsyncMock()
+        mock_app.start = AsyncMock()
+        mock_app.stop = AsyncMock()
+        mock_updater = MagicMock()
+        mock_updater.start_polling = AsyncMock()
+        mock_updater.stop = AsyncMock()
+        mock_app.updater = mock_updater
+
+        conn = TelegramConnector(bot_token="fake")
+        conn._connected = True
+        conn._application = mock_app
+
+        # Mock telegram imports — capture the _on_message callback
+        mock_telegram = MagicMock()
+        mock_telegram_ext = MagicMock()
+        captured_on_message = None
+
+        def _fake_msg_handler(filter_expr: MagicMock, callback: MagicMock) -> MagicMock:
+            nonlocal captured_on_message
+            captured_on_message = callback
+            return MagicMock()
+
+        mock_telegram_ext.MessageHandler = _fake_msg_handler
+
+        handler = AsyncMock(return_value="reply text")
+
+        class _ImmediateCancelEvent:
+            async def wait(self) -> None:
+                raise asyncio.CancelledError
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"telegram": mock_telegram, "telegram.ext": mock_telegram_ext},
+            ),
+            patch("asyncio.Event", _ImmediateCancelEvent),
+        ):
+            await conn.listen(handler)
+
+        # Now invoke the captured _on_message callback
+        assert captured_on_message is not None
+
+        mock_update = MagicMock()
+        mock_update.message.text = "Hello agent"
+        mock_update.message.chat_id = 12345
+        mock_update.message.from_user.id = 99
+        mock_update.message.from_user.first_name = "Mario"
+        mock_update.message.reply_text = AsyncMock()
+
+        mock_context = MagicMock()
+        await captured_on_message(mock_update, mock_context)
+
+        handler.assert_awaited_once()
+        msg_arg = handler.call_args[0][0]
+        assert msg_arg.text == "Hello agent"
+        assert msg_arg.chat_id == "12345"
+        assert msg_arg.user_name == "Mario"
+        mock_update.message.reply_text.assert_awaited_once_with("reply text")
+
+    @pytest.mark.asyncio
+    async def test_on_message_no_message(self) -> None:
+        """_on_message returns early when update.message is None."""
+        import asyncio
+
+        mock_app = MagicMock()
+        mock_app.initialize = AsyncMock()
+        mock_app.start = AsyncMock()
+        mock_app.stop = AsyncMock()
+        mock_updater = MagicMock()
+        mock_updater.start_polling = AsyncMock()
+        mock_updater.stop = AsyncMock()
+        mock_app.updater = mock_updater
+
+        conn = TelegramConnector(bot_token="fake")
+        conn._connected = True
+        conn._application = mock_app
+
+        mock_telegram = MagicMock()
+        mock_telegram_ext = MagicMock()
+        captured_on_message = None
+
+        def _fake_msg_handler(filter_expr: MagicMock, callback: MagicMock) -> MagicMock:
+            nonlocal captured_on_message
+            captured_on_message = callback
+            return MagicMock()
+
+        mock_telegram_ext.MessageHandler = _fake_msg_handler
+
+        handler = AsyncMock(return_value="reply")
+
+        class _ImmediateCancelEvent:
+            async def wait(self) -> None:
+                raise asyncio.CancelledError
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"telegram": mock_telegram, "telegram.ext": mock_telegram_ext},
+            ),
+            patch("asyncio.Event", _ImmediateCancelEvent),
+        ):
+            await conn.listen(handler)
+
+        assert captured_on_message is not None
+
+        # Test with None message
+        mock_update = MagicMock()
+        mock_update.message = None
+        await captured_on_message(mock_update, MagicMock())
+        handler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_on_message_unauthorized_chat(self) -> None:
+        """_on_message ignores messages from unauthorized chats."""
+        import asyncio
+
+        mock_app = MagicMock()
+        mock_app.initialize = AsyncMock()
+        mock_app.start = AsyncMock()
+        mock_app.stop = AsyncMock()
+        mock_updater = MagicMock()
+        mock_updater.start_polling = AsyncMock()
+        mock_updater.stop = AsyncMock()
+        mock_app.updater = mock_updater
+
+        conn = TelegramConnector(bot_token="fake", allowed_chat_ids=[111])
+        conn._connected = True
+        conn._application = mock_app
+
+        mock_telegram = MagicMock()
+        mock_telegram_ext = MagicMock()
+        captured_on_message = None
+
+        def _fake_msg_handler(filter_expr: MagicMock, callback: MagicMock) -> MagicMock:
+            nonlocal captured_on_message
+            captured_on_message = callback
+            return MagicMock()
+
+        mock_telegram_ext.MessageHandler = _fake_msg_handler
+
+        handler = AsyncMock(return_value="reply")
+
+        class _ImmediateCancelEvent:
+            async def wait(self) -> None:
+                raise asyncio.CancelledError
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"telegram": mock_telegram, "telegram.ext": mock_telegram_ext},
+            ),
+            patch("asyncio.Event", _ImmediateCancelEvent),
+        ):
+            await conn.listen(handler)
+
+        assert captured_on_message is not None
+
+        # Unauthorized chat_id = 999 (not in allowed_chat_ids [111])
+        mock_update = MagicMock()
+        mock_update.message.text = "Hello"
+        mock_update.message.chat_id = 999
+        await captured_on_message(mock_update, MagicMock())
+        handler.assert_not_awaited()
