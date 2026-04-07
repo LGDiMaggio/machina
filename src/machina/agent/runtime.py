@@ -357,7 +357,9 @@ class Agent:
             document_results=context_data.get("document_results"),
         )
         if context_str:
-            messages.append({"role": "system", "content": f"## Retrieved Context\n\n{context_str}"})
+            messages.append(
+                {"role": "system", "content": f"## Retrieved Context\n\n{context_str}"}
+            )
 
         # Add conversation history
         history = self._histories.get(chat_id, [])
@@ -401,10 +403,12 @@ class Agent:
 
             # Process tool calls
             span.output_summary = f"{len(tool_calls)} tool calls"
-            messages.append({
-                "role": "assistant",
-                "content": content or "",
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content or "",
+                }
+            )
 
             for tc in tool_calls:
                 func_name = tc.function.name
@@ -420,11 +424,13 @@ class Agent:
                     tool_result = await self._execute_tool(func_name, args)
                     tool_span.output_summary = str(tool_result)[:200]
 
-                messages.append({
-                    "role": "tool",
-                    "content": json.dumps(tool_result, default=str),
-                    "tool_call_id": tc.id,  # type: ignore[union-attr]
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps(tool_result, default=str),
+                        "tool_call_id": tc.id,  # type: ignore[union-attr]
+                    }
+                )
 
         # Exhausted iterations — get final response without tools
         return await self._llm.complete(messages)
@@ -466,8 +472,7 @@ class Agent:
                     asset_id=args.get("asset_id", ""),
                 )
                 return [
-                    {"content": r.content, "source": r.source, "page": r.page}
-                    for r in results
+                    {"content": r.content, "source": r.source, "page": r.page} for r in results
                 ]
             return {"error": "No document connector available"}
 
@@ -580,8 +585,7 @@ class Agent:
                 "asset_name": asset.name,
                 "symptoms": symptoms,
                 "probable_failures": [
-                    {"code": fm.code, "name": fm.name, "category": fm.category}
-                    for fm in results
+                    {"code": fm.code, "name": fm.name, "category": fm.category} for fm in results
                 ],
             }
         except Exception:
@@ -620,10 +624,7 @@ class Agent:
         enabled_tool_names.add("diagnose_failure")
         enabled_tool_names.add("get_maintenance_schedule")
 
-        return [
-            tool for tool in BUILTIN_TOOLS
-            if tool["function"]["name"] in enabled_tool_names
-        ]
+        return [tool for tool in BUILTIN_TOOLS if tool["function"]["name"] in enabled_tool_names]
 
     def _add_to_history(self, chat_id: str, role: str, content: str) -> None:
         """Add a message to the conversation history."""

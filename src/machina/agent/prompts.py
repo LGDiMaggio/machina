@@ -73,7 +73,11 @@ def build_system_prompt(
     Returns:
         The formatted system prompt string.
     """
-    plant_ctx = f"Plant: {plant_name} | Assets registered: {asset_count}" if plant_name else "No plant configured."
+    plant_ctx = (
+        f"Plant: {plant_name} | Assets registered: {asset_count}"
+        if plant_name
+        else "No plant configured."
+    )
 
     cap_ctx = "None configured."
     if capabilities:
@@ -89,6 +93,7 @@ def build_system_prompt(
 # Context injection helpers
 # ---------------------------------------------------------------------------
 
+
 def format_asset_context(asset: Asset) -> str:
     """Format an asset's details for injection into the prompt.
 
@@ -102,7 +107,9 @@ def format_asset_context(asset: Asset) -> str:
         f"**Asset: {asset.name}** (ID: {asset.id})",
         f"  Type: {asset.type.value}",
         f"  Location: {asset.location}" if asset.location else "",
-        f"  Manufacturer: {asset.manufacturer} {asset.model}".strip() if asset.manufacturer else "",
+        f"  Manufacturer: {asset.manufacturer} {asset.model}".strip()
+        if asset.manufacturer
+        else "",
         f"  Criticality: {asset.criticality.value}",
         f"  Parent: {asset.parent}" if asset.parent else "",
     ]
@@ -170,9 +177,7 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     lines = [f"**Spare Parts ({len(parts)}):**"]
     for part in parts:
         status = "✅ In stock" if part.stock_quantity > 0 else "❌ Out of stock"
-        lines.append(
-            f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}"
-        )
+        lines.append(f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}")
     return "\n".join(lines)
 
 

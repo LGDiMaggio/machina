@@ -287,6 +287,7 @@ class GenericCmmsConnector:
 # Parsing helpers — convert raw dicts to domain entities
 # ---------------------------------------------------------------------------
 
+
 def _parse_asset(data: dict[str, Any]) -> Asset:
     """Parse a dict into an Asset, tolerating missing fields."""
     return Asset(

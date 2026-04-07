@@ -166,18 +166,14 @@ class TestExecuteTool:
         conn = _FakeConnector()
         agent = Agent(connectors=[conn])
         await agent.start()
-        result = await agent._execute_tool(
-            "read_work_orders", {"asset_id": "P-201"}
-        )
+        result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
         assert isinstance(result, list)
         assert len(result) >= 1
 
     @pytest.mark.asyncio
     async def test_read_work_orders_no_connector(self) -> None:
         agent = Agent()
-        result = await agent._execute_tool(
-            "read_work_orders", {"asset_id": "P-201"}
-        )
+        result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
         assert "error" in result
 
 

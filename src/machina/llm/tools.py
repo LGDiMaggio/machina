@@ -77,9 +77,7 @@ GET_ASSET_DETAILS_TOOL = make_tool(
 
 READ_WORK_ORDERS_TOOL = make_tool(
     name="read_work_orders",
-    description=(
-        "Read work orders from the CMMS. Can filter by asset ID, status, or type."
-    ),
+    description=("Read work orders from the CMMS. Can filter by asset ID, status, or type."),
     parameters={
         "type": "object",
         "properties": {
@@ -97,9 +95,7 @@ READ_WORK_ORDERS_TOOL = make_tool(
 
 CREATE_WORK_ORDER_TOOL = make_tool(
     name="create_work_order",
-    description=(
-        "Create a new maintenance work order in the CMMS."
-    ),
+    description=("Create a new maintenance work order in the CMMS."),
     parameters={
         "type": "object",
         "properties": {
@@ -150,9 +146,7 @@ SEARCH_DOCUMENTS_TOOL = make_tool(
 
 CHECK_SPARE_PARTS_TOOL = make_tool(
     name="check_spare_parts",
-    description=(
-        "Check spare part availability and inventory for a given asset or SKU."
-    ),
+    description=("Check spare part availability and inventory for a given asset or SKU."),
     parameters={
         "type": "object",
         "properties": {
@@ -193,9 +187,7 @@ DIAGNOSE_FAILURE_TOOL = make_tool(
 
 GET_MAINTENANCE_SCHEDULE_TOOL = make_tool(
     name="get_maintenance_schedule",
-    description=(
-        "Get upcoming maintenance schedule for an asset or the entire plant."
-    ),
+    description=("Get upcoming maintenance schedule for an asset or the entire plant."),
     parameters={
         "type": "object",
         "properties": {

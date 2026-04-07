@@ -127,9 +127,7 @@ class TelegramConnector:
     async def health_check(self) -> ConnectorHealth:
         """Check bot connectivity."""
         if not self._connected:
-            return ConnectorHealth(
-                status=ConnectorStatus.UNHEALTHY, message="Not connected"
-            )
+            return ConnectorHealth(status=ConnectorStatus.UNHEALTHY, message="Not connected")
         return ConnectorHealth(status=ConnectorStatus.HEALTHY, message="Connected")
 
     async def send_message(self, chat_id: str | int, text: str) -> None:

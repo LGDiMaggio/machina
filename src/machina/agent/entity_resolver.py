@@ -98,9 +98,7 @@ class EntityResolver:
         # 1. Exact ID match — look for asset IDs embedded in the text
         for asset in assets:
             if asset.id.lower() in text.lower():
-                results.append(
-                    ResolvedEntity(asset, confidence=1.0, match_reason="exact_id")
-                )
+                results.append(ResolvedEntity(asset, confidence=1.0, match_reason="exact_id"))
                 logger.debug(
                     "entity_resolved",
                     operation="resolve",
@@ -118,9 +116,7 @@ class EntityResolver:
             name_lower = asset.name.lower()
             # Check full name match
             if name_lower in text_lower:
-                results.append(
-                    ResolvedEntity(asset, confidence=0.9, match_reason="name_match")
-                )
+                results.append(ResolvedEntity(asset, confidence=0.9, match_reason="name_match"))
             else:
                 # Check significant name words (skip short words)
                 name_words = {w for w in name_lower.split() if len(w) > 2}
@@ -162,14 +158,16 @@ class EntityResolver:
 
         # 4. Fuzzy keyword match across all fields
         for asset in assets:
-            searchable = " ".join([
-                asset.id,
-                asset.name,
-                asset.location,
-                asset.manufacturer,
-                asset.model,
-                asset.type.value,
-            ]).lower()
+            searchable = " ".join(
+                [
+                    asset.id,
+                    asset.name,
+                    asset.location,
+                    asset.manufacturer,
+                    asset.model,
+                    asset.type.value,
+                ]
+            ).lower()
 
             text_tokens_list = [t for t in text_tokens if len(t) > 2]
             if not text_tokens_list:
