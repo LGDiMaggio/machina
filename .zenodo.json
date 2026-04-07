@@ -1,0 +1,34 @@
+{
+  "title": "Machina: An AI Agent Framework for Industrial Maintenance",
+  "description": "Machina is an open-source Python framework for building AI agents specialized in industrial maintenance (predictive, preventive, corrective). It provides pre-built connectors for industrial systems (CMMS, IoT sensors, ERP), a domain model based on ISO 14224, and an LLM-powered agent layer with domain-aware prompting.",
+  "upload_type": "software",
+  "license": "Apache-2.0",
+  "creators": [
+    {
+      "name": "Di Maggio, Luigi Gianpio",
+      "affiliation": "Politecnico di Torino",
+      "orcid": "0000-0002-2295-8944"
+    }
+  ],
+  "keywords": [
+    "artificial intelligence",
+    "industrial maintenance",
+    "predictive maintenance",
+    "LLM agents",
+    "IoT",
+    "CMMS"
+  ],
+  "related_identifiers": [
+    {
+      "scheme": "url",
+      "identifier": "https://github.com/LGDiMaggio/machina",
+      "relation": "isSupplementTo"
+    },
+    {
+      "scheme": "url",
+      "identifier": "https://pypi.org/project/machina-ai/",
+      "relation": "isIdenticalTo"
+    }
+  ],
+  "access_right": "open"
+}
