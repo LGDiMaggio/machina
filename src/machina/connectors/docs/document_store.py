@@ -7,6 +7,7 @@ are not installed.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from typing import Any, ClassVar
@@ -105,7 +106,7 @@ class DocumentStoreConnector:
 
     async def connect(self) -> None:
         """Ingest documents and build the vector index."""
-        documents = self._load_documents()
+        documents = await asyncio.to_thread(self._load_documents)
         if not documents:
             logger.warning(
                 "no_documents_found",

@@ -7,6 +7,7 @@ a local JSON/YAML data source for demos and quickstarts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -202,7 +203,8 @@ class GenericCmmsConnector:
         spare_parts_file = self._data_dir / "spare_parts.json"
 
         if assets_file.exists():
-            raw = json.loads(assets_file.read_text(encoding="utf-8"))
+            text = await asyncio.to_thread(assets_file.read_text, encoding="utf-8")
+            raw = json.loads(text)
             for item in raw:
                 mapped = self._apply_mapping("assets", item)
                 asset = _parse_asset(mapped)
@@ -214,7 +216,8 @@ class GenericCmmsConnector:
             )
 
         if work_orders_file.exists():
-            raw = json.loads(work_orders_file.read_text(encoding="utf-8"))
+            text = await asyncio.to_thread(work_orders_file.read_text, encoding="utf-8")
+            raw = json.loads(text)
             for item in raw:
                 mapped = self._apply_mapping("work_orders", item)
                 self._work_orders.append(_parse_work_order(mapped))
@@ -225,7 +228,8 @@ class GenericCmmsConnector:
             )
 
         if spare_parts_file.exists():
-            raw = json.loads(spare_parts_file.read_text(encoding="utf-8"))
+            text = await asyncio.to_thread(spare_parts_file.read_text, encoding="utf-8")
+            raw = json.loads(text)
             for item in raw:
                 mapped = self._apply_mapping("spare_parts", item)
                 self._spare_parts.append(_parse_spare_part(mapped))

@@ -407,6 +407,7 @@ class Agent:
                 {
                     "role": "assistant",
                     "content": content or "",
+                    "tool_calls": tool_calls,
                 }
             )
 
@@ -523,6 +524,12 @@ class Agent:
             asset = self.plant.get_asset(asset_id)
             return asset.model_dump(mode="json")
         except Exception:
+            logger.warning(
+                "asset_lookup_failed",
+                agent=self.name,
+                asset_id=asset_id,
+                operation="get_asset_details",
+            )
             return {"error": f"Asset {asset_id!r} not found"}
 
     async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -589,6 +596,13 @@ class Agent:
                 ],
             }
         except Exception:
+            logger.warning(
+                "diagnose_failure_failed",
+                agent=self.name,
+                asset_id=asset_id,
+                operation="diagnose_failure",
+                symptoms=symptoms,
+            )
             return {
                 "asset_id": asset_id,
                 "symptoms": symptoms,
