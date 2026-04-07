@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -31,7 +31,7 @@ class Alarm(BaseModel):
     threshold: float = Field(..., description="Threshold that was exceeded")
     unit: str = Field(default="", description="Engineering unit (e.g. 'mm/s', '°C')")
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, description="When the alarm occurred"
+        default_factory=lambda: datetime.now(UTC), description="When the alarm occurred"
     )
     source: str = Field(default="", description="Data source URI (e.g. OPC-UA node ID)")
     acknowledged: bool = Field(default=False, description="Whether alarm was acknowledged")
