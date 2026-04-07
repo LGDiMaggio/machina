@@ -1,0 +1,42 @@
+[
+  {
+    "id": "WO-2026-1840",
+    "type": "preventive",
+    "priority": "medium",
+    "asset_id": "P-201",
+    "description": "Quarterly pump inspection — vibration check, lubrication, alignment verification",
+    "failure_mode": null
+  },
+  {
+    "id": "WO-2026-1841",
+    "type": "corrective",
+    "priority": "high",
+    "asset_id": "COMP-301",
+    "description": "Replace intake filter — high pressure drop detected across filter element",
+    "failure_mode": "FILTER-CLOG-01"
+  },
+  {
+    "id": "WO-2026-1842",
+    "type": "corrective",
+    "priority": "high",
+    "asset_id": "P-201",
+    "description": "Excessive vibration detected on bearing DE side — probable bearing wear",
+    "failure_mode": "BEAR-WEAR-01"
+  },
+  {
+    "id": "WO-2026-1843",
+    "type": "preventive",
+    "priority": "low",
+    "asset_id": "HX-401",
+    "description": "Annual heat exchanger cleaning and gasket inspection",
+    "failure_mode": null
+  },
+  {
+    "id": "WO-2025-1501",
+    "type": "corrective",
+    "priority": "critical",
+    "asset_id": "CONV-101",
+    "description": "Belt replacement — belt tracking issue caused edge wear and tearing",
+    "failure_mode": "BELT-WEAR-01"
+  }
+]

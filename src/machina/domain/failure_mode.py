@@ -6,7 +6,7 @@ methods, typical indicators, and recommended corrective actions.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FailureMode(BaseModel):
@@ -41,3 +41,10 @@ class FailureMode(BaseModel):
     )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
+
+    @field_validator("code")
+    @classmethod
+    def _validate_code(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("code cannot be empty")
+        return v.strip()

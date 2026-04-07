@@ -1,5 +1,7 @@
 """Tests for the FailureMode domain entity."""
 
+import pytest
+
 from machina.domain.failure_mode import FailureMode
 
 
@@ -30,3 +32,15 @@ class TestFailureMode:
         restored = FailureMode.model_validate(data)
         assert restored.code == sample_failure_mode.code
         assert restored.typical_indicators == sample_failure_mode.typical_indicators
+
+
+class TestFailureModeValidation:
+    """Test field validators."""
+
+    def test_empty_code_rejected(self) -> None:
+        with pytest.raises(ValueError, match="code cannot be empty"):
+            FailureMode(code="", name="Bearing Wear")
+
+    def test_code_stripped(self) -> None:
+        fm = FailureMode(code="  BEAR-01  ", name="Bearing Wear")
+        assert fm.code == "BEAR-01"

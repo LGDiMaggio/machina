@@ -1,0 +1,80 @@
+[
+  {
+    "id": "P-201",
+    "name": "Cooling Water Pump",
+    "type": "rotating_equipment",
+    "location": "Building A / Line 2 / Cooling System",
+    "manufacturer": "Grundfos",
+    "model": "CR 32-2",
+    "serial_number": "GF-2019-44521",
+    "criticality": "A",
+    "parent": "COOLING-SYS-01",
+    "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROSION-01"],
+    "metadata": {"install_date": "2019-06-15"}
+  },
+  {
+    "id": "P-202",
+    "name": "Chilled Water Pump",
+    "type": "rotating_equipment",
+    "location": "Building A / Line 2 / Chiller System",
+    "manufacturer": "Grundfos",
+    "model": "CR 16-4",
+    "serial_number": "GF-2020-55103",
+    "criticality": "B",
+    "parent": "CHILLER-SYS-01",
+    "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01"],
+    "metadata": {"install_date": "2020-03-10"}
+  },
+  {
+    "id": "COMP-301",
+    "name": "Air Compressor Unit 1",
+    "type": "rotating_equipment",
+    "location": "Building B / Utilities / Compressed Air",
+    "manufacturer": "Atlas Copco",
+    "model": "GA 55",
+    "serial_number": "AC-2018-33201",
+    "criticality": "A",
+    "parent": "COMP-AIR-SYS",
+    "failure_modes": ["BEAR-WEAR-01", "VALVE-FAIL-01", "FILTER-CLOG-01"],
+    "metadata": {"install_date": "2018-11-20"}
+  },
+  {
+    "id": "CONV-101",
+    "name": "Main Production Conveyor",
+    "type": "rotating_equipment",
+    "location": "Building A / Line 1 / Assembly",
+    "manufacturer": "Interroll",
+    "model": "Portec Belt 1200",
+    "serial_number": "IR-2021-77042",
+    "criticality": "A",
+    "parent": "LINE-1-SYS",
+    "failure_modes": ["BELT-WEAR-01", "MOTOR-OVERHEAT-01"],
+    "metadata": {"install_date": "2021-01-15"}
+  },
+  {
+    "id": "HX-401",
+    "name": "Process Heat Exchanger",
+    "type": "static_equipment",
+    "location": "Building A / Line 2 / Thermal System",
+    "manufacturer": "Alfa Laval",
+    "model": "M10-BFG",
+    "serial_number": "AL-2017-12098",
+    "criticality": "B",
+    "parent": "THERMAL-SYS-01",
+    "failure_modes": ["FOULING-01", "GASKET-FAIL-01"],
+    "metadata": {"install_date": "2017-08-22"}
+  },
+  {
+    "id": "MOT-201A",
+    "name": "Pump P-201 Drive Motor",
+    "type": "electrical",
+    "location": "Building A / Line 2 / Cooling System",
+    "manufacturer": "ABB",
+    "model": "M3BP 160MLB 4",
+    "serial_number": "ABB-2019-88301",
+    "criticality": "A",
+    "parent": "P-201",
+    "failure_modes": ["MOTOR-OVERHEAT-01", "INSULATION-FAIL-01"],
+    "metadata": {"install_date": "2019-06-15", "power_kw": 15}
+  }
+]

@@ -8,7 +8,6 @@
   [![PyPI version](https://img.shields.io/pypi/v/machina-ai.svg)](https://pypi.org/project/machina-ai/)
   [![CI](https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main)](https://github.com/LGDiMaggio/machina/actions)
   [![Downloads](https://img.shields.io/pypi/dm/machina-ai.svg)](https://pypi.org/project/machina-ai/)
-  [![Discord](https://img.shields.io/discord/000000000?label=Discord&logo=discord)](https://discord.gg/machina)
 
   <p>
     <a href="#quick-start">Quick Start</a> •
@@ -25,11 +24,6 @@
 
 > **Machina** is to industrial maintenance what LangChain is to general-purpose LLM applications.
 > Build AI agents that talk to your CMMS, read your equipment manuals, monitor your sensors, and help your technicians — all in a few lines of Python.
-
-<!-- TODO: Add demo GIF here -->
-<!-- <div align="center">
-  <img src="docs/assets/demo.gif" alt="Machina in action" width="700"/>
-</div> -->
 
 ## Why Machina?
 
@@ -70,9 +64,8 @@ pip install machina-ai[all]       # Everything
 ### Your First Maintenance Agent in 10 Lines
 
 ```python
-from machina import Agent
+from machina import Agent, Plant
 from machina.connectors import DocumentStore, Telegram
-from machina.domain import Plant
 
 # Load equipment manuals for RAG
 docs = DocumentStore(paths=["./manuals/", "./procedures/"])
@@ -310,11 +303,14 @@ See the [MCP Server Guide](https://machina-ai.readthedocs.io/mcp-server) for set
 - [x] LLM abstraction layer (LiteLLM wrapper)
 - [x] Structured logging (structlog)
 - [x] CI/CD pipeline (GitHub Actions)
-- [ ] GenericCmmsConnector
-- [ ] DocumentStore connector with RAG
-- [ ] Telegram connector
-- [ ] Agent runtime with domain-aware prompting
-- [ ] **v0.1 — Maintenance Knowledge Agent** (quickstart in 30 minutes)
+- [x] GenericCmmsConnector
+- [x] DocumentStore connector with RAG
+- [x] Telegram connector + CLI channel
+- [x] Agent runtime with domain-aware prompting
+- [x] Entity resolver (natural language → asset resolution)
+- [x] Action tracing (observability)
+- [x] LLM tool definitions (function calling)
+- [x] **v0.1 — Maintenance Knowledge Agent** (quickstart in 30 minutes)
 - [ ] SAP PM, IBM Maximo, UpKeep, MaintainX connectors
 - [ ] OPC-UA and MQTT connectors
 - [ ] WhatsApp, Slack, Teams, Email connectors
@@ -360,7 +356,6 @@ make ci            # All of the above
 ## Community & Support
 
 - [GitHub Discussions](https://github.com/LGDiMaggio/machina/discussions) — Ask questions, share ideas, show what you've built
-- [Discord](https://discord.gg/machina) — Real-time chat with the community
 - [Issues](https://github.com/LGDiMaggio/machina/issues) — Report bugs and request features
 - [Twitter/X](https://twitter.com/machina_oss) — Updates and announcements
 

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class WorkOrderType(StrEnum):
@@ -96,6 +96,13 @@ class WorkOrder(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("id cannot be empty")
+        return v.strip()
 
     def transition_to(self, new_status: WorkOrderStatus) -> None:
         """Transition the work order to a new status.

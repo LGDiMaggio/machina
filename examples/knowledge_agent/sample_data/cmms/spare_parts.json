@@ -1,0 +1,68 @@
+[
+  {
+    "sku": "SKF-6310",
+    "name": "Deep Groove Ball Bearing 6310",
+    "manufacturer": "SKF",
+    "compatible_assets": ["P-201", "P-202"],
+    "stock_quantity": 4,
+    "reorder_point": 2,
+    "lead_time_days": 5,
+    "unit_cost": 45.00,
+    "warehouse_location": "W1-R3-S12"
+  },
+  {
+    "sku": "SKF-6208",
+    "name": "Deep Groove Ball Bearing 6208",
+    "manufacturer": "SKF",
+    "compatible_assets": ["COMP-301"],
+    "stock_quantity": 2,
+    "reorder_point": 2,
+    "lead_time_days": 5,
+    "unit_cost": 32.00,
+    "warehouse_location": "W1-R3-S14"
+  },
+  {
+    "sku": "SEAL-CR32-KIT",
+    "name": "Mechanical Seal Kit for CR 32",
+    "manufacturer": "Grundfos",
+    "compatible_assets": ["P-201"],
+    "stock_quantity": 1,
+    "reorder_point": 1,
+    "lead_time_days": 14,
+    "unit_cost": 280.00,
+    "warehouse_location": "W1-R5-S02"
+  },
+  {
+    "sku": "BELT-1200-EP400",
+    "name": "Conveyor Belt EP400/3 1200mm",
+    "manufacturer": "Continental",
+    "compatible_assets": ["CONV-101"],
+    "stock_quantity": 0,
+    "reorder_point": 1,
+    "lead_time_days": 21,
+    "unit_cost": 1850.00,
+    "warehouse_location": "W2-R1-S01"
+  },
+  {
+    "sku": "FILTER-GA55-INT",
+    "name": "Intake Air Filter for GA 55",
+    "manufacturer": "Atlas Copco",
+    "compatible_assets": ["COMP-301"],
+    "stock_quantity": 3,
+    "reorder_point": 2,
+    "lead_time_days": 7,
+    "unit_cost": 85.00,
+    "warehouse_location": "W1-R4-S08"
+  },
+  {
+    "sku": "GASKET-M10-BFG",
+    "name": "Plate Gasket Set for M10-BFG",
+    "manufacturer": "Alfa Laval",
+    "compatible_assets": ["HX-401"],
+    "stock_quantity": 2,
+    "reorder_point": 1,
+    "lead_time_days": 10,
+    "unit_cost": 420.00,
+    "warehouse_location": "W1-R5-S10"
+  }
+]

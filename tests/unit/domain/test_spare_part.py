@@ -1,5 +1,7 @@
 """Tests for the SparePart domain entity."""
 
+import pytest
+
 from machina.domain.spare_part import SparePart
 
 
@@ -32,3 +34,19 @@ class TestSparePart:
         restored = SparePart.model_validate(data)
         assert restored.sku == sample_spare_part.sku
         assert restored.needs_reorder == sample_spare_part.needs_reorder
+
+
+class TestSparePartValidation:
+    """Test field validators."""
+
+    def test_empty_sku_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sku cannot be empty"):
+            SparePart(sku="", name="Bearing")
+
+    def test_whitespace_only_sku_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sku cannot be empty"):
+            SparePart(sku="   ", name="Bearing")
+
+    def test_sku_stripped(self) -> None:
+        part = SparePart(sku="  BRG-001  ", name="Bearing")
+        assert part.sku == "BRG-001"

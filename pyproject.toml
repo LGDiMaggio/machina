@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "machina-ai"
-version = "0.0.1"
+version = "0.1.0"
 description = "The open-source Python framework for building AI agents specialized in industrial maintenance."
 readme = "README.md"
 license = "Apache-2.0"

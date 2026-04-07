@@ -48,6 +48,17 @@ class TestLoadYaml:
         assert data["database"]["host"] == "localhost"
         assert data["database"]["port"] == "5432"
 
+    def test_list_env_var_substitution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test env var substitution inside a YAML list."""
+        monkeypatch.setenv("ITEM_A", "alpha")
+        monkeypatch.setenv("ITEM_B", "beta")
+        cfg = tmp_path / "test.yaml"
+        cfg.write_text("items:\n  - ${ITEM_A}\n  - ${ITEM_B}\n  - literal\n")
+        data = load_yaml(cfg)
+        assert data["items"] == ["alpha", "beta", "literal"]
+
     def test_file_not_found(self) -> None:
         with pytest.raises(FileNotFoundError):
             load_yaml("/nonexistent/path.yaml")
