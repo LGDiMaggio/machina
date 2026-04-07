@@ -338,9 +338,9 @@ class TestDocumentStoreRAG:
             await conn.connect()
 
         await conn.search("bearing", asset_id="P-201")
-        # Verify the filter was passed
+        # Verify search was called with extra k for post-filtering
         call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
-        assert call_kwargs[1].get("filter") is not None
+        assert call_kwargs[1].get("k") == 15  # top_k(5) * 3 for post-filter headroom
 
     @pytest.mark.asyncio
     async def test_rag_search_empty_vectorstore(self, tmp_path: Path) -> None:

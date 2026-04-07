@@ -178,7 +178,7 @@ class DocumentStoreConnector:
         """
         self._ensure_connected()
         if self._use_rag:
-            return self._rag_search(query, top_k=top_k, asset_id=asset_id)
+            return await asyncio.to_thread(self._rag_search, query, top_k=top_k, asset_id=asset_id)
         return self._keyword_search(query, top_k=top_k, asset_id=asset_id)
 
     async def retrieve_section(
@@ -263,17 +263,12 @@ class DocumentStoreConnector:
         if self._vectorstore is None:
             return []
 
-        where_filter: dict[str, Any] | None = None
-        if asset_id:
-            where_filter = {"source": {"$contains": asset_id}}
-
         results = self._vectorstore.similarity_search_with_score(
             query,
-            k=top_k,
-            filter=where_filter,
+            k=top_k if not asset_id else top_k * 3,
         )
 
-        return [
+        chunks = [
             DocumentChunk(
                 content=doc.page_content,
                 source=doc.metadata.get("source", ""),
@@ -283,6 +278,12 @@ class DocumentStoreConnector:
             )
             for doc, score in results
         ]
+
+        # Post-filter by asset_id (substring match on source path)
+        if asset_id:
+            chunks = [c for c in chunks if asset_id.lower() in c.source.lower()]
+
+        return chunks[:top_k]
 
     # ------------------------------------------------------------------
     # Keyword fallback

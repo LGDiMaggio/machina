@@ -256,32 +256,32 @@ class Agent:
 
         wo_connectors = self._registry.find_by_capability("read_work_orders")
         if wo_connectors:
-            cname, conn = wo_connectors[0]
+            wo_cname, wo_conn = wo_connectors[0]
 
-            async def _get_wos() -> list[Any]:
+            async def _get_wos(_cname: str = wo_cname, _conn: Any = wo_conn) -> list[Any]:
                 with self.tracer.trace(
                     "connector_query",
-                    connector=cname,
+                    connector=_cname,
                     asset_id=asset.id,
                     operation="read_work_orders",
                 ):
-                    return await conn.read_work_orders(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
+                    return await _conn.read_work_orders(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
 
             tasks.append(_get_wos())
             task_names.append("work_orders")
 
         sp_connectors = self._registry.find_by_capability("read_spare_parts")
         if sp_connectors:
-            cname, conn = sp_connectors[0]
+            sp_cname, sp_conn = sp_connectors[0]
 
-            async def _get_parts() -> list[Any]:
+            async def _get_parts(_cname: str = sp_cname, _conn: Any = sp_conn) -> list[Any]:
                 with self.tracer.trace(
                     "connector_query",
-                    connector=cname,
+                    connector=_cname,
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    return await conn.read_spare_parts(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
+                    return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
 
             tasks.append(_get_parts())
             task_names.append("spare_parts")
@@ -289,16 +289,16 @@ class Agent:
         # Document search
         doc_connectors = self._registry.find_by_capability("search_documents")
         if doc_connectors:
-            cname, conn = doc_connectors[0]
+            doc_cname, doc_conn = doc_connectors[0]
 
-            async def _search_docs() -> list[Any]:
+            async def _search_docs(_cname: str = doc_cname, _conn: Any = doc_conn) -> list[Any]:
                 with self.tracer.trace(
                     "connector_query",
-                    connector=cname,
+                    connector=_cname,
                     asset_id=asset.id,
                     operation="search_documents",
                 ):
-                    results = await conn.search(text, asset_id=asset.id)  # type: ignore[attr-defined]
+                    results = await _conn.search(text, asset_id=asset.id)  # type: ignore[attr-defined]
                     return [
                         {
                             "content": r.content,

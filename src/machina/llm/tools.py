@@ -105,12 +105,12 @@ CREATE_WORK_ORDER_TOOL = make_tool(
             },
             "type": {
                 "type": "string",
-                "enum": ["corrective", "preventive", "predictive", "inspection"],
+                "enum": ["corrective", "preventive", "predictive", "improvement"],
                 "description": "Work order type.",
             },
             "priority": {
                 "type": "string",
-                "enum": ["low", "medium", "high", "critical"],
+                "enum": ["low", "medium", "high", "emergency"],
                 "description": "Priority level.",
             },
             "description": {
