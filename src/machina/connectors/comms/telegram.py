@@ -103,7 +103,7 @@ class TelegramConnector:
             raise ConnectorError("bot_token is required for TelegramConnector")
 
         try:
-            from telegram.ext import ApplicationBuilder
+            from telegram.ext import ApplicationBuilder  # type: ignore[import-not-found]
 
             self._application = ApplicationBuilder().token(self._bot_token).build()
             logger.info("connected", connector="TelegramConnector")
@@ -164,7 +164,7 @@ class TelegramConnector:
         if self._application is None:
             raise ConnectorError("Telegram application not initialised")
 
-        from telegram import Update  # noqa: TC002
+        from telegram import Update  # type: ignore[import-not-found]  # noqa: TC002
         from telegram.ext import ContextTypes, filters
         from telegram.ext import MessageHandler as TGMsgHandler
 
@@ -211,7 +211,7 @@ class TelegramConnector:
         logger.info("listening", connector="TelegramConnector")
         await self._application.initialize()
         await self._application.start()
-        await self._application.updater.start_polling()  # type: ignore[union-attr]
+        await self._application.updater.start_polling()
 
         # Keep alive until cancelled
         try:
@@ -219,7 +219,7 @@ class TelegramConnector:
         except asyncio.CancelledError:
             pass
         finally:
-            await self._application.updater.stop()  # type: ignore[union-attr]
+            await self._application.updater.stop()
             await self._application.stop()
 
     def _ensure_connected(self) -> None:

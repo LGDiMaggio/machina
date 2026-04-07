@@ -118,7 +118,7 @@ class Agent:
         cmms_connectors = self._registry.find_by_capability("read_assets")
         for cname, conn in cmms_connectors:
             with self.tracer.trace("load_assets", connector=cname) as span:
-                assets = await conn.read_assets()
+                assets = await conn.read_assets()  # type: ignore[attr-defined]
                 for asset in assets:
                     self.plant.register_asset(asset)
                 span.output_summary = f"Loaded {len(assets)} assets"
@@ -262,7 +262,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_work_orders",
                 ):
-                    return await conn.read_work_orders(asset_id=asset.id)
+                    return await conn.read_work_orders(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
 
             tasks.append(_get_wos())
             task_names.append("work_orders")
@@ -278,7 +278,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    return await conn.read_spare_parts(asset_id=asset.id)
+                    return await conn.read_spare_parts(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
 
             tasks.append(_get_parts())
             task_names.append("spare_parts")
@@ -295,7 +295,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="search_documents",
                 ):
-                    results = await conn.search(text, asset_id=asset.id)
+                    results = await conn.search(text, asset_id=asset.id)  # type: ignore[attr-defined]
                     return [
                         {
                             "content": r.content,
@@ -428,7 +428,7 @@ class Agent:
                     {
                         "role": "tool",
                         "content": json.dumps(tool_result, default=str),
-                        "tool_call_id": tc.id,  # type: ignore[union-attr]
+                        "tool_call_id": tc.id,
                     }
                 )
 
@@ -453,7 +453,7 @@ class Agent:
             connectors = self._registry.find_by_capability("read_work_orders")
             if connectors:
                 _, conn = connectors[0]
-                wos = await conn.read_work_orders(
+                wos = await conn.read_work_orders(  # type: ignore[attr-defined]
                     asset_id=args.get("asset_id", ""),
                     status=args.get("status", ""),
                 )
@@ -467,7 +467,7 @@ class Agent:
             connectors = self._registry.find_by_capability("search_documents")
             if connectors:
                 _, conn = connectors[0]
-                results = await conn.search(
+                results = await conn.search(  # type: ignore[attr-defined]
                     args.get("query", ""),
                     asset_id=args.get("asset_id", ""),
                 )
@@ -480,7 +480,7 @@ class Agent:
             connectors = self._registry.find_by_capability("read_spare_parts")
             if connectors:
                 _, conn = connectors[0]
-                parts = await conn.read_spare_parts(
+                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
                     asset_id=args.get("asset_id", ""),
                     sku=args.get("sku", ""),
                 )
@@ -541,14 +541,14 @@ class Agent:
             asset_id=args.get("asset_id", ""),
             description=args.get("description", ""),
         )
-        created = await conn.create_work_order(wo)
+        created = await conn.create_work_order(wo)  # type: ignore[attr-defined]
         logger.info(
             "work_order_created",
             agent=self.name,
             work_order_id=created.id,
             asset_id=created.asset_id,
         )
-        return created.model_dump(mode="json")
+        return created.model_dump(mode="json")  # type: ignore[no-any-return]
 
     def _tool_diagnose_failure(
         self,

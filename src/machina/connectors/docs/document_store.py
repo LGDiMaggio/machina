@@ -208,8 +208,10 @@ class DocumentStoreConnector:
 
     def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
         """Build a ChromaDB vector store from parsed documents."""
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        from langchain_community.vectorstores import Chroma
+        from langchain.text_splitter import (  # type: ignore[import-not-found]
+            RecursiveCharacterTextSplitter,
+        )
+        from langchain_community.vectorstores import Chroma  # type: ignore[import-not-found]
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=self._chunk_size,
@@ -377,7 +379,9 @@ class DocumentStoreConnector:
     def _load_pdf(self, file_path: Path) -> dict[str, Any] | None:
         """Load a PDF file using LangChain's PDF loader, or skip if unavailable."""
         try:
-            from langchain_community.document_loaders import PyPDFLoader
+            from langchain_community.document_loaders import (  # type: ignore[import-not-found]
+                PyPDFLoader,
+            )
 
             loader = PyPDFLoader(str(file_path))
             pages = loader.load()
