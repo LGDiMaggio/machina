@@ -265,7 +265,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_work_orders",
                 ):
-                    return await _conn.read_work_orders(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
+                    return await _conn.read_work_orders(asset_id=asset.id)  # type: ignore[no-any-return]
 
             tasks.append(_get_wos())
             task_names.append("work_orders")
@@ -281,7 +281,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[attr-defined, no-any-return]
+                    return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
 
             tasks.append(_get_parts())
             task_names.append("spare_parts")
@@ -298,7 +298,7 @@ class Agent:
                     asset_id=asset.id,
                     operation="search_documents",
                 ):
-                    results = await _conn.search(text, asset_id=asset.id)  # type: ignore[attr-defined]
+                    results = await _conn.search(text, asset_id=asset.id)
                     return [
                         {
                             "content": r.content,
