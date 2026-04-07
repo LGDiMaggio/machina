@@ -1,0 +1,59 @@
+# === Private files — NEVER commit ===
+MACHINA_SPEC.md
+CLAUDE.md
+.claude/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# === Distribution / Packaging ===
+dist/
+build/
+*.egg-info/
+*.egg
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# === Virtual environments ===
+.venv/
+venv/
+ENV/
+
+# === Testing ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# === Type checking ===
+.mypy_cache/
+.pytype/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Environment variables ===
+.env
+.env.*
+
+# === Documentation build ===
+site/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === Jupyter ===
+.ipynb_checkpoints/

@@ -1,0 +1,142 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "machina-ai"
+version = "0.0.1"
+description = "The open-source Python framework for building AI agents specialized in industrial maintenance."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Luigi Di Maggio", email = "luigi.dimaggio@polito.it" },
+]
+keywords = [
+    "maintenance",
+    "predictive-maintenance",
+    "ai-agent",
+    "cmms",
+    "iot",
+    "opc-ua",
+    "mqtt",
+    "iso-14224",
+    "industrial",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.0"]
+sap = ["pyodata>=1.10", "requests>=2.31"]
+opcua = ["asyncua>=1.0"]
+mqtt = ["aiomqtt>=2.0"]
+modbus = ["pymodbus>=3.5"]
+telegram = ["python-telegram-bot>=21.0"]
+docs-rag = [
+    "langchain>=0.2",
+    "langchain-community>=0.2",
+    "chromadb>=0.4",
+]
+all = [
+    "machina-ai[litellm]",
+    "machina-ai[sap]",
+    "machina-ai[opcua]",
+    "machina-ai[mqtt]",
+    "machina-ai[modbus]",
+    "machina-ai[telegram]",
+    "machina-ai[docs-rag]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "pre-commit>=3.7",
+    "types-PyYAML>=6.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
+
+[project.urls]
+Homepage = "https://github.com/LGDiMaggio/machina"
+Documentation = "https://machina.readthedocs.io"
+Repository = "https://github.com/LGDiMaggio/machina"
+Issues = "https://github.com/LGDiMaggio/machina/issues"
+Changelog = "https://github.com/LGDiMaggio/machina/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/machina"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 99
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["machina"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["litellm.*", "asyncua.*", "aiomqtt.*", "pymodbus.*", "pyodata.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q"
+
+[tool.coverage.run]
+source = ["machina"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "@overload",
+    "\\.\\.\\.",
+]

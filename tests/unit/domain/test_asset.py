@@ -1,0 +1,93 @@
+"""Tests for the Asset domain entity."""
+
+from datetime import date
+
+import pytest
+
+from machina.domain.asset import Asset, AssetType, Criticality
+
+
+class TestAsset:
+    """Test Asset creation and behaviour."""
+
+    def test_create_asset_with_required_fields(self) -> None:
+        asset = Asset(id="P-201", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+        assert asset.id == "P-201"
+        assert asset.name == "Pump"
+        assert asset.type == AssetType.ROTATING_EQUIPMENT
+
+    def test_default_criticality_is_c(self) -> None:
+        asset = Asset(id="X-1", name="Test", type=AssetType.INSTRUMENT)
+        assert asset.criticality == Criticality.C
+
+    def test_full_asset_fields(self, sample_asset: Asset) -> None:
+        assert sample_asset.id == "P-201"
+        assert sample_asset.manufacturer == "Grundfos"
+        assert sample_asset.install_date == date(2019, 6, 15)
+        assert sample_asset.criticality == Criticality.A
+        assert sample_asset.parent == "COOLING-SYS-01"
+
+    def test_asset_serialization_roundtrip(self, sample_asset: Asset) -> None:
+        data = sample_asset.model_dump()
+        restored = Asset.model_validate(data)
+        assert restored.id == sample_asset.id
+        assert restored.type == sample_asset.type
+        assert restored.install_date == sample_asset.install_date
+
+    def test_asset_children(self) -> None:
+        asset = Asset(
+            id="SYS-01",
+            name="Cooling System",
+            type=AssetType.STATIC_EQUIPMENT,
+            children=["P-201", "P-202"],
+        )
+        assert len(asset.children) == 2
+        assert "P-201" in asset.children
+
+    def test_asset_metadata(self) -> None:
+        asset = Asset(
+            id="M-1",
+            name="Motor",
+            type=AssetType.ELECTRICAL,
+            metadata={"power_kw": 75, "voltage": 400},
+        )
+        assert asset.metadata["power_kw"] == 75
+
+    def test_asset_failure_modes(self) -> None:
+        asset = Asset(
+            id="P-201",
+            name="Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            failure_modes=["BEAR-WEAR-01", "SEAL-LEAK-01"],
+        )
+        assert len(asset.failure_modes) == 2
+
+
+class TestAssetType:
+    """Test AssetType enum."""
+
+    def test_all_types_exist(self) -> None:
+        expected = {
+            "rotating_equipment",
+            "static_equipment",
+            "instrument",
+            "electrical",
+            "piping",
+            "structural",
+            "hvac",
+            "safety",
+        }
+        assert {t.value for t in AssetType} == expected
+
+
+class TestCriticality:
+    """Test Criticality enum."""
+
+    def test_criticality_values(self) -> None:
+        assert Criticality.A.value == "A"
+        assert Criticality.B.value == "B"
+        assert Criticality.C.value == "C"
+
+    def test_invalid_criticality_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            Asset(id="X", name="X", type=AssetType.INSTRUMENT, criticality="D")  # type: ignore[arg-type]
