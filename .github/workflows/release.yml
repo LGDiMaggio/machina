@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create GitHub Releases
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install build twine
+
+      # ── Quality gates ──────────────────────────────────────────────────────
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+
+      - name: Type check (mypy)
+        run: mypy src/machina
+
+      - name: Tests
+        run: pytest tests/ -q --cov=machina --cov-report=term-missing
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: python -m twine check dist/*
+
+      # ── Extract changelog for this version ────────────────────────────────
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          # Write to file to safely pass multiline content
+          echo "$NOTES" > release_notes.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # ── GitHub Release ─────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "machina-ai v${{ steps.release_notes.outputs.version }}"
+          body_path: release_notes.md
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+
+      # ── PyPI publish ───────────────────────────────────────────────────────
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload dist/*
