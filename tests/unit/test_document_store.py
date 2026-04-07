@@ -106,6 +106,101 @@ class TestDocumentStoreConnector:
         assert "search_documents" in conn.capabilities
         assert "retrieve_section" in conn.capabilities
 
+    # --- New tests for coverage ---
+
+    @pytest.mark.asyncio
+    async def test_load_single_file(self, tmp_path: Path) -> None:
+        """Pass a single file (not directory) as path."""
+        txt_file = tmp_path / "single_doc.txt"
+        txt_file.write_text("Single document content about valves and pumps.")
+        conn = DocumentStoreConnector(paths=[txt_file])
+        await conn.connect()
+        results = await conn.search("valves")
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_unsupported_file_extension(self, tmp_path: Path) -> None:
+        """Unsupported file types (e.g. .csv) are skipped."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "data.csv").write_text("col1,col2\nval1,val2")
+        (docs_dir / "manual.txt").write_text("Important maintenance procedure.")
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        # Only the txt file should be loaded
+        health = await conn.health_check()
+        assert health.details["chunk_count"] >= 1
+        results = await conn.search("maintenance")
+        assert len(results) >= 1
+
+    @pytest.mark.asyncio
+    async def test_pdf_without_langchain(self, tmp_path: Path) -> None:
+        """PDF files are skipped when langchain is not installed."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        # Create a fake PDF file (langchain won't be able to parse it anyway)
+        (docs_dir / "manual.pdf").write_bytes(b"%PDF-1.4 fake content")
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        # Should not crash, just skip the PDF
+        health = await conn.health_check()
+        assert health.details["chunk_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_docx_without_langchain(self, tmp_path: Path) -> None:
+        """DOCX files are skipped when langchain is not installed."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "manual.docx").write_bytes(b"PK fake docx")
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        health = await conn.health_check()
+        assert health.details["chunk_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_retrieve_section_found(self, sample_docs_dir: Path) -> None:
+        """retrieve_section returns content for an existing source/page."""
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        # Get a chunk to know a valid source/page
+        results = await conn.search("bearing")
+        assert len(results) > 0
+        chunk = results[0]
+        content = await conn.retrieve_section(chunk.source, chunk.page)
+        assert len(content) > 0
+
+    @pytest.mark.asyncio
+    async def test_retrieve_section_not_found(self, sample_docs_dir: Path) -> None:
+        """retrieve_section returns empty string for non-existent source."""
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        content = await conn.retrieve_section("nonexistent.txt", 999)
+        assert content == ""
+
+    @pytest.mark.asyncio
+    async def test_retrieve_section_not_connected(self) -> None:
+        """retrieve_section raises when not connected."""
+        conn = DocumentStoreConnector()
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.retrieve_section("test.txt", 1)
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_top_k(self, sample_docs_dir: Path) -> None:
+        """Keyword search respects top_k parameter."""
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("COMP-301 pump bearing filter", top_k=2)
+        assert len(results) <= 2
+
+    @pytest.mark.asyncio
+    async def test_empty_paths(self) -> None:
+        """Connector with no paths connects successfully with 0 chunks."""
+        conn = DocumentStoreConnector(paths=[])
+        await conn.connect()
+        health = await conn.health_check()
+        assert health.status.value == "healthy"
+        assert health.details["chunk_count"] == 0
+
 
 class TestDocumentChunk:
     """Test DocumentChunk data class."""
@@ -118,3 +213,10 @@ class TestDocumentChunk:
         long_text = "A" * 100
         chunk = DocumentChunk(long_text, source="test.pdf")
         assert "..." in repr(chunk)
+
+    def test_defaults(self) -> None:
+        chunk = DocumentChunk("content")
+        assert chunk.source == ""
+        assert chunk.page == 0
+        assert chunk.score == 0.0
+        assert chunk.metadata == {}

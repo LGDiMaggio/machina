@@ -281,7 +281,7 @@ class CliChannel:
         print("║  Type your questions. Ctrl+C to exit.    ║")
         print("╚══════════════════════════════════════════╝\n")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 text = await loop.run_in_executor(None, lambda: input(self._prompt))

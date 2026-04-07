@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError
 
 
 @pytest.fixture
@@ -69,6 +69,17 @@ def sample_data_dir(tmp_path: Path) -> Path:
             "lead_time_days": 5,
             "unit_cost": 45.0,
             "warehouse_location": "W1",
+        },
+        {
+            "sku": "FILTER-GA55",
+            "name": "Air Filter GA55",
+            "manufacturer": "Atlas Copco",
+            "compatible_assets": ["COMP-301"],
+            "stock_quantity": 2,
+            "reorder_point": 1,
+            "lead_time_days": 10,
+            "unit_cost": 120.0,
+            "warehouse_location": "W2",
         },
     ]
     (cmms_dir / "spare_parts.json").write_text(json.dumps(spare_parts))
@@ -127,6 +138,18 @@ class TestGenericCmmsConnectorLocal:
         assert wos[0].asset_id == "P-201"
 
     @pytest.mark.asyncio
+    async def test_read_work_orders_by_status(self, sample_data_dir: Path) -> None:
+        """Filter work orders by status."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        # Default status is "created", filter for it
+        wos = await conn.read_work_orders(status="created")
+        assert len(wos) == 2  # all WOs default to created status
+        # Filter for a status that doesn't exist
+        wos = await conn.read_work_orders(status="completed")
+        assert len(wos) == 0
+
+    @pytest.mark.asyncio
     async def test_create_work_order(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
@@ -150,6 +173,63 @@ class TestGenericCmmsConnectorLocal:
         parts = await conn.read_spare_parts(asset_id="P-201")
         assert len(parts) == 1
         assert parts[0].sku == "SKF-6310"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_by_sku(self, sample_data_dir: Path) -> None:
+        """Filter spare parts by SKU."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        parts = await conn.read_spare_parts(sku="FILTER-GA55")
+        assert len(parts) == 1
+        assert parts[0].name == "Air Filter GA55"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_no_match(self, sample_data_dir: Path) -> None:
+        """Filter spare parts for nonexistent asset."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        parts = await conn.read_spare_parts(asset_id="NONEXISTENT")
+        assert len(parts) == 0
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_all(self, sample_data_dir: Path) -> None:
+        """Read all spare parts without filters."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        parts = await conn.read_spare_parts()
+        assert len(parts) == 2
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history(self, sample_data_dir: Path) -> None:
+        """Maintenance history returns completed/closed WOs."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        # Default WOs are in "created" status, so history should be empty
+        history = await conn.read_maintenance_history("P-201")
+        assert len(history) == 0
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_with_completed(self, sample_data_dir: Path) -> None:
+        """Add a completed WO and verify it shows in maintenance history."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        from machina.domain.work_order import WorkOrderStatus
+
+        wo = WorkOrder(
+            id="WO-DONE",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="Completed bearing replacement",
+        )
+        # Transition through valid states to reach completed
+        wo.transition_to(WorkOrderStatus.ASSIGNED)
+        wo.transition_to(WorkOrderStatus.IN_PROGRESS)
+        wo.transition_to(WorkOrderStatus.COMPLETED)
+        await conn.create_work_order(wo)
+        history = await conn.read_maintenance_history("P-201")
+        assert len(history) == 1
+        assert history[0].id == "WO-DONE"
 
     @pytest.mark.asyncio
     async def test_not_connected_raises(self) -> None:
@@ -188,3 +268,53 @@ class TestGenericCmmsConnectorLocal:
         conn = GenericCmmsConnector()
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
+
+
+class TestGenericCmmsConnectorRest:
+    """Test GenericCmmsConnector in REST mode."""
+
+    @pytest.mark.asyncio
+    async def test_rest_connect_no_api_key(self) -> None:
+        """REST mode requires an API key."""
+        conn = GenericCmmsConnector(url="http://example.com/api")
+        with pytest.raises(ConnectorAuthError, match="API key"):
+            await conn.connect()
+
+    @pytest.mark.asyncio
+    async def test_rest_connect_with_api_key(self) -> None:
+        """REST mode connects successfully with an API key."""
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
+        await conn.connect()
+        health = await conn.health_check()
+        assert health.status.value == "healthy"
+        assert health.details["mode"] == "rest"
+
+    @pytest.mark.asyncio
+    async def test_rest_read_assets_raises(self) -> None:
+        """REST mode read_assets raises not-implemented error."""
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
+        await conn.connect()
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await conn.read_assets()
+
+    @pytest.mark.asyncio
+    async def test_rest_get_asset_raises(self) -> None:
+        """REST mode get_asset raises not-implemented error."""
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
+        await conn.connect()
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await conn.get_asset("P-201")
+
+    @pytest.mark.asyncio
+    async def test_health_check_not_connected(self) -> None:
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
+        health = await conn.health_check()
+        assert health.status.value == "unhealthy"
+
+    @pytest.mark.asyncio
+    async def test_disconnect(self) -> None:
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
+        await conn.connect()
+        await conn.disconnect()
+        health = await conn.health_check()
+        assert health.status.value == "unhealthy"
