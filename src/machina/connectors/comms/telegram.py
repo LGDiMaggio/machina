@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import structlog
@@ -19,10 +20,11 @@ from machina.exceptions import ConnectorError
 logger = structlog.get_logger(__name__)
 
 
+@dataclass
 class IncomingMessage:
     """A message received from a communication channel.
 
-    Attributes:
+    Args:
         text: The message text.
         chat_id: Identifier for the chat/conversation.
         user_id: Identifier for the sender.
@@ -31,24 +33,12 @@ class IncomingMessage:
         raw: Raw platform-specific message object.
     """
 
-    __slots__ = ("channel", "chat_id", "raw", "text", "user_id", "user_name")
-
-    def __init__(
-        self,
-        text: str,
-        *,
-        chat_id: str = "",
-        user_id: str = "",
-        user_name: str = "",
-        channel: str = "telegram",
-        raw: Any = None,
-    ) -> None:
-        self.text = text
-        self.chat_id = chat_id
-        self.user_id = user_id
-        self.user_name = user_name
-        self.channel = channel
-        self.raw = raw
+    text: str
+    chat_id: str = ""
+    user_id: str = ""
+    user_name: str = ""
+    channel: str = "telegram"
+    raw: Any = None
 
     def __repr__(self) -> str:
         return (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,10 +21,11 @@ from machina.exceptions import ConnectorError
 logger = structlog.get_logger(__name__)
 
 
+@dataclass
 class DocumentChunk:
     """A retrieved passage from a document.
 
-    Attributes:
+    Args:
         content: The text content of the passage.
         source: File path or document name.
         page: Page number (if available).
@@ -31,22 +33,11 @@ class DocumentChunk:
         metadata: Additional metadata from the document loader.
     """
 
-    __slots__ = ("content", "metadata", "page", "score", "source")
-
-    def __init__(
-        self,
-        content: str,
-        *,
-        source: str = "",
-        page: int = 0,
-        score: float = 0.0,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        self.content = content
-        self.source = source
-        self.page = page
-        self.score = score
-        self.metadata = metadata or {}
+    content: str
+    source: str = ""
+    page: int = 0
+    score: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         preview = self.content[:60] + "..." if len(self.content) > 60 else self.content

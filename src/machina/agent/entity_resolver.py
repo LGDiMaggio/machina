@@ -7,6 +7,7 @@ resolver finds the matching asset(s) in the plant registry.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
@@ -26,27 +27,19 @@ def _tokenise(text: str) -> set[str]:
     return {w for w in cleaned.split() if len(w) > 0}
 
 
+@dataclass
 class ResolvedEntity:
     """Result of entity resolution.
 
-    Attributes:
+    Args:
         asset: The matched asset.
         confidence: Confidence score (0.0-1.0).
         match_reason: How the match was determined.
     """
 
-    __slots__ = ("asset", "confidence", "match_reason")
-
-    def __init__(
-        self,
-        asset: Asset,
-        *,
-        confidence: float = 1.0,
-        match_reason: str = "",
-    ) -> None:
-        self.asset = asset
-        self.confidence = confidence
-        self.match_reason = match_reason
+    asset: Asset
+    confidence: float = 1.0
+    match_reason: str = ""
 
     def __repr__(self) -> str:
         return (
