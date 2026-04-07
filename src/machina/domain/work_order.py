@@ -6,7 +6,7 @@ activities through their full lifecycle from creation to closure.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -90,8 +90,8 @@ class WorkOrder(BaseModel):
     spare_parts: list[SparePartRequirement] = Field(
         default_factory=list, description="Required spare parts"
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     assigned_to: str | None = Field(default=None, description="Assigned technician")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -108,4 +108,4 @@ class WorkOrder(BaseModel):
             msg = f"Cannot transition from {self.status.value!r} to {new_status.value!r}"
             raise ValueError(msg)
         self.status = new_status
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(UTC)
