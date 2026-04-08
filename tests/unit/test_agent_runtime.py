@@ -160,6 +160,39 @@ class _FakeErrorConnector:
         raise RuntimeError("Connection timeout")
 
 
+class _FakeChannel:
+    """Channel stub that delivers one message to the handler and exits.
+
+    Used to exercise :meth:`Agent.run` and the handler lambda in
+    ``_run_async()`` without blocking on real stdin or Telegram polling.
+    """
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "Tell me about pump P-201") -> None:
+        self._message_text = message_text
+        self.connected = False
+        self.disconnected = False
+        self.received_response: str | None = None
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+    async def listen(self, handler: Any) -> None:
+        text = self._message_text
+
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        self.received_response = await handler(msg)
+
+
 class _FakeLLM:
     """Fake LLM provider that returns a canned response."""
 
@@ -769,3 +802,31 @@ class TestRunAsync:
         channel.connect.assert_awaited_once()
         channel.listen.assert_awaited_once()
         channel.disconnect.assert_awaited_once()
+
+
+class TestAgentRun:
+    """Tests for the synchronous :meth:`Agent.run` entry point."""
+
+    def test_run_drives_start_listen_stop(self) -> None:
+        """Covers runtime.py line 210 (asyncio.run wrapper) and 223-224
+        (the _handler lambda being invoked by a channel)."""
+        plant = _make_plant()
+        channel = _FakeChannel("What's the status of P-201?")
+        agent = Agent(
+            plant=plant,
+            connectors=[_FakeConnector()],
+            channels=[channel],
+        )
+        agent._llm = _FakeLLM("P-201 is running normally.")  # type: ignore[assignment]
+
+        # Blocking sync call — exits when _FakeChannel.listen returns
+        agent.run()
+
+        # Channel lifecycle fully exercised: connect → listen → disconnect
+        assert channel.connected is True
+        assert channel.disconnected is True
+        # The _handler lambda was invoked with our message and returned
+        # the stub LLM's canned response
+        assert channel.received_response == "P-201 is running normally."
+        # start() loaded assets from _FakeConnector.read_assets()
+        assert "P-201" in plant.assets
