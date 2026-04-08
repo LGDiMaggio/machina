@@ -31,6 +31,7 @@ def _make_plant() -> Plant:
             type=AssetType.ROTATING_EQUIPMENT,
             location="Building A",
             criticality=Criticality.A,
+            equipment_class_code="PU",
         )
     )
     return plant
@@ -58,6 +59,7 @@ class _FakeConnector:
                 type=AssetType.ROTATING_EQUIPMENT,
                 location="Building A",
                 criticality=Criticality.A,
+                equipment_class_code="PU",
             ),
         ]
 
@@ -158,6 +160,39 @@ class _FakeErrorConnector:
         raise RuntimeError("Connection timeout")
 
 
+class _FakeChannel:
+    """Channel stub that delivers one message to the handler and exits.
+
+    Used to exercise :meth:`Agent.run` and the handler lambda in
+    ``_run_async()`` without blocking on real stdin or Telegram polling.
+    """
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "Tell me about pump P-201") -> None:
+        self._message_text = message_text
+        self.connected = False
+        self.disconnected = False
+        self.received_response: str | None = None
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+    async def listen(self, handler: Any) -> None:
+        text = self._message_text
+
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        self.received_response = await handler(msg)
+
+
 class _FakeLLM:
     """Fake LLM provider that returns a canned response."""
 
@@ -179,6 +214,59 @@ class _FakeLLM:
         **kwargs: Any,
     ) -> dict[str, Any]:
         return {"content": self._response, "tool_calls": None}
+
+
+class _FakeOpenAIStyleLLM:
+    """LLM stub mimicking OpenAI's response shape (``tool_calls=None``)."""
+
+    model = "openai:gpt-4o-mini"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        return "Response from OpenAI-style provider."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "content": "Response from OpenAI-style provider.",
+            "tool_calls": None,
+        }
+
+
+class _FakeOllamaStyleLLM:
+    """LLM stub mimicking Ollama's response shape (``tool_calls=[]``).
+
+    Ollama's LiteLLM adapter returns an empty list rather than ``None``
+    when the model chose not to call any tool. The agent runtime must
+    handle both shapes transparently — this stub covers the ``[]`` case.
+    """
+
+    model = "ollama:llama3:8b"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        return "Response from Ollama-style provider."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "content": "Response from Ollama-style provider.",
+            "tool_calls": [],
+        }
 
 
 class _FakeLLMWithToolCalls:
@@ -767,3 +855,93 @@ class TestRunAsync:
         channel.connect.assert_awaited_once()
         channel.listen.assert_awaited_once()
         channel.disconnect.assert_awaited_once()
+
+
+class TestAgentRun:
+    """Tests for the synchronous :meth:`Agent.run` entry point."""
+
+    def test_run_drives_start_listen_stop(self) -> None:
+        """Covers runtime.py line 210 (asyncio.run wrapper) and 223-224
+        (the _handler lambda being invoked by a channel)."""
+        plant = _make_plant()
+        channel = _FakeChannel("What's the status of P-201?")
+        agent = Agent(
+            plant=plant,
+            connectors=[_FakeConnector()],
+            channels=[channel],
+        )
+        agent._llm = _FakeLLM("P-201 is running normally.")  # type: ignore[assignment]
+
+        # Blocking sync call — exits when _FakeChannel.listen returns
+        agent.run()
+
+        # Channel lifecycle fully exercised: connect → listen → disconnect
+        assert channel.connected is True
+        assert channel.disconnected is True
+        # The _handler lambda was invoked with our message and returned
+        # the stub LLM's canned response
+        assert channel.received_response == "P-201 is running normally."
+        # start() loaded assets from _FakeConnector.read_assets()
+        assert "P-201" in plant.assets
+
+
+class TestLLMProviderSwap:
+    """MACHINA_SPEC R7 AC: same agent produces identical behaviour across
+    different LLM provider implementations."""
+
+    @pytest.mark.parametrize(
+        ("llm_factory", "expected_prefix"),
+        [
+            (_FakeOpenAIStyleLLM, "Response from OpenAI-style"),
+            (_FakeOllamaStyleLLM, "Response from Ollama-style"),
+        ],
+        ids=["openai-style", "ollama-style"],
+    )
+    @pytest.mark.asyncio
+    async def test_same_scenario_with_different_providers(
+        self,
+        llm_factory: Any,
+        expected_prefix: str,
+    ) -> None:
+        """Run the identical agent setup and message through two different
+        provider stubs (one returning ``tool_calls=None``, the other
+        ``tool_calls=[]``). The runtime must handle both shapes and the
+        response must propagate through in both cases."""
+        agent = Agent(
+            plant=_make_plant(),
+            connectors=[_FakeConnector()],
+            llm=llm_factory(),
+        )
+        await agent.start()
+        try:
+            response = await agent.handle_message(
+                "What's the status of P-201?",
+                chat_id="t",
+            )
+            assert response.startswith(expected_prefix)
+        finally:
+            await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_tools_falls_back_to_complete(self) -> None:
+        """When ``_get_available_tools`` returns an empty list, ``_llm_loop``
+        must take the ``complete()`` fallback path instead of
+        ``complete_with_tools``.
+
+        In normal operation ``_get_available_tools`` always includes two
+        built-in tools (``diagnose_failure`` and ``get_maintenance_schedule``),
+        so this branch is only reachable by overriding the method. We do that
+        here to prove the fallback is wired up correctly for any future
+        deployment that strips built-in tools.
+
+        Covers runtime.py lines 398-399 (previously uncovered).
+        """
+        agent = Agent(plant=_make_plant(), llm=_FakeOpenAIStyleLLM())
+        # Force empty tool list to hit the complete() branch
+        agent._get_available_tools = lambda: []  # type: ignore[method-assign]
+        await agent.start()
+        try:
+            response = await agent.handle_message("Hi", chat_id="t")
+            assert "OpenAI-style" in response
+        finally:
+            await agent.stop()

@@ -31,7 +31,7 @@ Building an AI maintenance agent today means writing custom connectors for SAP P
 
 **That takes months. Machina makes it take minutes.**
 
-Machina provides the missing vertical layer between general-purpose agent frameworks (LangChain, CrewAI, AutoGen) and the industrial maintenance world: pre-built connectors, a rich domain model based on ISO 14224, and maintenance-aware AI — so you can go from `pip install` to a working agent in under 30 minutes.
+Machina provides the missing vertical layer between general-purpose agent frameworks (LangChain, CrewAI, AutoGen) and the industrial maintenance world: pre-built connectors, a rich domain model aligned with ISO 14224, and maintenance-aware AI — so you can go from `pip install` to a working agent in under 30 minutes.
 
 ## Features
 
@@ -241,18 +241,22 @@ pump = Asset(
     type=AssetType.ROTATING_EQUIPMENT,
     location="Building A / Line 2 / Cooling System",
     criticality="A",
+    equipment_class_code="PU",  # ISO 14224 Table A.4
 )
 
 # Define known failure modes
 bearing_wear = FailureMode(
-    code="BEAR-WEAR-01",
+    code="BEAR-WEAR-01",               # Machina-internal catalog ID
+    iso_14224_code="VIB",              # ISO 14224 Annex B Table B.15
     name="Bearing Wear — Drive End",
+    mechanism="fatigue",               # ISO 14224 Table B.2
+    category="mechanical",
     detection_methods=["vibration_analysis", "temperature_monitoring"],
     recommended_actions=["replace_bearing", "check_alignment"],
 )
 ```
 
-The domain model supports hierarchical asset trees, ISO 14224 failure taxonomies, work order lifecycle management, spare part inventory tracking, and maintenance plan scheduling.
+The domain model supports hierarchical asset trees, ISO 14224-aligned failure taxonomies, work order lifecycle management, spare part inventory tracking, and maintenance plan scheduling.
 
 See the [Domain Model Reference](https://machina-ai.readthedocs.io/domain) for all entities and services.
 

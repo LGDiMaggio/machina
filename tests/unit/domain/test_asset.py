@@ -62,6 +62,23 @@ class TestAsset:
         )
         assert len(asset.failure_modes) == 2
 
+    def test_equipment_class_code_defaults_to_none(self) -> None:
+        asset = Asset(id="P-201", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+        assert asset.equipment_class_code is None
+
+    def test_equipment_class_code_from_fixture(self, sample_asset: Asset) -> None:
+        """The canonical fixture carries the ISO 14224 Table A.4 code."""
+        assert sample_asset.equipment_class_code == "PU"
+
+    def test_equipment_class_code_accepts_iso_code(self) -> None:
+        asset = Asset(
+            id="C-101",
+            name="Main Compressor",
+            type=AssetType.ROTATING_EQUIPMENT,
+            equipment_class_code="CO",
+        )
+        assert asset.equipment_class_code == "CO"
+
 
 class TestAssetType:
     """Test AssetType enum."""

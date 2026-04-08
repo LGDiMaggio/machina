@@ -1,6 +1,6 @@
 """FailureMode entity — a specific way an asset can fail.
 
-Failure modes follow the ISO 14224 taxonomy and carry detection
+Failure modes are aligned with the ISO 14224 taxonomy and carry detection
 methods, typical indicators, and recommended corrective actions.
 """
 
@@ -16,12 +16,29 @@ class FailureMode(BaseModel):
     detect the failure, and *what* to do about it.
     """
 
-    code: str = Field(..., description="Unique failure mode code (e.g. 'BEAR-WEAR-01')")
+    code: str = Field(
+        ...,
+        description=(
+            "Machina-internal catalog identifier for this failure mode "
+            "(e.g. 'BEAR-WEAR-01'). For the ISO 14224 standard code, "
+            "use 'iso_14224_code'."
+        ),
+    )
     name: str = Field(..., description="Human-readable failure mode name")
     mechanism: str = Field(
-        default="", description="Failure mechanism (e.g. 'fatigue', 'corrosion')"
+        default="",
+        description=(
+            "Failure mechanism (e.g. 'fatigue', 'corrosion'); aligns with "
+            "ISO 14224 Table B.2 subdivisions."
+        ),
     )
-    category: str = Field(default="", description="Category (e.g. 'mechanical', 'electrical')")
+    category: str = Field(
+        default="",
+        description=(
+            "Top-level category (e.g. 'mechanical', 'electrical'); aligns "
+            "with ISO 14224 Table B.2 top-level failure mechanism groups."
+        ),
+    )
     detection_methods: list[str] = Field(
         default_factory=list,
         description="Methods to detect this failure (e.g. 'vibration_analysis')",
@@ -38,6 +55,14 @@ class FailureMode(BaseModel):
         default=None,
         ge=0,
         description="Mean Time Between Failures in hours",
+    )
+    iso_14224_code: str | None = Field(
+        default=None,
+        description=(
+            "ISO 14224 Annex B Table B.15 failure mode code "
+            "(e.g. 'VIB' vibration, 'ELP' external leakage of process medium, "
+            "'BRD' breakdown, 'OHE' overheating, 'PLU' plugged/choked)."
+        ),
     )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}

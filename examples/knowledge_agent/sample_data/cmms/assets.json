@@ -10,6 +10,7 @@
     "criticality": "A",
     "parent": "COOLING-SYS-01",
     "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROSION-01"],
+    "equipment_class_code": "PU",
     "metadata": {"install_date": "2019-06-15"}
   },
   {
@@ -23,6 +24,7 @@
     "criticality": "B",
     "parent": "CHILLER-SYS-01",
     "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01"],
+    "equipment_class_code": "PU",
     "metadata": {"install_date": "2020-03-10"}
   },
   {
@@ -36,6 +38,7 @@
     "criticality": "A",
     "parent": "COMP-AIR-SYS",
     "failure_modes": ["BEAR-WEAR-01", "VALVE-FAIL-01", "FILTER-CLOG-01"],
+    "equipment_class_code": "CO",
     "metadata": {"install_date": "2018-11-20"}
   },
   {
@@ -49,6 +52,7 @@
     "criticality": "A",
     "parent": "LINE-1-SYS",
     "failure_modes": ["BELT-WEAR-01", "MOTOR-OVERHEAT-01"],
+    "equipment_class_code": "CV",
     "metadata": {"install_date": "2021-01-15"}
   },
   {
@@ -62,6 +66,7 @@
     "criticality": "B",
     "parent": "THERMAL-SYS-01",
     "failure_modes": ["FOULING-01", "GASKET-FAIL-01"],
+    "equipment_class_code": "HE",
     "metadata": {"install_date": "2017-08-22"}
   },
   {
@@ -75,6 +80,7 @@
     "criticality": "A",
     "parent": "P-201",
     "failure_modes": ["MOTOR-OVERHEAT-01", "INSULATION-FAIL-01"],
+    "equipment_class_code": "EM",
     "metadata": {"install_date": "2019-06-15", "power_kw": 15}
   }
 ]

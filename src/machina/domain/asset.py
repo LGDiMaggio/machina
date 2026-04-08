@@ -15,7 +15,14 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class AssetType(StrEnum):
-    """Equipment classification based on ISO 14224 categories."""
+    """Pragmatic equipment classification inspired by ISO 14224 and common industry usage.
+
+    This enum uses Machina-specific buckets that blend ISO 14224 equipment
+    categories (rotating, electrical, safety) with common industry terms
+    (static, instrument, piping, structural, HVAC). For strict ISO 14224
+    alignment, use ``Asset.equipment_class_code`` to carry the Annex A
+    Table A.4 code (e.g. 'PU', 'CO', 'HE', 'EM').
+    """
 
     ROTATING_EQUIPMENT = "rotating_equipment"
     STATIC_EQUIPMENT = "static_equipment"
@@ -66,6 +73,15 @@ class Asset(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Arbitrary key-value metadata",
+    )
+    equipment_class_code: str | None = Field(
+        default=None,
+        description=(
+            "ISO 14224 Annex A Table A.4 equipment class code "
+            "(e.g. 'PU' pumps, 'CO' compressors, 'HE' heat exchangers, "
+            "'EM' electric motors, 'GT' gas turbines, 'ST' steam turbines, "
+            "'VE' pressure vessels, 'TA' storage tanks)."
+        ),
     )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}

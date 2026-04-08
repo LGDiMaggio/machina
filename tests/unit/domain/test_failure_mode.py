@@ -26,12 +26,27 @@ class TestFailureMode:
         assert fm.code == "TEST-01"
         assert fm.mechanism == ""
         assert fm.mtbf_hours is None
+        assert fm.iso_14224_code is None
+
+    def test_iso_14224_code_from_fixture(self, sample_failure_mode: FailureMode) -> None:
+        """The canonical fixture carries the ISO 14224 Table B.15 code."""
+        assert sample_failure_mode.iso_14224_code == "VIB"
+
+    def test_iso_14224_code_is_optional(self) -> None:
+        """Setting iso_14224_code explicitly works and defaults to None."""
+        fm = FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear",
+            iso_14224_code="VIB",
+        )
+        assert fm.iso_14224_code == "VIB"
 
     def test_serialization_roundtrip(self, sample_failure_mode: FailureMode) -> None:
         data = sample_failure_mode.model_dump()
         restored = FailureMode.model_validate(data)
         assert restored.code == sample_failure_mode.code
         assert restored.typical_indicators == sample_failure_mode.typical_indicators
+        assert restored.iso_14224_code == sample_failure_mode.iso_14224_code
 
 
 class TestFailureModeValidation:

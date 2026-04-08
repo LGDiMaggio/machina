@@ -42,6 +42,19 @@ class WorkOrderStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class FailureImpact(StrEnum):
+    """Failure impact on equipment function (ISO 14224 Table 6).
+
+    - CRITICAL: loss of equipment function (production-stopping)
+    - DEGRADED: equipment still functioning but below specification
+    - INCIPIENT: imminent failure detected before functional loss
+    """
+
+    CRITICAL = "critical"
+    DEGRADED = "degraded"
+    INCIPIENT = "incipient"
+
+
 _VALID_TRANSITIONS: dict[WorkOrderStatus, set[WorkOrderStatus]] = {
     WorkOrderStatus.CREATED: {WorkOrderStatus.ASSIGNED, WorkOrderStatus.CANCELLED},
     WorkOrderStatus.ASSIGNED: {
@@ -94,6 +107,21 @@ class WorkOrder(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     assigned_to: str | None = Field(default=None, description="Assigned technician")
     metadata: dict[str, Any] = Field(default_factory=dict)
+    failure_impact: FailureImpact | None = Field(
+        default=None,
+        description=(
+            "ISO 14224 Table 6 failure impact on equipment function "
+            "(critical / degraded / incipient)."
+        ),
+    )
+    failure_cause: str | None = Field(
+        default=None,
+        description=(
+            "Root cause of the failure; aligns with ISO 14224 Table B.3 "
+            "categories (design / fabrication / operation-maintenance / "
+            "management / miscellaneous)."
+        ),
+    )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
 
