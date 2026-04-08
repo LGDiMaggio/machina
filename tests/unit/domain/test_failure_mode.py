@@ -28,9 +28,7 @@ class TestFailureMode:
         assert fm.mtbf_hours is None
         assert fm.iso_14224_code is None
 
-    def test_iso_14224_code_from_fixture(
-        self, sample_failure_mode: FailureMode
-    ) -> None:
+    def test_iso_14224_code_from_fixture(self, sample_failure_mode: FailureMode) -> None:
         """The canonical fixture carries the ISO 14224 Table B.15 code."""
         assert sample_failure_mode.iso_14224_code == "VIB"
 

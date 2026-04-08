@@ -83,9 +83,7 @@ class TestWorkOrder:
         assert wo.failure_impact is None
         assert wo.failure_cause is None
 
-    def test_failure_impact_and_cause_from_fixture(
-        self, sample_work_order: WorkOrder
-    ) -> None:
+    def test_failure_impact_and_cause_from_fixture(self, sample_work_order: WorkOrder) -> None:
         """The canonical fixture carries ISO 14224 Table 6 impact + Table B.3 cause."""
         assert sample_work_order.failure_impact == FailureImpact.CRITICAL
         assert sample_work_order.failure_cause == "Expected wear and tear"
