@@ -11,7 +11,7 @@ from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import FailureImpact, Priority, WorkOrder, WorkOrderType
 
 
 @pytest.fixture
@@ -28,6 +28,7 @@ def sample_asset() -> Asset:
         install_date=date(2019, 6, 15),
         criticality=Criticality.A,
         parent="COOLING-SYS-01",
+        equipment_class_code="PU",
     )
 
 
@@ -41,6 +42,8 @@ def sample_work_order() -> WorkOrder:
         asset_id="P-201",
         description="Excessive vibration detected on bearing DE side",
         failure_mode="BEARING_WEAR",
+        failure_impact=FailureImpact.CRITICAL,
+        failure_cause="Expected wear and tear",
     )
 
 
@@ -56,6 +59,7 @@ def sample_failure_mode() -> FailureMode:
         typical_indicators=["increased_vibration", "elevated_temperature", "noise"],
         recommended_actions=["replace_bearing", "check_alignment", "verify_lubrication"],
         mtbf_hours=26000,
+        iso_14224_code="VIB",
     )
 
 

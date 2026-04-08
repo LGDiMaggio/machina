@@ -1,6 +1,6 @@
 {
   "title": "Machina: An AI Agent Framework for Industrial Maintenance",
-  "description": "Machina is an open-source Python framework for building AI agents specialized in industrial maintenance (predictive, preventive, corrective). It provides pre-built connectors for industrial systems (CMMS, IoT sensors, ERP), a domain model based on ISO 14224, and an LLM-powered agent layer with domain-aware prompting.",
+  "description": "Machina is an open-source Python framework for building AI agents specialized in industrial maintenance (predictive, preventive, corrective). It provides pre-built connectors for industrial systems (CMMS, IoT sensors, ERP), a domain model aligned with ISO 14224, and an LLM-powered agent layer with domain-aware prompting.",
   "upload_type": "software",
   "license": "Apache-2.0",
   "creators": [

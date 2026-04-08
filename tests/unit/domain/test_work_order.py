@@ -3,6 +3,7 @@
 import pytest
 
 from machina.domain.work_order import (
+    FailureImpact,
     Priority,
     SparePartRequirement,
     WorkOrder,
@@ -76,6 +77,40 @@ class TestWorkOrder:
         )
         assert len(wo.spare_parts) == 1
         assert wo.spare_parts[0].sku == "SKF-6310"
+
+    def test_failure_impact_and_cause_default_to_none(self) -> None:
+        wo = WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-1")
+        assert wo.failure_impact is None
+        assert wo.failure_cause is None
+
+    def test_failure_impact_and_cause_from_fixture(
+        self, sample_work_order: WorkOrder
+    ) -> None:
+        """The canonical fixture carries ISO 14224 Table 6 impact + Table B.3 cause."""
+        assert sample_work_order.failure_impact == FailureImpact.CRITICAL
+        assert sample_work_order.failure_cause == "Expected wear and tear"
+
+    def test_failure_impact_accepts_all_iso_values(self) -> None:
+        for impact in (
+            FailureImpact.CRITICAL,
+            FailureImpact.DEGRADED,
+            FailureImpact.INCIPIENT,
+        ):
+            wo = WorkOrder(
+                id=f"WO-{impact.value}",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-1",
+                failure_impact=impact,
+            )
+            assert wo.failure_impact == impact
+
+
+class TestFailureImpact:
+    """Test the FailureImpact enum (ISO 14224 Table 6)."""
+
+    def test_all_values(self) -> None:
+        expected = {"critical", "degraded", "incipient"}
+        assert {i.value for i in FailureImpact} == expected
 
 
 class TestWorkOrderType:

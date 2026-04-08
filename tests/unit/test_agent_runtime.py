@@ -31,6 +31,7 @@ def _make_plant() -> Plant:
             type=AssetType.ROTATING_EQUIPMENT,
             location="Building A",
             criticality=Criticality.A,
+            equipment_class_code="PU",
         )
     )
     return plant
@@ -58,6 +59,7 @@ class _FakeConnector:
                 type=AssetType.ROTATING_EQUIPMENT,
                 location="Building A",
                 criticality=Criticality.A,
+                equipment_class_code="PU",
             ),
         ]
 

@@ -13,7 +13,9 @@
     "priority": "high",
     "asset_id": "COMP-301",
     "description": "Replace intake filter — high pressure drop detected across filter element",
-    "failure_mode": "FILTER-CLOG-01"
+    "failure_mode": "FILTER-CLOG-01",
+    "failure_impact": "degraded",
+    "failure_cause": "Expected wear and tear"
   },
   {
     "id": "WO-2026-1842",
@@ -21,7 +23,9 @@
     "priority": "high",
     "asset_id": "P-201",
     "description": "Excessive vibration detected on bearing DE side — probable bearing wear",
-    "failure_mode": "BEAR-WEAR-01"
+    "failure_mode": "BEAR-WEAR-01",
+    "failure_impact": "critical",
+    "failure_cause": "Expected wear and tear"
   },
   {
     "id": "WO-2026-1843",
@@ -34,9 +38,11 @@
   {
     "id": "WO-2025-1501",
     "type": "corrective",
-    "priority": "critical",
+    "priority": "emergency",
     "asset_id": "CONV-101",
     "description": "Belt replacement — belt tracking issue caused edge wear and tearing",
-    "failure_mode": "BELT-WEAR-01"
+    "failure_mode": "BELT-WEAR-01",
+    "failure_impact": "critical",
+    "failure_cause": "Installation failure"
   }
 ]

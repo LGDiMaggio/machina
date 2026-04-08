@@ -17,7 +17,7 @@ import structlog
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import FailureImpact, Priority, WorkOrder, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -311,6 +311,7 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
         children=data.get("children", []),
         failure_modes=data.get("failure_modes", []),
         metadata=data.get("metadata", {}),
+        equipment_class_code=data.get("equipment_class_code"),
     )
 
 
@@ -323,6 +324,10 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
         asset_id=str(data.get("asset_id", "")),
         description=str(data.get("description", "")),
         failure_mode=data.get("failure_mode"),
+        failure_impact=(
+            FailureImpact(data["failure_impact"]) if "failure_impact" in data else None
+        ),
+        failure_cause=data.get("failure_cause"),
     )
 
 
