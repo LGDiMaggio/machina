@@ -216,6 +216,59 @@ class _FakeLLM:
         return {"content": self._response, "tool_calls": None}
 
 
+class _FakeOpenAIStyleLLM:
+    """LLM stub mimicking OpenAI's response shape (``tool_calls=None``)."""
+
+    model = "openai:gpt-4o-mini"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        return "Response from OpenAI-style provider."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "content": "Response from OpenAI-style provider.",
+            "tool_calls": None,
+        }
+
+
+class _FakeOllamaStyleLLM:
+    """LLM stub mimicking Ollama's response shape (``tool_calls=[]``).
+
+    Ollama's LiteLLM adapter returns an empty list rather than ``None``
+    when the model chose not to call any tool. The agent runtime must
+    handle both shapes transparently — this stub covers the ``[]`` case.
+    """
+
+    model = "ollama:llama3:8b"
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        return "Response from Ollama-style provider."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "content": "Response from Ollama-style provider.",
+            "tool_calls": [],
+        }
+
+
 class _FakeLLMWithToolCalls:
     """Fake LLM that returns a tool call on first invocation, then text."""
 
@@ -830,3 +883,65 @@ class TestAgentRun:
         assert channel.received_response == "P-201 is running normally."
         # start() loaded assets from _FakeConnector.read_assets()
         assert "P-201" in plant.assets
+
+
+class TestLLMProviderSwap:
+    """MACHINA_SPEC R7 AC: same agent produces identical behaviour across
+    different LLM provider implementations."""
+
+    @pytest.mark.parametrize(
+        ("llm_factory", "expected_prefix"),
+        [
+            (_FakeOpenAIStyleLLM, "Response from OpenAI-style"),
+            (_FakeOllamaStyleLLM, "Response from Ollama-style"),
+        ],
+        ids=["openai-style", "ollama-style"],
+    )
+    @pytest.mark.asyncio
+    async def test_same_scenario_with_different_providers(
+        self,
+        llm_factory: Any,
+        expected_prefix: str,
+    ) -> None:
+        """Run the identical agent setup and message through two different
+        provider stubs (one returning ``tool_calls=None``, the other
+        ``tool_calls=[]``). The runtime must handle both shapes and the
+        response must propagate through in both cases."""
+        agent = Agent(
+            plant=_make_plant(),
+            connectors=[_FakeConnector()],
+            llm=llm_factory(),
+        )
+        await agent.start()
+        try:
+            response = await agent.handle_message(
+                "What's the status of P-201?",
+                chat_id="t",
+            )
+            assert response.startswith(expected_prefix)
+        finally:
+            await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_tools_falls_back_to_complete(self) -> None:
+        """When ``_get_available_tools`` returns an empty list, ``_llm_loop``
+        must take the ``complete()`` fallback path instead of
+        ``complete_with_tools``.
+
+        In normal operation ``_get_available_tools`` always includes two
+        built-in tools (``diagnose_failure`` and ``get_maintenance_schedule``),
+        so this branch is only reachable by overriding the method. We do that
+        here to prove the fallback is wired up correctly for any future
+        deployment that strips built-in tools.
+
+        Covers runtime.py lines 398-399 (previously uncovered).
+        """
+        agent = Agent(plant=_make_plant(), llm=_FakeOpenAIStyleLLM())
+        # Force empty tool list to hit the complete() branch
+        agent._get_available_tools = lambda: []  # type: ignore[method-assign]
+        await agent.start()
+        try:
+            response = await agent.handle_message("Hi", chat_id="t")
+            assert "OpenAI-style" in response
+        finally:
+            await agent.stop()

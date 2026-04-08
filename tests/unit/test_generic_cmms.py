@@ -271,75 +271,23 @@ class TestGenericCmmsConnectorLocal:
 
 
 class TestGenericCmmsConnectorRest:
-    """Test GenericCmmsConnector in REST mode."""
+    """Pre-connect validation for REST mode.
+
+    The full REST path (real HTTP via httpx) is covered in
+    ``tests/integration/test_generic_cmms_rest.py`` using ``pytest-httpx``.
+    This class keeps only the tests that don't need a mock server.
+    """
 
     @pytest.mark.asyncio
     async def test_rest_connect_no_api_key(self) -> None:
-        """REST mode requires an API key."""
+        """REST mode requires an API key — rejected before any HTTP call."""
         conn = GenericCmmsConnector(url="http://example.com/api")
         with pytest.raises(ConnectorAuthError, match="API key"):
             await conn.connect()
 
     @pytest.mark.asyncio
-    async def test_rest_connect_with_api_key(self) -> None:
-        """REST mode connects successfully with an API key."""
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
-        await conn.connect()
-        health = await conn.health_check()
-        assert health.status.value == "healthy"
-        assert health.details["mode"] == "rest"
-
-    @pytest.mark.asyncio
-    async def test_rest_read_assets_raises(self) -> None:
-        """REST mode read_assets raises not-implemented error."""
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
-        await conn.connect()
-        with pytest.raises(ConnectorError, match="not yet implemented"):
-            await conn.read_assets()
-
-    @pytest.mark.asyncio
-    async def test_rest_get_asset_raises(self) -> None:
-        """REST mode get_asset raises not-implemented error."""
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
-        await conn.connect()
-        with pytest.raises(ConnectorError, match="not yet implemented"):
-            await conn.get_asset("P-201")
-
-    @pytest.mark.asyncio
-    async def test_rest_read_work_orders_raises(self) -> None:
-        """REST mode read_work_orders raises not-implemented error."""
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
-        await conn.connect()
-        with pytest.raises(ConnectorError, match="not yet implemented"):
-            await conn.read_work_orders()
-
-    @pytest.mark.asyncio
-    async def test_rest_create_work_order_raises(self) -> None:
-        """REST mode create_work_order raises not-implemented error."""
-        from machina.domain.work_order import WorkOrder, WorkOrderType
-
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="test-key")
-        await conn.connect()
-        wo = WorkOrder(
-            id="WO-REST",
-            type=WorkOrderType.CORRECTIVE,
-            priority=Priority.HIGH,
-            asset_id="P-201",
-            description="Test",
-        )
-        with pytest.raises(ConnectorError, match="not yet implemented"):
-            await conn.create_work_order(wo)
-
-    @pytest.mark.asyncio
     async def test_health_check_not_connected(self) -> None:
+        """health_check() returns UNHEALTHY before connect() is called."""
         conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
-        health = await conn.health_check()
-        assert health.status.value == "unhealthy"
-
-    @pytest.mark.asyncio
-    async def test_disconnect(self) -> None:
-        conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
-        await conn.connect()
-        await conn.disconnect()
         health = await conn.health_check()
         assert health.status.value == "unhealthy"
