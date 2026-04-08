@@ -40,9 +40,7 @@ logger = structlog.get_logger(__name__)
 # The Annotated discriminated unions live in auth.py / pagination.py for
 # pydantic serialization purposes.
 _AuthUnion = BearerAuth | BasicAuth | ApiKeyHeaderAuth | NoAuth
-_PaginationUnion = (
-    NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
-)
+_PaginationUnion = NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
 
 
 def _require_httpx() -> Any:
@@ -382,9 +380,7 @@ class GenericCmmsConnector:
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
         if self._auth is None:
-            raise ConnectorAuthError(
-                "API key or auth strategy is required for REST mode"
-            )
+            raise ConnectorAuthError("API key or auth strategy is required for REST mode")
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(

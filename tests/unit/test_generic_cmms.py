@@ -401,15 +401,11 @@ class TestPaginationStrategies:
 
         client = _FakeClient(
             responses=[
-                _FakeResponse(
-                    200, [{"id": "A"}, {"id": "B"}, {"id": "C"}]
-                ),
+                _FakeResponse(200, [{"id": "A"}, {"id": "B"}, {"id": "C"}]),
             ]
         )
         strategy = NoPagination()
-        items = [
-            item async for item in strategy.iterate(client, "http://x/items", {})
-        ]
+        items = [item async for item in strategy.iterate(client, "http://x/items", {})]
         assert [item["id"] for item in items] == ["A", "B", "C"]
         # Single request, no pagination query params
         assert client.calls == [("http://x/items", {})]
@@ -476,9 +472,7 @@ class TestPaginationStrategies:
         strategy = OffsetLimitPagination(page_size=2)
         items = [
             item
-            async for item in strategy.iterate(
-                client, "http://x", {}, params={"status": "open"}
-            )
+            async for item in strategy.iterate(client, "http://x", {}, params={"status": "open"})
         ]
         assert len(items) == 1
         # The filter param should be on every call
@@ -491,9 +485,7 @@ class TestPaginationStrategies:
         client = _FakeClient(
             responses=[_FakeResponse(200, [{"id": "A"}])],
         )
-        strategy = OffsetLimitPagination(
-            limit_param="size", offset_param="start", page_size=10
-        )
+        strategy = OffsetLimitPagination(limit_param="size", offset_param="start", page_size=10)
         _ = [item async for item in strategy.iterate(client, "http://x", {})]
         assert "size" in client.calls[0][1]
         assert "start" in client.calls[0][1]
@@ -567,9 +559,7 @@ class TestNestedSchemaMapping:
     """Nested (_fields) schema-mapping mode with JMESPath extraction."""
 
     @pytest.mark.asyncio
-    async def test_nested_mapping_extracts_fields_via_jmespath(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_nested_mapping_extracts_fields_via_jmespath(self, tmp_path: Path) -> None:
         """A JSON file with nested items can be flattened via _fields."""
         cmms_dir = tmp_path / "nested"
         cmms_dir.mkdir()
@@ -599,9 +589,7 @@ class TestNestedSchemaMapping:
         assert result[0].criticality.value == "A"
 
     @pytest.mark.asyncio
-    async def test_nested_mapping_silently_drops_missing_paths(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_nested_mapping_silently_drops_missing_paths(self, tmp_path: Path) -> None:
         """Fields whose JMESPath yields None should simply be dropped."""
         cmms_dir = tmp_path / "partial"
         cmms_dir.mkdir()
