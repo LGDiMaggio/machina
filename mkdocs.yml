@@ -1,0 +1,75 @@
+site_name: Machina
+site_description: >
+  The open-source Python framework for building AI agents specialized in
+  industrial maintenance.
+site_url: https://machina-ai.readthedocs.io
+repo_url: https://github.com/LGDiMaggio/machina
+repo_name: LGDiMaggio/machina
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/machina-logo.svg
+  favicon: assets/machina-logo.svg
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            heading_level: 3
+            merge_init_into_class: true
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Architecture: architecture.md
+  - Domain Model Reference: domain.md
+  - Connectors:
+      - Custom Connectors: connectors/custom.md
+  - MCP Server: mcp-server.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
