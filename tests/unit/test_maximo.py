@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.maximo import (
     MaximoConnector,
     _parse_asset,
@@ -17,7 +18,6 @@ from machina.connectors.cmms.maximo import (
     _reverse_priority,
     _reverse_worktype,
 )
-from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.domain.asset import Asset, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -28,7 +28,6 @@ from machina.domain.work_order import (
     WorkOrderType,
 )
 from machina.exceptions import ConnectorError
-
 
 # ---------------------------------------------------------------------------
 # Parsing helpers

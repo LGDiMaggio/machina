@@ -57,7 +57,7 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_basic_auth(self, httpx_mock, connector: SapPmConnector) -> None:
         await _connect(httpx_mock, connector)
-        assert connector._connected  # noqa: SLF001
+        assert connector._connected
         req = httpx_mock.get_requests()[0]
         assert "Authorization" in req.headers
         assert req.headers["sap-client"] == "100"
@@ -86,9 +86,9 @@ class TestConnection:
             text="<edmx:Edmx/>",
         )
         await conn.connect()
-        assert conn._connected  # noqa: SLF001
+        assert conn._connected
         # Metadata request should carry the Bearer token
-        metadata_req = [r for r in httpx_mock.get_requests() if r.method == "GET"][0]
+        metadata_req = next(r for r in httpx_mock.get_requests() if r.method == "GET")
         assert metadata_req.headers["Authorization"] == "Bearer tok123"
 
     @pytest.mark.asyncio
@@ -327,7 +327,7 @@ class TestCreateWorkOrder:
         )
         created = await connector.create_work_order(wo)
         assert created.id == "4000099"
-        post_req = [r for r in httpx_mock.get_requests() if r.method == "POST"][0]
+        post_req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         assert post_req.headers.get("X-CSRF-Token") == "csrf-abc123"
         assert post_req.headers.get("sap-client") == "100"
 

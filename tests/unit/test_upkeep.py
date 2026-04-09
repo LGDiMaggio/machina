@@ -28,7 +28,6 @@ from machina.domain.work_order import (
 )
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
-
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------

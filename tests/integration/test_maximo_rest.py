@@ -57,7 +57,7 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_success(self, httpx_mock, connector: MaximoConnector) -> None:
         await _connect(httpx_mock, connector)
-        assert connector._connected  # noqa: SLF001
+        assert connector._connected
         req = httpx_mock.get_requests()[0]
         assert req.headers["apikey"] == "test-key"
 
@@ -260,7 +260,7 @@ class TestCreateWorkOrder:
         )
         created = await connector.create_work_order(wo)
         assert created.id == "WO-NEW"
-        req = [r for r in httpx_mock.get_requests() if r.method == "POST"][0]
+        req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         assert req.headers["apikey"] == "test-key"
 
 

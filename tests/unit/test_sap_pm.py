@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.auth import BasicAuth
 from machina.connectors.cmms.sap_pm import (
     SapPmConnector,
     _map_sap_status,
@@ -32,7 +32,6 @@ from machina.domain.work_order import (
     WorkOrderType,
 )
 from machina.exceptions import ConnectorError
-
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -271,7 +270,7 @@ class TestConnectorLifecycle:
 
     def test_sap_client_stored(self) -> None:
         conn = self._make()
-        assert conn._sap_client == "100"  # noqa: SLF001
+        assert conn._sap_client == "100"
 
     @pytest.mark.asyncio
     async def test_read_before_connect_raises(self) -> None:

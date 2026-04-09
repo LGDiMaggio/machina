@@ -42,7 +42,7 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_success(self, httpx_mock, connector: UpKeepConnector) -> None:
         await _connect(httpx_mock, connector)
-        assert connector._connected  # noqa: SLF001
+        assert connector._connected
         req = httpx_mock.get_requests()[0]
         assert req.headers["Session-Token"] == "test-token"
 
@@ -196,7 +196,7 @@ class TestCreateWorkOrder:
         created = await connector.create_work_order(wo)
         assert created.id == "wo-new"
         assert created.description == "Replace bearing"
-        req = [r for r in httpx_mock.get_requests() if r.method == "POST"][0]
+        req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         assert req.headers["Session-Token"] == "test-token"
 
 
