@@ -446,13 +446,14 @@ class MaximoConnector:
         size = page_size or self._PAGE_SIZE
         all_items: list[dict[str, Any]] = []
         url: str | None = f"{self.url}/maximo/oslc/os/{object_structure}"
-        params: dict[str, str] | None = {"oslc.pageSize": str(size)}
+        initial_params: dict[str, str] = {"oslc.pageSize": str(size)}
         if self._lean:
-            params["lean"] = "1"
+            initial_params["lean"] = "1"
         if oslc_where:
-            params["oslc.where"] = oslc_where
+            initial_params["oslc.where"] = oslc_where
         if oslc_select:
-            params["oslc.select"] = oslc_select
+            initial_params["oslc.select"] = oslc_select
+        params: dict[str, str] | None = initial_params
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while url is not None:

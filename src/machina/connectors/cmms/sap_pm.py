@@ -583,16 +583,17 @@ class SapPmConnector:
         page_size = top or self._PAGE_SIZE
         all_items: list[dict[str, Any]] = []
         url: str | None = f"{self.url}/{service}/{entity_set}"
-        params: dict[str, str] = {
+        initial_params: dict[str, str] = {
             "$top": str(page_size),
             "$format": "json",
         }
         if odata_filter:
-            params["$filter"] = odata_filter
+            initial_params["$filter"] = odata_filter
         if odata_select:
-            params["$select"] = odata_select
+            initial_params["$select"] = odata_select
         if odata_expand:
-            params["$expand"] = odata_expand
+            initial_params["$expand"] = odata_expand
+        params: dict[str, str] | None = initial_params
         skip = 0
 
         async with httpx.AsyncClient(timeout=30.0) as client:
