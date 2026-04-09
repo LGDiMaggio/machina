@@ -272,7 +272,9 @@ class TestReadWorkOrders:
             url=_odata_url(
                 "API_MAINTENANCEORDER",
                 "MaintenanceOrder",
-                **{"$filter": "Equipment eq '10000001' and MaintenanceOrderSystemStatus eq 'TECO'"},
+                **{
+                    "$filter": "Equipment eq '10000001' and MaintenanceOrderSystemStatus eq 'TECO'"
+                },
             ),
             json={"d": {"results": []}},
         )

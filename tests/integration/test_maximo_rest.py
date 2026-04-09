@@ -78,7 +78,9 @@ class TestConnection:
         assert "Authorization" in req.headers
 
     @pytest.mark.asyncio
-    async def test_connect_invalid_credentials(self, httpx_mock, connector: MaximoConnector) -> None:
+    async def test_connect_invalid_credentials(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
         httpx_mock.add_response(
             method="GET",
             url=f"{OSLC}/whoami",
@@ -154,7 +156,9 @@ class TestReadAssets:
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
-            url=_oslc_url("mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'}),
+            url=_oslc_url(
+                "mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'}
+            ),
             json={
                 "member": [{"assetnum": "PUMP-201", "description": "Pump"}],
                 "responseInfo": {},
@@ -169,7 +173,9 @@ class TestReadAssets:
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
-            url=_oslc_url("mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="NONEXIST"'}),
+            url=_oslc_url(
+                "mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="NONEXIST"'}
+            ),
             json={"member": [], "responseInfo": {}},
         )
         asset = await connector.get_asset("NONEXIST")
