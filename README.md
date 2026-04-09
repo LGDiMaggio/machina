@@ -163,7 +163,7 @@ Machina follows a layered architecture with clear separation of concerns:
 
 **Design principles:** modular and pluggable (install only what you need), convention over configuration (sensible defaults), domain-first (every connector normalizes to domain entities), LLM-agnostic, and observable (structured logging and tracing for every action).
 
-See the [Architecture Guide](https://machina-ai.readthedocs.io/architecture) for details.
+See the [Architecture Guide](https://machina-ai.readthedocs.io/en/latest/architecture/) for details.
 
 ## Connectors
 
@@ -225,7 +225,7 @@ class MyCustomCmms(BaseConnector):
         ...
 ```
 
-See the [Custom Connectors Guide](https://machina-ai.readthedocs.io/connectors/custom) for the full tutorial.
+See the [Custom Connectors Guide](https://machina-ai.readthedocs.io/en/latest/connectors/custom/) for the full tutorial.
 
 ## Domain Model
 
@@ -258,7 +258,7 @@ bearing_wear = FailureMode(
 
 The domain model supports hierarchical asset trees, ISO 14224-aligned failure taxonomies, work order lifecycle management, spare part inventory tracking, and maintenance plan scheduling.
 
-See the [Domain Model Reference](https://machina-ai.readthedocs.io/domain) for all entities and services.
+See the [Domain Model Reference](https://machina-ai.readthedocs.io/en/latest/domain/) for all entities and services.
 
 ## Workflow Engine
 
@@ -295,7 +295,7 @@ Now anyone on your team can ask Claude: *"What's the maintenance history for pum
 
 This is also the fastest way to evaluate Machina: connect your data, use it from Claude, and when you need workflows and automation, the full framework is right there.
 
-See the [MCP Server Guide](https://machina-ai.readthedocs.io/mcp-server) for setup instructions.
+See the [MCP Server Guide](https://machina-ai.readthedocs.io/en/latest/mcp-server/) for setup instructions.
 
 ## Roadmap
 
