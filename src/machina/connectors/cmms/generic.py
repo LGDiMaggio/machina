@@ -1,8 +1,9 @@
 """GenericCmmsConnector — configurable REST adapter for any CMMS.
 
 Works with any REST-based CMMS by mapping JSON responses to Machina
-domain entities via a user-supplied schema mapping.  Also supports
-a local JSON/YAML data source for demos and quickstarts.
+domain entities via a user-supplied schema mapping. Supports pluggable
+authentication and pagination strategies, plus a local JSON data source
+for demos and quickstarts.
 """
 
 from __future__ import annotations
@@ -12,15 +13,34 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
+import jmespath
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.cmms.auth import (
+    ApiKeyHeaderAuth,
+    BasicAuth,
+    BearerAuth,
+    NoAuth,
+)
+from machina.connectors.cmms.pagination import (
+    CursorPagination,
+    NoPagination,
+    OffsetLimitPagination,
+    PageNumberPagination,
+)
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import FailureImpact, Priority, WorkOrder, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
+
+# Plain unions (not Annotated) for use as runtime type annotations.
+# The Annotated discriminated unions live in auth.py / pagination.py for
+# pydantic serialization purposes.
+_AuthUnion = BearerAuth | BasicAuth | ApiKeyHeaderAuth | NoAuth
+_PaginationUnion = NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
 
 
 def _require_httpx() -> Any:
@@ -41,9 +61,25 @@ class GenericCmmsConnector:
 
     Args:
         url: Base URL of the CMMS REST API (optional for local mode).
-        api_key: API key for authentication (optional).
+        api_key: Bearer token for authentication. Legacy shortcut —
+            equivalent to ``auth=BearerAuth(token=api_key)``. Ignored when
+            ``auth`` is provided.
         data_dir: Path to a directory of JSON files used as a local data source.
-        schema_mapping: Dictionary that maps CMMS field names to Machina field names.
+        schema_mapping: Dictionary that maps CMMS field names to Machina
+            field names. Supports two forms:
+
+            * **Flat rename**: ``{"assets": {"asset_id": "id"}}`` renames
+              top-level keys in each raw item.
+            * **JMESPath extraction**: ``{"assets": {"_fields":
+              {"id": "equipment.id", "name": "meta.display_name"}}}``
+              extracts nested fields via JMESPath expressions.
+        auth: Authentication strategy for REST mode. Defaults to deriving
+            a :class:`BearerAuth` from ``api_key`` when the latter is set.
+            Use :class:`NoAuth` explicitly for endpoints that require no
+            credentials.
+        pagination: Pagination strategy for list-style REST endpoints.
+            Defaults to :class:`NoPagination` (single-shot GET) which
+            preserves the behaviour of earlier versions.
 
     Example:
         ```python
@@ -52,10 +88,37 @@ class GenericCmmsConnector:
         await cmms.connect()
         assets = await cmms.read_assets()
 
-        # REST mode
+        # REST mode, legacy single-key auth
         cmms = GenericCmmsConnector(
             url="https://cmms.example.com/api",
             api_key="...",
+        )
+
+        # REST mode, modern CMMS with Basic auth, offset/limit pagination
+        # and nested response format
+        from machina.connectors.cmms import (
+            BasicAuth,
+            OffsetLimitPagination,
+        )
+
+        cmms = GenericCmmsConnector(
+            url="https://cmms.example.com/api",
+            auth=BasicAuth(username="svc", password="..."),
+            pagination=OffsetLimitPagination(
+                limit_param="size",
+                offset_param="start",
+                page_size=50,
+                items_path="data",
+            ),
+            schema_mapping={
+                "assets": {
+                    "_fields": {
+                        "id": "equipment.id",
+                        "name": "equipment.display_name",
+                        "criticality": "meta.criticality_class",
+                    },
+                },
+            },
         )
         ```
     """
@@ -74,13 +137,26 @@ class GenericCmmsConnector:
         url: str = "",
         api_key: str = "",
         data_dir: str | Path = "",
-        schema_mapping: dict[str, dict[str, str]] | None = None,
+        schema_mapping: dict[str, dict[str, Any]] | None = None,
+        auth: _AuthUnion | None = None,
+        pagination: _PaginationUnion | None = None,
     ) -> None:
         self.url = url
         self._api_key = api_key
         self._data_dir = Path(data_dir) if data_dir else None
         self._schema_mapping = schema_mapping or {}
         self._connected = False
+
+        # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
+        if auth is not None:
+            self._auth: _AuthUnion | None = auth
+        elif api_key:
+            self._auth = BearerAuth(token=api_key)
+        else:
+            self._auth = None
+
+        # Pagination: default NoPagination preserves legacy single-shot behaviour
+        self._pagination: _PaginationUnion = pagination or NoPagination()
 
         # In-memory store for local mode
         self._assets: dict[str, Asset] = {}
@@ -96,6 +172,8 @@ class GenericCmmsConnector:
 
         Raises:
             ConnectorError: If neither ``url`` nor ``data_dir`` is provided.
+            ConnectorAuthError: In REST mode, if no authentication strategy
+                was supplied.
         """
         if self._data_dir and self._data_dir.exists():
             await self._load_local_data()
@@ -255,10 +333,34 @@ class GenericCmmsConnector:
             )
 
     def _apply_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
-        """Remap field names using the schema mapping."""
+        """Apply schema mapping to a single raw item dict.
+
+        Supports two mapping forms:
+
+        1. **Flat rename (legacy)**: ``{"asset_id": "id"}`` renames top-level
+           keys. Any field not mentioned in the mapping is preserved with
+           its original key.
+        2. **JMESPath extraction**: ``{"_fields": {"id": "equipment.id"}}``
+           produces a new dict with only the listed fields, each extracted
+           via a JMESPath expression. Missing paths are silently dropped.
+
+        Selection between the two modes is based on the presence of the
+        ``_fields`` sentinel key.
+        """
         mapping = self._schema_mapping.get(entity, {})
         if not mapping:
             return data
+        if "_fields" in mapping:
+            fields_map = mapping["_fields"]
+            if not isinstance(fields_map, dict):
+                return data
+            result: dict[str, Any] = {}
+            for target_key, path in fields_map.items():
+                value = jmespath.search(str(path), data)
+                if value is not None:
+                    result[str(target_key)] = value
+            return result
+        # Legacy flat rename mode
         return {mapping.get(k, k): v for k, v in data.items()}
 
     # ------------------------------------------------------------------
@@ -267,7 +369,9 @@ class GenericCmmsConnector:
 
     def _rest_headers(self) -> dict[str, str]:
         """Return the Authorization headers used for every REST call."""
-        return {"Authorization": f"Bearer {self._api_key}"}
+        if self._auth is None:
+            return {}
+        return self._auth.apply({})
 
     def _rest_url(self, *parts: str) -> str:
         """Join the base URL and path parts, stripping trailing slashes."""
@@ -275,8 +379,8 @@ class GenericCmmsConnector:
 
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
-        if not self._api_key:
-            raise ConnectorAuthError("API key is required for REST mode")
+        if self._auth is None:
+            raise ConnectorAuthError("API key or auth strategy is required for REST mode")
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -295,17 +399,24 @@ class GenericCmmsConnector:
         """Fetch assets from the REST API.
 
         When ``asset_id`` is provided, GETs ``/assets/{id}`` and expects a
-        single-object response. Otherwise GETs ``/assets`` and expects a list.
+        single-object response (pagination bypassed). Otherwise GETs
+        ``/assets`` and iterates via the configured pagination strategy.
         """
         httpx = _require_httpx()
-        url = self._rest_url("assets", asset_id) if asset_id else self._rest_url("assets")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, headers=self._rest_headers())
-            resp.raise_for_status()
-        data = resp.json()
+        headers = self._rest_headers()
         if asset_id:
-            return [_parse_asset(self._apply_mapping("assets", data))]
-        return [_parse_asset(self._apply_mapping("assets", item)) for item in data]
+            url = self._rest_url("assets", asset_id)
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+            return [_parse_asset(self._apply_mapping("assets", resp.json()))]
+
+        url = self._rest_url("assets")
+        results: list[Asset] = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async for raw in self._pagination.iterate(client, url, headers):
+                results.append(_parse_asset(self._apply_mapping("assets", raw)))
+        return results
 
     async def _rest_read_work_orders(
         self,
@@ -316,24 +427,22 @@ class GenericCmmsConnector:
         """Fetch work orders from the REST API.
 
         Query params ``asset_id`` and ``status`` are forwarded to the server
-        when set.
+        when set. Iteration uses the configured pagination strategy.
         """
         httpx = _require_httpx()
+        headers = self._rest_headers()
         params: dict[str, str] = {}
         if asset_id:
             params["asset_id"] = asset_id
         if status:
             params["status"] = status
+
+        url = self._rest_url("work_orders")
+        results: list[WorkOrder] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                self._rest_url("work_orders"),
-                headers=self._rest_headers(),
-                params=params,
-            )
-            resp.raise_for_status()
-        return [
-            _parse_work_order(self._apply_mapping("work_orders", item)) for item in resp.json()
-        ]
+            async for raw in self._pagination.iterate(client, url, headers, params=params):
+                results.append(_parse_work_order(self._apply_mapping("work_orders", raw)))
+        return results
 
     async def _rest_create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Submit a new work order to the REST API."""

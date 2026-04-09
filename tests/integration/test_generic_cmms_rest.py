@@ -272,3 +272,136 @@ class TestRequireHttpx:
 
         httpx_mod = _require_httpx()
         assert httpx_mod is httpx
+
+
+class TestModernRestCmmsEndToEnd:
+    """End-to-end integration test exercising auth + pagination + JMESPath.
+
+    This simulates a modern CMMS REST API that:
+
+    * Uses HTTP Basic authentication instead of Bearer tokens.
+    * Wraps each response in a ``{"data": [...], "meta": {...}}`` envelope.
+    * Uses offset/limit pagination with custom parameter names
+      (``start`` and ``size``) and deeply nested item structures.
+
+    It verifies that the ``GenericCmmsConnector`` can integrate such an API
+    without any custom code beyond configuration.
+    """
+
+    BASE_URL = "https://modern-cmms.example.com/v2"
+
+    @pytest.mark.asyncio
+    async def test_modern_rest_cmms_end_to_end(self, httpx_mock) -> None:
+        import base64
+
+        from machina.connectors.cmms import (
+            BasicAuth,
+            GenericCmmsConnector,
+            OffsetLimitPagination,
+        )
+
+        # Build the connector with Basic auth, custom pagination, and
+        # JMESPath field extraction from a nested response shape.
+        conn = GenericCmmsConnector(
+            url=self.BASE_URL,
+            auth=BasicAuth(username="svc", password="s3cret"),
+            pagination=OffsetLimitPagination(
+                limit_param="size",
+                offset_param="start",
+                page_size=2,
+                items_path="data",
+            ),
+            schema_mapping={
+                "assets": {
+                    "_fields": {
+                        "id": "equipment.id",
+                        "name": "equipment.display_name",
+                        "type": "meta.asset_type",
+                        "criticality": "meta.criticality_class",
+                        "equipment_class_code": "meta.iso_code",
+                    },
+                },
+            },
+        )
+
+        # Health check (single-shot GET, no pagination)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{self.BASE_URL}/health",
+            status_code=200,
+            json={"status": "ok"},
+        )
+        await conn.connect()
+
+        # First page: 2 items (full page) → pagination keeps going
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{self.BASE_URL}/assets?size=2&start=0",
+            json={
+                "meta": {"total": 3},
+                "data": [
+                    {
+                        "equipment": {"id": "P-201", "display_name": "Cooling Pump"},
+                        "meta": {
+                            "asset_type": "rotating_equipment",
+                            "criticality_class": "A",
+                            "iso_code": "PU",
+                        },
+                    },
+                    {
+                        "equipment": {
+                            "id": "COMP-301",
+                            "display_name": "Air Compressor",
+                        },
+                        "meta": {
+                            "asset_type": "rotating_equipment",
+                            "criticality_class": "A",
+                            "iso_code": "CO",
+                        },
+                    },
+                ],
+            },
+        )
+
+        # Second page: 1 item (short page) → pagination stops here
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{self.BASE_URL}/assets?size=2&start=2",
+            json={
+                "meta": {"total": 3},
+                "data": [
+                    {
+                        "equipment": {"id": "HEX-101", "display_name": "Heat Exchanger"},
+                        "meta": {
+                            "asset_type": "static_equipment",
+                            "criticality_class": "B",
+                            "iso_code": "HE",
+                        },
+                    },
+                ],
+            },
+        )
+
+        assets = await conn.read_assets()
+
+        # All three assets were retrieved across both pages
+        assert len(assets) == 3
+        assert {a.id for a in assets} == {"P-201", "COMP-301", "HEX-101"}
+
+        # Field mapping extracted nested values correctly
+        pump = next(a for a in assets if a.id == "P-201")
+        assert pump.name == "Cooling Pump"
+        assert pump.equipment_class_code == "PU"
+        assert pump.criticality.value == "A"
+
+        hex_unit = next(a for a in assets if a.id == "HEX-101")
+        assert hex_unit.equipment_class_code == "HE"
+        assert hex_unit.criticality.value == "B"
+
+        # Every HTTP request carried the expected Basic auth header
+        expected_creds = base64.b64encode(b"svc:s3cret").decode("ascii")
+        expected_auth = f"Basic {expected_creds}"
+        for req in httpx_mock.get_requests():
+            assert req.headers["Authorization"] == expected_auth
+
+        await conn.disconnect()
