@@ -17,8 +17,10 @@ from machina.connectors.cmms.sap_pm import (
     _parse_sap_datetime,
     _parse_spare_part,
     _parse_work_order,
+    _require_httpx,
     _reverse_order_type,
     _reverse_priority,
+    _reverse_status,
     _sap_criticality,
     _sap_cycle_to_interval,
 )
@@ -118,6 +120,21 @@ class TestParseWorkOrder:
         assert wo.type == WorkOrderType.PREVENTIVE
         assert wo.status == WorkOrderStatus.CREATED
 
+    def test_failure_mode_mapping(self) -> None:
+        """SAP failure fields must be extracted into failure_mode/failure_cause."""
+        raw = {
+            "MaintenanceOrder": "4000003",
+            "MaintenanceOrderType": "PM01",
+            "MaintPriority": "2",
+            "MaintenanceOrderSystemStatus": "CNF",
+            "Equipment": "E1",
+            "MaintenanceActivityType": "BEARING_REPAIR",
+            "MaintenanceCause": "WEAR",
+        }
+        wo = _parse_work_order(raw)
+        assert wo.failure_mode == "BEARING_REPAIR"
+        assert wo.failure_cause == "WEAR"
+
 
 class TestMapSapStatus:
     def test_compound_status(self) -> None:
@@ -155,8 +172,18 @@ class TestParseSapDatetime:
         dt = _parse_sap_datetime("20250601")
         assert dt.year == 2025
 
+    def test_sap_date_with_negative_offset(self) -> None:
+        dt = _parse_sap_datetime("/Date(1717228800000-0300)/")
+        assert dt.year == 2024
+        assert dt.tzinfo is not None
+
     def test_empty_string_returns_now(self) -> None:
         dt = _parse_sap_datetime("")
+        assert dt.tzinfo is not None
+
+    def test_invalid_string_falls_back_to_now(self) -> None:
+        """A string that is neither ISO, /Date()/, nor a plain date returns now."""
+        dt = _parse_sap_datetime("not-a-date-at-all!")
         assert dt.tzinfo is not None
 
 
@@ -173,6 +200,20 @@ class TestParseSparePart:
         assert isinstance(sp, SparePart)
         assert sp.sku == "MAT-001"
         assert sp.stock_quantity == 50
+
+    def test_extra_fields_in_metadata(self) -> None:
+        """SAP-specific material columns must land in metadata."""
+        raw = {
+            "Material": "MAT-001",
+            "MaterialDescription": "Bearing",
+            "AvailableQuantity": 5,
+            "MaterialGroup": "FERT",
+            "BaseUnit": "PC",
+        }
+        sp = _parse_spare_part(raw)
+        assert sp.metadata["MaterialGroup"] == "FERT"
+        assert sp.metadata["BaseUnit"] == "PC"
+        assert "Material" not in sp.metadata
 
 
 class TestParseMaintenancePlan:
@@ -234,6 +275,10 @@ class TestSapCycleToInterval:
         i = _sap_cycle_to_interval(1000, "STD")
         assert i.hours == 1000
 
+    def test_unknown_unit_falls_back_to_days(self) -> None:
+        i = _sap_cycle_to_interval(7, "UNKNOWN")
+        assert i.days == 7
+
 
 class TestReverseMapping:
     def test_reverse_priority(self) -> None:
@@ -247,6 +292,14 @@ class TestReverseMapping:
         assert _reverse_order_type(WorkOrderType.PREVENTIVE) == "PM02"
         assert _reverse_order_type(WorkOrderType.PREDICTIVE) == "PM03"
         assert _reverse_order_type(WorkOrderType.IMPROVEMENT) == "PM04"
+
+    def test_reverse_status(self) -> None:
+        assert _reverse_status(WorkOrderStatus.CREATED) == "CRTD"
+        assert _reverse_status(WorkOrderStatus.ASSIGNED) == "REL"
+        assert _reverse_status(WorkOrderStatus.IN_PROGRESS) == "PCNF"
+        assert _reverse_status(WorkOrderStatus.COMPLETED) == "CNF"
+        assert _reverse_status(WorkOrderStatus.CLOSED) == "TECO"
+        assert _reverse_status(WorkOrderStatus.CANCELLED) == "DLFL"
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +336,12 @@ class TestConnectorLifecycle:
         conn = self._make()
         health = await conn.health_check()
         assert health.status.value == "unhealthy"
+
+
+class TestRequireHttpx:
+    def test_import_error_gives_actionable_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "httpx", None)
+        with pytest.raises(ConnectorError, match="pip install machina-ai"):
+            _require_httpx()

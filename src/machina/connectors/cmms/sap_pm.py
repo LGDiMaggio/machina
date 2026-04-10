@@ -18,11 +18,14 @@ Key SAP OData service groups consumed:
 * ``API_EQUIPMENT`` — Equipment master data
 * ``API_MAINTENANCEORDER`` — Maintenance orders (work orders)
 * ``API_MAINTENANCEPLAN`` — Preventive-maintenance plans
-* ``API_BOM_WHERE_USED`` — BOM / spare parts look-up (simplified)
+* ``API_BILL_OF_MATERIAL_SRV`` — BOM / spare-part look-up
+  (entity set and field names are configurable per SAP version; see
+  :class:`SapPmConnector` constructor args).
 
 See also:
     https://api.sap.com/api/API_EQUIPMENT/overview
     https://api.sap.com/api/API_MAINTENANCEORDER/overview
+    https://api.sap.com/api/API_BILL_OF_MATERIAL_SRV/overview
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -87,6 +91,15 @@ _SAP_STATUS_MAP: dict[str, WorkOrderStatus] = {
     "TECO": WorkOrderStatus.CLOSED,
     "CLSD": WorkOrderStatus.CLOSED,
     "DLFL": WorkOrderStatus.CANCELLED,
+}
+
+_REVERSE_SAP_STATUS: dict[WorkOrderStatus, str] = {
+    WorkOrderStatus.CREATED: "CRTD",
+    WorkOrderStatus.ASSIGNED: "REL",
+    WorkOrderStatus.IN_PROGRESS: "PCNF",
+    WorkOrderStatus.COMPLETED: "CNF",
+    WorkOrderStatus.CLOSED: "TECO",
+    WorkOrderStatus.CANCELLED: "DLFL",
 }
 
 _SAP_EQUIP_CATEGORY_MAP: dict[str, AssetType] = {
@@ -171,6 +184,8 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
         asset_id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
         description=str(data.get("MaintenanceOrderDesc", data.get("Description", ""))),
         assigned_to=data.get("MaintOrdPersonResponsible") or None,
+        failure_mode=data.get("MaintenanceActivityType") or None,
+        failure_cause=data.get("MaintenanceCause") or data.get("MaintNotifCause") or None,
         created_at=_parse_sap_datetime(created) if created else now,
         updated_at=_parse_sap_datetime(updated) if updated else now,
         metadata={
@@ -189,6 +204,9 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
                 "MaintenanceOrderDesc",
                 "Description",
                 "MaintOrdPersonResponsible",
+                "MaintenanceActivityType",
+                "MaintenanceCause",
+                "MaintNotifCause",
                 "CreationDate",
                 "MaintOrdBasicStartDate",
                 "LastChangeDateTime",
@@ -221,6 +239,23 @@ def _parse_spare_part(data: dict[str, Any]) -> SparePart:
         stock_quantity=int(data.get("AvailableQuantity", data.get("Quantity", 0))),
         unit_cost=float(data.get("StandardPrice", data.get("Price", 0.0))),
         warehouse_location=str(data.get("StorageLocation", data.get("Plant", ""))),
+        metadata={
+            k: v
+            for k, v in data.items()
+            if k
+            not in {
+                "Material",
+                "MaterialNumber",
+                "MaterialDescription",
+                "Description",
+                "AvailableQuantity",
+                "Quantity",
+                "StandardPrice",
+                "Price",
+                "StorageLocation",
+                "Plant",
+            }
+        },
     )
 
 
@@ -301,6 +336,21 @@ class SapPmConnector:
         auth: Authentication strategy — :class:`OAuth2ClientCredentials`
             or :class:`BasicAuth`.
         sap_client: SAP client number (sent as ``sap-client`` header).
+        bom_service: OData service group used by :meth:`read_spare_parts`.
+            Defaults to ``"API_BILL_OF_MATERIAL_SRV"`` (standard S/4HANA
+            Cloud service). Override for on-premise systems with
+            different service names.
+        bom_entity_set: Entity set inside ``bom_service``. Defaults to
+            ``"BillOfMaterialItem"``.
+        bom_material_field: Name of the material / component field on
+            ``bom_entity_set`` used by the ``sku`` filter. Defaults to
+            ``"BillOfMaterialComponent"``.
+        bom_equipment_field: Name of the equipment field on
+            ``bom_entity_set`` used by the ``asset_id`` filter. Defaults
+            to the empty string, which disables server-side filtering by
+            asset (because the default ``BillOfMaterialItem`` entity
+            does not directly expose an Equipment key). Set this to a
+            valid field name if your SAP version exposes one.
 
     Example:
         ```python
@@ -325,6 +375,7 @@ class SapPmConnector:
         "read_assets",
         "read_work_orders",
         "create_work_order",
+        "update_work_order",
         "read_spare_parts",
         "read_maintenance_plans",
     ]
@@ -337,10 +388,18 @@ class SapPmConnector:
         url: str,
         auth: _AuthUnion,
         sap_client: str = "",
+        bom_service: str = "API_BILL_OF_MATERIAL_SRV",
+        bom_entity_set: str = "BillOfMaterialItem",
+        bom_material_field: str = "BillOfMaterialComponent",
+        bom_equipment_field: str = "",
     ) -> None:
         self.url = url.rstrip("/")
         self._auth = auth
         self._sap_client = sap_client
+        self._bom_service = bom_service
+        self._bom_entity_set = bom_entity_set
+        self._bom_material_field = bom_material_field
+        self._bom_equipment_field = bom_equipment_field
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -363,7 +422,9 @@ class SapPmConnector:
             if isinstance(self._auth, OAuth2ClientCredentials):
                 await self._auth.fetch_token(client)
 
-            resp = await client.get(
+            resp = await request_with_retry(
+                client,
+                "GET",
                 f"{self.url}/API_EQUIPMENT/$metadata",
                 headers=self._headers(),
             )
@@ -417,15 +478,28 @@ class SapPmConnector:
         self,
         *,
         asset_id: str = "",
-        status: str = "",
+        status: WorkOrderStatus | str = "",
     ) -> list[WorkOrder]:
-        """Read maintenance orders from SAP PM."""
+        """Read maintenance orders from SAP PM.
+
+        Args:
+            asset_id: Filter by equipment number.
+            status: Filter by status — accepts a :class:`WorkOrderStatus`
+                enum (automatically reverse-mapped to the SAP code) or a
+                raw SAP status string like ``"REL"`` for backward
+                compatibility.
+        """
         self._ensure_connected()
         filters: list[str] = []
         if asset_id:
             filters.append(f"Equipment eq '{asset_id}'")
         if status:
-            filters.append(f"MaintenanceOrderSystemStatus eq '{status}'")
+            sap_status = (
+                _REVERSE_SAP_STATUS.get(status, status.value)
+                if isinstance(status, WorkOrderStatus)
+                else status
+            )
+            filters.append(f"MaintenanceOrderSystemStatus eq '{sap_status}'")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
@@ -433,6 +507,17 @@ class SapPmConnector:
             odata_filter=odata_filter,
         )
         return [_parse_work_order(item) for item in raw]
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        """Look up a single maintenance order by number."""
+        self._ensure_connected()
+        raw = await self._odata_get(
+            "API_MAINTENANCEORDER",
+            "MaintenanceOrder",
+            odata_filter=f"MaintenanceOrder eq '{work_order_id}'",
+            top=1,
+        )
+        return _parse_work_order(raw[0]) if raw else None
 
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new maintenance order in SAP PM.
@@ -444,7 +529,6 @@ class SapPmConnector:
             The created work order with the server-assigned ID.
         """
         self._ensure_connected()
-        httpx = _require_httpx()
         payload: dict[str, Any] = {
             "MaintenanceOrderDesc": work_order.description,
             "Equipment": work_order.asset_id,
@@ -453,17 +537,11 @@ class SapPmConnector:
         }
         if work_order.assigned_to:
             payload["MaintOrdPersonResponsible"] = work_order.assigned_to
-        headers = {
-            **self._headers(),
-            "Content-Type": "application/json",
-            "X-CSRF-Token": await self._fetch_csrf_token(),
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder",
-                headers=headers,
-                json=payload,
-            )
+        resp = await self._write_with_csrf(
+            "POST",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder",
+            payload,
+        )
         if resp.status_code == 401:
             raise ConnectorAuthError("SAP PM authentication failed")
         if resp.status_code not in (200, 201):
@@ -475,10 +553,73 @@ class SapPmConnector:
         logger.info(
             "work_order_created",
             connector="SapPmConnector",
+            operation="create_work_order",
             work_order_id=result.get("MaintenanceOrder"),
             asset_id=work_order.asset_id,
         )
         return _parse_work_order(result)
+
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update an existing maintenance order in SAP PM.
+
+        Only non-``None`` fields are included in the PATCH payload.
+
+        Args:
+            work_order_id: SAP maintenance order number.
+            status: New :class:`WorkOrderStatus` (reverse-mapped to SAP code).
+            assigned_to: New responsible person.
+            description: New order description.
+
+        Returns:
+            The updated work order.
+        """
+        self._ensure_connected()
+        payload: dict[str, Any] = {}
+        if status is not None:
+            payload["MaintenanceOrderSystemStatus"] = _reverse_status(status)
+        if assigned_to is not None:
+            payload["MaintOrdPersonResponsible"] = assigned_to
+        if description is not None:
+            payload["MaintenanceOrderDesc"] = description
+        if not payload:
+            raise ConnectorError("update_work_order requires at least one field to update")
+        resp = await self._write_with_csrf(
+            "PATCH",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder('{work_order_id}')",
+            payload,
+        )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("SAP PM authentication failed")
+        if resp.status_code not in (200, 204):
+            raise ConnectorError(
+                f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
+            )
+        logger.info(
+            "work_order_updated",
+            connector="SapPmConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+        )
+        # Re-fetch the updated entity to return the full work order.
+        updated = await self.get_work_order(work_order_id)
+        if updated is None:
+            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        return updated
+
+    async def close_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CLOSED status."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+
+    async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CANCELLED status."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
 
     async def read_spare_parts(
         self,
@@ -486,17 +627,44 @@ class SapPmConnector:
         asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read material / spare part data from SAP."""
+        """Read material / spare-part data from SAP's BOM service.
+
+        The service group, entity set, and filter field names are
+        configured on the connector (see constructor args
+        ``bom_service``, ``bom_entity_set``, ``bom_material_field``,
+        ``bom_equipment_field``). Defaults target the standard S/4HANA
+        ``API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`` entity.
+
+        Args:
+            asset_id: Optional Equipment identifier. Applied as a
+                server-side OData ``$filter`` clause only when
+                ``bom_equipment_field`` is configured; otherwise logged
+                and ignored.
+            sku: Optional material number, translated to a server-side
+                ``$filter`` on ``bom_material_field``.
+        """
         self._ensure_connected()
         filters: list[str] = []
         if asset_id:
-            filters.append(f"Equipment eq '{asset_id}'")
+            if self._bom_equipment_field:
+                filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
+            else:
+                logger.warning(
+                    "bom_asset_filter_unsupported",
+                    connector="SapPmConnector",
+                    asset_id=asset_id,
+                    bom_entity_set=self._bom_entity_set,
+                    message=(
+                        "asset_id filter ignored: bom_equipment_field is not "
+                        "configured for this BOM service"
+                    ),
+                )
         if sku:
-            filters.append(f"Material eq '{sku}'")
+            filters.append(f"{self._bom_material_field} eq '{sku}'")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
-            "API_EQUIPMENT",
-            "EquipmentBOM",
+            self._bom_service,
+            self._bom_entity_set,
             odata_filter=odata_filter,
         )
         return [_parse_spare_part(item) for item in raw]
@@ -538,20 +706,46 @@ class SapPmConnector:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
 
-    async def _fetch_csrf_token(self) -> str:
-        """Fetch a CSRF token for write operations.
+    async def _write_with_csrf(self, method: str, url: str, payload: dict[str, Any]) -> Any:
+        """Execute a write request (POST/PATCH) with CSRF token.
 
-        SAP OData services require a CSRF token (``X-CSRF-Token: Fetch``
-        on a GET, then the returned token on POST/PATCH/DELETE).
+        SAP OData services require a CSRF token tied to the HTTP
+        session cookie. This helper performs the token fetch and the
+        write within a **single** ``httpx.AsyncClient`` context so that
+        the session cookies are shared.
+
+        Raises:
+            ConnectorAuthError: If the CSRF fetch or the write returns 401.
+            ConnectorError: If the CSRF fetch fails or returns no token.
         """
         httpx = _require_httpx()
-        headers = {**self._headers(), "X-CSRF-Token": "Fetch"}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Step 1: Fetch CSRF token
+            csrf_resp = await request_with_retry(
+                client,
+                "GET",
                 f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
-                headers=headers,
+                headers={**self._headers(), "X-CSRF-Token": "Fetch"},
             )
-        return str(resp.headers.get("x-csrf-token", ""))
+            if csrf_resp.status_code == 401:
+                raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
+            if csrf_resp.status_code not in (200, 204):
+                raise ConnectorError(
+                    f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}"
+                )
+            token = csrf_resp.headers.get("x-csrf-token", "")
+            if not token:
+                raise ConnectorError(
+                    "SAP PM CSRF token fetch did not return an x-csrf-token header"
+                )
+
+            # Step 2: Write with same client (session cookies shared)
+            headers = {
+                **self._headers(),
+                "Content-Type": "application/json",
+                "X-CSRF-Token": str(token),
+            }
+            return await request_with_retry(client, method, url, headers=headers, json=payload)
 
     async def _odata_get(
         self,
@@ -600,10 +794,12 @@ class SapPmConnector:
             while url is not None:
                 if params is not None and skip > 0:
                     params["$skip"] = str(skip)
-                resp = await client.get(
+                resp = await request_with_retry(
+                    client,
+                    "GET",
                     url,
                     headers=self._headers(),
-                    **({"params": params} if params is not None else {}),
+                    params=params,
                 )
                 if resp.status_code == 401:
                     raise ConnectorAuthError("SAP PM authentication failed")
@@ -668,3 +864,8 @@ def _reverse_order_type(wo_type: WorkOrderType) -> str:
         WorkOrderType.PREDICTIVE: "PM03",
         WorkOrderType.IMPROVEMENT: "PM04",
     }.get(wo_type, "PM01")
+
+
+def _reverse_status(status: WorkOrderStatus) -> str:
+    """Map Machina work-order status to SAP system status code."""
+    return _REVERSE_SAP_STATUS.get(status, "CRTD")

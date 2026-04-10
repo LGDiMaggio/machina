@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -24,6 +26,10 @@ class SparePart(BaseModel):
     lead_time_days: int = Field(default=0, ge=0, description="Supplier lead time in days")
     unit_cost: float = Field(default=0.0, ge=0, description="Cost per unit")
     warehouse_location: str = Field(default="", description="Physical storage location")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Connector-specific fields preserved verbatim from the source CMMS",
+    )
 
     model_config = {"frozen": False, "str_strip_whitespace": True}
 

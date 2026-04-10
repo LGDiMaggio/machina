@@ -12,9 +12,11 @@ import pytest
 from machina.connectors.cmms.upkeep import (
     UpKeepConnector,
     _parse_asset,
+    _parse_datetime,
     _parse_maintenance_plan,
     _parse_spare_part,
     _parse_work_order,
+    _require_httpx,
     _reverse_priority,
 )
 from machina.domain.asset import Asset, AssetType
@@ -82,7 +84,7 @@ class TestParseWorkOrder:
         raw = {
             "id": "wo-1",
             "title": "Fix leaking valve",
-            "priority": 3,
+            "priority": 2,  # UpKeep: 2 = HIGH (0-indexed scale, 0-3)
             "status": "open",
             "assetId": "asset-1",
             "createdAt": "2025-06-01T10:00:00Z",
@@ -101,7 +103,7 @@ class TestParseWorkOrder:
             "id": "wo-2",
             "title": "Monthly lubrication",
             "category": "preventive",
-            "priority": 1,
+            "priority": 0,  # UpKeep: 0 = LOW (lowest)
             "status": "complete",
             "assetId": "asset-2",
             "createdAt": "2025-05-01T08:00:00Z",
@@ -112,11 +114,23 @@ class TestParseWorkOrder:
         assert wo.priority == Priority.LOW
         assert wo.status == WorkOrderStatus.COMPLETED
 
+    def test_emergency_priority(self) -> None:
+        """UpKeep priority 3 (highest on the 0-3 scale) must map to EMERGENCY."""
+        raw = {
+            "id": "wo-e",
+            "title": "Shutdown",
+            "priority": 3,
+            "status": "open",
+            "assetId": "a",
+        }
+        wo = _parse_work_order(raw)
+        assert wo.priority == Priority.EMERGENCY
+
     def test_in_progress_status_mapping(self) -> None:
         raw = {
             "id": "wo-3",
             "title": "Repair",
-            "priority": 2,
+            "priority": 1,
             "status": "in progress",
             "assetId": "a",
         }
@@ -127,7 +141,8 @@ class TestParseWorkOrder:
 class TestParseSparePart:
     """Verify UpKeep part JSON → SparePart conversion."""
 
-    def test_basic_spare_part(self) -> None:
+    def test_basic_spare_part_falls_back_to_id(self) -> None:
+        """Without partNumber/barcode, the UpKeep record id is used as SKU."""
         raw = {
             "id": "part-1",
             "name": "Bearing SKF 6205",
@@ -142,6 +157,43 @@ class TestParseSparePart:
         assert sp.stock_quantity == 25
         assert sp.unit_cost == 42.50
         assert sp.warehouse_location == "Warehouse B"
+
+    def test_spare_part_prefers_part_number(self) -> None:
+        """When partNumber is present it must win over the internal id."""
+        raw = {
+            "id": "part-1",
+            "partNumber": "SKF-6205-2RS",
+            "name": "Deep groove bearing",
+            "quantity": 10,
+        }
+        sp = _parse_spare_part(raw)
+        assert sp.sku == "SKF-6205-2RS"
+
+    def test_spare_part_falls_back_to_barcode(self) -> None:
+        """When only barcode is provided (no partNumber), barcode is the SKU."""
+        raw = {
+            "id": "part-2",
+            "barcode": "1234567890",
+            "name": "Bearing",
+        }
+        sp = _parse_spare_part(raw)
+        assert sp.sku == "1234567890"
+
+    def test_spare_part_preserves_extra_fields_in_metadata(self) -> None:
+        """Unknown fields must be round-tripped via metadata, not dropped."""
+        raw = {
+            "id": "p9",
+            "partNumber": "P-9",
+            "name": "Gasket",
+            "vendorId": "VND-77",
+            "leadTimeDays": 14,
+        }
+        sp = _parse_spare_part(raw)
+        assert sp.metadata["vendorId"] == "VND-77"
+        assert sp.metadata["leadTimeDays"] == 14
+        # Known fields must NOT leak into metadata.
+        assert "id" not in sp.metadata
+        assert "partNumber" not in sp.metadata
 
 
 class TestParseMaintenancePlan:
@@ -165,14 +217,30 @@ class TestParseMaintenancePlan:
         assert len(plan.tasks) == 2
 
 
+class TestParseDatetime:
+    """Verify UpKeep ISO-8601 timestamp parsing."""
+
+    def test_utc_zulu_suffix(self) -> None:
+        dt = _parse_datetime("2025-06-01T10:00:00Z")
+        assert dt.year == 2025
+        assert dt.tzinfo is not None
+
+    def test_naive_iso_defaults_to_utc(self) -> None:
+        """A naive ISO string (no Z, no offset) must be coerced to UTC."""
+        dt = _parse_datetime("2025-06-01T10:00:00")
+        assert dt.tzinfo is not None
+        assert dt.year == 2025
+
+
 class TestReversePriority:
-    """Verify Machina → UpKeep priority mapping."""
+    """Verify Machina → UpKeep priority mapping (0-indexed, 0-3)."""
 
     def test_all_values(self) -> None:
-        assert _reverse_priority(Priority.LOW) == 1
-        assert _reverse_priority(Priority.MEDIUM) == 2
-        assert _reverse_priority(Priority.HIGH) == 3
-        assert _reverse_priority(Priority.EMERGENCY) == 4
+        # Per UpKeep REST API v2: priority is an int where 0 = lowest, 3 = highest
+        assert _reverse_priority(Priority.LOW) == 0
+        assert _reverse_priority(Priority.MEDIUM) == 1
+        assert _reverse_priority(Priority.HIGH) == 2
+        assert _reverse_priority(Priority.EMERGENCY) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +282,12 @@ class TestConnectorLifecycle:
         conn = UpKeepConnector(api_key="tok")
         health = await conn.health_check()
         assert health.status.value == "unhealthy"
+
+
+class TestRequireHttpx:
+    def test_import_error_gives_actionable_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "httpx", None)
+        with pytest.raises(ConnectorError, match="pip install machina-ai"):
+            _require_httpx()

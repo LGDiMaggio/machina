@@ -20,6 +20,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -51,10 +52,13 @@ def _require_httpx() -> Any:
 # ---------------------------------------------------------------------------
 
 _UPKEEP_PRIORITY_MAP: dict[int, Priority] = {
-    1: Priority.LOW,
-    2: Priority.MEDIUM,
-    3: Priority.HIGH,
-    4: Priority.EMERGENCY,
+    # Per the UpKeep REST API v2, priority is a 0-indexed integer where
+    # 0 is the lowest and 3 is the highest. See:
+    # https://developers.onupkeep.com/#work-orders
+    0: Priority.LOW,
+    1: Priority.MEDIUM,
+    2: Priority.HIGH,
+    3: Priority.EMERGENCY,
 }
 
 _UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
@@ -62,6 +66,15 @@ _UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
     "in progress": WorkOrderStatus.IN_PROGRESS,
     "on hold": WorkOrderStatus.ASSIGNED,
     "complete": WorkOrderStatus.COMPLETED,
+}
+
+_REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
+    WorkOrderStatus.CREATED: "open",
+    WorkOrderStatus.ASSIGNED: "on hold",
+    WorkOrderStatus.IN_PROGRESS: "in progress",
+    WorkOrderStatus.COMPLETED: "complete",
+    WorkOrderStatus.CLOSED: "complete",  # UpKeep has no distinct closed state
+    WorkOrderStatus.CANCELLED: "on hold",  # UpKeep has no distinct cancelled state
 }
 
 _UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {
@@ -108,7 +121,7 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
 
 def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert an UpKeep work-order JSON object to a :class:`WorkOrder`."""
-    raw_priority = data.get("priority", 2)
+    raw_priority = data.get("priority", 1)
     priority = _UPKEEP_PRIORITY_MAP.get(int(raw_priority), Priority.MEDIUM)
     raw_status = str(data.get("status", "open")).lower()
     status = _UPKEEP_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
@@ -151,13 +164,33 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
 
 
 def _parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Convert an UpKeep part JSON object to a :class:`SparePart`."""
+    """Convert an UpKeep part JSON object to a :class:`SparePart`.
+
+    Prefers the physical part identifier (``partNumber`` then ``barcode``)
+    as the SKU, falling back to UpKeep's internal record ``id`` only
+    when neither is provided.
+    """
+    sku = str(data.get("partNumber") or data.get("barcode") or data.get("id") or "")
     return SparePart(
-        sku=str(data.get("id", "")),
+        sku=sku,
         name=str(data.get("name", "")),
         stock_quantity=int(data.get("quantity", 0)),
         unit_cost=float(data.get("cost", 0.0)),
         warehouse_location=str(data.get("area", "")),
+        metadata={
+            k: v
+            for k, v in data.items()
+            if k
+            not in {
+                "id",
+                "partNumber",
+                "barcode",
+                "name",
+                "quantity",
+                "cost",
+                "area",
+            }
+        },
     )
 
 
@@ -206,6 +239,7 @@ class UpKeepConnector:
         "read_assets",
         "read_work_orders",
         "create_work_order",
+        "update_work_order",
         "read_spare_parts",
         "read_maintenance_plans",
     ]
@@ -238,7 +272,9 @@ class UpKeepConnector:
             raise ConnectorAuthError("UpKeep API key is required")
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
+            resp = await request_with_retry(
+                client,
+                "GET",
                 f"{self.url}/api/v2/users",
                 headers=self._headers(),
                 params={"limit": "1"},
@@ -283,7 +319,9 @@ class UpKeepConnector:
         self._ensure_connected()
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
+            resp = await request_with_retry(
+                client,
+                "GET",
                 f"{self.url}/api/v2/assets/{asset_id}",
                 headers=self._headers(),
             )
@@ -299,17 +337,48 @@ class UpKeepConnector:
         self,
         *,
         asset_id: str = "",
-        status: str = "",
+        status: WorkOrderStatus | str = "",
     ) -> list[WorkOrder]:
-        """Read work orders, optionally filtered by asset or status."""
+        """Read work orders, optionally filtered by asset or status.
+
+        Args:
+            asset_id: Filter by UpKeep asset ID.
+            status: Filter by status — accepts a :class:`WorkOrderStatus`
+                enum (reverse-mapped to UpKeep's string) or a raw UpKeep
+                status string for backward compatibility.
+        """
         self._ensure_connected()
         params: dict[str, str] = {}
         if asset_id:
             params["asset"] = asset_id
         if status:
-            params["status"] = status
+            upkeep_status = (
+                _REVERSE_UPKEEP_STATUS.get(status, status.value)
+                if isinstance(status, WorkOrderStatus)
+                else status
+            )
+            params["status"] = upkeep_status
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
         return [_parse_work_order(item) for item in raw]
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        """Look up a single work order by ID."""
+        self._ensure_connected()
+        httpx = _require_httpx()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client,
+                "GET",
+                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                headers=self._headers(),
+            )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise ConnectorError(f"UpKeep GET work order failed: HTTP {resp.status_code}")
+        body = resp.json()
+        result = body.get("result", body)
+        return _parse_work_order(result)
 
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order in UpKeep.
@@ -331,7 +400,9 @@ class UpKeepConnector:
             ),
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+            resp = await request_with_retry(
+                client,
+                "POST",
                 f"{self.url}/api/v2/work-orders",
                 headers=self._headers(),
                 json=payload,
@@ -350,18 +421,90 @@ class UpKeepConnector:
         )
         return _parse_work_order(result)
 
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update an existing work order in UpKeep via PATCH.
+
+        Only non-``None`` fields are included in the PATCH payload.
+
+        Args:
+            work_order_id: UpKeep work order ID.
+            status: New status (reverse-mapped to UpKeep string).
+            assigned_to: New ``assignedToId``.
+            description: New title.
+
+        Returns:
+            The updated work order.
+        """
+        self._ensure_connected()
+        httpx = _require_httpx()
+        payload: dict[str, Any] = {}
+        if status is not None:
+            payload["status"] = _reverse_status(status)
+        if assigned_to is not None:
+            payload["assignedToId"] = assigned_to
+        if description is not None:
+            payload["title"] = description
+        if not payload:
+            raise ConnectorError("update_work_order requires at least one field to update")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client,
+                "PATCH",
+                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                headers=self._headers(),
+                json=payload,
+            )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("UpKeep API key is invalid")
+        if resp.status_code not in (200, 204):
+            raise ConnectorError(f"UpKeep update work order failed: HTTP {resp.status_code}")
+        logger.info(
+            "work_order_updated",
+            connector="UpKeepConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+        )
+        updated = await self.get_work_order(work_order_id)
+        if updated is None:
+            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        return updated
+
+    async def close_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CLOSED (maps to 'complete' in UpKeep)."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+
+    async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CANCELLED (maps to 'on hold' in UpKeep)."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+
     async def read_spare_parts(
         self,
         *,
-        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read spare parts (UpKeep calls them *parts*)."""
+        """Read spare parts (UpKeep calls them *parts*).
+
+        Args:
+            sku: Optional SKU / part number to filter the result in-memory
+                after fetching. Matches the parsed :attr:`SparePart.sku`,
+                which prefers the physical part identifier.
+
+        Note:
+            UpKeep's ``/api/v2/parts`` endpoint does not expose an
+            asset-compatibility relation, so filtering by asset is not
+            supported here. Use work-order line items to discover parts
+            associated with a specific asset.
+        """
         self._ensure_connected()
         raw = await self._paginated_get("/api/v2/parts")
         parts = [_parse_spare_part(item) for item in raw]
-        if asset_id:
-            parts = [p for p in parts if asset_id in p.compatible_assets]
         if sku:
             parts = [p for p in parts if p.sku == sku]
         return parts
@@ -410,7 +553,9 @@ class UpKeepConnector:
                     "offset": str(offset),
                     **(params or {}),
                 }
-                resp = await client.get(
+                resp = await request_with_retry(
+                    client,
+                    "GET",
                     f"{self.url}{path}",
                     headers=self._headers(),
                     params=query,
@@ -435,10 +580,20 @@ class UpKeepConnector:
 
 
 def _reverse_priority(priority: Priority) -> int:
-    """Map Machina priority back to UpKeep integer (1-4)."""
+    """Map Machina priority back to UpKeep integer (0-indexed, 0-3).
+
+    UpKeep's REST API v2 uses a 0-indexed priority scale where 0 is the
+    lowest and 3 is the highest. See
+    https://developers.onupkeep.com/#work-orders.
+    """
     return {
-        Priority.LOW: 1,
-        Priority.MEDIUM: 2,
-        Priority.HIGH: 3,
-        Priority.EMERGENCY: 4,
-    }.get(priority, 2)
+        Priority.LOW: 0,
+        Priority.MEDIUM: 1,
+        Priority.HIGH: 2,
+        Priority.EMERGENCY: 3,
+    }.get(priority, 1)
+
+
+def _reverse_status(status: WorkOrderStatus) -> str:
+    """Map Machina work-order status to UpKeep status string."""
+    return _REVERSE_UPKEEP_STATUS.get(status, "open")

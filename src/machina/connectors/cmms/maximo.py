@@ -26,6 +26,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
+from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -81,13 +82,52 @@ _MAXIMO_WORKTYPE_MAP: dict[str, WorkOrderType] = {
     "EV": WorkOrderType.IMPROVEMENT,
 }
 
+_REVERSE_MAXIMO_STATUS: dict[WorkOrderStatus, str] = {
+    WorkOrderStatus.CREATED: "WAPPR",
+    WorkOrderStatus.ASSIGNED: "APPR",
+    WorkOrderStatus.IN_PROGRESS: "INPRG",
+    WorkOrderStatus.COMPLETED: "COMP",
+    WorkOrderStatus.CLOSED: "CLOSE",
+    WorkOrderStatus.CANCELLED: "CAN",
+}
 
-def _parse_asset(data: dict[str, Any]) -> Asset:
-    """Convert a Maximo MXASSET JSON object to a Machina :class:`Asset`."""
+
+def _resolve_asset_type(
+    data: dict[str, Any],
+    asset_type_map: dict[str, AssetType] | None,
+) -> AssetType:
+    """Resolve Machina ``AssetType`` from a Maximo MXASSET record.
+
+    Maximo does not expose a canonical category field. When the caller
+    supplies an ``asset_type_map`` keyed by ``classstructureid`` (or
+    ``assettype``), the resolver performs an exact lookup with a
+    fallback to :attr:`AssetType.ROTATING_EQUIPMENT`. Without a map,
+    every asset collapses to ``ROTATING_EQUIPMENT`` — the historical
+    behaviour.
+    """
+    if not asset_type_map:
+        return AssetType.ROTATING_EQUIPMENT
+    key = str(data.get("classstructureid") or data.get("assettype") or "")
+    return asset_type_map.get(key, AssetType.ROTATING_EQUIPMENT)
+
+
+def _parse_asset(
+    data: dict[str, Any],
+    asset_type_map: dict[str, AssetType] | None = None,
+) -> Asset:
+    """Convert a Maximo MXASSET JSON object to a Machina :class:`Asset`.
+
+    Args:
+        data: Parsed JSON record from the Maximo MXASSET object structure.
+        asset_type_map: Optional mapping from Maximo ``classstructureid``
+            (or ``assettype``) values to Machina :class:`AssetType`.
+            When ``None`` all assets are classified as
+            :attr:`AssetType.ROTATING_EQUIPMENT`.
+    """
     return Asset(
         id=str(data.get("assetnum", "")),
         name=str(data.get("description", "")),
-        type=AssetType.ROTATING_EQUIPMENT,  # Maximo doesn't expose a direct mapping
+        type=_resolve_asset_type(data, asset_type_map),
         location=str(data.get("location", "")),
         manufacturer=str(data.get("manufacturer", "")),
         model=str(data.get("modelnum", "")),
@@ -152,6 +192,8 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
         asset_id=str(data.get("assetnum", "")),
         description=str(data.get("description", "")),
         assigned_to=data.get("lead") or data.get("assignedownergroup") or None,
+        failure_mode=data.get("failurecode") or None,
+        failure_cause=data.get("failureremark") or data.get("problemcode") or None,
         created_at=_parse_datetime(created) if created else now,
         updated_at=_parse_datetime(updated) if updated else now,
         metadata={
@@ -167,6 +209,9 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
                 "description",
                 "lead",
                 "assignedownergroup",
+                "failurecode",
+                "failureremark",
+                "problemcode",
                 "reportdate",
                 "changedate",
             }
@@ -183,6 +228,21 @@ def _parse_spare_part(data: dict[str, Any]) -> SparePart:
         reorder_point=int(data.get("reorder", 0)),
         unit_cost=float(data.get("avgcost", data.get("lastcost", 0.0))),
         warehouse_location=str(data.get("location", "")),
+        metadata={
+            k: v
+            for k, v in data.items()
+            if k
+            not in {
+                "itemnum",
+                "description",
+                "item",
+                "curbal",
+                "reorder",
+                "avgcost",
+                "lastcost",
+                "location",
+            }
+        },
     )
 
 
@@ -219,15 +279,28 @@ class MaximoConnector:
             :class:`BasicAuth`, or :class:`BearerAuth`.
         lean: If ``True`` (default), requests add ``lean=1`` to suppress
             OSLC namespace wrappers in responses.
+        asset_type_map: Optional mapping from a Maximo classification
+            key (``classstructureid`` preferred, ``assettype`` as
+            fallback) to a Machina :class:`AssetType`. When omitted,
+            every Maximo asset is mapped to
+            :attr:`AssetType.ROTATING_EQUIPMENT`. Use this to honour
+            your site's Maximo taxonomy without subclassing the
+            connector.
 
     Example:
         ```python
         from machina.connectors import Maximo
         from machina.connectors.cmms import ApiKeyHeaderAuth
+        from machina.domain.asset import AssetType
 
         connector = Maximo(
             url="https://maximo.example.com",
             auth=ApiKeyHeaderAuth(header_name="apikey", value="my-key"),
+            asset_type_map={
+                "PUMPS": AssetType.ROTATING_EQUIPMENT,
+                "VESSELS": AssetType.STATIC_EQUIPMENT,
+                "INSTRUMENTS": AssetType.INSTRUMENT,
+            },
         )
         await connector.connect()
         assets = await connector.read_assets()
@@ -238,6 +311,7 @@ class MaximoConnector:
         "read_assets",
         "read_work_orders",
         "create_work_order",
+        "update_work_order",
         "read_spare_parts",
         "read_maintenance_plans",
     ]
@@ -250,10 +324,12 @@ class MaximoConnector:
         url: str,
         auth: _AuthUnion,
         lean: bool = True,
+        asset_type_map: dict[str, AssetType] | None = None,
     ) -> None:
         self.url = url.rstrip("/")
         self._auth = auth
         self._lean = lean
+        self._asset_type_map = asset_type_map
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -271,7 +347,9 @@ class MaximoConnector:
         """
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
+            resp = await request_with_retry(
+                client,
+                "GET",
                 f"{self.url}/maximo/oslc/whoami",
                 headers=self._headers(),
             )
@@ -308,7 +386,7 @@ class MaximoConnector:
         """Return all assets from Maximo (MXASSET object structure)."""
         self._ensure_connected()
         raw = await self._oslc_get("mxasset")
-        return [_parse_asset(item) for item in raw]
+        return [_parse_asset(item, self._asset_type_map) for item in raw]
 
     async def get_asset(self, asset_id: str) -> Asset | None:
         """Look up a single asset by asset number."""
@@ -318,24 +396,46 @@ class MaximoConnector:
             oslc_where=f'assetnum="{asset_id}"',
             page_size=1,
         )
-        return _parse_asset(raw[0]) if raw else None
+        return _parse_asset(raw[0], self._asset_type_map) if raw else None
 
     async def read_work_orders(
         self,
         *,
         asset_id: str = "",
-        status: str = "",
+        status: WorkOrderStatus | str = "",
     ) -> list[WorkOrder]:
-        """Read work orders, optionally filtered by asset or status."""
+        """Read work orders, optionally filtered by asset or status.
+
+        Args:
+            asset_id: Filter by Maximo asset number.
+            status: Filter by status — accepts a :class:`WorkOrderStatus`
+                enum (reverse-mapped to Maximo code) or a raw Maximo
+                status string for backward compatibility.
+        """
         self._ensure_connected()
         clauses: list[str] = []
         if asset_id:
             clauses.append(f'assetnum="{asset_id}"')
         if status:
-            clauses.append(f'status="{status.upper()}"')
+            maximo_status = (
+                _REVERSE_MAXIMO_STATUS.get(status, status.value.upper())
+                if isinstance(status, WorkOrderStatus)
+                else status.upper()
+            )
+            clauses.append(f'status="{maximo_status}"')
         where = " and ".join(clauses) if clauses else ""
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [_parse_work_order(item) for item in raw]
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        """Look up a single work order by work order number."""
+        self._ensure_connected()
+        raw = await self._oslc_get(
+            "mxwo",
+            oslc_where=f'wonum="{work_order_id}"',
+            page_size=1,
+        )
+        return _parse_work_order(raw[0]) if raw else None
 
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order in Maximo.
@@ -358,7 +458,9 @@ class MaximoConnector:
             payload["lead"] = work_order.assigned_to
         headers = {**self._headers(), "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+            resp = await request_with_retry(
+                client,
+                "POST",
                 f"{self.url}/maximo/oslc/os/mxwo",
                 headers=headers,
                 json=payload,
@@ -376,23 +478,91 @@ class MaximoConnector:
         )
         return _parse_work_order(body)
 
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update an existing work order in Maximo via PATCH.
+
+        Only non-``None`` fields are included in the PATCH payload.
+
+        Args:
+            work_order_id: Maximo work order number (``wonum``).
+            status: New status (reverse-mapped to Maximo code).
+            assigned_to: New lead person.
+            description: New work order description.
+
+        Returns:
+            The updated work order.
+        """
+        self._ensure_connected()
+        httpx = _require_httpx()
+        payload: dict[str, Any] = {}
+        if status is not None:
+            payload["status"] = _reverse_status(status)
+        if assigned_to is not None:
+            payload["lead"] = assigned_to
+        if description is not None:
+            payload["description"] = description
+        if not payload:
+            raise ConnectorError("update_work_order requires at least one field to update")
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client,
+                "PATCH",
+                f"{self.url}/maximo/oslc/os/mxwo/{work_order_id}",
+                headers=headers,
+                json=payload,
+            )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("Maximo authentication failed")
+        if resp.status_code not in (200, 204):
+            raise ConnectorError(f"Maximo update work order failed: HTTP {resp.status_code}")
+        logger.info(
+            "work_order_updated",
+            connector="MaximoConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+        )
+        updated = await self.get_work_order(work_order_id)
+        if updated is None:
+            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        return updated
+
+    async def close_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CLOSED status."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+
+    async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CANCELLED status."""
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+
     async def read_spare_parts(
         self,
         *,
-        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read inventory items (spare parts) from Maximo."""
+        """Read inventory items (spare parts) from Maximo.
+
+        Args:
+            sku: Optional Maximo ``itemnum`` to narrow the lookup via an
+                OSLC ``where`` clause.
+
+        Note:
+            Maximo's ``mxinventory`` object structure does not expose a
+            direct asset-compatibility relation, so filtering by asset is
+            not supported here. For asset-specific spare parts, consult
+            the corresponding work-order job plan or ``mxpmpart``.
+        """
         self._ensure_connected()
-        clauses: list[str] = []
-        if sku:
-            clauses.append(f'itemnum="{sku}"')
-        where = " and ".join(clauses) if clauses else ""
+        where = f'itemnum="{sku}"' if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
-        parts = [_parse_spare_part(item) for item in raw]
-        if asset_id:
-            parts = [p for p in parts if asset_id in p.compatible_assets]
-        return parts
+        return [_parse_spare_part(item) for item in raw]
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Read preventive-maintenance triggers from Maximo."""
@@ -457,10 +627,12 @@ class MaximoConnector:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while url is not None:
-                resp = await client.get(
+                resp = await request_with_retry(
+                    client,
+                    "GET",
                     url,
                     headers=self._headers(),
-                    **({"params": params} if params is not None else {}),
+                    params=params,
                 )
                 if resp.status_code == 401:
                     raise ConnectorAuthError("Maximo authentication failed")
@@ -508,3 +680,8 @@ def _reverse_worktype(wo_type: WorkOrderType) -> str:
         WorkOrderType.PREDICTIVE: "CP",
         WorkOrderType.IMPROVEMENT: "EV",
     }.get(wo_type, "CM")
+
+
+def _reverse_status(status: WorkOrderStatus) -> str:
+    """Map Machina work-order status to Maximo status code."""
+    return _REVERSE_MAXIMO_STATUS.get(status, "WAPPR")

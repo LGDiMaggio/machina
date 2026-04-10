@@ -39,9 +39,13 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read all assets (`/api/v2/assets`) |
-| `read_work_orders` | Read work orders, filterable by asset and status (`/api/v2/work-orders`) |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw UpKeep string) |
+| `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) |
+| `update_work_order` | Update status, assignee, or description via PATCH |
+| `close_work_order` | Convenience wrapper: transition to CLOSED (maps to UpKeep `complete`) |
+| `cancel_work_order` | Convenience wrapper: transition to CANCELLED (maps to UpKeep `on hold`) |
+| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
 
 ## Usage Examples
@@ -54,10 +58,21 @@ for asset in assets:
     print(f"{asset.id}: {asset.name}")
 ```
 
-### Read work orders for an asset
+### Read work orders with Machina enum filter
 
 ```python
-wos = await connector.read_work_orders(asset_id="asset-123")
+from machina.domain.work_order import WorkOrderStatus
+
+wos = await connector.read_work_orders(
+    asset_id="asset-123",
+    status=WorkOrderStatus.IN_PROGRESS,  # auto-mapped to "in progress"
+)
+```
+
+### Get a single work order
+
+```python
+wo = await connector.get_work_order("wo-123")
 ```
 
 ### Create a work order
@@ -79,12 +94,17 @@ created = await connector.create_work_order(wo)
 print(f"Created: {created.id}")
 ```
 
-### Read maintenance plans
+### Update / close a work order
 
 ```python
-plans = await connector.read_maintenance_plans()
-for plan in plans:
-    print(f"{plan.name}: every {plan.interval.days} days")
+from machina.domain.work_order import WorkOrderStatus
+
+updated = await connector.update_work_order(
+    "wo-123",
+    status=WorkOrderStatus.COMPLETED,
+    assigned_to="tech-user-id",
+)
+await connector.close_work_order("wo-123")
 ```
 
 ## Entity Mapping
@@ -100,18 +120,24 @@ for plan in plans:
 | `serialNumber` | `Asset.serial_number` |
 | `id` (work order) | `WorkOrder.id` |
 | `title` | `WorkOrder.description` |
-| `priority` (1-4) | `WorkOrder.priority` (1→Low, 2→Medium, 3→High, 4→Emergency) |
-| `status` | `WorkOrder.status` (open→Created, in progress→InProgress, complete→Completed) |
-| `id` (part) | `SparePart.sku` |
+| `priority` (0-3) | `WorkOrder.priority` (0→Low, 1→Medium, 2→High, 3→Emergency) |
+| `status` | `WorkOrder.status` (open→Created, in progress→InProgress, on hold→Assigned, complete→Completed) |
+| `partNumber` / `barcode` / `id` | `SparePart.sku` (prefers physical identifier, falls back to record ID) |
 | `name` (part) | `SparePart.name` |
 | `quantity` | `SparePart.stock_quantity` |
 | `frequencyDays` | `MaintenancePlan.interval.days` |
 
+## Resilience
+
+All HTTP calls route through a shared retry helper with exponential backoff.
+See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
+
 ## Known Limitations
 
-- **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`. To set criticality, update the asset after import.
-- **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `WorkOrderType.PREVENTIVE` and `WorkOrderType.CORRECTIVE` respectively. Predictive and improvement types are not natively supported.
-- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering.
+- **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
+- **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
+- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
+- **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 
 ## API Reference
 
