@@ -30,8 +30,15 @@ from machina.connectors.cmms.pagination import (
     PageNumberPagination,
 )
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import FailureImpact, Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import (
+    FailureImpact,
+    Priority,
+    WorkOrder,
+    WorkOrderStatus,
+    WorkOrderType,
+)
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -123,13 +130,36 @@ class GenericCmmsConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
+    _BASE_CAPABILITIES: ClassVar[list[str]] = [
         "read_assets",
         "read_work_orders",
         "create_work_order",
         "read_spare_parts",
         "read_maintenance_history",
     ]
+
+    # Maps optional capability names to the endpoint config key that enables them.
+    _OPTIONAL_CAPABILITIES: ClassVar[dict[str, str]] = {
+        "get_work_order": "get_work_order",
+        "update_work_order": "update_work_order",
+        "close_work_order": "update_work_order",
+        "cancel_work_order": "update_work_order",
+        "read_maintenance_plans": "read_maintenance_plans",
+    }
+
+    @property
+    def capabilities(self) -> list[str]:
+        """Return capabilities based on configuration.
+
+        Base capabilities are always available. Optional capabilities
+        are added when running in local mode (all supported) or when
+        the corresponding endpoint is configured in REST mode.
+        """
+        caps = list(self._BASE_CAPABILITIES)
+        for cap, endpoint_key in self._OPTIONAL_CAPABILITIES.items():
+            if self._data_dir or endpoint_key in self._endpoints:
+                caps.append(cap)
+        return caps
 
     def __init__(
         self,
@@ -140,12 +170,14 @@ class GenericCmmsConnector:
         schema_mapping: dict[str, dict[str, Any]] | None = None,
         auth: _AuthUnion | None = None,
         pagination: _PaginationUnion | None = None,
+        endpoints: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.url = url
         self._api_key = api_key
         self._data_dir = Path(data_dir) if data_dir else None
         self._schema_mapping = schema_mapping or {}
         self._connected = False
+        self._endpoints = endpoints or {}
 
         # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
         if auth is not None:
@@ -162,6 +194,7 @@ class GenericCmmsConnector:
         self._assets: dict[str, Asset] = {}
         self._work_orders: list[WorkOrder] = []
         self._spare_parts: list[SparePart] = []
+        self._maintenance_plans: list[MaintenancePlan] = []
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -285,6 +318,105 @@ class GenericCmmsConnector:
         ]
 
     # ------------------------------------------------------------------
+    # Work-order lifecycle & maintenance plans
+    # ------------------------------------------------------------------
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        """Look up a single work order by ID."""
+        self._ensure_connected()
+        if self._data_dir:
+            for wo in self._work_orders:
+                if wo.id == work_order_id:
+                    return wo
+            return None
+        return await self._rest_get_work_order(work_order_id)
+
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update an existing work order.
+
+        In local mode the in-memory work order is mutated directly.
+        In REST mode the configured endpoint is called and the work
+        order is re-fetched to return fresh state.
+
+        Raises:
+            ConnectorError: If the work order is not found, or the
+                endpoint is not configured in REST mode.
+        """
+        self._ensure_connected()
+        if self._data_dir:
+            return self._local_update_work_order(
+                work_order_id,
+                status=status,
+                assigned_to=assigned_to,
+                description=description,
+            )
+        return await self._rest_update_work_order(
+            work_order_id,
+            status=status,
+            assigned_to=assigned_to,
+            description=description,
+        )
+
+    async def close_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CLOSED status."""
+        return await self.update_work_order(
+            work_order_id, status=WorkOrderStatus.CLOSED
+        )
+
+    async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
+        """Transition a work order to CANCELLED status."""
+        return await self.update_work_order(
+            work_order_id, status=WorkOrderStatus.CANCELLED
+        )
+
+    async def read_maintenance_plans(self) -> list[MaintenancePlan]:
+        """Read preventive-maintenance plans.
+
+        In local mode returns plans loaded from ``maintenance_plans.json``.
+        In REST mode fetches from the configured endpoint with pagination.
+        """
+        self._ensure_connected()
+        if self._data_dir:
+            return list(self._maintenance_plans)
+        return await self._rest_read_maintenance_plans()
+
+    # ------------------------------------------------------------------
+    # Internal: local work-order updates
+    # ------------------------------------------------------------------
+
+    def _local_update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Mutate an in-memory work order."""
+        for wo in self._work_orders:
+            if wo.id == work_order_id:
+                if status is not None:
+                    wo.transition_to(status)
+                if assigned_to is not None:
+                    wo.assigned_to = assigned_to
+                if description is not None:
+                    wo.description = description
+                logger.info(
+                    "work_order_updated",
+                    connector="GenericCmmsConnector",
+                    work_order_id=work_order_id,
+                )
+                return wo
+        raise ConnectorError(f"Work order {work_order_id} not found")
+
+    # ------------------------------------------------------------------
     # Internal: local data loading
     # ------------------------------------------------------------------
 
@@ -330,6 +462,21 @@ class GenericCmmsConnector:
                 "loaded_spare_parts",
                 connector="GenericCmmsConnector",
                 count=len(self._spare_parts),
+            )
+
+        maintenance_plans_file = self._data_dir / "maintenance_plans.json"
+        if maintenance_plans_file.exists():
+            text = await asyncio.to_thread(
+                maintenance_plans_file.read_text, encoding="utf-8"
+            )
+            raw = json.loads(text)
+            for item in raw:
+                mapped = self._apply_mapping("maintenance_plans", item)
+                self._maintenance_plans.append(_parse_maintenance_plan(mapped))
+            logger.debug(
+                "loaded_maintenance_plans",
+                connector="GenericCmmsConnector",
+                count=len(self._maintenance_plans),
             )
 
     def _apply_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -457,6 +604,109 @@ class GenericCmmsConnector:
             resp.raise_for_status()
         return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
 
+    async def _rest_get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        """Fetch a single work order from the REST API."""
+        config = self._require_endpoint("get_work_order")
+        httpx = _require_httpx()
+        path = config["path"].replace("{id}", work_order_id)
+        headers = self._rest_headers()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(self._rest_url(path), headers=headers)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+
+    async def _rest_update_work_order(
+        self,
+        work_order_id: str,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update a work order via the REST API and re-fetch."""
+        config = self._require_endpoint("update_work_order")
+        httpx = _require_httpx()
+        path = config["path"].replace("{id}", work_order_id)
+        method = config.get("method", "PATCH")
+        field_map: dict[str, str] = config.get("field_map", {})
+
+        payload: dict[str, Any] = {}
+        if status is not None:
+            payload["status"] = status.value
+        if assigned_to is not None:
+            payload["assigned_to"] = assigned_to
+        if description is not None:
+            payload["description"] = description
+
+        # Apply field mapping to payload keys
+        if field_map:
+            payload = {field_map.get(k, k): v for k, v in payload.items()}
+
+        headers = {**self._rest_headers(), "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(
+                method, self._rest_url(path), headers=headers, json=payload
+            )
+            resp.raise_for_status()
+
+        logger.info(
+            "work_order_updated",
+            connector="GenericCmmsConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+        )
+        # Re-fetch to return fresh state
+        updated = await self.get_work_order(work_order_id)
+        if updated is None:
+            raise ConnectorError(
+                f"Work order {work_order_id} not found after update"
+            )
+        return updated
+
+    async def _rest_read_maintenance_plans(self) -> list[MaintenancePlan]:
+        """Fetch maintenance plans from the REST API."""
+        config = self._require_endpoint("read_maintenance_plans")
+        httpx = _require_httpx()
+        path = config["path"]
+        headers = self._rest_headers()
+        results: list[MaintenancePlan] = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async for raw in self._pagination.iterate(
+                client, self._rest_url(path), headers
+            ):
+                results.append(
+                    _parse_maintenance_plan(
+                        self._apply_mapping("maintenance_plans", raw)
+                    )
+                )
+        return results
+
+    # ------------------------------------------------------------------
+    # Endpoint configuration helpers
+    # ------------------------------------------------------------------
+
+    def _require_endpoint(self, operation: str) -> dict[str, Any]:
+        """Return the endpoint config for an operation or raise.
+
+        Raises:
+            ConnectorError: With an actionable message when the endpoint
+                is not configured.
+        """
+        config = self._endpoints.get(operation)
+        if config is None:
+            logger.warning(
+                "endpoint_not_configured",
+                connector="GenericCmmsConnector",
+                operation=operation,
+            )
+            raise ConnectorError(
+                f"{operation} is not configured for this CMMS. "
+                f"Add an '{operation}' entry to the 'endpoints' parameter."
+            )
+        return config
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -518,4 +768,26 @@ def _parse_spare_part(data: dict[str, Any]) -> SparePart:
         lead_time_days=int(data.get("lead_time_days", 0)),
         unit_cost=float(data.get("unit_cost", 0.0)),
         warehouse_location=str(data.get("warehouse_location", "")),
+    )
+
+
+def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
+    """Parse a dict into a MaintenancePlan, tolerating missing fields."""
+    interval_data = data.get("interval", {})
+    if isinstance(interval_data, dict):
+        interval = Interval(
+            days=int(interval_data.get("days", 0)),
+            weeks=int(interval_data.get("weeks", 0)),
+            months=int(interval_data.get("months", 0)),
+            hours=int(interval_data.get("hours", 0)),
+        )
+    else:
+        interval = Interval(days=int(interval_data) if interval_data else 0)
+    return MaintenancePlan(
+        id=str(data.get("id", "")),
+        asset_id=str(data.get("asset_id", "")),
+        name=str(data.get("name", "")),
+        interval=interval,
+        tasks=data.get("tasks", []),
+        active=data.get("active", True),
     )

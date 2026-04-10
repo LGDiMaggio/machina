@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from machina.connectors.cmms.generic import GenericCmmsConnector
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 
@@ -83,6 +83,26 @@ def sample_data_dir(tmp_path: Path) -> Path:
         },
     ]
     (cmms_dir / "spare_parts.json").write_text(json.dumps(spare_parts))
+
+    maintenance_plans = [
+        {
+            "id": "MP-001",
+            "asset_id": "P-201",
+            "name": "Quarterly Bearing Inspection",
+            "interval": {"months": 3},
+            "tasks": ["Check vibration levels", "Inspect seal condition"],
+            "active": True,
+        },
+        {
+            "id": "MP-002",
+            "asset_id": "COMP-301",
+            "name": "Monthly Filter Check",
+            "interval": {"months": 1},
+            "tasks": ["Replace air filter"],
+            "active": True,
+        },
+    ]
+    (cmms_dir / "maintenance_plans.json").write_text(json.dumps(maintenance_plans))
 
     return cmms_dir
 
@@ -264,7 +284,159 @@ class TestGenericCmmsConnectorLocal:
         assert result[0].id == "X-1"
         assert result[0].name == "Mapped Asset"
 
-    def test_capabilities(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = await conn.get_work_order("WO-001")
+        assert wo is not None
+        assert wo.id == "WO-001"
+        assert wo.description == "Bearing replacement"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_not_found(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = await conn.get_work_order("NONEXISTENT")
+        assert wo is None
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_status(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        updated = await conn.update_work_order(
+            "WO-001", status=WorkOrderStatus.ASSIGNED
+        )
+        assert updated.status == WorkOrderStatus.ASSIGNED
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_description(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        updated = await conn.update_work_order(
+            "WO-001", description="Updated description"
+        )
+        assert updated.description == "Updated description"
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_assigned_to(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        updated = await conn.update_work_order(
+            "WO-001", assigned_to="Mario Rossi"
+        )
+        assert updated.assigned_to == "Mario Rossi"
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_not_found(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        with pytest.raises(ConnectorError, match="not found"):
+            await conn.update_work_order(
+                "NONEXISTENT", description="Nope"
+            )
+
+    @pytest.mark.asyncio
+    async def test_close_work_order(self, sample_data_dir: Path) -> None:
+        """Close requires the WO to be in COMPLETED state first."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        # Transition WO-001 through valid states to COMPLETED
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.IN_PROGRESS)
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.COMPLETED)
+        closed = await conn.close_work_order("WO-001")
+        assert closed.status == WorkOrderStatus.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_cancel_work_order(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        cancelled = await conn.cancel_work_order("WO-001")
+        assert cancelled.status == WorkOrderStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_close_work_order_invalid_transition(self, sample_data_dir: Path) -> None:
+        """Cannot close a WO directly from CREATED status."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        with pytest.raises(ValueError, match="Cannot transition"):
+            await conn.close_work_order("WO-001")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        plans = await conn.read_maintenance_plans()
+        assert len(plans) == 2
+        assert plans[0].id == "MP-001"
+        assert plans[0].name == "Quarterly Bearing Inspection"
+        assert plans[0].interval.months == 3
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans_no_file(self, tmp_path: Path) -> None:
+        """Without maintenance_plans.json, returns empty list."""
+        cmms_dir = tmp_path / "empty_cmms"
+        cmms_dir.mkdir()
+        conn = GenericCmmsConnector(data_dir=cmms_dir)
+        await conn.connect()
+        plans = await conn.read_maintenance_plans()
+        assert plans == []
+
+
+class TestDynamicCapabilities:
+    """Test that capabilities are computed dynamically based on config."""
+
+    def test_local_mode_includes_all_capabilities(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        caps = conn.capabilities
+        assert "read_assets" in caps
+        assert "update_work_order" in caps
+        assert "close_work_order" in caps
+        assert "cancel_work_order" in caps
+        assert "get_work_order" in caps
+        assert "read_maintenance_plans" in caps
+
+    def test_rest_mode_base_only(self) -> None:
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="k")
+        caps = conn.capabilities
+        assert "read_assets" in caps
+        assert "create_work_order" in caps
+        assert "update_work_order" not in caps
+        assert "get_work_order" not in caps
+        assert "read_maintenance_plans" not in caps
+
+    def test_rest_mode_with_endpoints(self) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={
+                "update_work_order": {"path": "work-orders/{id}", "method": "PATCH"},
+                "read_maintenance_plans": {"path": "maintenance-plans"},
+            },
+        )
+        caps = conn.capabilities
+        assert "update_work_order" in caps
+        assert "close_work_order" in caps  # derived from update_work_order
+        assert "cancel_work_order" in caps
+        assert "read_maintenance_plans" in caps
+        assert "get_work_order" not in caps  # not configured
+
+    def test_rest_mode_partial_config(self) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={
+                "get_work_order": {"path": "work-orders/{id}"},
+            },
+        )
+        caps = conn.capabilities
+        assert "get_work_order" in caps
+        assert "update_work_order" not in caps
+        assert "read_maintenance_plans" not in caps
+
+    def test_capabilities_still_accessible_on_instance(self) -> None:
+        """Backward compat: capabilities is accessible as a property."""
         conn = GenericCmmsConnector()
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
