@@ -18,6 +18,7 @@ from machina.domain.work_order import (
     FailureImpact,
     Priority,
     WorkOrder,
+    WorkOrderStatus,
     WorkOrderType,
 )
 from machina.exceptions import ConnectorAuthError, ConnectorError
@@ -405,3 +406,262 @@ class TestModernRestCmmsEndToEnd:
             assert req.headers["Authorization"] == expected_auth
 
         await conn.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# New REST methods: get, update, close, cancel work orders & maintenance plans
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def rest_connector_with_endpoints() -> GenericCmmsConnector:
+    """REST-mode connector with all optional endpoints configured."""
+    return GenericCmmsConnector(
+        url=BASE_URL,
+        api_key="test-key",
+        endpoints={
+            "get_work_order": {"path": "work_orders/{id}", "method": "GET"},
+            "update_work_order": {"path": "work_orders/{id}", "method": "PATCH"},
+            "read_maintenance_plans": {"path": "maintenance_plans"},
+        },
+    )
+
+
+class TestRestGetWorkOrder:
+    """REST get_work_order exercises GET /work_orders/{id}."""
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_found(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={
+                "id": "WO-001",
+                "type": "corrective",
+                "priority": "high",
+                "asset_id": "P-201",
+                "description": "Bearing replacement",
+            },
+        )
+        wo = await conn.get_work_order("WO-001")
+        assert wo is not None
+        assert wo.id == "WO-001"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_not_found(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/NONEXISTENT",
+            status_code=404,
+        )
+        wo = await conn.get_work_order("NONEXISTENT")
+        assert wo is None
+
+
+class TestRestUpdateWorkOrder:
+    """REST update_work_order exercises PATCH /work_orders/{id}."""
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_sends_patch(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        # PATCH response
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={"ok": True},
+        )
+        # Re-fetch after update
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={
+                "id": "WO-001",
+                "type": "corrective",
+                "priority": "high",
+                "asset_id": "P-201",
+                "description": "Updated",
+                "status": "assigned",
+            },
+        )
+        updated = await conn.update_work_order(
+            "WO-001", status=WorkOrderStatus.ASSIGNED, description="Updated"
+        )
+        assert updated.id == "WO-001"
+        # Verify PATCH body contained the right fields
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        body = json.loads(patch_req.content)
+        assert body["status"] == "assigned"
+        assert body["description"] == "Updated"
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_with_field_map(self, httpx_mock) -> None:
+        """When field_map is configured, outgoing keys are remapped."""
+        conn = GenericCmmsConnector(
+            url=BASE_URL,
+            api_key="test-key",
+            endpoints={
+                "get_work_order": {"path": "work_orders/{id}", "method": "GET"},
+                "update_work_order": {
+                    "path": "work_orders/{id}",
+                    "method": "PATCH",
+                    "field_map": {
+                        "status": "wo_status",
+                        "description": "wo_desc",
+                    },
+                },
+            },
+        )
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={"ok": True},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={
+                "id": "WO-001",
+                "type": "corrective",
+                "asset_id": "P-201",
+                "description": "Mapped",
+            },
+        )
+        await conn.update_work_order(
+            "WO-001", status=WorkOrderStatus.ASSIGNED, description="Mapped"
+        )
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        body = json.loads(patch_req.content)
+        assert "wo_status" in body
+        assert "wo_desc" in body
+        assert "status" not in body
+
+
+class TestRestCloseAndCancelWorkOrder:
+    """close_work_order and cancel_work_order delegate to update."""
+
+    @pytest.mark.asyncio
+    async def test_close_delegates_to_update(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={"ok": True},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={
+                "id": "WO-001",
+                "type": "corrective",
+                "asset_id": "P-201",
+                "status": "closed",
+            },
+        )
+        result = await conn.close_work_order("WO-001")
+        assert result.id == "WO-001"
+        # Verify the PATCH sent status=closed
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        body = json.loads(patch_req.content)
+        assert body["status"] == "closed"
+
+    @pytest.mark.asyncio
+    async def test_cancel_delegates_to_update(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={"ok": True},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={
+                "id": "WO-001",
+                "type": "corrective",
+                "asset_id": "P-201",
+                "status": "cancelled",
+            },
+        )
+        result = await conn.cancel_work_order("WO-001")
+        assert result.id == "WO-001"
+
+
+class TestRestReadMaintenancePlans:
+    """REST read_maintenance_plans exercises GET /maintenance_plans."""
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/maintenance_plans",
+            json=[
+                {
+                    "id": "MP-001",
+                    "asset_id": "P-201",
+                    "name": "Quarterly Bearing Inspection",
+                    "interval": {"months": 3},
+                    "tasks": ["Check vibration levels"],
+                    "active": True,
+                },
+            ],
+        )
+        plans = await conn.read_maintenance_plans()
+        assert len(plans) == 1
+        assert plans[0].id == "MP-001"
+        assert plans[0].interval.months == 3
+
+
+class TestRestGracefulDegradation:
+    """Unconfigured endpoints raise ConnectorError with actionable message."""
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_not_configured(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        await _connect_with_health(httpx_mock, rest_connector)
+        with pytest.raises(ConnectorError, match="not configured"):
+            await rest_connector.get_work_order("WO-001")
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_not_configured(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        await _connect_with_health(httpx_mock, rest_connector)
+        with pytest.raises(ConnectorError, match="not configured"):
+            await rest_connector.update_work_order("WO-001", description="Nope")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans_not_configured(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        await _connect_with_health(httpx_mock, rest_connector)
+        with pytest.raises(ConnectorError, match="not configured"):
+            await rest_connector.read_maintenance_plans()
