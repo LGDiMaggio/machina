@@ -656,9 +656,7 @@ class TestRestGracefulDegradation:
     ) -> None:
         await _connect_with_health(httpx_mock, rest_connector)
         with pytest.raises(ConnectorError, match="not configured"):
-            await rest_connector.update_work_order(
-                "WO-001", description="Nope"
-            )
+            await rest_connector.update_work_order("WO-001", description="Nope")
 
     @pytest.mark.asyncio
     async def test_read_maintenance_plans_not_configured(

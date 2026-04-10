@@ -366,15 +366,11 @@ class GenericCmmsConnector:
 
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
-        return await self.update_work_order(
-            work_order_id, status=WorkOrderStatus.CLOSED
-        )
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
 
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
-        return await self.update_work_order(
-            work_order_id, status=WorkOrderStatus.CANCELLED
-        )
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Read preventive-maintenance plans.
@@ -403,7 +399,10 @@ class GenericCmmsConnector:
         for wo in self._work_orders:
             if wo.id == work_order_id:
                 if status is not None:
-                    wo.transition_to(status)
+                    try:
+                        wo.transition_to(status)
+                    except ValueError as exc:
+                        raise ConnectorError(str(exc)) from exc
                 if assigned_to is not None:
                     wo.assigned_to = assigned_to
                 if description is not None:
@@ -411,7 +410,9 @@ class GenericCmmsConnector:
                 logger.info(
                     "work_order_updated",
                     connector="GenericCmmsConnector",
+                    operation="update_work_order",
                     work_order_id=work_order_id,
+                    asset_id=wo.asset_id,
                 )
                 return wo
         raise ConnectorError(f"Work order {work_order_id} not found")
@@ -466,9 +467,7 @@ class GenericCmmsConnector:
 
         maintenance_plans_file = self._data_dir / "maintenance_plans.json"
         if maintenance_plans_file.exists():
-            text = await asyncio.to_thread(
-                maintenance_plans_file.read_text, encoding="utf-8"
-            )
+            text = await asyncio.to_thread(maintenance_plans_file.read_text, encoding="utf-8")
             raw = json.loads(text)
             for item in raw:
                 mapped = self._apply_mapping("maintenance_plans", item)
@@ -657,13 +656,23 @@ class GenericCmmsConnector:
             operation="update_work_order",
             work_order_id=work_order_id,
         )
-        # Re-fetch to return fresh state
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
-            raise ConnectorError(
-                f"Work order {work_order_id} not found after update"
-            )
-        return updated
+        # Re-fetch if get_work_order is configured; otherwise parse the
+        # PATCH response directly so update works without a separate GET
+        # endpoint.
+        if "get_work_order" in self._endpoints:
+            updated = await self.get_work_order(work_order_id)
+            if updated is None:
+                raise ConnectorError(f"Work order {work_order_id} not found after update")
+            return updated
+        if resp.content:
+            return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+        # No response body and no get endpoint — return a minimal WO
+        return WorkOrder(
+            id=work_order_id,
+            type=WorkOrderType.CORRECTIVE,
+            asset_id="",
+            status=status or WorkOrderStatus.CREATED,
+        )
 
     async def _rest_read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Fetch maintenance plans from the REST API."""
@@ -673,13 +682,9 @@ class GenericCmmsConnector:
         headers = self._rest_headers()
         results: list[MaintenancePlan] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(
-                client, self._rest_url(path), headers
-            ):
+            async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
                 results.append(
-                    _parse_maintenance_plan(
-                        self._apply_mapping("maintenance_plans", raw)
-                    )
+                    _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
                 )
         return results
 

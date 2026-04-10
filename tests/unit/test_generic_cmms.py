@@ -304,27 +304,21 @@ class TestGenericCmmsConnectorLocal:
     async def test_update_work_order_status(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
-        updated = await conn.update_work_order(
-            "WO-001", status=WorkOrderStatus.ASSIGNED
-        )
+        updated = await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
         assert updated.status == WorkOrderStatus.ASSIGNED
 
     @pytest.mark.asyncio
     async def test_update_work_order_description(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
-        updated = await conn.update_work_order(
-            "WO-001", description="Updated description"
-        )
+        updated = await conn.update_work_order("WO-001", description="Updated description")
         assert updated.description == "Updated description"
 
     @pytest.mark.asyncio
     async def test_update_work_order_assigned_to(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
-        updated = await conn.update_work_order(
-            "WO-001", assigned_to="Mario Rossi"
-        )
+        updated = await conn.update_work_order("WO-001", assigned_to="Mario Rossi")
         assert updated.assigned_to == "Mario Rossi"
 
     @pytest.mark.asyncio
@@ -332,9 +326,7 @@ class TestGenericCmmsConnectorLocal:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
         with pytest.raises(ConnectorError, match="not found"):
-            await conn.update_work_order(
-                "NONEXISTENT", description="Nope"
-            )
+            await conn.update_work_order("NONEXISTENT", description="Nope")
 
     @pytest.mark.asyncio
     async def test_close_work_order(self, sample_data_dir: Path) -> None:
@@ -360,7 +352,7 @@ class TestGenericCmmsConnectorLocal:
         """Cannot close a WO directly from CREATED status."""
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
-        with pytest.raises(ValueError, match="Cannot transition"):
+        with pytest.raises(ConnectorError, match="Cannot transition"):
             await conn.close_work_order("WO-001")
 
     @pytest.mark.asyncio
