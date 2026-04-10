@@ -4,7 +4,7 @@
   <p><strong>The open-source Python framework for building AI agents specialized in industrial maintenance.</strong></p>
 
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-  [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+  [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
   [![PyPI version](https://img.shields.io/pypi/v/machina-ai.svg)](https://pypi.org/project/machina-ai/)
   [![CI](https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main)](https://github.com/LGDiMaggio/machina/actions)
   [![Downloads](https://img.shields.io/pypi/dm/machina-ai.svg)](https://pypi.org/project/machina-ai/)
@@ -35,13 +35,14 @@ Machina provides the missing vertical layer between general-purpose agent framew
 
 ## Features
 
-- **Industrial Connectors** — Pre-built integrations for CMMS (SAP PM, IBM Maximo, Limble), IoT protocols (OPC-UA, MQTT, Modbus), ERP systems, and communication platforms (Telegram, WhatsApp, Slack)
+- **Industrial Connectors** — Pre-built integrations for CMMS (SAP PM, IBM Maximo, UpKeep, any REST-based CMMS), document stores with RAG, and communication platforms (Telegram). IoT protocols (OPC-UA, MQTT) and additional comms (Slack, Teams) coming in v0.2
 - **Maintenance Domain Model** — First-class Python objects for Asset, WorkOrder, FailureMode, SparePart, MaintenancePlan, and Alarm — with hierarchies, validation, and domain logic built in
 - **Domain-Aware AI** — Agents that automatically resolve equipment references, inject maintenance context, retrieve relevant procedures, and ground answers in your data
-- **Workflow Engine** — Composable multi-step workflows for common patterns like alarm-to-work-order, spare part checks, and maintenance scheduling
 - **LLM-Agnostic** — Works with OpenAI, Anthropic, Mistral, Llama, Ollama, and any LiteLLM-compatible provider. No vendor lock-in
-- **Async-First** — Built on `asyncio` for real-time sensor subscriptions, concurrent queries, and high-throughput production environments
-- **MCP Server** — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
+- **Async-First** — Built on `asyncio` for concurrent queries and high-throughput production environments
+- **Pluggable Auth & Pagination** — Built-in support for OAuth2, API key, Basic Auth, and Bearer token authentication; offset, page-number, and cursor pagination strategies; exponential backoff retry logic
+- **MCP Server** *(v0.2)* — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
+- **Workflow Engine** *(v0.2)* — Composable multi-step workflows for common patterns like alarm-to-work-order, spare part checks, and maintenance scheduling
 - **Sandbox Mode** *(v0.2)* — Test agents safely with a log-only runtime that records all actions without executing them — perfect for demos and experimentation
 - **Extensible** — Create custom connectors, domain entities, and workflows. Publish them as plugins for the community
 
@@ -113,10 +114,10 @@ agent = Agent(
 )
 ```
 
-### Add Real-Time Sensor Monitoring
+### Add Real-Time Sensor Monitoring *(Coming in v0.2)*
 
 ```python
-from machina.connectors import OpcUa
+from machina.connectors import OpcUa  # requires: pip install machina-ai[opcua]
 
 sensors = OpcUa(
     endpoint="opc.tcp://plc-line2:4840",
@@ -133,6 +134,8 @@ agent = Agent(
     llm="openai:gpt-4o",
 )
 ```
+
+> **Note:** The OPC-UA connector is planned for v0.2. The example above shows the target API.
 
 ## Architecture
 
@@ -175,14 +178,16 @@ See the [Architecture Guide](https://machina-ai.readthedocs.io/en/latest/archite
 | Connector | System | Since |
 |-----------|--------|-------|
 | `GenericCmms` | Any REST-based CMMS (configurable via YAML/JSON schema mapping) | v0.1 |
+| `SapPM` | SAP Plant Maintenance (OData v2/v4, OAuth2 + Basic Auth) | v0.1 |
+| `Maximo` | IBM Maximo (OSLC/JSON API, API key + Basic + Bearer Auth) | v0.1 |
+| `UpKeep` | UpKeep CMMS (REST API v2, Session-Token Auth) | v0.1 |
+
+All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Bearer), pagination strategies (offset, page-number, cursor), and exponential backoff retry logic.
 
 #### 🚧 Coming Soon
 
 | Connector | System | Planned |
-|-----------|--------|---------|
-| `SapPM` | SAP Plant Maintenance | v0.2 |
-| `Maximo` | IBM Maximo | v0.2 |
-| `UpKeep` | UpKeep CMMS | v0.2 |
+|-----------|--------|--------|
 | `MaintainX` | MaintainX | v0.2 |
 | `Limble` | Limble CMMS | v0.2 |
 | `Fiix` | Fiix (Rockwell) | v0.2 |
@@ -294,7 +299,7 @@ The domain model supports hierarchical asset trees, ISO 14224-aligned failure ta
 
 See the [Domain Model Reference](https://machina-ai.readthedocs.io/en/latest/domain/) for all entities and services.
 
-## Workflow Engine
+## Workflow Engine *(Coming in v0.2)*
 
 Build multi-step maintenance workflows:
 
@@ -316,42 +321,49 @@ alarm_to_workorder = Workflow(
 agent.register_workflow(alarm_to_workorder)
 ```
 
-## MCP Server
+> **Note:** The workflow engine is planned for v0.2. The example above shows the target API.
 
-Don't need a full agent? Machina can expose its connectors as **MCP (Model Context Protocol) servers**, so Claude Desktop, Cursor, or any MCP-compatible tool can access your industrial data directly:
+## MCP Server *(Coming in v0.2)*
+
+Don't need a full agent? Machina will expose its connectors as **MCP (Model Context Protocol) servers**, so Claude Desktop, Cursor, or any MCP-compatible tool can access your industrial data directly:
 
 ```bash
 # Start MCP server exposing your CMMS and document store
 machina mcp serve --config machina.yaml
 ```
 
-Now anyone on your team can ask Claude: *"What's the maintenance history for pump P-201?"* — and Claude queries your SAP PM instance through Machina's MCP server. No agent code required.
+Anyone on your team will be able to ask Claude: *"What's the maintenance history for pump P-201?"* — and Claude queries your SAP PM instance through Machina's MCP server. No agent code required.
 
-This is also the fastest way to evaluate Machina: connect your data, use it from Claude, and when you need workflows and automation, the full framework is right there.
+This will also be the fastest way to evaluate Machina: connect your data, use it from Claude, and when you need workflows and automation, the full framework is right there.
 
-See the [MCP Server Guide](https://machina-ai.readthedocs.io/en/latest/mcp-server/) for setup instructions.
+> **Note:** The MCP server layer is planned for v0.2. The connector infrastructure is already in place — the MCP layer will be a thin protocol adapter on top.
 
 ## Roadmap
 
 ### ✅ v0.1 — Maintenance Knowledge Agent *(released)*
 
-- [x] Core domain model (Asset, WorkOrder, FailureMode, SparePart, Alarm)
+- [x] Core domain model (Asset, WorkOrder, FailureMode, SparePart, Alarm, MaintenancePlan)
+- [x] Domain services (FailureAnalyzer, WorkOrderFactory, MaintenanceScheduler)
 - [x] BaseConnector protocol and ConnectorRegistry
 - [x] Exception hierarchy and structured logging (structlog)
-- [x] Configuration system (YAML + env var substitution)
-- [x] LLM abstraction layer (LiteLLM wrapper)
+- [x] Configuration system (YAML + env var substitution + validation)
+- [x] LLM abstraction layer (LiteLLM wrapper with function calling)
 - [x] GenericCmmsConnector (any REST-based CMMS)
-- [x] DocumentStore connector with RAG
+- [x] SapPmConnector (OData v2/v4, OAuth2 + Basic Auth)
+- [x] MaximoConnector (OSLC/JSON API, API key + Basic + Bearer Auth)
+- [x] UpKeepConnector (REST API v2, Session-Token Auth)
+- [x] Pluggable auth (OAuth2, API key, Basic, Bearer), pagination (offset, page, cursor), and retry logic
+- [x] DocumentStore connector with RAG (LangChain + ChromaDB)
 - [x] Telegram connector
 - [x] Agent runtime with domain-aware prompting
 - [x] Entity resolver (natural language → asset resolution)
 - [x] Action tracing (observability)
 - [x] LLM tool definitions (function calling)
-- [x] CI/CD pipeline (GitHub Actions)
+- [x] CI/CD pipeline (GitHub Actions) with automated PyPI release
 
-### 🚧 v0.2 — Connectors, Workflows & MCP *(in progress)*
+### 🚧 v0.2 — Workflows, MCP & More Connectors *(in progress)*
 
-- [ ] SAP PM, IBM Maximo, UpKeep, MaintainX connectors
+- [ ] MaintainX, Limble, Fiix connectors
 - [ ] OPC-UA and MQTT connectors
 - [ ] WhatsApp, Slack, Teams, Email connectors
 - [ ] Workflow engine
@@ -372,11 +384,11 @@ See the [full roadmap](https://github.com/LGDiMaggio/machina/projects) for detai
 
 The [`examples/`](examples/) directory contains complete, runnable examples:
 
-| Example | Description |
-|---------|-------------|
-| [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — the 30-minute quickstart |
-| [`alarm_to_workorder/`](examples/alarm_to_workorder/) | Alarm-to-Work-Order workflow with CMMS integration |
-| [`multi_agent_team/`](examples/multi_agent_team/) | Specialized agents collaborating on complex diagnostics |
+| Example | Description | Status |
+|---------|-------------|--------|
+| [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — the 30-minute quickstart | ✅ Available |
+| `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | 🚧 Planned (v0.2) |
+| `multi_agent_team/` | Specialized agents collaborating on complex diagnostics | 🚧 Planned (v0.3) |
 
 ## Contributing
 
