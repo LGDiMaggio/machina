@@ -386,7 +386,8 @@ The [`examples/`](examples/) directory contains complete, runnable examples:
 
 | Example | Description | Status |
 |---------|-------------|--------|
-| [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — the 30-minute quickstart | ✅ Available |
+| [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — Q&A chatbot with RAG | ✅ Available |
+| [`predictive_pipeline/`](examples/predictive_pipeline/) | End-to-end predictive maintenance: sensor alarm → diagnosis → work order → scheduling | ⚠️ Preview — example code ready, requires workflow engine (v0.2) |
 | `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | 🚧 Planned (v0.2) |
 | `multi_agent_team/` | Specialized agents collaborating on complex diagnostics | 🚧 Planned (v0.3) |
 
