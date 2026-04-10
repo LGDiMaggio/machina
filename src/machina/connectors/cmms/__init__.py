@@ -19,8 +19,10 @@ from machina.connectors.cmms.auth import (
     BasicAuth,
     BearerAuth,
     NoAuth,
+    OAuth2ClientCredentials,
 )
 from machina.connectors.cmms.generic import GenericCmmsConnector
+from machina.connectors.cmms.maximo import MaximoConnector
 from machina.connectors.cmms.pagination import (
     CursorPagination,
     NoPagination,
@@ -28,6 +30,8 @@ from machina.connectors.cmms.pagination import (
     PageNumberPagination,
     PaginationStrategy,
 )
+from machina.connectors.cmms.sap_pm import SapPmConnector
+from machina.connectors.cmms.upkeep import UpKeepConnector
 
 __all__ = [
     "ApiKeyHeaderAuth",
@@ -36,9 +40,13 @@ __all__ = [
     "BearerAuth",
     "CursorPagination",
     "GenericCmmsConnector",
+    "MaximoConnector",
     "NoAuth",
     "NoPagination",
+    "OAuth2ClientCredentials",
     "OffsetLimitPagination",
     "PageNumberPagination",
     "PaginationStrategy",
+    "SapPmConnector",
+    "UpKeepConnector",
 ]

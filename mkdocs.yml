@@ -57,6 +57,9 @@ nav:
   - Domain Model Reference: domain.md
   - Connectors:
       - Custom Connectors: connectors/custom.md
+      - SAP PM: connectors/sap-pm.md
+      - IBM Maximo: connectors/maximo.md
+      - UpKeep: connectors/upkeep.md
   - MCP Server: mcp-server.md
 
 markdown_extensions:
