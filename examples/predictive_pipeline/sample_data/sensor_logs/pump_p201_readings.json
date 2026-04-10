@@ -1,0 +1,118 @@
+{
+  "asset_id": "P-201",
+  "asset_name": "Cooling Water Pump",
+  "sensor_readings": [
+    {
+      "timestamp": "2026-04-10T02:00:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 3.2,
+        "bearing_temperature_de_c": 52.1,
+        "bearing_temperature_nde_c": 48.3,
+        "motor_current_a": 12.4,
+        "discharge_pressure_bar": 4.8,
+        "flow_rate_m3h": 45.2
+      }
+    },
+    {
+      "timestamp": "2026-04-10T02:15:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 3.4,
+        "bearing_temperature_de_c": 52.3,
+        "bearing_temperature_nde_c": 48.5,
+        "motor_current_a": 12.5,
+        "discharge_pressure_bar": 4.7,
+        "flow_rate_m3h": 45.0
+      }
+    },
+    {
+      "timestamp": "2026-04-10T02:30:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 4.1,
+        "bearing_temperature_de_c": 53.8,
+        "bearing_temperature_nde_c": 48.6,
+        "motor_current_a": 12.6,
+        "discharge_pressure_bar": 4.7,
+        "flow_rate_m3h": 44.8
+      }
+    },
+    {
+      "timestamp": "2026-04-10T02:45:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 5.3,
+        "bearing_temperature_de_c": 56.2,
+        "bearing_temperature_nde_c": 49.1,
+        "motor_current_a": 12.8,
+        "discharge_pressure_bar": 4.6,
+        "flow_rate_m3h": 44.1
+      }
+    },
+    {
+      "timestamp": "2026-04-10T03:00:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 6.8,
+        "bearing_temperature_de_c": 59.4,
+        "bearing_temperature_nde_c": 49.5,
+        "motor_current_a": 13.1,
+        "discharge_pressure_bar": 4.5,
+        "flow_rate_m3h": 43.5
+      }
+    },
+    {
+      "timestamp": "2026-04-10T03:15:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 7.8,
+        "bearing_temperature_de_c": 62.1,
+        "bearing_temperature_nde_c": 49.8,
+        "motor_current_a": 13.4,
+        "discharge_pressure_bar": 4.4,
+        "flow_rate_m3h": 42.8
+      },
+      "alarm": {
+        "id": "ALM-2026-04-10-0315",
+        "parameter": "vibration_velocity_mm_s",
+        "value": 7.8,
+        "threshold": 6.0,
+        "severity": "WARNING",
+        "message": "Vibration velocity on drive-end bearing exceeds WARNING threshold (6.0 mm/s)"
+      }
+    },
+    {
+      "timestamp": "2026-04-10T03:30:00Z",
+      "sensors": {
+        "vibration_velocity_mm_s": 8.5,
+        "bearing_temperature_de_c": 64.8,
+        "bearing_temperature_nde_c": 50.2,
+        "motor_current_a": 13.7,
+        "discharge_pressure_bar": 4.3,
+        "flow_rate_m3h": 42.1
+      },
+      "alarm": {
+        "id": "ALM-2026-04-10-0330",
+        "parameter": "vibration_velocity_mm_s",
+        "value": 8.5,
+        "threshold": 6.0,
+        "severity": "WARNING",
+        "message": "Vibration velocity on drive-end bearing continues to increase — trend suggests imminent bearing failure"
+      }
+    }
+  ],
+  "thresholds": {
+    "vibration_velocity_mm_s": {
+      "warning": 6.0,
+      "critical": 11.0,
+      "unit": "mm/s",
+      "reference": "ISO 10816-3 Zone C boundary for Group 2 machines"
+    },
+    "bearing_temperature_de_c": {
+      "warning": 70.0,
+      "critical": 85.0,
+      "unit": "°C"
+    },
+    "bearing_temperature_nde_c": {
+      "warning": 70.0,
+      "critical": 85.0,
+      "unit": "°C"
+    }
+  },
+  "notes": "This data simulates a progressive bearing degradation on the drive-end (DE) side of pump P-201. Key indicators: vibration velocity rising from normal (~3 mm/s) through warning (>6 mm/s) with correlated temperature increase on DE bearing only (NDE stays stable). Motor current also increases slightly due to increased mechanical resistance. This pattern is classic for bearing wear / fatigue failure mode (ISO 14224 code VIB)."
+}
