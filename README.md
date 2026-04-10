@@ -42,6 +42,7 @@ Machina provides the missing vertical layer between general-purpose agent framew
 - **LLM-Agnostic** — Works with OpenAI, Anthropic, Mistral, Llama, Ollama, and any LiteLLM-compatible provider. No vendor lock-in
 - **Async-First** — Built on `asyncio` for real-time sensor subscriptions, concurrent queries, and high-throughput production environments
 - **MCP Server** — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
+- **Sandbox Mode** *(v0.2)* — Test agents safely with a log-only runtime that records all actions without executing them — perfect for demos and experimentation
 - **Extensible** — Create custom connectors, domain entities, and workflows. Publish them as plugins for the community
 
 ## Quick Start
@@ -169,9 +170,16 @@ See the [Architecture Guide](https://machina-ai.readthedocs.io/en/latest/archite
 
 ### CMMS
 
-| Connector | System | Status |
-|-----------|--------|--------|
-| `GenericCmms` | Any REST-based CMMS | v0.1 |
+#### ✅ Available Now
+
+| Connector | System | Since |
+|-----------|--------|-------|
+| `GenericCmms` | Any REST-based CMMS (configurable via YAML/JSON schema mapping) | v0.1 |
+
+#### 🚧 Coming Soon
+
+| Connector | System | Planned |
+|-----------|--------|---------|
 | `SapPM` | SAP Plant Maintenance | v0.2 |
 | `Maximo` | IBM Maximo | v0.2 |
 | `UpKeep` | UpKeep CMMS | v0.2 |
@@ -183,17 +191,27 @@ See the [Architecture Guide](https://machina-ai.readthedocs.io/en/latest/archite
 
 ### IoT & Industrial Protocols
 
-| Connector | Protocol | Status |
-|-----------|----------|--------|
+#### 🚧 Coming Soon
+
+| Connector | Protocol | Planned |
+|-----------|----------|---------|
 | `OpcUa` | OPC-UA | v0.2 |
 | `Mqtt` | MQTT / Sparkplug B | v0.2 |
 | `Modbus` | Modbus TCP/RTU | v0.3 |
+| `Plc` | S7 / EtherNet/IP | v0.3 |
 
 ### Communication
 
-| Connector | Platform | Status |
-|-----------|----------|--------|
+#### ✅ Available Now
+
+| Connector | Platform | Since |
+|-----------|----------|-------|
 | `Telegram` | Telegram Bot API | v0.1 |
+
+#### 🚧 Coming Soon
+
+| Connector | Platform | Planned |
+|-----------|----------|---------|
 | `WhatsApp` | WhatsApp Business | v0.2 |
 | `Slack` | Slack Bot API | v0.2 |
 | `Teams` | Microsoft Teams | v0.2 |
@@ -202,11 +220,27 @@ See the [Architecture Guide](https://machina-ai.readthedocs.io/en/latest/archite
 
 ### Documents & Knowledge
 
-| Connector | Source | Status |
-|-----------|--------|--------|
+#### ✅ Available Now
+
+| Connector | Source | Since |
+|-----------|--------|-------|
 | `DocumentStore` | PDF / DOCX with RAG | v0.1 |
+
+#### 🚧 Coming Soon
+
+| Connector | Source | Planned |
+|-----------|--------|---------|
 | `Confluence` | Atlassian | v0.3 |
 | `SharePoint` | Microsoft 365 | v0.3 |
+
+### ERP
+
+#### 🚧 Coming Soon
+
+| Connector | System | Planned |
+|-----------|--------|---------|
+| `SapErp` | SAP S/4HANA | v0.2 |
+| `OracleErp` | Oracle ERP | v0.3 |
 
 ### Building Custom Connectors
 
@@ -299,32 +333,38 @@ See the [MCP Server Guide](https://machina-ai.readthedocs.io/en/latest/mcp-serve
 
 ## Roadmap
 
-- [x] Project specification and architecture design
+### ✅ v0.1 — Maintenance Knowledge Agent *(released)*
+
 - [x] Core domain model (Asset, WorkOrder, FailureMode, SparePart, Alarm)
 - [x] BaseConnector protocol and ConnectorRegistry
-- [x] Exception hierarchy
+- [x] Exception hierarchy and structured logging (structlog)
 - [x] Configuration system (YAML + env var substitution)
 - [x] LLM abstraction layer (LiteLLM wrapper)
-- [x] Structured logging (structlog)
-- [x] CI/CD pipeline (GitHub Actions)
-- [x] GenericCmmsConnector
+- [x] GenericCmmsConnector (any REST-based CMMS)
 - [x] DocumentStore connector with RAG
-- [x] Telegram connector + CLI channel
+- [x] Telegram connector
 - [x] Agent runtime with domain-aware prompting
 - [x] Entity resolver (natural language → asset resolution)
 - [x] Action tracing (observability)
 - [x] LLM tool definitions (function calling)
-- [x] **v0.1 — Maintenance Knowledge Agent** (quickstart in 30 minutes)
+- [x] CI/CD pipeline (GitHub Actions)
+
+### 🚧 v0.2 — Connectors, Workflows & MCP *(in progress)*
+
 - [ ] SAP PM, IBM Maximo, UpKeep, MaintainX connectors
 - [ ] OPC-UA and MQTT connectors
 - [ ] WhatsApp, Slack, Teams, Email connectors
 - [ ] Workflow engine
 - [ ] **MCP Server layer** — use connectors from Claude, Cursor, and any MCP client
+- [ ] **Sandbox mode** — log-only runtime for safe experimentation and demos
 - [ ] Plugin system for community extensions
-- [ ] **v0.2 — Connectors, Workflows & MCP**
+
+### 🔮 v0.3 — Intelligence & Scale
+
 - [ ] Anomaly detection module
 - [ ] Multi-agent orchestration
-- [ ] **v0.3 — Intelligence & Scale**
+- [ ] Remaining Useful Life (RUL) estimation
+- [ ] Additional connectors (Modbus, eMaint, Infor EAM, GoogleChat)
 
 See the [full roadmap](https://github.com/LGDiMaggio/machina/projects) for details.
 
