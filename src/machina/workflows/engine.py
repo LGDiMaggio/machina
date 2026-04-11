@@ -92,6 +92,7 @@ class WorkflowEngine:
             WorkflowError: If a step fails with :attr:`ErrorPolicy.STOP`.
         """
         trigger_event = trigger_event or {}
+        self._validate_workflow(workflow)
         context = WorkflowContext(trigger_event)
         step_results: list[StepResult] = []
         overall_success = True
@@ -155,6 +156,12 @@ class WorkflowEngine:
             try:
                 should_run = step.guard.check(context.as_dict())
             except Exception:
+                logger.warning(
+                    "guard_exception",
+                    step=step.name,
+                    guard=step.guard.description,
+                    exc_info=True,
+                )
                 should_run = False
             if not should_run:
                 logger.info(
@@ -367,7 +374,7 @@ class WorkflowEngine:
         # Resolve inputs from template variables
         resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
 
-        if self.sandbox and self._is_write_action(step.action):
+        if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
                 "sandbox_service",
                 step=step.name,
@@ -398,7 +405,7 @@ class WorkflowEngine:
         # Resolve inputs
         resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
 
-        if self.sandbox and self._is_write_action(step.action):
+        if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
                 "sandbox_connector",
                 step=step.name,
@@ -425,8 +432,38 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_write_action(action: str) -> bool:
-        """Return ``True`` if the action is a write/mutation operation."""
+    def _validate_workflow(workflow: Workflow) -> None:
+        """Validate workflow step references before execution.
+
+        Checks that every ``depends_on`` entry references an existing
+        step name within the workflow.
+
+        Raises:
+            WorkflowError: If any dependency reference is invalid.
+        """
+        step_names = set(workflow.step_names)
+        for step in workflow.steps:
+            for dep in step.depends_on:
+                if dep not in step_names:
+                    raise WorkflowError(
+                        f"Step '{step.name}' depends on '{dep}' "
+                        f"which does not exist in workflow '{workflow.name}'. "
+                        f"Available steps: {sorted(step_names)}"
+                    )
+
+    @staticmethod
+    def _is_write_action(action: str, *, step: Step | None = None) -> bool:
+        """Return ``True`` if the action is a write/mutation operation.
+
+        When the step defines ``is_write`` explicitly (``True`` or
+        ``False``), that value is authoritative.  Otherwise, a keyword
+        heuristic is used — this can miss custom write actions or
+        false-positive on reads whose names contain write-like words
+        (e.g. ``get_update_history``).  Prefer setting ``is_write=True``
+        on steps that modify state.
+        """
+        if step is not None and step.is_write is not None:
+            return step.is_write
         write_keywords = {
             "create",
             "update",

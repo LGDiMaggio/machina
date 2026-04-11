@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from machina.connectors.comms.email import EmailConnector
-from machina.connectors.comms.telegram import IncomingMessage
+from machina.connectors.comms.types import IncomingMessage
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 

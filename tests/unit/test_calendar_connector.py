@@ -537,6 +537,9 @@ class TestOutlookCalendarBackend:
         mock_http.get = AsyncMock(return_value=mock_resp)
         backend._http = mock_http
         backend._token = "tok"
+        mock_msal_app = MagicMock()
+        mock_msal_app.acquire_token_silent.return_value = {"access_token": "tok"}
+        backend._msal_app = mock_msal_app
 
         conn = CalendarConnector(backend="outlook")
         conn._backend = backend
@@ -565,6 +568,9 @@ class TestOutlookCalendarBackend:
         mock_http.post = AsyncMock(return_value=mock_resp)
         backend._http = mock_http
         backend._token = "tok"
+        mock_msal_app = MagicMock()
+        mock_msal_app.acquire_token_silent.return_value = {"access_token": "tok"}
+        backend._msal_app = mock_msal_app
 
         conn = CalendarConnector(backend="outlook")
         conn._backend = backend
@@ -585,6 +591,9 @@ class TestOutlookCalendarBackend:
         mock_http.delete = AsyncMock(return_value=mock_resp)
         backend._http = mock_http
         backend._token = "tok"
+        mock_msal_app = MagicMock()
+        mock_msal_app.acquire_token_silent.return_value = {"access_token": "tok"}
+        backend._msal_app = mock_msal_app
 
         conn = CalendarConnector(backend="outlook")
         conn._backend = backend

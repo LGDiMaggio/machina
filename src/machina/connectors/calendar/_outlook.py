@@ -51,6 +51,7 @@ class OutlookCalendarBackend:
         self._calendar_type_map = calendar_type_map or {}
         self._token: str = ""
         self._http: Any = None  # httpx.AsyncClient
+        self._msal_app: Any = None  # msal.ConfidentialClientApplication
 
     async def connect(self) -> None:
         """Acquire an access token via MSAL and create an HTTP client."""
@@ -68,17 +69,12 @@ class OutlookCalendarBackend:
                 "tenant_id, client_id, and client_secret are required for Outlook calendar backend"
             )
 
-        app = msal.ConfidentialClientApplication(
+        self._msal_app = msal.ConfidentialClientApplication(
             self._client_id,
             authority=f"https://login.microsoftonline.com/{self._tenant_id}",
             client_credential=self._client_secret,
         )
-        result = app.acquire_token_for_client(scopes=self._SCOPES)
-        if "access_token" not in result:
-            error_desc = result.get("error_description", "Unknown MSAL error")
-            raise ConnectorAuthError(f"Failed to acquire Outlook token: {error_desc}")
-
-        self._token = result["access_token"]
+        self._token = await self._acquire_token()
 
         import httpx
 
@@ -94,8 +90,43 @@ class OutlookCalendarBackend:
         if self._http is not None:
             await self._http.aclose()
             self._http = None
+        self._msal_app = None
         self._token = ""
         logger.info("disconnected", connector="CalendarConnector", backend="outlook")
+
+    async def _acquire_token(self) -> str:
+        """Acquire a fresh access token from MSAL.
+
+        Tries the token cache first (``acquire_token_silent``), falling
+        back to a fresh client-credentials grant.
+
+        Raises:
+            ConnectorAuthError: If token acquisition fails.
+        """
+        if self._msal_app is None:
+            raise ConnectorAuthError("MSAL application not initialised")
+
+        # Try cached token first (avoids unnecessary token requests)
+        result = self._msal_app.acquire_token_silent(self._SCOPES, account=None)
+        if result and "access_token" in result:
+            return str(result["access_token"])
+
+        # Fall back to fresh acquisition
+        result = self._msal_app.acquire_token_for_client(scopes=self._SCOPES)
+        if "access_token" not in result:
+            error_desc = result.get("error_description", "Unknown MSAL error")
+            raise ConnectorAuthError(f"Failed to acquire Outlook token: {error_desc}")
+
+        return str(result["access_token"])
+
+    async def _ensure_fresh_token(self) -> None:
+        """Refresh the access token and update HTTP headers if needed."""
+        token = await self._acquire_token()
+        if token != self._token:
+            self._token = token
+            if self._http is not None:
+                self._http.headers["Authorization"] = f"Bearer {self._token}"
+            logger.debug("token_refreshed", connector="CalendarConnector", backend="outlook")
 
     async def list_events(
         self,
@@ -118,6 +149,7 @@ class OutlookCalendarBackend:
         """
         if self._http is None:
             raise ConnectorError("Not connected — call connect() first")
+        await self._ensure_fresh_token()
 
         if calendar_id:
             url = f"/users/{self._user_id}/calendars/{calendar_id}/events"
@@ -167,6 +199,7 @@ class OutlookCalendarBackend:
         """
         if self._http is None:
             raise ConnectorError("Not connected — call connect() first")
+        await self._ensure_fresh_token()
 
         if calendar_id:
             url = f"/users/{self._user_id}/calendars/{calendar_id}/events"
@@ -198,6 +231,7 @@ class OutlookCalendarBackend:
         """
         if self._http is None:
             raise ConnectorError("Not connected — call connect() first")
+        await self._ensure_fresh_token()
 
         resp = await self._http.delete(f"/users/{self._user_id}/events/{event_id}")
         resp.raise_for_status()

@@ -13,7 +13,7 @@ from machina.connectors.comms.slack import SlackConnector
 from machina.exceptions import ConnectorError
 
 if TYPE_CHECKING:
-    from machina.connectors.comms.telegram import IncomingMessage
+    from machina.connectors.comms.types import IncomingMessage
 
 
 class TestSlackConnector:

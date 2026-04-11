@@ -160,6 +160,7 @@ class Step:
     guard: GuardCondition | None = None
     timeout_seconds: float | None = None
     inputs: dict[str, str] = field(default_factory=dict)
+    is_write: bool | None = None
 
 
 # ------------------------------------------------------------------

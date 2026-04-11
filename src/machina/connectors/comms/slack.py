@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
-from machina.connectors.comms.telegram import IncomingMessage, MessageHandler
+from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)

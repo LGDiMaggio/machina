@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
-from machina.connectors.comms.telegram import IncomingMessage, MessageHandler
+from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -89,6 +89,7 @@ class EmailConnector:
         self._poll_interval = poll_interval
         self._connected = False
         self._smtp: Any = None
+        self._imap: Any = None  # Persistent IMAP connection
         self._gmail_service: Any = None
 
     @property
@@ -104,11 +105,15 @@ class EmailConnector:
         self._connected = True
 
     async def disconnect(self) -> None:
-        """Close SMTP connection or release Gmail resources."""
+        """Close SMTP and IMAP connections or release Gmail resources."""
         if self._smtp is not None:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self._smtp.quit)
             self._smtp = None
+        if self._imap is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self._imap.logout)
+            self._imap = None
         self._gmail_service = None
         self._connected = False
         logger.info("disconnected", connector="EmailConnector")
@@ -235,26 +240,44 @@ class EmailConnector:
         except Exception as exc:
             raise ConnectorError(f"Failed to send email: {exc}") from exc
 
-    async def _fetch_imap_messages(self) -> list[IncomingMessage]:
-        """Fetch unseen messages from IMAP inbox."""
+    async def _ensure_imap_connected(self) -> Any:
+        """Return a connected IMAP client, reusing an existing one if possible."""
         import imaplib
 
+        if self._imap is not None:
+            try:
+                await asyncio.to_thread(self._imap.noop)
+                return self._imap
+            except Exception:
+                logger.debug("imap_reconnect", connector="EmailConnector")
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._imap.logout)
+                self._imap = None
+
+        imap: imaplib.IMAP4
+        if self._use_tls:
+            imap = await asyncio.to_thread(
+                lambda: imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
+            )
+        else:
+            imap = await asyncio.to_thread(lambda: imaplib.IMAP4(self._imap_host, self._imap_port))
+
+        await asyncio.to_thread(imap.login, self._username, self._password)
+        self._imap = imap
+        return imap
+
+    async def _fetch_imap_messages(self) -> list[IncomingMessage]:
+        """Fetch unseen messages from IMAP inbox.
+
+        Reuses the IMAP connection across poll cycles and reconnects
+        automatically if the connection has dropped.
+        """
         if not self._imap_host:
             return []
 
         messages: list[IncomingMessage] = []
         try:
-            imap: imaplib.IMAP4
-            if self._use_tls:
-                imap = await asyncio.to_thread(
-                    lambda: imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
-                )
-            else:
-                imap = await asyncio.to_thread(
-                    lambda: imaplib.IMAP4(self._imap_host, self._imap_port)
-                )
-
-            await asyncio.to_thread(imap.login, self._username, self._password)
+            imap = await self._ensure_imap_connected()
             await asyncio.to_thread(imap.select, "INBOX")
 
             _, data = await asyncio.to_thread(imap.search, None, "UNSEEN")
@@ -293,14 +316,14 @@ class EmailConnector:
                         raw=parsed,
                     )
                 )
-
-            await asyncio.to_thread(imap.logout)
         except Exception as exc:
             logger.warning(
                 "imap_fetch_error",
                 connector="EmailConnector",
                 error=str(exc),
             )
+            # Force reconnect on next poll
+            self._imap = None
 
         return messages
 
