@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
@@ -15,7 +16,9 @@ import structlog
 _REDACT_PATTERNS = {"token", "password", "secret", "api_key", "client_secret", "authorization"}
 
 
-def _redact_secrets(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _redact_secrets(
+    logger: Any, method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Redact sensitive fields from log events."""
     for key in list(event_dict):
         if any(pattern in key.lower() for pattern in _REDACT_PATTERNS):
