@@ -421,6 +421,145 @@ class TestMqttTopicMatching:
         assert _mqtt_topic_matches("a/b/c", "a/b") is False
 
 
+class TestMqttConnectorTls:
+    """Test TLS configuration."""
+
+    @pytest.mark.asyncio
+    async def test_connect_with_tls(self) -> None:
+        """TLS enabled creates an ssl context and passes it to aiomqtt.Client."""
+        mock_client_instance = AsyncMock()
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_aiomqtt = MagicMock()
+        mock_aiomqtt.Client = mock_client_cls
+
+        conn = MqttConnector(broker="mqtt.example.com", port=8883, tls=True)
+
+        import ssl as real_ssl
+
+        with (
+            patch.dict(sys.modules, {"aiomqtt": mock_aiomqtt}),
+            patch.object(real_ssl, "create_default_context") as mock_create_ctx,
+        ):
+            mock_create_ctx.return_value = MagicMock()
+            await conn.connect()
+
+        assert conn._connected is True
+        mock_create_ctx.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_with_tls_and_ca_certs(self) -> None:
+        """TLS with custom CA certs loads them into the context."""
+        mock_client_instance = AsyncMock()
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_aiomqtt = MagicMock()
+        mock_aiomqtt.Client = mock_client_cls
+
+        mock_ctx = MagicMock()
+
+        conn = MqttConnector(
+            broker="mqtt.example.com",
+            port=8883,
+            tls=True,
+            ca_certs="/path/to/ca.pem",
+        )
+
+        import ssl as real_ssl
+
+        with (
+            patch.dict(sys.modules, {"aiomqtt": mock_aiomqtt}),
+            patch.object(real_ssl, "create_default_context", return_value=mock_ctx),
+        ):
+            await conn.connect()
+
+        mock_ctx.load_verify_locations.assert_called_once_with("/path/to/ca.pem")
+
+    @pytest.mark.asyncio
+    async def test_connect_without_tls_no_ssl(self) -> None:
+        """When tls=False, no SSL context is created."""
+        mock_client_instance = AsyncMock()
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_aiomqtt = MagicMock()
+        mock_aiomqtt.Client = mock_client_cls
+
+        conn = MqttConnector(broker="localhost", port=1883, tls=False)
+
+        with patch.dict(sys.modules, {"aiomqtt": mock_aiomqtt}):
+            await conn.connect()
+
+        # Client was created with tls_context=None
+        call_kwargs = mock_client_cls.call_args[1]
+        assert call_kwargs["tls_context"] is None
+
+
+class TestMqttConnectorMultipleTopics:
+    """Test multiple simultaneous topic subscriptions."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_multiple_topics(self) -> None:
+        """Subscribing with multiple topics should subscribe to all of them."""
+        mock_client = AsyncMock()
+        conn = MqttConnector(
+            broker="localhost",
+            topics=[
+                {"topic": "plant/pump/vib", "threshold": 6.0},
+                {"topic": "plant/pump/temp", "threshold": 80.0},
+                {"topic": "plant/comp/vib", "threshold": 4.0},
+            ],
+        )
+        conn._connected = True
+        conn._client = mock_client
+
+        async def callback(alarm: Alarm) -> None:
+            pass
+
+        sub = await conn.subscribe(callback)
+
+        assert mock_client.subscribe.await_count == 3
+        topics_subscribed = [
+            call.args[0] for call in mock_client.subscribe.await_args_list
+        ]
+        assert "plant/pump/vib" in topics_subscribed
+        assert "plant/pump/temp" in topics_subscribed
+        assert "plant/comp/vib" in topics_subscribed
+
+        # Cleanup
+        sub._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sub._task
+
+    @pytest.mark.asyncio
+    async def test_subscribe_with_custom_qos(self) -> None:
+        """QoS levels from TopicConfig should be passed to MQTT subscribe."""
+        mock_client = AsyncMock()
+        conn = MqttConnector(
+            broker="localhost",
+            topics=[
+                TopicConfig(topic="important/data", qos=2, threshold=1.0),
+            ],
+        )
+        conn._connected = True
+        conn._client = mock_client
+
+        async def callback(alarm: Alarm) -> None:
+            pass
+
+        sub = await conn.subscribe(callback)
+        mock_client.subscribe.assert_awaited_once_with("important/data", qos=2)
+
+        sub._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sub._task
+
+
 class TestTopicConfig:
     """Test TopicConfig defaults."""
 

@@ -558,6 +558,238 @@ class TestDataChangeHandler:
         assert received[0].value == 0.5
 
 
+class TestOpcUaConnectorBrowseNodes:
+    """Test browse_nodes capability."""
+
+    @pytest.mark.asyncio
+    async def test_browse_nodes_not_connected(self) -> None:
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.browse_nodes()
+
+    @pytest.mark.asyncio
+    async def test_browse_nodes_default_root(self) -> None:
+        """Browse from the Objects folder when no root node specified."""
+        browse_name_1 = MagicMock()
+        browse_name_1.to_string.return_value = "0:Objects"
+        node_class_1 = MagicMock()
+        node_class_1.name = "Object"
+
+        mock_child_1 = MagicMock()
+        mock_child_1.nodeid.to_string.return_value = "ns=0;i=85"
+        mock_child_1.read_browse_name = AsyncMock(return_value=browse_name_1)
+        mock_child_1.read_node_class = AsyncMock(return_value=node_class_1)
+
+        browse_name_2 = MagicMock()
+        browse_name_2.to_string.return_value = "2:Plant"
+        node_class_2 = MagicMock()
+        node_class_2.name = "Object"
+
+        mock_child_2 = MagicMock()
+        mock_child_2.nodeid.to_string.return_value = "ns=2;s=Plant"
+        mock_child_2.read_browse_name = AsyncMock(return_value=browse_name_2)
+        mock_child_2.read_node_class = AsyncMock(return_value=node_class_2)
+
+        mock_root_node = AsyncMock()
+        mock_root_node.get_children = AsyncMock(return_value=[mock_child_1, mock_child_2])
+
+        mock_ua = MagicMock()
+        mock_client = MagicMock()
+        mock_client.get_node.return_value = mock_root_node
+
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        conn._connected = True
+        conn._client = mock_client
+
+        with patch.dict(sys.modules, {"asyncua": MagicMock(ua=mock_ua), "asyncua.ua": mock_ua}):
+            nodes = await conn.browse_nodes()
+
+        assert len(nodes) == 2
+        assert nodes[0]["node_id"] == "ns=0;i=85"
+        assert nodes[0]["browse_name"] == "0:Objects"
+        assert nodes[1]["node_id"] == "ns=2;s=Plant"
+
+    @pytest.mark.asyncio
+    async def test_browse_nodes_specific_root(self) -> None:
+        """Browse from a specific root node."""
+        browse_name = MagicMock()
+        browse_name.to_string.return_value = "2:Vibration"
+        node_class = MagicMock()
+        node_class.name = "Variable"
+
+        mock_child = MagicMock()
+        mock_child.nodeid.to_string.return_value = "ns=2;s=Pump.Vib"
+        mock_child.read_browse_name = AsyncMock(return_value=browse_name)
+        mock_child.read_node_class = AsyncMock(return_value=node_class)
+
+        mock_root_node = AsyncMock()
+        mock_root_node.get_children = AsyncMock(return_value=[mock_child])
+
+        mock_client = MagicMock()
+        mock_client.get_node.return_value = mock_root_node
+
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        conn._connected = True
+        conn._client = mock_client
+
+        mock_ua = MagicMock()
+        with patch.dict(sys.modules, {"asyncua": MagicMock(ua=mock_ua), "asyncua.ua": mock_ua}):
+            nodes = await conn.browse_nodes("ns=2;s=Pump")
+
+        assert len(nodes) == 1
+        assert nodes[0]["node_class"] == "Variable"
+        mock_client.get_node.assert_called_with("ns=2;s=Pump")
+
+    @pytest.mark.asyncio
+    async def test_browse_nodes_empty(self) -> None:
+        """Browse a leaf node with no children."""
+        mock_root = AsyncMock()
+        mock_root.get_children.return_value = []
+
+        mock_client = MagicMock()
+        mock_client.get_node.return_value = mock_root
+
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        conn._connected = True
+        conn._client = mock_client
+
+        mock_ua = MagicMock()
+        with patch.dict(sys.modules, {"asyncua": MagicMock(ua=mock_ua), "asyncua.ua": mock_ua}):
+            nodes = await conn.browse_nodes("ns=2;s=Leaf")
+
+        assert nodes == []
+
+    @pytest.mark.asyncio
+    async def test_browse_nodes_error(self) -> None:
+        """browse_nodes wraps exceptions in ConnectorError."""
+        mock_root = AsyncMock()
+        mock_root.get_children.side_effect = Exception("browse failed")
+
+        mock_client = MagicMock()
+        mock_client.get_node.return_value = mock_root
+
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        conn._connected = True
+        conn._client = mock_client
+
+        mock_ua = MagicMock()
+        with (
+            patch.dict(sys.modules, {"asyncua": MagicMock(ua=mock_ua), "asyncua.ua": mock_ua}),
+            pytest.raises(ConnectorError, match="Failed to browse nodes"),
+        ):
+            await conn.browse_nodes()
+
+
+class TestOpcUaConnectorSecurity:
+    """Test security configuration."""
+
+    @pytest.mark.asyncio
+    async def test_connect_with_sign_security(self) -> None:
+        """Security mode 'Sign' should call set_security_string."""
+        mock_client_cls = MagicMock()
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        mock_asyncua = MagicMock()
+        mock_asyncua.Client = mock_client_cls
+
+        conn = OpcUaConnector(
+            endpoint="opc.tcp://localhost:4840",
+            security_mode="Sign",
+            security_policy="Basic256Sha256",
+            certificate="/path/to/cert.pem",
+            private_key="/path/to/key.pem",
+        )
+
+        with patch.dict(
+            sys.modules,
+            {"asyncua": mock_asyncua, "asyncua.crypto.security_policies": MagicMock()},
+        ):
+            await conn.connect()
+
+        # set_security_string should have been called with the policy string
+        mock_client.set_security_string.assert_awaited_once_with(
+            "Basic256Sha256,Sign,/path/to/cert.pem,/path/to/key.pem"
+        )
+
+    @pytest.mark.asyncio
+    async def test_connect_with_sign_and_encrypt_security(self) -> None:
+        """Security mode 'SignAndEncrypt' should configure the client."""
+        mock_client_cls = MagicMock()
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        mock_asyncua = MagicMock()
+        mock_asyncua.Client = mock_client_cls
+
+        conn = OpcUaConnector(
+            endpoint="opc.tcp://localhost:4840",
+            security_mode="SignAndEncrypt",
+            security_policy="Basic256Sha256",
+            certificate="/cert.der",
+            private_key="/key.der",
+        )
+
+        with patch.dict(
+            sys.modules,
+            {"asyncua": mock_asyncua, "asyncua.crypto.security_policies": MagicMock()},
+        ):
+            await conn.connect()
+
+        mock_client.set_security_string.assert_awaited_once_with(
+            "Basic256Sha256,SignAndEncrypt,/cert.der,/key.der"
+        )
+
+    @pytest.mark.asyncio
+    async def test_connect_security_config_failure(self) -> None:
+        """If set_security_string raises, ConnectorAuthError should be raised."""
+        mock_client_cls = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.set_security_string.side_effect = Exception("bad certificate")
+        mock_client_cls.return_value = mock_client
+
+        mock_asyncua = MagicMock()
+        mock_asyncua.Client = mock_client_cls
+
+        conn = OpcUaConnector(
+            endpoint="opc.tcp://localhost:4840",
+            security_mode="Sign",
+            security_policy="Basic256Sha256",
+        )
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"asyncua": mock_asyncua, "asyncua.crypto.security_policies": MagicMock()},
+            ),
+            pytest.raises(ConnectorAuthError, match="Security configuration failed"),
+        ):
+            await conn.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_none_security_skips_config(self) -> None:
+        """Security mode 'None' should not call set_security_string."""
+        mock_client_cls = MagicMock()
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        mock_asyncua = MagicMock()
+        mock_asyncua.Client = mock_client_cls
+
+        conn = OpcUaConnector(
+            endpoint="opc.tcp://localhost:4840",
+            security_mode="None",
+        )
+
+        with patch.dict(
+            sys.modules,
+            {"asyncua": mock_asyncua, "asyncua.crypto.security_policies": MagicMock()},
+        ):
+            await conn.connect()
+
+        mock_client.set_security_string.assert_not_awaited()
+
+
 class TestSubscriptionConfig:
     """Test SubscriptionConfig defaults."""
 
