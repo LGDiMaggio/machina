@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import MutableMapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping
 
 _REDACT_PATTERNS = {"token", "password", "secret", "api_key", "client_secret", "authorization"}
 
