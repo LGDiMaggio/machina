@@ -18,6 +18,7 @@ from machina.exceptions import ConnectorAuthError, ConnectorError
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_event(
     id: str = "evt-1",
     title: str = "Test",
@@ -199,7 +200,6 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_parse_events_with_date_filter(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         backend = ICalBackend(source="dummy")
@@ -215,7 +215,6 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_parse_recurring_events(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         backend = ICalBackend(source="dummy")
@@ -232,15 +231,12 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_calendar_type_map_classification(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         type_map = {"shutdown": EventType.DOWNTIME, "production": EventType.PRODUCTION}
         backend = ICalBackend(source="dummy", calendar_type_map=type_map)
         backend._raw_data = SAMPLE_ICS
-        conn = CalendarConnector(
-            backend="ical", source="dummy", calendar_type_map=type_map
-        )
+        conn = CalendarConnector(backend="ical", source="dummy", calendar_type_map=type_map)
         conn._backend = backend
 
         events = await conn.read_events()
@@ -250,7 +246,6 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_create_event_raises_readonly(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         backend = ICalBackend(source="dummy")
@@ -263,7 +258,6 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_delete_event_raises_readonly(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         backend = ICalBackend(source="dummy")
@@ -276,7 +270,6 @@ class TestICalBackend:
 
     @pytest.mark.asyncio
     async def test_disconnect_clears_data(self) -> None:
-
         from machina.connectors.calendar._ical import ICalBackend
 
         backend = ICalBackend(source="dummy")
@@ -307,9 +300,14 @@ class TestGoogleCalendarBackend:
     async def test_connect_no_credentials_raises(self) -> None:
         # Mock the import so it doesn't fail
         mock_discovery = MagicMock()
-        with patch.dict(sys.modules, {"googleapiclient": MagicMock(), "googleapiclient.discovery": mock_discovery}):
+        with patch.dict(
+            sys.modules,
+            {"googleapiclient": MagicMock(), "googleapiclient.discovery": mock_discovery},
+        ):
             conn = CalendarConnector(backend="google")
-            with pytest.raises(ConnectorAuthError, match="service_account_file or credentials_file"):
+            with pytest.raises(
+                ConnectorAuthError, match="service_account_file or credentials_file"
+            ):
                 await conn.connect()
 
     @pytest.mark.asyncio
@@ -320,13 +318,16 @@ class TestGoogleCalendarBackend:
         mock_sa_mod.Credentials.from_service_account_file.return_value = mock_creds
         mock_discovery.build.return_value = MagicMock()
 
-        with patch.dict(sys.modules, {
-            "googleapiclient": MagicMock(),
-            "googleapiclient.discovery": mock_discovery,
-            "google": MagicMock(),
-            "google.oauth2": MagicMock(),
-            "google.oauth2.service_account": mock_sa_mod,
-        }):
+        with patch.dict(
+            sys.modules,
+            {
+                "googleapiclient": MagicMock(),
+                "googleapiclient.discovery": mock_discovery,
+                "google": MagicMock(),
+                "google.oauth2": MagicMock(),
+                "google.oauth2.service_account": mock_sa_mod,
+            },
+        ):
             conn = CalendarConnector(backend="google", service_account_file="/sa.json")
             await conn.connect()
             assert conn._backend.is_connected
@@ -549,9 +550,7 @@ class TestOutlookCalendarBackend:
     async def test_create_event(self) -> None:
         from machina.connectors.calendar._outlook import OutlookCalendarBackend
 
-        backend = OutlookCalendarBackend(
-            tenant_id="t", client_id="c", client_secret="s"
-        )
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
 
         mock_http = AsyncMock()
         mock_resp = MagicMock()
@@ -578,9 +577,7 @@ class TestOutlookCalendarBackend:
     async def test_delete_event(self) -> None:
         from machina.connectors.calendar._outlook import OutlookCalendarBackend
 
-        backend = OutlookCalendarBackend(
-            tenant_id="t", client_id="c", client_secret="s"
-        )
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
 
         mock_http = AsyncMock()
         mock_resp = MagicMock()
@@ -599,9 +596,7 @@ class TestOutlookCalendarBackend:
     async def test_disconnect(self) -> None:
         from machina.connectors.calendar._outlook import OutlookCalendarBackend
 
-        backend = OutlookCalendarBackend(
-            tenant_id="t", client_id="c", client_secret="s"
-        )
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
         mock_http = AsyncMock()
         backend._http = mock_http
         backend._token = "tok"

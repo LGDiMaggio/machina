@@ -192,9 +192,7 @@ class CalendarConnector:
         self._ensure_connected()
 
         if self._backend_name == "ical":
-            events = await self._backend.list_events(
-                calendar_id=calendar_id, start=start, end=end
-            )
+            events = await self._backend.list_events(calendar_id=calendar_id, start=start, end=end)
         else:
             events = await self._backend.list_events(
                 calendar_id=calendar_id, start=start, end=end, max_results=max_results

@@ -65,8 +65,7 @@ class OutlookCalendarBackend:
 
         if not all([self._tenant_id, self._client_id, self._client_secret]):
             raise ConnectorAuthError(
-                "tenant_id, client_id, and client_secret are required "
-                "for Outlook calendar backend"
+                "tenant_id, client_id, and client_secret are required for Outlook calendar backend"
             )
 
         app = msal.ConfidentialClientApplication(
@@ -240,8 +239,7 @@ class OutlookCalendarBackend:
             end_dt = end_dt.replace(tzinfo=UTC)
 
         attendees = [
-            a.get("emailAddress", {}).get("address", "")
-            for a in item.get("attendees", [])
+            a.get("emailAddress", {}).get("address", "") for a in item.get("attendees", [])
         ]
         recurrence = item.get("recurrence")
 
@@ -277,8 +275,7 @@ class OutlookCalendarBackend:
 
         if event.attendees:
             body["attendees"] = [
-                {"emailAddress": {"address": a}, "type": "required"}
-                for a in event.attendees
+                {"emailAddress": {"address": a}, "type": "required"} for a in event.attendees
             ]
 
         return body

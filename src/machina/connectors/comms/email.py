@@ -164,7 +164,9 @@ class EmailConnector:
                      and returns the response text.
         """
         self._ensure_connected()
-        logger.info("listening", connector="EmailConnector", mode="gmail" if self._is_gmail else "imap")
+        logger.info(
+            "listening", connector="EmailConnector", mode="gmail" if self._is_gmail else "imap"
+        )
 
         try:
             while True:
@@ -172,7 +174,9 @@ class EmailConnector:
                 for msg in messages:
                     response = await handler(msg)
                     if response and msg.chat_id:
-                        await self.send_message(msg.chat_id, response, subject="Re: " + msg.text[:50])
+                        await self.send_message(
+                            msg.chat_id, response, subject="Re: " + msg.text[:50]
+                        )
                 await asyncio.sleep(self._poll_interval)
         except asyncio.CancelledError:
             pass
@@ -192,9 +196,7 @@ class EmailConnector:
 
         try:
             if self._use_tls:
-                smtp = await asyncio.to_thread(
-                    smtplib.SMTP_SSL, self._smtp_host, self._smtp_port
-                )
+                smtp = await asyncio.to_thread(smtplib.SMTP_SSL, self._smtp_host, self._smtp_port)
             else:
                 smtp = await asyncio.to_thread(smtplib.SMTP, self._smtp_host, self._smtp_port)
                 await asyncio.to_thread(smtp.starttls)
@@ -238,13 +240,9 @@ class EmailConnector:
         messages: list[IncomingMessage] = []
         try:
             if self._use_tls:
-                imap = await asyncio.to_thread(
-                    imaplib.IMAP4_SSL, self._imap_host, self._imap_port
-                )
+                imap = await asyncio.to_thread(imaplib.IMAP4_SSL, self._imap_host, self._imap_port)
             else:
-                imap = await asyncio.to_thread(
-                    imaplib.IMAP4, self._imap_host, self._imap_port
-                )
+                imap = await asyncio.to_thread(imaplib.IMAP4, self._imap_host, self._imap_port)
 
             await asyncio.to_thread(imap.login, self._username, self._password)
             await asyncio.to_thread(imap.select, "INBOX")
@@ -318,9 +316,7 @@ class EmailConnector:
         ]
 
         try:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                self._gmail_credentials_file, scopes
-            )
+            flow = InstalledAppFlow.from_client_secrets_file(self._gmail_credentials_file, scopes)
             creds = await asyncio.to_thread(flow.run_local_server, port=0)
             self._gmail_service = build("gmail", "v1", credentials=creds)
             logger.info("connected", connector="EmailConnector", mode="gmail")
@@ -374,8 +370,7 @@ class EmailConnector:
                     .execute
                 )
                 headers = {
-                    h["name"]: h["value"]
-                    for h in msg_detail.get("payload", {}).get("headers", [])
+                    h["name"]: h["value"] for h in msg_detail.get("payload", {}).get("headers", [])
                 }
                 from_addr = headers.get("From", "")
 

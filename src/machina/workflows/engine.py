@@ -198,9 +198,7 @@ class WorkflowEngine:
 
             except TimeoutError:
                 elapsed = (time.perf_counter() - start) * 1000
-                error_msg = (
-                    f"Step '{step.name}' timed out after {step.timeout_seconds}s"
-                )
+                error_msg = f"Step '{step.name}' timed out after {step.timeout_seconds}s"
                 logger.warning(
                     "step_timeout",
                     step=step.name,
@@ -225,7 +223,9 @@ class WorkflowEngine:
                 return self._handle_step_failure(step, error_msg, elapsed)
 
         # Should not reach here, but be safe
-        return StepResult(step_name=step.name, success=False, error="Unexpected")  # pragma: no cover
+        return StepResult(
+            step_name=step.name, success=False, error="Unexpected"
+        )  # pragma: no cover
 
     def _handle_step_failure(
         self,
@@ -307,9 +307,7 @@ class WorkflowEngine:
     async def _dispatch_llm(self, step: Step, context: WorkflowContext) -> Any:
         """Call the LLM with the step's resolved prompt."""
         if self._llm is None:
-            raise WorkflowError(
-                f"Step '{step.name}' requires an LLM but none is configured"
-            )
+            raise WorkflowError(f"Step '{step.name}' requires an LLM but none is configured")
 
         resolved_prompt = context.resolve(step.prompt)
 
@@ -364,14 +362,10 @@ class WorkflowEngine:
 
         service = self._services.get(service_name)
         if service is None:
-            raise WorkflowError(
-                f"Step '{step.name}': service '{service_name}' not registered"
-            )
+            raise WorkflowError(f"Step '{step.name}': service '{service_name}' not registered")
 
         # Resolve inputs from template variables
-        resolved_inputs = {
-            k: context.resolve(v) for k, v in step.inputs.items()
-        }
+        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action):
             logger.info(
@@ -402,9 +396,7 @@ class WorkflowEngine:
         capability = parts[1] if len(parts) > 1 else step.action
 
         # Resolve inputs
-        resolved_inputs = {
-            k: context.resolve(v) for k, v in step.inputs.items()
-        }
+        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action):
             logger.info(
@@ -417,16 +409,12 @@ class WorkflowEngine:
 
         connectors = self._registry.find_by_capability(capability)
         if not connectors:
-            raise WorkflowError(
-                f"Step '{step.name}': no connector with capability '{capability}'"
-            )
+            raise WorkflowError(f"Step '{step.name}': no connector with capability '{capability}'")
 
         _, conn = connectors[0]
         method = getattr(conn, capability, None)
         if method is None:
-            raise WorkflowError(
-                f"Step '{step.name}': connector has no method '{capability}'"
-            )
+            raise WorkflowError(f"Step '{step.name}': connector has no method '{capability}'")
 
         if asyncio.iscoroutinefunction(method):
             return await method(**resolved_inputs)

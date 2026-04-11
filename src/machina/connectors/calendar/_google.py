@@ -72,9 +72,7 @@ class GoogleCalendarBackend:
                 "for Google Calendar backend"
             )
 
-        self._service = await asyncio.to_thread(
-            build, "calendar", "v3", credentials=creds
-        )
+        self._service = await asyncio.to_thread(build, "calendar", "v3", credentials=creds)
         logger.info("connected", connector="CalendarConnector", backend="google")
 
     def _auth_service_account(self) -> Any:
@@ -132,9 +130,7 @@ class GoogleCalendarBackend:
         if end:
             kwargs["timeMax"] = end.isoformat()
 
-        result = await asyncio.to_thread(
-            self._service.events().list(**kwargs).execute
-        )
+        result = await asyncio.to_thread(self._service.events().list(**kwargs).execute)
 
         event_type = self._calendar_type_map.get(calendar_id, EventType.OTHER)
         events: list[CalendarEvent] = []
@@ -169,9 +165,7 @@ class GoogleCalendarBackend:
 
         body = self._to_google_body(event)
         result = await asyncio.to_thread(
-            self._service.events()
-            .insert(calendarId=calendar_id, body=body)
-            .execute
+            self._service.events().insert(calendarId=calendar_id, body=body).execute
         )
 
         event_type = self._calendar_type_map.get(calendar_id, event.event_type)
@@ -195,9 +189,7 @@ class GoogleCalendarBackend:
             raise ConnectorError("Not connected — call connect() first")
 
         await asyncio.to_thread(
-            self._service.events()
-            .delete(calendarId=calendar_id, eventId=event_id)
-            .execute
+            self._service.events().delete(calendarId=calendar_id, eventId=event_id).execute
         )
         logger.info(
             "event_deleted",
@@ -237,9 +229,7 @@ class GoogleCalendarBackend:
             start_dt = datetime.fromisoformat(start_raw.get("dateTime", ""))
             end_dt = datetime.fromisoformat(end_raw.get("dateTime", ""))
 
-        attendees = [
-            a.get("email", "") for a in item.get("attendees", [])
-        ]
+        attendees = [a.get("email", "") for a in item.get("attendees", [])]
         recurrence = item.get("recurrence", [])
 
         return CalendarEvent(

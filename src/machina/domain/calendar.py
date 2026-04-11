@@ -61,12 +61,8 @@ class CalendarEvent(BaseModel):
     recurring: bool = Field(
         default=False, description="Whether this event was expanded from a recurrence"
     )
-    recurrence_rule: str = Field(
-        default="", description="RRULE string (only on the master event)"
-    )
-    attendees: list[str] = Field(
-        default_factory=list, description="Attendee emails or names"
-    )
+    recurrence_rule: str = Field(default="", description="RRULE string (only on the master event)")
+    attendees: list[str] = Field(default_factory=list, description="Attendee emails or names")
     metadata: dict[str, str] = Field(
         default_factory=dict,
         description="Backend-specific extra fields",

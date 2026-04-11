@@ -54,7 +54,9 @@ class ICalBackend:
             raise ImportError(msg) from None
 
         self._raw_data = await asyncio.to_thread(self._load_source)
-        logger.info("connected", connector="CalendarConnector", backend="ical", source=self._source)
+        logger.info(
+            "connected", connector="CalendarConnector", backend="ical", source=self._source
+        )
 
     def _load_source(self) -> str:
         """Synchronously load iCal data from file or URL."""

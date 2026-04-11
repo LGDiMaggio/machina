@@ -618,7 +618,9 @@ class TestSandboxMode:
         registry = ConnectorRegistry()
         registry.register("comms", comms)
         engine = WorkflowEngine(
-            registry=registry, tracer=tracer, sandbox=True,
+            registry=registry,
+            tracer=tracer,
+            sandbox=True,
         )
         wf = Workflow(
             name="SandboxNotify",
