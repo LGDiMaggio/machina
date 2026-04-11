@@ -395,20 +395,21 @@ This will also be the fastest way to evaluate Machina: connect your data, use it
 - [x] LLM tool definitions (function calling)
 - [x] CI/CD pipeline (GitHub Actions) with automated PyPI release
 
-### 🚧 v0.2 — Workflows, MCP & More Connectors *(in progress)*
+### ✅ v0.2 — Workflows & More Connectors *(released)*
 
-- [ ] MaintainX, Limble, Fiix connectors
 - [x] OPC-UA and MQTT connectors
 - [x] Slack and Email connectors
 - [x] CalendarConnector (Google Calendar / Outlook / iCal)
 - [x] Workflow engine with trigger-step-action model
 - [x] Built-in alarm-to-work-order workflow template
 - [x] Sandbox mode — log-only runtime
+- [x] Security hardening (secret redaction, prompt injection defense, sandbox enforcement)
+
+### 🚧 v0.3 — MCP, Intelligence & Scale *(in progress)*
+
 - [ ] **MCP Server layer** — use connectors from Claude, Cursor, and any MCP client
+- [ ] MaintainX, Limble, Fiix connectors
 - [ ] Plugin system for community extensions
-
-### 🔮 v0.3 — Intelligence & Scale
-
 - [ ] Anomaly detection module
 - [ ] Multi-agent orchestration
 - [ ] Remaining Useful Life (RUL) estimation
