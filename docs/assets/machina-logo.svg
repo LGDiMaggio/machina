@@ -1,21 +1,4 @@
 <svg width="680" height="360" viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
-<style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&amp;display=swap');
-.m-title {
-  font-family: 'DM Sans', sans-serif;
-  font-weight: 500;
-  font-size: 46px;
-  fill: #1b2a3d;
-  letter-spacing: 7px;
-}
-.m-sub {
-  font-family: 'DM Sans', sans-serif;
-  font-weight: 400;
-  font-size: 12.5px;
-  fill: #0d8a72;
-  letter-spacing: 3px;
-}
-</style>
 
 <g transform="translate(340, 140)">
 
@@ -73,10 +56,10 @@
 
 </g>
 
-<text x="340" y="275" text-anchor="middle" class="m-title">MACHINA</text>
+<text x="340" y="275" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif" font-weight="600" font-size="46" fill="#1b2a3d" letter-spacing="7">MACHINA</text>
 
 <line x1="235" y1="293" x2="445" y2="293" stroke="#0d8a72" stroke-width="0.6" opacity="0.35"/>
 
-<text x="340" y="311" text-anchor="middle" class="m-sub">AI AGENTS FOR INDUSTRIAL MAINTENANCE</text>
+<text x="340" y="311" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif" font-weight="400" font-size="12.5" fill="#0d8a72" letter-spacing="3">AI AGENTS FOR INDUSTRIAL MAINTENANCE</text>
 
 </svg>
