@@ -105,7 +105,7 @@ class ICalBackend:
         """Synchronously parse the cached iCal data."""
         import icalendar
 
-        cal = icalendar.Calendar.from_ical(self._raw_data)
+        cal = icalendar.Calendar.from_ical(self._raw_data or "")
         events: list[CalendarEvent] = []
 
         for component in cal.walk():

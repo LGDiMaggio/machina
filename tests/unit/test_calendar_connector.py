@@ -693,3 +693,530 @@ class TestConvenienceMethods:
 
         result = await conn.read_events()
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# iCal backend — full coverage
+# ---------------------------------------------------------------------------
+
+
+SAMPLE_ICS_FULL = """\
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Test//EN
+BEGIN:VEVENT
+UID:evt-1
+SUMMARY:Production Run A
+DTSTART:20260415T060000Z
+DTEND:20260415T180000Z
+DESCRIPTION:Main production window
+LOCATION:Plant Floor A
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-2
+SUMMARY:Maintenance Shutdown
+DTSTART;VALUE=DATE:20260420
+DTEND;VALUE=DATE:20260421
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-3
+SUMMARY:Daily Standup
+DTSTART:20260415T090000Z
+DTEND:20260415T091500Z
+RRULE:FREQ=DAILY;COUNT=5
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-no-end
+SUMMARY:Single point event
+DTSTART:20260416T100000Z
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+class TestICalBackendFull:
+    """Comprehensive tests for the iCal backend (requires icalendar installed)."""
+
+    @pytest.mark.asyncio
+    async def test_connect_and_list_events(self) -> None:
+        """Full connect + list_events flow with real iCal parsing."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        events = await backend.list_events()
+        # Should find at least 3 (evt-1, evt-2, evt-no-end; evt-3 recurring needs range)
+        assert len(events) >= 3
+        titles = {e.title for e in events}
+        assert "Production Run A" in titles
+        assert "Maintenance Shutdown" in titles
+
+    @pytest.mark.asyncio
+    async def test_all_day_event_parsing(self) -> None:
+        """All-day events (DATE without time) are handled correctly."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        events = await backend.list_events()
+        all_day = [e for e in events if e.title == "Maintenance Shutdown"]
+        assert len(all_day) == 1
+        assert all_day[0].all_day is True
+
+    @pytest.mark.asyncio
+    async def test_event_without_dtend(self) -> None:
+        """Events without DTEND use DTSTART as fallback."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        events = await backend.list_events()
+        no_end = [e for e in events if e.title == "Single point event"]
+        assert len(no_end) == 1
+        assert no_end[0].start == no_end[0].end
+
+    @pytest.mark.asyncio
+    async def test_date_range_filter(self) -> None:
+        """Events outside the date range are excluded."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        start = datetime(2026, 4, 15, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 4, 15, 23, 59, tzinfo=UTC)
+        events = await backend.list_events(start=start, end=end)
+        # Only evt-1 and evt-no-end-ish fall in April 15 (+ recurring expansions)
+        for e in events:
+            assert e.start <= end
+            assert e.end >= start
+
+    @pytest.mark.asyncio
+    async def test_recurring_event_expansion(self) -> None:
+        """Recurring events are expanded within the date range."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        start = datetime(2026, 4, 15, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 4, 20, 0, 0, tzinfo=UTC)
+        events = await backend.list_events(start=start, end=end)
+        standup_events = [e for e in events if "Standup" in e.title]
+        # RRULE DAILY COUNT=5 starting April 15 → 5 occurrences, all within range
+        assert len(standup_events) >= 3
+        assert all(e.recurring is True for e in standup_events)
+
+    @pytest.mark.asyncio
+    async def test_calendar_type_map_classification(self) -> None:
+        """Events are classified by calendar_type_map keywords."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(
+            source="dummy.ics",
+            calendar_type_map={
+                "production": EventType.PRODUCTION,
+                "maintenance": EventType.MAINTENANCE,
+            },
+        )
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        events = await backend.list_events()
+        prod_events = [e for e in events if e.event_type == EventType.PRODUCTION]
+        maint_events = [e for e in events if e.event_type == EventType.MAINTENANCE]
+        assert len(prod_events) >= 1
+        assert len(maint_events) >= 1
+
+    @pytest.mark.asyncio
+    async def test_classify_event_default_other(self) -> None:
+        """Unmatched events get EventType.OTHER."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+
+        events = await backend.list_events()
+        standup = [e for e in events if e.title == "Daily Standup"]
+        if standup:
+            assert standup[0].event_type == EventType.OTHER
+
+    @pytest.mark.asyncio
+    async def test_not_connected_raises(self) -> None:
+        """list_events raises when not connected."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await backend.list_events()
+
+    @pytest.mark.asyncio
+    async def test_connect_no_source_raises(self) -> None:
+        """connect() raises when source is empty."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="")
+        with pytest.raises(ConnectorError, match="source is required"):
+            await backend.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_file_not_found_raises(self) -> None:
+        """connect() raises when file does not exist."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="/nonexistent/path.ics")
+        with pytest.raises(ConnectorError, match="not found"):
+            await backend.connect()
+
+    @pytest.mark.asyncio
+    async def test_create_event_raises_readonly(self) -> None:
+        """iCal backend refuses create_event."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        with pytest.raises(ConnectorError, match="read-only"):
+            await backend.create_event("cal-1", _make_event())
+
+    @pytest.mark.asyncio
+    async def test_delete_event_raises_readonly(self) -> None:
+        """iCal backend refuses delete_event."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        with pytest.raises(ConnectorError, match="read-only"):
+            await backend.delete_event("cal-1", "evt-1")
+
+    def test_is_connected(self) -> None:
+        """is_connected reflects raw_data state."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        assert backend.is_connected is False
+        backend._raw_data = "data"
+        assert backend.is_connected is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect(self) -> None:
+        """disconnect clears cached data."""
+        from machina.connectors.calendar._ical import ICalBackend
+
+        backend = ICalBackend(source="dummy.ics")
+        backend._raw_data = SAMPLE_ICS_FULL
+        await backend.disconnect()
+        assert backend._raw_data is None
+        assert backend.is_connected is False
+
+
+# ---------------------------------------------------------------------------
+# Google Calendar — additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleCalendarBackendExtended:
+    """Additional tests for uncovered Google Calendar paths."""
+
+    @pytest.mark.asyncio
+    async def test_connect_installed_app_flow(self) -> None:
+        """Test installed-app OAuth2 flow (credentials_file)."""
+        mock_flow_cls = MagicMock()
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.return_value = MagicMock()
+        mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+
+        mock_oauthlib = MagicMock()
+        mock_oauthlib.flow.InstalledAppFlow = mock_flow_cls
+
+        mock_build = MagicMock(return_value=MagicMock())
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "googleapiclient": MagicMock(),
+                    "googleapiclient.discovery": MagicMock(build=mock_build),
+                    "google_auth_oauthlib": mock_oauthlib,
+                    "google_auth_oauthlib.flow": mock_oauthlib.flow,
+                },
+            ),
+            patch("googleapiclient.discovery.build", mock_build),
+        ):
+            from machina.connectors.calendar._google import GoogleCalendarBackend
+
+            backend = GoogleCalendarBackend(credentials_file="/fake/creds.json")
+            await backend.connect()
+            mock_flow_cls.from_client_secrets_file.assert_called_once()
+            assert backend.is_connected is True
+
+    @pytest.mark.asyncio
+    async def test_connect_no_credentials_raises(self) -> None:
+        """connect() without credentials raises ConnectorAuthError."""
+        mock_google = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {
+                "googleapiclient": mock_google,
+                "googleapiclient.discovery": mock_google.discovery,
+            },
+        ):
+            from machina.connectors.calendar._google import GoogleCalendarBackend
+
+            backend = GoogleCalendarBackend()
+            with pytest.raises(ConnectorAuthError, match="credentials_file"):
+                await backend.connect()
+
+    @pytest.mark.asyncio
+    async def test_delete_event(self) -> None:
+        """delete_event calls the Google API."""
+        from machina.connectors.calendar._google import GoogleCalendarBackend
+
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_delete = MagicMock()
+        mock_delete.execute.return_value = None
+        mock_events.delete.return_value = mock_delete
+        mock_service.events.return_value = mock_events
+
+        backend = GoogleCalendarBackend(service_account_file="/fake.json")
+        backend._service = mock_service
+
+        await backend.delete_event("primary", "evt-del-1")
+        mock_events.delete.assert_called_once_with(calendarId="primary", eventId="evt-del-1")
+
+    @pytest.mark.asyncio
+    async def test_delete_event_not_connected_raises(self) -> None:
+        """delete_event raises when not connected."""
+        from machina.connectors.calendar._google import GoogleCalendarBackend
+
+        backend = GoogleCalendarBackend()
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await backend.delete_event("primary", "evt-1")
+
+    @pytest.mark.asyncio
+    async def test_create_event_all_day_with_attendees(self) -> None:
+        """Create an all-day event with attendees and recurrence_rule."""
+        from machina.connectors.calendar._google import GoogleCalendarBackend
+
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_insert = MagicMock()
+        mock_insert.execute.return_value = {
+            "id": "g-allday-new",
+            "summary": "Plant Holiday",
+            "start": {"date": "2026-05-01"},
+            "end": {"date": "2026-05-02"},
+        }
+        mock_events.insert.return_value = mock_insert
+        mock_service.events.return_value = mock_events
+
+        backend = GoogleCalendarBackend(service_account_file="/fake.json")
+        backend._service = mock_service
+
+        event = _make_event(
+            title="Plant Holiday",
+            all_day=True,
+            attendees=["tech@example.com", "mgr@example.com"],
+            recurrence_rule="RRULE:FREQ=YEARLY",
+        )
+        created = await backend.create_event("primary", event)
+        assert created.id == "g-allday-new"
+
+        # Verify insert was called
+        mock_events.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_events_with_date_filter(self) -> None:
+        """list_events passes timeMin/timeMax when start/end are provided."""
+        from machina.connectors.calendar._google import GoogleCalendarBackend
+
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_list = MagicMock()
+        mock_list.execute.return_value = {"items": []}
+        mock_events.list.return_value = mock_list
+        mock_service.events.return_value = mock_events
+
+        backend = GoogleCalendarBackend(service_account_file="/fake.json")
+        backend._service = mock_service
+
+        start = datetime(2026, 4, 1, tzinfo=UTC)
+        end = datetime(2026, 4, 30, tzinfo=UTC)
+        await backend.list_events(start=start, end=end)
+
+        call_kwargs = mock_events.list.call_args[1]
+        assert "timeMin" in call_kwargs
+        assert "timeMax" in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_event_with_attendees_and_recurrence(self) -> None:
+        """Parsing an event with attendees and recurrence rules."""
+        from machina.connectors.calendar._google import GoogleCalendarBackend
+
+        mock_service = MagicMock()
+        mock_events = MagicMock()
+        mock_list = MagicMock()
+        mock_list.execute.return_value = {
+            "items": [
+                {
+                    "id": "g-recurring",
+                    "summary": "Weekly Review",
+                    "start": {"dateTime": "2026-04-15T10:00:00+00:00"},
+                    "end": {"dateTime": "2026-04-15T11:00:00+00:00"},
+                    "attendees": [
+                        {"email": "a@test.com"},
+                        {"email": "b@test.com"},
+                    ],
+                    "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=10"],
+                    "recurringEventId": "g-master",
+                },
+            ]
+        }
+        mock_events.list.return_value = mock_list
+        mock_service.events.return_value = mock_events
+
+        backend = GoogleCalendarBackend(service_account_file="/fake.json")
+        backend._service = mock_service
+
+        events = await backend.list_events()
+        assert len(events) == 1
+        assert events[0].attendees == ["a@test.com", "b@test.com"]
+        assert events[0].recurring is True
+        assert "FREQ=WEEKLY" in events[0].recurrence_rule
+
+
+# ---------------------------------------------------------------------------
+# Outlook Calendar — additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestOutlookCalendarBackendExtended:
+    """Additional tests for uncovered Outlook paths."""
+
+    @pytest.mark.asyncio
+    async def test_connect_success(self) -> None:
+        """Full connect flow with mocked MSAL and httpx."""
+        mock_msal = MagicMock()
+        mock_app = MagicMock()
+        mock_app.acquire_token_for_client.return_value = {"access_token": "test-token"}
+        mock_msal.ConfidentialClientApplication.return_value = mock_app
+
+        mock_httpx = MagicMock()
+        mock_client = AsyncMock()
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch.dict(sys.modules, {"msal": mock_msal, "httpx": mock_httpx}):
+            from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+            backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+            await backend.connect()
+            assert backend.is_connected is True
+            assert backend._msal_app is not None
+
+    @pytest.mark.asyncio
+    async def test_token_refresh_on_api_call(self) -> None:
+        """Token is refreshed via _ensure_fresh_token before API calls."""
+        from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+        mock_http = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"value": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.headers = {"Authorization": "Bearer old-token"}
+        backend._http = mock_http
+        backend._token = "old-token"
+
+        # MSAL returns a new token
+        mock_msal_app = MagicMock()
+        mock_msal_app.acquire_token_silent.return_value = {"access_token": "new-token"}
+        backend._msal_app = mock_msal_app
+
+        await backend.list_events()
+        assert backend._token == "new-token"
+        assert mock_http.headers["Authorization"] == "Bearer new-token"
+
+    @pytest.mark.asyncio
+    async def test_token_silent_fallback_to_client_credentials(self) -> None:
+        """When acquire_token_silent returns None, falls back to client credentials."""
+        from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+        mock_http = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"value": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.headers = {"Authorization": "Bearer old"}
+        backend._http = mock_http
+        backend._token = "old"
+
+        mock_msal_app = MagicMock()
+        mock_msal_app.acquire_token_silent.return_value = None
+        mock_msal_app.acquire_token_for_client.return_value = {"access_token": "fresh"}
+        backend._msal_app = mock_msal_app
+
+        await backend.list_events()
+        assert backend._token == "fresh"
+        mock_msal_app.acquire_token_for_client.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_events_default_calendar(self) -> None:
+        """Empty calendar_id uses the user's default calendar URL."""
+        from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+        mock_http = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"value": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        backend._http = mock_http
+        backend._token = "tok"
+        mock_msal = MagicMock()
+        mock_msal.acquire_token_silent.return_value = {"access_token": "tok"}
+        backend._msal_app = mock_msal
+
+        await backend.list_events(calendar_id="")
+        url_used = mock_http.get.call_args[0][0]
+        assert "/calendar/events" in url_used
+        assert "/calendars/" not in url_used
+
+    @pytest.mark.asyncio
+    async def test_list_events_with_date_filter(self) -> None:
+        """Date filters produce $filter query parameters."""
+        from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+        mock_http = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"value": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        backend._http = mock_http
+        backend._token = "tok"
+        mock_msal = MagicMock()
+        mock_msal.acquire_token_silent.return_value = {"access_token": "tok"}
+        backend._msal_app = mock_msal
+
+        start = datetime(2026, 4, 1, tzinfo=UTC)
+        end = datetime(2026, 4, 30, tzinfo=UTC)
+        await backend.list_events(start=start, end=end)
+
+        call_kwargs = mock_http.get.call_args[1]
+        assert "$filter" in call_kwargs.get("params", {})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_msal_app(self) -> None:
+        """Disconnect clears MSAL app reference."""
+        from machina.connectors.calendar._outlook import OutlookCalendarBackend
+
+        backend = OutlookCalendarBackend(tenant_id="t", client_id="c", client_secret="s")
+        backend._http = AsyncMock()
+        backend._token = "tok"
+        backend._msal_app = MagicMock()
+
+        await backend.disconnect()
+        assert backend._msal_app is None
+        assert backend._token == ""

@@ -469,3 +469,370 @@ class TestEmailConnectorListen:
 
         # Should not raise
         await conn.listen(handler)
+
+
+# ---------------------------------------------------------------------------
+# IMAP connection reuse
+# ---------------------------------------------------------------------------
+
+
+class TestEmailConnectorIMAPReuse:
+    """Test IMAP connection reuse and reconnection logic."""
+
+    @pytest.mark.asyncio
+    async def test_imap_connection_reused_across_polls(self) -> None:
+        """IMAP connection is reused when noop succeeds."""
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            imap_host="imap.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+
+        mock_imap = MagicMock()
+        mock_imap.noop.return_value = ("OK", [])
+        mock_imap.select.return_value = ("OK", [])
+        mock_imap.search.return_value = ("OK", [b""])
+        conn._imap = mock_imap
+
+        messages = await conn._fetch_imap_messages()
+        assert messages == []
+        # Should reuse existing connection, not create a new one
+        mock_imap.noop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_imap_reconnects_on_failure(self) -> None:
+        """IMAP reconnects when noop raises an exception."""
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            imap_host="imap.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+
+        # Existing connection that fails noop
+        old_imap = MagicMock()
+        old_imap.noop.side_effect = Exception("Connection lost")
+        old_imap.logout.return_value = ("BYE", [])
+        conn._imap = old_imap
+
+        # New connection that succeeds
+        new_imap = MagicMock()
+        new_imap.select.return_value = ("OK", [])
+        new_imap.search.return_value = ("OK", [b""])
+
+        import imaplib
+
+        with patch.object(imaplib, "IMAP4_SSL", return_value=new_imap):
+            messages = await conn._fetch_imap_messages()
+
+        assert messages == []
+        assert conn._imap is new_imap
+
+    @pytest.mark.asyncio
+    async def test_imap_no_host_returns_empty(self) -> None:
+        """No IMAP host returns empty list."""
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+
+        messages = await conn._fetch_imap_messages()
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_imap_fetch_error_resets_connection(self) -> None:
+        """IMAP errors reset the connection for next poll."""
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            imap_host="imap.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+
+        mock_imap = MagicMock()
+        mock_imap.noop.return_value = ("OK", [])
+        mock_imap.select.side_effect = Exception("Mailbox unavailable")
+        conn._imap = mock_imap
+
+        messages = await conn._fetch_imap_messages()
+        assert messages == []
+        # Connection should be reset for next poll
+        assert conn._imap is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_imap(self) -> None:
+        """Disconnect properly closes IMAP connection."""
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            imap_host="imap.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+        mock_imap = MagicMock()
+        conn._imap = mock_imap
+
+        await conn.disconnect()
+        mock_imap.logout.assert_called_once()
+        assert conn._imap is None
+
+    @pytest.mark.asyncio
+    async def test_imap_multipart_email_parsing(self) -> None:
+        """Multipart emails have plain text body extracted."""
+        import email.mime.multipart
+        import email.mime.text
+
+        conn = EmailConnector(
+            smtp_host="smtp.test.com",
+            imap_host="imap.test.com",
+            username="u@test.com",
+            password="p",
+        )
+        conn._connected = True
+
+        # Build a real multipart email
+        msg = email.mime.multipart.MIMEMultipart("alternative")
+        msg["From"] = "sender@test.com"
+        msg["To"] = "u@test.com"
+        msg["Subject"] = "Test"
+        msg.attach(email.mime.text.MIMEText("Plain text body", "plain"))
+        msg.attach(email.mime.text.MIMEText("<b>HTML body</b>", "html"))
+
+        mock_imap = MagicMock()
+        mock_imap.noop.return_value = ("OK", [])
+        mock_imap.select.return_value = ("OK", [])
+        mock_imap.search.return_value = ("OK", [b"1"])
+        mock_imap.fetch.return_value = ("OK", [(b"1", msg.as_bytes())])
+        conn._imap = mock_imap
+
+        messages = await conn._fetch_imap_messages()
+        assert len(messages) == 1
+        assert messages[0].text == "Plain text body"
+        assert messages[0].channel == "email"
+
+
+# ---------------------------------------------------------------------------
+# Gmail API backend
+# ---------------------------------------------------------------------------
+
+
+class TestEmailConnectorGmailExtended:
+    """Extended Gmail API backend tests."""
+
+    @pytest.mark.asyncio
+    async def test_gmail_send(self) -> None:
+        """Gmail send_message encodes and sends via the API."""
+        conn = EmailConnector(
+            gmail_credentials_file="/fake/creds.json",
+            username="agent@gmail.com",
+        )
+        conn._connected = True
+
+        mock_service = MagicMock()
+        mock_users = MagicMock()
+        mock_messages = MagicMock()
+        mock_send = MagicMock()
+        mock_send.execute.return_value = {"id": "sent-1"}
+        mock_messages.send.return_value = mock_send
+        mock_users.messages.return_value = mock_messages
+        mock_service.users.return_value = mock_users
+        conn._gmail_service = mock_service
+
+        await conn.send_message("tech@test.com", "WO created", subject="Alert")
+        mock_messages.send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_gmail_send_not_initialized_raises(self) -> None:
+        """Gmail send raises when service is None."""
+        conn = EmailConnector(
+            gmail_credentials_file="/fake/creds.json",
+            username="agent@gmail.com",
+        )
+        conn._connected = True
+        conn._gmail_service = None
+
+        with pytest.raises(ConnectorError, match="Gmail service not initialised"):
+            await conn._send_gmail("to@test.com", "text", subject="Test")
+
+    @pytest.mark.asyncio
+    async def test_gmail_send_failure_raises(self) -> None:
+        """Gmail send wraps API errors in ConnectorError."""
+        conn = EmailConnector(
+            gmail_credentials_file="/fake/creds.json",
+            username="agent@gmail.com",
+        )
+        conn._connected = True
+
+        mock_service = MagicMock()
+        mock_users = MagicMock()
+        mock_messages = MagicMock()
+        mock_send = MagicMock()
+        mock_send.execute.side_effect = RuntimeError("API quota exceeded")
+        mock_messages.send.return_value = mock_send
+        mock_users.messages.return_value = mock_messages
+        mock_service.users.return_value = mock_users
+        conn._gmail_service = mock_service
+
+        with pytest.raises(ConnectorError, match="Gmail send failed"):
+            await conn.send_message("to@test.com", "text")
+
+    @pytest.mark.asyncio
+    async def test_gmail_fetch_messages(self) -> None:
+        """Gmail fetch returns parsed messages and marks them as read."""
+        import base64
+
+        conn = EmailConnector(
+            gmail_credentials_file="/fake/creds.json",
+            username="agent@gmail.com",
+        )
+        conn._connected = True
+
+        body_b64 = base64.urlsafe_b64encode(b"Check pump P-201").decode()
+        mock_service = MagicMock()
+        mock_users = MagicMock()
+        mock_messages = MagicMock()
+
+        mock_list = MagicMock()
+        mock_list.execute.return_value = {"messages": [{"id": "msg-1"}]}
+        mock_messages.list.return_value = mock_list
+
+        mock_get = MagicMock()
+        mock_get.execute.return_value = {
+            "payload": {
+                "headers": [{"name": "From", "value": "tech@test.com"}],
+                "parts": [
+                    {"mimeType": "text/plain", "body": {"data": body_b64}},
+                ],
+            }
+        }
+        mock_messages.get.return_value = mock_get
+
+        mock_modify = MagicMock()
+        mock_modify.execute.return_value = {}
+        mock_messages.modify.return_value = mock_modify
+
+        mock_users.messages.return_value = mock_messages
+        mock_service.users.return_value = mock_users
+        conn._gmail_service = mock_service
+
+        messages = await conn._fetch_gmail_messages()
+        assert len(messages) == 1
+        assert messages[0].text == "Check pump P-201"
+        assert messages[0].chat_id == "tech@test.com"
+        # Verify marked as read
+        mock_messages.modify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_gmail_fetch_body_without_parts(self) -> None:
+        """Gmail messages without parts use direct body data."""
+        import base64
+
+        conn = EmailConnector(
+            gmail_credentials_file="/fake/creds.json",
+            username="agent@gmail.com",
+        )
+        conn._connected = True
+
+        body_b64 = base64.urlsafe_b64encode(b"Simple body").decode()
+        mock_service = MagicMock()
+        mock_users = MagicMock()
+        mock_messages = MagicMock()
+
+        mock_list = MagicMock()
+        mock_list.execute.return_value = {"messages": [{"id": "msg-2"}]}
+        mock_messages.list.return_value = mock_list
+
+        mock_get = MagicMock()
+        mock_get.execute.return_value = {
+            "payload": {
+                "headers": [{"name": "From", "value": "mgr@test.com"}],
+                "body": {"data": body_b64},
+            }
+        }
+        mock_messages.get.return_value = mock_get
+
+        mock_modify = MagicMock()
+        mock_modify.execute.return_value = {}
+        mock_messages.modify.return_value = mock_modify
+
+        mock_users.messages.return_value = mock_messages
+        mock_service.users.return_value = mock_users
+        conn._gmail_service = mock_service
+
+        messages = await conn._fetch_gmail_messages()
+        assert len(messages) == 1
+        assert messages[0].text == "Simple body"
+
+    @pytest.mark.asyncio
+    async def test_gmail_fetch_no_service_returns_empty(self) -> None:
+        """Gmail fetch with no service returns empty."""
+        conn = EmailConnector(gmail_credentials_file="/fake/creds.json")
+        conn._connected = True
+        conn._gmail_service = None
+
+        messages = await conn._fetch_gmail_messages()
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_gmail_fetch_error_returns_empty(self) -> None:
+        """Gmail fetch that errors returns empty and logs warning."""
+        conn = EmailConnector(gmail_credentials_file="/fake/creds.json")
+        conn._connected = True
+
+        mock_service = MagicMock()
+        mock_users = MagicMock()
+        mock_messages = MagicMock()
+        mock_list = MagicMock()
+        mock_list.execute.side_effect = RuntimeError("Network error")
+        mock_messages.list.return_value = mock_list
+        mock_users.messages.return_value = mock_messages
+        mock_service.users.return_value = mock_users
+        conn._gmail_service = mock_service
+
+        messages = await conn._fetch_gmail_messages()
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_new_messages_routes_to_gmail(self) -> None:
+        """_fetch_new_messages routes to Gmail when credentials are set."""
+        conn = EmailConnector(gmail_credentials_file="/fake/creds.json")
+        conn._connected = True
+        conn._gmail_service = None
+
+        messages = await conn._fetch_new_messages()
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_gmail_connect(self) -> None:
+        """Gmail connect flow with mocked Google libraries."""
+        mock_flow_cls = MagicMock()
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.return_value = MagicMock()
+        mock_flow_cls.from_client_secrets_file.return_value = mock_flow
+
+        mock_oauthlib = MagicMock()
+        mock_oauthlib.flow.InstalledAppFlow = mock_flow_cls
+
+        mock_build = MagicMock(return_value=MagicMock())
+
+        with patch.dict(
+            sys.modules,
+            {
+                "google_auth_oauthlib": mock_oauthlib,
+                "google_auth_oauthlib.flow": mock_oauthlib.flow,
+                "googleapiclient": MagicMock(),
+                "googleapiclient.discovery": MagicMock(build=mock_build),
+            },
+        ):
+            conn = EmailConnector(
+                gmail_credentials_file="/fake/creds.json",
+                username="agent@gmail.com",
+            )
+            await conn.connect()
+            assert conn._connected is True
