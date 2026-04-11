@@ -35,7 +35,7 @@ Machina provides the missing vertical layer between general-purpose agent framew
 
 ## Features
 
-- **Industrial Connectors** — Pre-built integrations for CMMS (SAP PM, IBM Maximo, UpKeep, any REST-based CMMS), document stores with RAG, and communication platforms (Telegram). IoT protocols (OPC-UA, MQTT) and additional comms (Slack, Teams) coming in v0.2
+- **Industrial Connectors** — Pre-built integrations for CMMS (SAP PM, IBM Maximo, UpKeep, any REST-based CMMS), document stores with RAG, communication platforms (Telegram, Slack, Email), and IoT protocols (OPC-UA, MQTT)
 - **Maintenance Domain Model** — First-class Python objects for Asset, WorkOrder, FailureMode, SparePart, MaintenancePlan, and Alarm — with hierarchies, validation, and domain logic built in
 - **Domain-Aware AI** — Agents that automatically resolve equipment references, inject maintenance context, retrieve relevant procedures, and ground answers in your data
 - **LLM-Agnostic** — Works with OpenAI, Anthropic, Mistral, Llama, Ollama, and any LiteLLM-compatible provider. No vendor lock-in
@@ -114,7 +114,7 @@ agent = Agent(
 )
 ```
 
-### Add Real-Time Sensor Monitoring *(Coming in v0.2)*
+### Add Real-Time Sensor Monitoring
 
 ```python
 from machina.connectors import OpcUa  # requires: pip install machina-ai[opcua]
@@ -134,8 +134,6 @@ agent = Agent(
     llm="openai:gpt-4o",
 )
 ```
-
-> **Note:** The OPC-UA connector is planned for v0.2. The example above shows the target API.
 
 ## Architecture
 
@@ -196,12 +194,17 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 
 ### IoT & Industrial Protocols
 
+#### ✅ Available Now
+
+| Connector | Protocol | Since |
+|-----------|----------|-------|
+| `OpcUa` | OPC-UA | v0.2 |
+| `Mqtt` | MQTT / Sparkplug B | v0.2 |
+
 #### 🚧 Coming Soon
 
 | Connector | Protocol | Planned |
 |-----------|----------|---------|
-| `OpcUa` | OPC-UA | v0.2 |
-| `Mqtt` | MQTT / Sparkplug B | v0.2 |
 | `Modbus` | Modbus TCP/RTU | v0.3 |
 | `Plc` | S7 / EtherNet/IP | v0.3 |
 
@@ -212,15 +215,15 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 | Connector | Platform | Since |
 |-----------|----------|-------|
 | `Telegram` | Telegram Bot API | v0.1 |
+| `Slack` | Slack Bolt SDK (Socket Mode) | v0.2 |
+| `Email` | SMTP / IMAP (+ Gmail API backend) | v0.2 |
 
 #### 🚧 Coming Soon
 
 | Connector | Platform | Planned |
 |-----------|----------|---------|
-| `WhatsApp` | WhatsApp Business | v0.2 |
-| `Slack` | Slack Bot API | v0.2 |
-| `Teams` | Microsoft Teams | v0.2 |
-| `Email` | SMTP / IMAP / Gmail API | v0.2 |
+| `WhatsApp` | WhatsApp Business Cloud API | v0.3 |
+| `Teams` | Microsoft Graph API | v0.3 |
 | `GoogleChat` | Google Chat | v0.3 |
 
 ### Documents & Knowledge
@@ -246,6 +249,16 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 |-----------|--------|---------|
 | `SapErp` | SAP S/4HANA | v0.2 |
 | `OracleErp` | Oracle ERP | v0.3 |
+
+### Calendar & Scheduling
+
+#### ✅ Available Now
+
+| Connector | Source | Since |
+|-----------|--------|-------|
+| `Calendar` | Google Calendar / Outlook / iCal | v0.2 |
+
+The `CalendarConnector` provides production schedules, shift patterns, technician availability, and planned downtime windows via three pluggable backends (iCal, Google Calendar API, Microsoft Graph API).
 
 ### Building Custom Connectors
 
@@ -384,8 +397,9 @@ This will also be the fastest way to evaluate Machina: connect your data, use it
 ### 🚧 v0.2 — Workflows, MCP & More Connectors *(in progress)*
 
 - [ ] MaintainX, Limble, Fiix connectors
-- [ ] OPC-UA and MQTT connectors
-- [ ] WhatsApp, Slack, Teams, Email connectors
+- [x] OPC-UA and MQTT connectors
+- [x] Slack and Email connectors
+- [x] CalendarConnector (Google Calendar / Outlook / iCal)
 - [x] Workflow engine with trigger-step-action model
 - [x] Built-in alarm-to-work-order workflow template
 - [x] Sandbox mode — log-only runtime
@@ -397,6 +411,7 @@ This will also be the fastest way to evaluate Machina: connect your data, use it
 - [ ] Anomaly detection module
 - [ ] Multi-agent orchestration
 - [ ] Remaining Useful Life (RUL) estimation
+- [ ] WhatsApp, Teams connectors
 - [ ] Additional connectors (Modbus, eMaint, Infor EAM, GoogleChat)
 
 See the [full roadmap](https://github.com/LGDiMaggio/machina/projects) for details.
@@ -408,8 +423,8 @@ The [`examples/`](examples/) directory contains complete, runnable examples:
 | Example | Description | Status |
 |---------|-------------|--------|
 | [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — Q&A chatbot with RAG | ✅ Available |
-| [`predictive_pipeline/`](examples/predictive_pipeline/) | End-to-end predictive maintenance: sensor alarm → diagnosis → work order → scheduling | ⚠️ Preview — example code ready, uses workflow engine |
-| `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | ✅ Available (built-in template) |
+| [`predictive_pipeline/`](examples/predictive_pipeline/) | End-to-end predictive maintenance: sensor alarm → diagnosis → work order → scheduling | ✅ Available |
+| `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | 🚧 Planned (v0.2) |
 | `multi_agent_team/` | Specialized agents collaborating on complex diagnostics | 🚧 Planned (v0.3) |
 
 ## Contributing

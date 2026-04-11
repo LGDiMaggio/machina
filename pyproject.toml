@@ -54,6 +54,24 @@ iot = [
     "machina-ai[mqtt]",
 ]
 telegram = ["python-telegram-bot>=21.0"]
+slack = ["slack-bolt>=1.18"]
+gmail = [
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+    "google-api-python-client>=2.0",
+]
+google-calendar = [
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+    "google-api-python-client>=2.0",
+]
+outlook-calendar = ["msal>=1.28", "httpx>=0.27"]
+ical = ["icalendar>=5.0", "python-dateutil>=2.9"]
+calendar = [
+    "machina-ai[google-calendar]",
+    "machina-ai[outlook-calendar]",
+    "machina-ai[ical]",
+]
 cmms-rest = ["httpx>=0.27"]
 docs-rag = [
     "langchain>=0.2",
@@ -67,6 +85,8 @@ all = [
     "machina-ai[mqtt]",
     "machina-ai[modbus]",
     "machina-ai[telegram]",
+    "machina-ai[slack]",
+    "machina-ai[calendar]",
     "machina-ai[cmms-rest]",
     "machina-ai[docs-rag]",
 ]
@@ -128,7 +148,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "asyncua.*", "aiomqtt.*", "pymodbus.*", "pyodata.*", "jmespath.*"]
+module = ["litellm.*", "asyncua.*", "aiomqtt.*", "pymodbus.*", "pyodata.*", "jmespath.*", "slack_bolt.*", "slack_sdk.*", "google.*", "google_auth_oauthlib.*", "googleapiclient.*", "msal.*", "icalendar.*", "dateutil.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
