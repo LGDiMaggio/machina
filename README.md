@@ -238,6 +238,7 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 
 | Connector | Source | Planned |
 |-----------|--------|---------|
+| `GoogleDrive` | Google Drive API | v0.3 |
 | `Confluence` | Atlassian | v0.3 |
 | `SharePoint` | Microsoft 365 | v0.3 |
 
@@ -470,4 +471,4 @@ Machina builds on the shoulders of giants:
 
 <div align="center">
   <strong>Built for the people who keep the machines running.</strong>
-</div>
+</div>                                                                            
