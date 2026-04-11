@@ -270,9 +270,7 @@ class TestMqttConnectorSubscribe:
         async def _cb(alarm: Alarm) -> None:
             pass
 
-        conn._sub_entries[sub.id] = _SubscriptionEntry(
-            callback=_cb, topic_cfgs=[]
-        )
+        conn._sub_entries[sub.id] = _SubscriptionEntry(callback=_cb, topic_cfgs=[])
 
         await conn.unsubscribe(sub)
         assert task.cancelled()
@@ -536,9 +534,7 @@ class TestMqttConnectorMultipleTopics:
         await conn.subscribe(callback)
 
         assert mock_client.subscribe.await_count == 3
-        topics_subscribed = [
-            call.args[0] for call in mock_client.subscribe.await_args_list
-        ]
+        topics_subscribed = [call.args[0] for call in mock_client.subscribe.await_args_list]
         assert "plant/pump/vib" in topics_subscribed
         assert "plant/pump/temp" in topics_subscribed
         assert "plant/comp/vib" in topics_subscribed
