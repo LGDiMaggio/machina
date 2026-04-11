@@ -17,8 +17,8 @@ authors:
     orcid: "https://orcid.org/0000-0002-2295-8944"  # replace with your ORCID
     affiliation: "Politecnico di Torino"
 
-version: "0.1.0"
-date-released: "2026-04-07"
+version: "0.2.0"
+date-released: "2026-04-11"
 
 license: Apache-2.0
 repository-code: "https://github.com/LGDiMaggio/machina"
@@ -40,7 +40,7 @@ preferred-citation:
       given-names: "Luigi Gianpio"
       email: luigi.dimaggio@polito.it
       affiliation: "Politecnico di Torino"
-  version: "0.1.0"
-  date-released: "2026-04-07"
+  version: "0.2.0"
+  date-released: "2026-04-11"
   license: Apache-2.0
   repository-code: "https://github.com/LGDiMaggio/machina"

@@ -10,7 +10,7 @@ from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.workflows import Step, Workflow, WorkflowEngine
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
