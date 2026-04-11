@@ -54,7 +54,7 @@ class GoogleCalendarBackend:
     async def connect(self) -> None:
         """Authenticate and create the Google Calendar service."""
         try:
-            from googleapiclient.discovery import build  # type: ignore[import-not-found]
+            from googleapiclient.discovery import build
         except ImportError:
             msg = (
                 "Google API libraries are required for Google Calendar backend. "
@@ -77,15 +77,15 @@ class GoogleCalendarBackend:
 
     def _auth_service_account(self) -> Any:
         """Authenticate via service-account key file."""
-        from google.oauth2.service_account import Credentials  # type: ignore[import-not-found]
+        from google.oauth2.service_account import Credentials
 
-        return Credentials.from_service_account_file(
+        return Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             self._service_account_file, scopes=self._scopes
         )
 
     def _auth_installed_app(self) -> Any:
         """Authenticate via installed-app OAuth2 flow."""
-        from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-not-found]
+        from google_auth_oauthlib.flow import InstalledAppFlow
 
         flow = InstalledAppFlow.from_client_secrets_file(
             self._credentials_file, scopes=self._scopes

@@ -70,7 +70,7 @@ class SlackConnector:
             raise ConnectorError("app_token is required for SlackConnector (Socket Mode)")
 
         try:
-            from slack_bolt.async_app import AsyncApp  # type: ignore[import-not-found]
+            from slack_bolt.async_app import AsyncApp
 
             self._app = AsyncApp(token=self._bot_token)
             logger.info("connected", connector="SlackConnector")
@@ -137,7 +137,7 @@ class SlackConnector:
             raise ConnectorError("Slack application not initialised")
 
         try:
-            from slack_bolt.adapter.socket_mode.async_handler import (  # type: ignore[import-not-found]
+            from slack_bolt.adapter.socket_mode.async_handler import (
                 AsyncSocketModeHandler,
             )
         except ImportError:
@@ -147,7 +147,7 @@ class SlackConnector:
             )
             raise ImportError(msg) from None
 
-        @self._app.event("message")
+        @self._app.event("message")  # type: ignore[untyped-decorator]
         async def _on_message(event: dict[str, Any], say: Any) -> None:
             # Skip bot messages and message edits
             if event.get("subtype") is not None:

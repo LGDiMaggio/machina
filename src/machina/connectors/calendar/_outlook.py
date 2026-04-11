@@ -55,7 +55,7 @@ class OutlookCalendarBackend:
     async def connect(self) -> None:
         """Acquire an access token via MSAL and create an HTTP client."""
         try:
-            import msal  # type: ignore[import-not-found]
+            import msal
         except ImportError:
             msg = (
                 "msal is required for the Outlook calendar backend. "

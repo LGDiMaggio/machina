@@ -148,7 +148,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "asyncua.*", "aiomqtt.*", "pymodbus.*", "pyodata.*", "jmespath.*", "slack_bolt.*", "slack_sdk.*", "google.*", "google_auth_oauthlib.*", "googleapiclient.*", "msal.*", "icalendar.*", "dateutil.*"]
+module = ["litellm.*", "asyncua.*", "aiomqtt.*", "jmespath.*", "slack_bolt.*", "google.*", "google_auth_oauthlib.*", "googleapiclient.*", "msal.*", "icalendar.*", "dateutil.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

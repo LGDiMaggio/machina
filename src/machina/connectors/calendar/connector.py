@@ -20,7 +20,7 @@ Install the backend you need::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -84,8 +84,6 @@ class CalendarConnector:
         )
         ```
     """
-
-    capabilities: ClassVar[list[str]] = _FULL_CAPABILITIES  # overridden at instance level
 
     def __init__(
         self,
@@ -201,7 +199,7 @@ class CalendarConnector:
         if event_type is not None:
             events = [e for e in events if e.event_type == event_type]
 
-        return events
+        return list(events)
 
     async def create_event(self, event: CalendarEvent, calendar_id: str = "") -> CalendarEvent:
         """Create a calendar event.
@@ -217,7 +215,8 @@ class CalendarConnector:
             ConnectorError: If the backend is read-only (iCal).
         """
         self._ensure_connected()
-        return await self._backend.create_event(calendar_id, event)
+        result: CalendarEvent = await self._backend.create_event(calendar_id, event)
+        return result
 
     async def delete_event(self, event_id: str, calendar_id: str = "") -> None:
         """Delete a calendar event.

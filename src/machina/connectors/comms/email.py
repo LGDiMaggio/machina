@@ -195,10 +195,15 @@ class EmailConnector:
             raise ConnectorError("username is required for EmailConnector")
 
         try:
+            smtp: smtplib.SMTP
             if self._use_tls:
-                smtp = await asyncio.to_thread(smtplib.SMTP_SSL, self._smtp_host, self._smtp_port)
+                smtp = await asyncio.to_thread(
+                    lambda: smtplib.SMTP_SSL(self._smtp_host, self._smtp_port)
+                )
             else:
-                smtp = await asyncio.to_thread(smtplib.SMTP, self._smtp_host, self._smtp_port)
+                smtp = await asyncio.to_thread(
+                    lambda: smtplib.SMTP(self._smtp_host, self._smtp_port)
+                )
                 await asyncio.to_thread(smtp.starttls)
 
             await asyncio.to_thread(smtp.login, self._username, self._password)
@@ -239,10 +244,15 @@ class EmailConnector:
 
         messages: list[IncomingMessage] = []
         try:
+            imap: imaplib.IMAP4
             if self._use_tls:
-                imap = await asyncio.to_thread(imaplib.IMAP4_SSL, self._imap_host, self._imap_port)
+                imap = await asyncio.to_thread(
+                    lambda: imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
+                )
             else:
-                imap = await asyncio.to_thread(imaplib.IMAP4, self._imap_host, self._imap_port)
+                imap = await asyncio.to_thread(
+                    lambda: imaplib.IMAP4(self._imap_host, self._imap_port)
+                )
 
             await asyncio.to_thread(imap.login, self._username, self._password)
             await asyncio.to_thread(imap.select, "INBOX")
@@ -255,6 +265,8 @@ class EmailConnector:
                 if msg_data[0] is None:
                     continue
                 raw_email = msg_data[0][1]
+                if not isinstance(raw_email, bytes):
+                    continue
                 parsed = email_lib.message_from_bytes(raw_email)
 
                 body = ""
@@ -262,12 +274,12 @@ class EmailConnector:
                     for part in parsed.walk():
                         if part.get_content_type() == "text/plain":
                             payload = part.get_payload(decode=True)
-                            if payload:
+                            if isinstance(payload, bytes):
                                 body = payload.decode("utf-8", errors="replace")
                             break
                 else:
                     payload = parsed.get_payload(decode=True)
-                    if payload:
+                    if isinstance(payload, bytes):
                         body = payload.decode("utf-8", errors="replace")
 
                 from_addr = parsed.get("From", "")
@@ -299,10 +311,8 @@ class EmailConnector:
     async def _connect_gmail(self) -> None:
         """Authenticate with Gmail API using OAuth credentials."""
         try:
-            from google_auth_oauthlib.flow import (
-                InstalledAppFlow,  # type: ignore[import-not-found]
-            )
-            from googleapiclient.discovery import build  # type: ignore[import-not-found]
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from googleapiclient.discovery import build
         except ImportError:
             msg = (
                 "Google API libraries are required for Gmail backend. "

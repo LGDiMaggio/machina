@@ -45,7 +45,7 @@ class ICalBackend:
             raise ConnectorError("source is required for iCal backend")
 
         try:
-            import icalendar  # type: ignore[import-not-found]  # noqa: F401
+            import icalendar  # noqa: F401
         except ImportError:
             msg = (
                 "icalendar is required for the iCal backend. "
@@ -64,7 +64,7 @@ class ICalBackend:
             import urllib.request
 
             with urllib.request.urlopen(self._source, timeout=30) as resp:
-                return resp.read().decode("utf-8")
+                return str(resp.read().decode("utf-8"))
 
         path = Path(self._source)
         if not path.exists():
@@ -103,7 +103,7 @@ class ICalBackend:
         end: datetime | None,
     ) -> list[CalendarEvent]:
         """Synchronously parse the cached iCal data."""
-        import icalendar  # type: ignore[import-not-found]
+        import icalendar
 
         cal = icalendar.Calendar.from_ical(self._raw_data)
         events: list[CalendarEvent] = []
@@ -214,7 +214,7 @@ class ICalBackend:
         max_occurrences: int = 500,
     ) -> list[CalendarEvent]:
         """Expand a recurring event using python-dateutil rrule."""
-        from dateutil.rrule import rrulestr  # type: ignore[import-not-found]
+        from dateutil.rrule import rrulestr
 
         rule = rrulestr(f"RRULE:{rrule_text}", dtstart=dtstart)
         occurrences = rule.between(range_start, range_end, inc=True)
