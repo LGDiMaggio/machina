@@ -42,8 +42,8 @@ Machina provides the missing vertical layer between general-purpose agent framew
 - **Async-First** — Built on `asyncio` for concurrent queries and high-throughput production environments
 - **Pluggable Auth & Pagination** — Built-in support for OAuth2, API key, Basic Auth, and Bearer token authentication; offset, page-number, and cursor pagination strategies; exponential backoff retry logic
 - **MCP Server** *(v0.2)* — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
-- **Workflow Engine** *(v0.2)* — Composable multi-step workflows for common patterns like alarm-to-work-order, spare part checks, and maintenance scheduling
-- **Sandbox Mode** *(v0.2)* — Test agents safely with a log-only runtime that records all actions without executing them — perfect for demos and experimentation
+- **Workflow Engine** — Composable multi-step workflows with trigger-step-action model, template variable interpolation, error policies (retry/skip/stop/notify), guard conditions, and sandbox mode. Includes built-in alarm-to-work-order template
+- **Sandbox Mode** — Test agents safely with a log-only runtime that records all actions without executing them — perfect for demos and experimentation
 - **Extensible** — Create custom connectors, domain entities, and workflows. Publish them as plugins for the community
 
 ## Quick Start
@@ -299,29 +299,49 @@ The domain model supports hierarchical asset trees, ISO 14224-aligned failure ta
 
 See the [Domain Model Reference](https://machina-ai.readthedocs.io/en/latest/domain/) for all entities and services.
 
-## Workflow Engine *(Coming in v0.2)*
+## Workflow Engine
 
-Build multi-step maintenance workflows:
+Build multi-step maintenance workflows with error handling, template variable interpolation, and sandbox mode:
 
 ```python
-from machina.workflows import Workflow, Step
+from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy
 
 alarm_to_workorder = Workflow(
     name="Alarm to Work Order",
-    trigger="alarm",
+    trigger=Trigger(type=TriggerType.ALARM, filter={"severity": ["critical"]}),
     steps=[
-        Step("diagnose", action="failure_analyzer.diagnose"),
-        Step("check_history", action="cmms.get_asset_history"),
-        Step("check_parts", action="inventory.check_availability"),
-        Step("create_wo", action="work_order_factory.create"),
-        Step("notify", action="telegram.send_message"),
+        Step("diagnose", action="failure_analyzer.diagnose",
+             on_error=ErrorPolicy.STOP),
+        Step("check_history", action="cmms.get_asset_history",
+             inputs={"asset_id": "{trigger.asset_id}"},
+             on_error=ErrorPolicy.SKIP),
+        Step("create_wo", action="work_order_factory.create",
+             on_error=ErrorPolicy.STOP),
+        Step("notify", action="channels.send_message",
+             template="⚠️ WO created for {trigger.asset_id}: {diagnose}",
+             on_error=ErrorPolicy.NOTIFY),
     ],
 )
 
+agent = Agent(workflows=[alarm_to_workorder], sandbox=True)
+agent.register_workflow(alarm_to_workorder)
+result = await agent.trigger_workflow("Alarm to Work Order", {"asset_id": "P-201"})
+```
+
+Or use the built-in alarm-to-work-order template:
+
+```python
+from machina.workflows.builtins import alarm_to_workorder
 agent.register_workflow(alarm_to_workorder)
 ```
 
-> **Note:** The workflow engine is planned for v0.2. The example above shows the target API.
+Workflow features:
+- **Trigger types**: alarm, schedule, manual, condition
+- **Error policies**: retry (with configurable retries), skip, stop, notify
+- **Guard conditions**: skip steps based on prior outputs
+- **Template variables**: `{trigger.asset_id}`, `{step_name}`, `{step_name.field}`
+- **Sandbox mode**: write actions logged but not executed — reads still run
+- **Observability**: every step traced via ActionTracer
 
 ## MCP Server *(Coming in v0.2)*
 
@@ -366,9 +386,10 @@ This will also be the fastest way to evaluate Machina: connect your data, use it
 - [ ] MaintainX, Limble, Fiix connectors
 - [ ] OPC-UA and MQTT connectors
 - [ ] WhatsApp, Slack, Teams, Email connectors
-- [ ] Workflow engine
+- [x] Workflow engine with trigger-step-action model
+- [x] Built-in alarm-to-work-order workflow template
+- [x] Sandbox mode — log-only runtime
 - [ ] **MCP Server layer** — use connectors from Claude, Cursor, and any MCP client
-- [ ] **Sandbox mode** — log-only runtime for safe experimentation and demos
 - [ ] Plugin system for community extensions
 
 ### 🔮 v0.3 — Intelligence & Scale
@@ -387,8 +408,8 @@ The [`examples/`](examples/) directory contains complete, runnable examples:
 | Example | Description | Status |
 |---------|-------------|--------|
 | [`knowledge_agent/`](examples/knowledge_agent/) | Maintenance Knowledge Agent — Q&A chatbot with RAG | ✅ Available |
-| [`predictive_pipeline/`](examples/predictive_pipeline/) | End-to-end predictive maintenance: sensor alarm → diagnosis → work order → scheduling | ⚠️ Preview — example code ready, requires workflow engine (v0.2) |
-| `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | 🚧 Planned (v0.2) |
+| [`predictive_pipeline/`](examples/predictive_pipeline/) | End-to-end predictive maintenance: sensor alarm → diagnosis → work order → scheduling | ⚠️ Preview — example code ready, uses workflow engine |
+| `alarm_to_workorder/` | Alarm-to-Work-Order workflow with CMMS integration | ✅ Available (built-in template) |
 | `multi_agent_team/` | Specialized agents collaborating on complex diagnostics | 🚧 Planned (v0.3) |
 
 ## Contributing

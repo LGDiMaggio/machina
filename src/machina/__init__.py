@@ -8,6 +8,7 @@ from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
+from machina.workflows import Step, Workflow, WorkflowEngine
 
 __version__ = "0.1.1"
 
@@ -24,8 +25,11 @@ __all__ = [
     "Priority",
     "Severity",
     "SparePart",
+    "Step",
     "WorkOrder",
     "WorkOrderStatus",
     "WorkOrderType",
+    "Workflow",
+    "WorkflowEngine",
     "__version__",
 ]
