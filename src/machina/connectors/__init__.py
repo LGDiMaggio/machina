@@ -33,6 +33,7 @@ Telegram = TelegramConnector
 UpKeep = UpKeepConnector
 
 __all__ = [
+    "MQTT",
     "ApiKeyHeaderAuth",
     "AuthStrategy",
     "BaseConnector",
@@ -46,7 +47,6 @@ __all__ = [
     "DocumentStoreConnector",
     "GenericCmms",
     "GenericCmmsConnector",
-    "MQTT",
     "Maximo",
     "MaximoConnector",
     "MqttConnector",
