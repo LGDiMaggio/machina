@@ -737,6 +737,11 @@ END:VCALENDAR
 class TestICalBackendFull:
     """Comprehensive tests for the iCal backend (requires icalendar installed)."""
 
+    pytestmark = pytest.mark.skipif(
+        not importlib.util.find_spec("icalendar"),
+        reason="icalendar not installed",
+    )
+
     @pytest.mark.asyncio
     async def test_connect_and_list_events(self) -> None:
         """Full connect + list_events flow with real iCal parsing."""
