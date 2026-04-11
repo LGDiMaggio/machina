@@ -2,13 +2,13 @@
   <img src="docs/assets/machina-logo.svg" alt="Machina" width="700"/>
   <h1>Machina</h1>
   <p><strong>The open-source Python framework for building AI agents specialized in industrial maintenance.</strong></p>
-
-  [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-  [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-  [![PyPI version](https://img.shields.io/pypi/v/machina-ai.svg)](https://pypi.org/project/machina-ai/)
-  [![CI](https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main)](https://github.com/LGDiMaggio/machina/actions)
-  [![Downloads](https://img.shields.io/pypi/dm/machina-ai.svg)](https://pypi.org/project/machina-ai/)
-
+  <p>
+    <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"/></a>
+    <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"/></a>
+    <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/v/machina-ai.svg" alt="PyPI version"/></a>
+    <a href="https://github.com/LGDiMaggio/machina/actions"><img src="https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main" alt="CI"/></a>
+    <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/dm/machina-ai.svg" alt="Downloads"/></a>
+  </p>
   <p>
     <a href="#quick-start">Quick Start</a> •
     <a href="#features">Features</a> •
@@ -41,7 +41,7 @@ Machina provides the missing vertical layer between general-purpose agent framew
 - **LLM-Agnostic** — Works with OpenAI, Anthropic, Mistral, Llama, Ollama, and any LiteLLM-compatible provider. No vendor lock-in
 - **Async-First** — Built on `asyncio` for concurrent queries and high-throughput production environments
 - **Pluggable Auth & Pagination** — Built-in support for OAuth2, API key, Basic Auth, and Bearer token authentication; offset, page-number, and cursor pagination strategies; exponential backoff retry logic
-- **MCP Server** *(v0.2)* — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
+- **MCP Server** *(v0.3)* — Expose any connector as an MCP server — let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors without writing agent code
 - **Workflow Engine** — Composable multi-step workflows with trigger-step-action model, template variable interpolation, error policies (retry/skip/stop/notify), guard conditions, and sandbox mode. Includes built-in alarm-to-work-order template
 - **Sandbox Mode** — Test agents safely with a log-only runtime that records all actions without executing them — perfect for demos and experimentation
 - **Extensible** — Create custom connectors, domain entities, and workflows. Publish them as plugins for the community
@@ -186,9 +186,9 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 
 | Connector | System | Planned |
 |-----------|--------|--------|
-| `MaintainX` | MaintainX | v0.2 |
-| `Limble` | Limble CMMS | v0.2 |
-| `Fiix` | Fiix (Rockwell) | v0.2 |
+| `MaintainX` | MaintainX | v0.3 |
+| `Limble` | Limble CMMS | v0.3 |
+| `Fiix` | Fiix (Rockwell) | v0.3 |
 | `eMaint` | eMaint (Fluke) | v0.3 |
 | `InforEam` | Infor EAM | v0.3 |
 
@@ -248,7 +248,7 @@ All CMMS connectors include pluggable authentication (OAuth2, API key, Basic, Be
 
 | Connector | System | Planned |
 |-----------|--------|---------|
-| `SapErp` | SAP S/4HANA | v0.2 |
+| `SapErp` | SAP S/4HANA | v0.3 |
 | `OracleErp` | Oracle ERP | v0.3 |
 
 ### Calendar & Scheduling
@@ -357,7 +357,7 @@ Workflow features:
 - **Sandbox mode**: write actions logged but not executed — reads still run
 - **Observability**: every step traced via ActionTracer
 
-## MCP Server *(Coming in v0.2)*
+## MCP Server *(Coming in v0.3)*
 
 Don't need a full agent? Machina will expose its connectors as **MCP (Model Context Protocol) servers**, so Claude Desktop, Cursor, or any MCP-compatible tool can access your industrial data directly:
 
@@ -370,7 +370,7 @@ Anyone on your team will be able to ask Claude: *"What's the maintenance history
 
 This will also be the fastest way to evaluate Machina: connect your data, use it from Claude, and when you need workflows and automation, the full framework is right there.
 
-> **Note:** The MCP server layer is planned for v0.2. The connector infrastructure is already in place — the MCP layer will be a thin protocol adapter on top.
+> **Note:** The MCP server layer is planned for v0.3. The connector infrastructure is already in place — the MCP layer will be a thin protocol adapter on top.
 
 ## Roadmap
 
