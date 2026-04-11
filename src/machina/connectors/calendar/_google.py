@@ -77,11 +77,10 @@ class GoogleCalendarBackend:
 
     def _auth_service_account(self) -> Any:
         """Authenticate via service-account key file."""
-        from google.oauth2.service_account import Credentials
+        from google.oauth2 import service_account
 
-        return Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
-            self._service_account_file, scopes=self._scopes
-        )
+        creds_cls: Any = service_account.Credentials
+        return creds_cls.from_service_account_file(self._service_account_file, scopes=self._scopes)
 
     def _auth_installed_app(self) -> Any:
         """Authenticate via installed-app OAuth2 flow."""
