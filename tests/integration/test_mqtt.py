@@ -157,7 +157,7 @@ class TestMqttConnectorDisconnect:
         assert conn._connected is False
 
     @pytest.mark.asyncio
-    async def test_disconnect_cancels_subscriptions(self) -> None:
+    async def test_disconnect_cancels_reader_task(self) -> None:
         # Create a real task that we can cancel and await
         async def _hang() -> None:
             await asyncio.Event().wait()
@@ -168,13 +168,15 @@ class TestMqttConnectorDisconnect:
         conn._connected = True
         conn._client = MagicMock()
         conn._client_cm = AsyncMock()
+        conn._reader_task = task
 
-        sub = MqttSubscription(_task=task)
+        sub = MqttSubscription()
         conn._subscriptions[sub.id] = sub
 
         await conn.disconnect()
         assert task.cancelled()
         assert len(conn._subscriptions) == 0
+        assert conn._reader_task is None
 
 
 class TestMqttConnectorHealthCheck:
@@ -224,7 +226,7 @@ class TestMqttConnectorSubscribe:
             await conn.subscribe(callback)
 
     @pytest.mark.asyncio
-    async def test_subscribe_creates_task(self) -> None:
+    async def test_subscribe_creates_reader_task(self) -> None:
         mock_client = AsyncMock()
         conn = MqttConnector(
             broker="localhost",
@@ -240,17 +242,17 @@ class TestMqttConnectorSubscribe:
 
         assert isinstance(sub, MqttSubscription)
         assert sub.id in conn._subscriptions
-        assert sub._task is not None
+        assert conn._reader_task is not None
         mock_client.subscribe.assert_awaited_once_with("sensors/#", qos=0)
 
         # Cleanup
-        sub._task.cancel()
+        conn._reader_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await sub._task
+            await conn._reader_task
 
     @pytest.mark.asyncio
-    async def test_unsubscribe(self) -> None:
-        # Create a real task that we can cancel and await
+    async def test_unsubscribe_stops_reader_when_empty(self) -> None:
+        # Create a real task that simulates the reader
         async def _hang() -> None:
             await asyncio.Event().wait()
 
@@ -259,13 +261,23 @@ class TestMqttConnectorSubscribe:
         conn = MqttConnector(broker="localhost")
         conn._connected = True
         conn._client = MagicMock()
+        conn._reader_task = task
 
-        sub = MqttSubscription(_task=task)
+        sub = MqttSubscription()
         conn._subscriptions[sub.id] = sub
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        async def _cb(alarm: Alarm) -> None:
+            pass
+
+        conn._sub_entries[sub.id] = _SubscriptionEntry(
+            callback=_cb, topic_cfgs=[]
+        )
 
         await conn.unsubscribe(sub)
         assert task.cancelled()
         assert sub.id not in conn._subscriptions
+        assert conn._reader_task is None
 
 
 class TestMqttConnectorPublish:
@@ -521,7 +533,7 @@ class TestMqttConnectorMultipleTopics:
         async def callback(alarm: Alarm) -> None:
             pass
 
-        sub = await conn.subscribe(callback)
+        await conn.subscribe(callback)
 
         assert mock_client.subscribe.await_count == 3
         topics_subscribed = [
@@ -532,9 +544,9 @@ class TestMqttConnectorMultipleTopics:
         assert "plant/comp/vib" in topics_subscribed
 
         # Cleanup
-        sub._task.cancel()
+        conn._reader_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await sub._task
+            await conn._reader_task
 
     @pytest.mark.asyncio
     async def test_subscribe_with_custom_qos(self) -> None:
@@ -552,12 +564,12 @@ class TestMqttConnectorMultipleTopics:
         async def callback(alarm: Alarm) -> None:
             pass
 
-        sub = await conn.subscribe(callback)
+        await conn.subscribe(callback)
         mock_client.subscribe.assert_awaited_once_with("important/data", qos=2)
 
-        sub._task.cancel()
+        conn._reader_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await sub._task
+            await conn._reader_task
 
 
 class TestTopicConfig:

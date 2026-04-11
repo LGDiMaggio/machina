@@ -10,6 +10,7 @@ Uses ``asyncua`` under the hood (install with ``pip install machina-ai[opcua]``)
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -462,14 +463,15 @@ class _DataChangeHandler:
         }
         self._callback = callback
         self._endpoint = endpoint
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     def datachange_notification(self, node: Any, val: Any, data: Any) -> None:
         """Called by asyncua on every subscribed data change.
 
         Schedules the async alarm processing on the running event loop.
+        Each task is tracked in ``_background_tasks`` to prevent
+        garbage-collection of in-flight tasks under rapid data changes.
         """
-        import asyncio
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -480,7 +482,9 @@ class _DataChangeHandler:
             )
             return
 
-        self._task_ref = loop.create_task(self._process_change(node, val))
+        task = loop.create_task(self._process_change(node, val))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _process_change(self, node: Any, val: Any) -> None:
         """Process a single data change and invoke callback if threshold exceeded."""

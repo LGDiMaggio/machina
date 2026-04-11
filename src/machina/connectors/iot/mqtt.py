@@ -77,7 +77,14 @@ class MqttSubscription:
     """
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    _task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+
+@dataclass
+class _SubscriptionEntry:
+    """Internal record linking a callback to its topic configs."""
+
+    callback: AlarmCallback
+    topic_cfgs: list[TopicConfig]
 
 
 class MqttConnector:
@@ -152,6 +159,8 @@ class MqttConnector:
         self._client: Any = None
         self._client_cm: Any = None  # async context manager
         self._subscriptions: dict[str, MqttSubscription] = {}
+        self._sub_entries: dict[str, _SubscriptionEntry] = {}
+        self._reader_task: asyncio.Task[None] | None = None
 
         # Normalise topic configs
         self._topic_configs: list[TopicConfig] = []
@@ -181,8 +190,6 @@ class MqttConnector:
             raise ImportError(msg) from None
 
         try:
-            import aiomqtt
-
             tls_params: Any = None
             if self._tls:
                 import ssl
@@ -222,9 +229,14 @@ class MqttConnector:
 
     async def disconnect(self) -> None:
         """Disconnect from the MQTT broker and cancel all subscriptions."""
-        for sub in list(self._subscriptions.values()):
-            await self._cancel_subscription(sub)
+        self._sub_entries.clear()
         self._subscriptions.clear()
+
+        if self._reader_task is not None and not self._reader_task.done():
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
 
         if self._client_cm is not None:
             try:
@@ -257,6 +269,10 @@ class MqttConnector:
         For each message that exceeds a configured threshold an
         :class:`Alarm` is passed to *callback*.
 
+        Multiple calls to ``subscribe()`` are supported — a single
+        background reader fans out each message to all registered
+        subscriptions.
+
         Args:
             callback: Async function called with each :class:`Alarm`.
             configs: Optional topic configs; defaults to the configs
@@ -274,7 +290,7 @@ class MqttConnector:
         if not topic_cfgs:
             raise ConnectorError("No topic configurations provided")
 
-        # Subscribe to all topics
+        # Subscribe to all topics on the broker
         for cfg in topic_cfgs:
             await self._client.subscribe(cfg.topic, qos=cfg.qos)
             logger.debug(
@@ -285,14 +301,18 @@ class MqttConnector:
                 asset_id=cfg.asset_id,
             )
 
-        # Start background message processing task
+        # Register the subscription entry
         sub = MqttSubscription()
-        task = asyncio.create_task(
-            self._message_loop(callback, topic_cfgs),
-            name=f"mqtt-sub-{sub.id}",
-        )
-        sub._task = task
+        entry = _SubscriptionEntry(callback=callback, topic_cfgs=topic_cfgs)
+        self._sub_entries[sub.id] = entry
         self._subscriptions[sub.id] = sub
+
+        # Start the shared reader if not already running
+        if self._reader_task is None or self._reader_task.done():
+            self._reader_task = asyncio.create_task(
+                self._reader_loop(),
+                name="mqtt-reader",
+            )
 
         logger.info(
             "subscribed",
@@ -308,8 +328,16 @@ class MqttConnector:
         Args:
             subscription: The handle returned by :meth:`subscribe`.
         """
-        await self._cancel_subscription(subscription)
+        self._sub_entries.pop(subscription.id, None)
         self._subscriptions.pop(subscription.id, None)
+
+        # Stop the reader if no subscriptions remain
+        if not self._sub_entries and self._reader_task is not None:
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
+
         logger.info(
             "unsubscribed",
             connector="MqttConnector",
@@ -347,72 +375,82 @@ class MqttConnector:
         if not self._connected or self._client is None:
             raise ConnectorError("Not connected — call connect() first")
 
-    async def _message_loop(
-        self,
-        callback: AlarmCallback,
-        topic_cfgs: list[TopicConfig],
-    ) -> None:
-        """Process incoming MQTT messages until cancelled."""
-        configs_by_topic: dict[str, TopicConfig] = {cfg.topic: cfg for cfg in topic_cfgs}
+    async def _reader_loop(self) -> None:
+        """Single reader that fans out each message to all subscriptions.
 
+        Only one ``_reader_loop`` runs per connector — it distributes
+        incoming messages to every registered :class:`_SubscriptionEntry`.
+        """
         try:
             async for message in self._client.messages:
                 topic = str(message.topic)
-                cfg = self._match_topic(topic, configs_by_topic)
-                if cfg is None:
-                    continue
 
-                try:
-                    value = self._parse_payload(message.payload, cfg)
-                except Exception:
-                    logger.debug(
-                        "payload_parse_error",
-                        connector="MqttConnector",
-                        topic=topic,
-                        exc_info=True,
-                    )
-                    continue
-
-                if value is None:
-                    continue
-
-                # Only raise alarm when threshold is configured and exceeded
-                if cfg.threshold and value <= cfg.threshold:
-                    continue
-
-                alarm = Alarm(
-                    id=f"ALM-{uuid.uuid4().hex[:8]}",
-                    asset_id=cfg.asset_id or topic,
-                    severity=cfg.severity,
-                    parameter=cfg.parameter or topic,
-                    value=value,
-                    threshold=cfg.threshold,
-                    unit=cfg.unit,
-                    timestamp=datetime.now(UTC),
-                    source=f"mqtt://{self._broker}/{topic}",
-                )
-
-                logger.info(
-                    "alarm_raised",
-                    connector="MqttConnector",
-                    alarm_id=alarm.id,
-                    asset_id=alarm.asset_id,
-                    parameter=alarm.parameter,
-                    value=alarm.value,
-                    threshold=alarm.threshold,
-                )
-
-                try:
-                    await callback(alarm)
-                except Exception:
-                    logger.error(
-                        "alarm_callback_error",
-                        connector="MqttConnector",
-                        alarm_id=alarm.id,
-                        exc_info=True,
-                    )
+                for entry in list(self._sub_entries.values()):
+                    await self._dispatch_message(topic, message.payload, entry)
         except asyncio.CancelledError:
             return
+
+    async def _dispatch_message(
+        self,
+        topic: str,
+        payload: bytes,
+        entry: _SubscriptionEntry,
+    ) -> None:
+        """Dispatch a single message to a subscription entry."""
+        configs_by_topic = {cfg.topic: cfg for cfg in entry.topic_cfgs}
+        cfg = self._match_topic(topic, configs_by_topic)
+        if cfg is None:
+            return
+
+        try:
+            value = self._parse_payload(payload, cfg)
+        except Exception:
+            logger.debug(
+                "payload_parse_error",
+                connector="MqttConnector",
+                topic=topic,
+                exc_info=True,
+            )
+            return
+
+        if value is None:
+            return
+
+        # Only raise alarm when threshold is configured and exceeded
+        if cfg.threshold and value <= cfg.threshold:
+            return
+
+        alarm = Alarm(
+            id=f"ALM-{uuid.uuid4().hex[:8]}",
+            asset_id=cfg.asset_id or topic,
+            severity=cfg.severity,
+            parameter=cfg.parameter or topic,
+            value=value,
+            threshold=cfg.threshold,
+            unit=cfg.unit,
+            timestamp=datetime.now(UTC),
+            source=f"mqtt://{self._broker}/{topic}",
+        )
+
+        logger.info(
+            "alarm_raised",
+            connector="MqttConnector",
+            alarm_id=alarm.id,
+            asset_id=alarm.asset_id,
+            parameter=alarm.parameter,
+            value=alarm.value,
+            threshold=alarm.threshold,
+        )
+
+        try:
+            await entry.callback(alarm)
+        except Exception:
+            logger.error(
+                "alarm_callback_error",
+                connector="MqttConnector",
+                alarm_id=alarm.id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _match_topic(topic: str, configs: dict[str, TopicConfig]) -> TopicConfig | None:
@@ -453,11 +491,13 @@ class MqttConnector:
         return None
 
     async def _cancel_subscription(self, sub: MqttSubscription) -> None:
-        """Cancel a subscription's background task."""
-        if sub._task is not None and not sub._task.done():
-            sub._task.cancel()
+        """Remove a subscription entry and stop the reader if empty."""
+        self._sub_entries.pop(sub.id, None)
+        if not self._sub_entries and self._reader_task is not None:
+            self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await sub._task
+                await self._reader_task
+            self._reader_task = None
 
     @staticmethod
     def _normalise_configs(
