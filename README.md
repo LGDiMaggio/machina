@@ -14,7 +14,7 @@
     <a href="#features">Features</a> •
     <a href="#architecture">Architecture</a> •
     <a href="#connectors">Connectors</a> •
-    <a href="#mcp-server">MCP Server</a> •
+    <a href="#domain-model">Domain Model</a> •
     <a href="https://machina-ai.readthedocs.io">Documentation</a> •
     <a href="#contributing">Contributing</a>
   </p>
@@ -282,7 +282,14 @@ See the [Custom Connectors Guide](https://machina-ai.readthedocs.io/en/latest/co
 
 ## Domain Model
 
-Machina ships with a rich domain model that encodes industrial maintenance concepts:
+The domain model is the backbone of Machina. It defines a **universal language** that every layer of the framework speaks: connectors normalize external data into domain entities, the agent runtime reasons in domain terms, the workflow engine operates on domain objects, and LLM prompts are grounded in domain context. This is what makes Machina a *vertical* framework rather than just a collection of API wrappers.
+
+**Why this matters in practice:**
+
+- **Portability** — Switch from SAP PM to IBM Maximo, and your agent logic doesn't change. Both connectors output the same `Asset`, `WorkOrder`, and `FailureMode` objects. Your workflows, prompts, and business rules stay intact.
+- **Deterministic logic where it counts** — Domain services like `FailureAnalyzer`, `WorkOrderFactory`, and `MaintenanceScheduler` encode maintenance expertise as code, not LLM guesses. The AI reasons *with* these services, not instead of them.
+- **LLM context grounding** — When an agent sends context to the LLM, it serializes domain entities with their full metadata (criticality, ISO 14224 codes, failure history). This means the LLM doesn't hallucinate asset IDs or invent failure modes — it works with real, validated data.
+- **ISO 14224 alignment** — Failure modes, equipment classes, and failure mechanisms follow the ISO 14224 taxonomy, making Machina data interoperable with industry standards.
 
 ```python
 from machina.domain import Asset, AssetType, FailureMode
@@ -309,7 +316,7 @@ bearing_wear = FailureMode(
 )
 ```
 
-The domain model supports hierarchical asset trees, ISO 14224-aligned failure taxonomies, work order lifecycle management, spare part inventory tracking, and maintenance plan scheduling.
+The full domain includes: `Asset` (with hierarchical trees), `WorkOrder` (lifecycle management), `FailureMode` (ISO 14224 taxonomy), `SparePart` (inventory tracking), `Alarm` (severity-based), `MaintenancePlan` (scheduling), `CalendarEvent`, `PlannedDowntime`, and `ShiftPattern`. Three domain services — `FailureAnalyzer`, `WorkOrderFactory`, and `MaintenanceScheduler` — provide rule-based intelligence that works deterministically alongside the LLM.
 
 See the [Domain Model Reference](https://machina-ai.readthedocs.io/en/latest/domain/) for all entities and services.
 
@@ -467,9 +474,5 @@ Machina builds on the shoulders of giants:
 - [asyncua](https://github.com/FreeOpcUa/opcua-asyncio) — OPC-UA Python implementation
 - [Paho MQTT](https://github.com/eclipse/paho.mqtt.python) — MQTT client
 - [ChromaDB](https://github.com/chroma-core/chroma) — Vector database for RAG
-
----
-
-<div align="center">
-  <strong>Built for the people who keep the machines running.</strong>
-</div>
+- [structlog](https://github.com/hynek/structlog) — Structured logging
+- [MCP SDK](https://github.com/modelcontextprotocol/python-sdk) — Model Context Protocol
