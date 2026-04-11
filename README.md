@@ -472,4 +472,4 @@ Machina builds on the shoulders of giants:
 
 <div align="center">
   <strong>Built for the people who keep the machines running.</strong>
-</div>                                                                            
+</div>
