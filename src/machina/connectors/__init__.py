@@ -20,16 +20,20 @@ from machina.connectors.cmms import (
 )
 from machina.connectors.comms.telegram import CliChannel, TelegramConnector
 from machina.connectors.docs.document_store import DocumentStoreConnector
+from machina.connectors.iot import MqttConnector, OpcUaConnector
 
 # Short public API aliases (see CLAUDE.md naming conventions)
 DocumentStore = DocumentStoreConnector
 GenericCmms = GenericCmmsConnector
 Maximo = MaximoConnector
+MQTT = MqttConnector
+OpcUA = OpcUaConnector
 SapPM = SapPmConnector
 Telegram = TelegramConnector
 UpKeep = UpKeepConnector
 
 __all__ = [
+    "MQTT",
     "ApiKeyHeaderAuth",
     "AuthStrategy",
     "BaseConnector",
@@ -45,10 +49,13 @@ __all__ = [
     "GenericCmmsConnector",
     "Maximo",
     "MaximoConnector",
+    "MqttConnector",
     "NoAuth",
     "NoPagination",
     "OAuth2ClientCredentials",
     "OffsetLimitPagination",
+    "OpcUA",
+    "OpcUaConnector",
     "PageNumberPagination",
     "PaginationStrategy",
     "SapPM",
