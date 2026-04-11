@@ -8,8 +8,21 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import Any
 
 import structlog
+
+_REDACT_PATTERNS = {"token", "password", "secret", "api_key", "client_secret", "authorization"}
+
+
+def _redact_secrets(
+    logger: Any, method: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Redact sensitive fields from log events."""
+    for key in list(event_dict):
+        if any(pattern in key.lower() for pattern in _REDACT_PATTERNS):
+            event_dict[key] = "***REDACTED***"
+    return event_dict
 
 
 def configure_logging(
@@ -25,6 +38,7 @@ def configure_logging(
     """
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
+        _redact_secrets,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),

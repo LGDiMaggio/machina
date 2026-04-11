@@ -89,6 +89,7 @@ class Agent:
         self.plant = plant or Plant(name="Default")
         self._channels = channels or []
         self._max_history = max_history
+        self._max_message_length = 10_000
 
         # LLM provider
         if isinstance(llm, str):
@@ -226,6 +227,17 @@ class Agent:
         Raises:
             LLMError: If the underlying LLM call fails.
         """
+        if len(text) > self._max_message_length:
+            original_length = len(text)
+            text = text[: self._max_message_length]
+            logger.warning(
+                "message_truncated",
+                agent=self.name,
+                chat_id=chat_id,
+                original_length=original_length,
+                max_length=self._max_message_length,
+            )
+
         logger.info(
             "message_received",
             agent=self.name,
@@ -601,6 +613,14 @@ class Agent:
 
     async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
+        if self.sandbox:
+            logger.info(
+                "sandbox_create_work_order",
+                agent=self.name,
+                args=args,
+            )
+            return {"sandbox": True, "action": "create_work_order", "args": args}
+
         from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
         connectors = self._registry.find_by_capability("create_work_order")
