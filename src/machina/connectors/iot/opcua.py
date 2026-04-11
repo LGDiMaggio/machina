@@ -203,8 +203,7 @@ class OpcUaConnector:
                 "insecure_connection",
                 connector="OpcUaConnector",
                 endpoint=self._endpoint,
-                message="OPC-UA security_mode is 'None'. "
-                "Use 'SignAndEncrypt' in production.",
+                message="OPC-UA security_mode is 'None'. Use 'SignAndEncrypt' in production.",
             )
 
     async def disconnect(self) -> None:

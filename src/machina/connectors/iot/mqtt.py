@@ -233,8 +233,7 @@ class MqttConnector:
                 connector="MqttConnector",
                 broker=self._broker,
                 port=self._port,
-                message="MQTT TLS is disabled. "
-                "Use tls=True and port 8883 in production.",
+                message="MQTT TLS is disabled. Use tls=True and port 8883 in production.",
             )
 
     async def disconnect(self) -> None:
