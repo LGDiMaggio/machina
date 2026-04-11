@@ -7,6 +7,7 @@ grant) and calls the Microsoft Graph ``/calendars`` endpoints with
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -107,12 +108,14 @@ class OutlookCalendarBackend:
             raise ConnectorAuthError("MSAL application not initialised")
 
         # Try cached token first (avoids unnecessary token requests)
-        result = self._msal_app.acquire_token_silent(self._SCOPES, account=None)
+        result = await asyncio.to_thread(self._msal_app.acquire_token_silent, self._SCOPES, None)
         if result and "access_token" in result:
             return str(result["access_token"])
 
         # Fall back to fresh acquisition
-        result = self._msal_app.acquire_token_for_client(scopes=self._SCOPES)
+        result = await asyncio.to_thread(
+            self._msal_app.acquire_token_for_client, scopes=self._SCOPES
+        )
         if "access_token" not in result:
             error_desc = result.get("error_description", "Unknown MSAL error")
             raise ConnectorAuthError(f"Failed to acquire Outlook token: {error_desc}")

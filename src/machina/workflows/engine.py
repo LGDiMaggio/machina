@@ -337,8 +337,19 @@ class WorkflowEngine:
         step: Step,
         context: WorkflowContext,
     ) -> Any:
-        """Send a notification via a communication connector."""
+        """Send a notification via a communication connector.
+
+        The step's ``inputs`` dict should include a ``"channel"`` key
+        with the recipient address (channel ID, chat ID, or email).
+        Falls back to ``trigger.channel`` if not explicitly set.
+        """
         resolved = context.resolve(step.template or step.prompt)
+
+        # Resolve recipient from step inputs or trigger context
+        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        channel = resolved_inputs.get("channel", "")
+        if not channel:
+            channel = context.trigger.get("channel", "")
 
         if self.sandbox:
             logger.info(
@@ -354,8 +365,8 @@ class WorkflowEngine:
             return {"sent": False, "error": "No communication connector available"}
 
         _, conn = connectors[0]
-        await conn.send_message(resolved)  # type: ignore[attr-defined]
-        return {"sent": True, "message": resolved}
+        await conn.send_message(channel, resolved)  # type: ignore[attr-defined]
+        return {"sent": True, "channel": channel, "message": resolved}
 
     async def _dispatch_service(
         self,
@@ -472,5 +483,12 @@ class WorkflowEngine:
             "submit",
             "write",
             "notify",
+            "close",
+            "cancel",
+            "approve",
+            "reject",
+            "complete",
+            "assign",
+            "set",
         }
         return any(kw in action.lower() for kw in write_keywords)

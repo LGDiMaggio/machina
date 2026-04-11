@@ -95,7 +95,7 @@ class _FakeCommsConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def send_message(self, message: str, **kwargs: Any) -> None:
+    async def send_message(self, channel: str, message: str, **kwargs: Any) -> None:
         self.messages_sent.append(message)
 
     async def wait_for_reply(self, **kwargs: Any) -> str:
