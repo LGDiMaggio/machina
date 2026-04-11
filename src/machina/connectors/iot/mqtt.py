@@ -227,6 +227,15 @@ class MqttConnector:
             tls=self._tls,
         )
 
+        if not self._tls:
+            logger.warning(
+                "insecure_connection",
+                connector="MqttConnector",
+                broker=self._broker,
+                port=self._port,
+                message="MQTT TLS is disabled. Use tls=True and port 8883 in production.",
+            )
+
     async def disconnect(self) -> None:
         """Disconnect from the MQTT broker and cancel all subscriptions."""
         self._sub_entries.clear()

@@ -62,6 +62,9 @@ nav:
       - UpKeep: connectors/upkeep.md
       - OPC-UA: connectors/opcua.md
       - MQTT: connectors/mqtt.md
+      - Slack: connectors/slack.md
+      - Email: connectors/email.md
+      - Calendar: connectors/calendar.md
   - MCP Server: mcp-server.md
 
 markdown_extensions:

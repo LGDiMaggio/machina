@@ -945,3 +945,65 @@ class TestLLMProviderSwap:
             assert "OpenAI-style" in response
         finally:
             await agent.stop()
+
+
+# ---------------------------------------------------------------------------
+# Workflow integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestAgentWorkflows:
+    """Test Agent workflow registration and triggering."""
+
+    def test_init_with_workflows(self) -> None:
+        from machina.workflows import Step, Workflow
+
+        wf = Workflow(name="Test WF", steps=[Step("s1")])
+        agent = Agent(workflows=[wf])
+        assert "Test WF" in agent.workflows
+        assert agent.workflows["Test WF"] is wf
+
+    def test_register_workflow(self) -> None:
+        from machina.workflows import Step, Workflow
+
+        agent = Agent()
+        wf = Workflow(name="Dynamic WF", steps=[Step("s1")])
+        agent.register_workflow(wf)
+        assert "Dynamic WF" in agent.workflows
+
+    def test_workflows_property_is_copy(self) -> None:
+        from machina.workflows import Workflow
+
+        agent = Agent()
+        agent.register_workflow(Workflow(name="W1"))
+        workflows = agent.workflows
+        workflows["injected"] = Workflow(name="injected")
+        # Original should not be mutated
+        assert "injected" not in agent.workflows
+
+    @pytest.mark.asyncio
+    async def test_trigger_workflow(self) -> None:
+        from machina.workflows import Step, Workflow
+
+        wf = Workflow(name="Simple", steps=[Step("noop")])
+        agent = Agent(workflows=[wf])
+        result = await agent.trigger_workflow("Simple", {"asset_id": "P-201"})
+        assert result.success is True
+        assert result.workflow_name == "Simple"
+
+    @pytest.mark.asyncio
+    async def test_trigger_unknown_workflow_raises(self) -> None:
+        from machina.exceptions import WorkflowError
+
+        agent = Agent()
+        with pytest.raises(WorkflowError, match="not registered"):
+            await agent.trigger_workflow("Nonexistent")
+
+    def test_sandbox_flag(self) -> None:
+        agent = Agent(sandbox=True)
+        assert agent.sandbox is True
+        assert agent._engine.sandbox is True
+
+    def test_sandbox_default_false(self) -> None:
+        agent = Agent()
+        assert agent.sandbox is False

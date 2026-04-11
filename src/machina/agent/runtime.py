@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -22,6 +22,10 @@ from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS
 from machina.observability.tracing import ActionTracer
+from machina.workflows.engine import WorkflowEngine
+
+if TYPE_CHECKING:
+    from machina.workflows.models import Workflow, WorkflowResult
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +47,8 @@ class Agent:
              an :class:`LLMProvider` instance.
         temperature: LLM sampling temperature.
         max_history: Maximum conversation turns to keep in memory.
+        workflows: List of workflow definitions to register.
+        sandbox: If ``True``, write actions are logged but not executed.
 
     Example:
         ```python
@@ -75,12 +81,15 @@ class Agent:
         llm: str | LLMProvider = "openai:gpt-4o",
         temperature: float = 0.1,
         max_history: int = 20,
+        workflows: list[Workflow] | None = None,
+        sandbox: bool = False,
     ) -> None:
         self.name = name
         self.description = description
         self.plant = plant or Plant(name="Default")
         self._channels = channels or []
         self._max_history = max_history
+        self._max_message_length = 10_000
 
         # LLM provider
         if isinstance(llm, str):
@@ -100,8 +109,64 @@ class Agent:
         # Action tracer
         self.tracer = ActionTracer()
 
+        # Sandbox mode
+        self.sandbox = sandbox
+
+        # Workflow engine
+        self._workflows: dict[str, Workflow] = {}
+        self._engine = WorkflowEngine(
+            registry=self._registry,
+            tracer=self.tracer,
+            llm=self._llm,
+            sandbox=sandbox,
+        )
+        for wf in workflows or []:
+            self._workflows[wf.name] = wf
+
         # Conversation history per chat
         self._histories: dict[str, list[dict[str, str]]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API — workflows
+    # ------------------------------------------------------------------
+
+    @property
+    def workflows(self) -> dict[str, Workflow]:
+        """Registered workflows (read-only copy)."""
+        return dict(self._workflows)
+
+    def register_workflow(self, workflow: Workflow) -> None:
+        """Register a workflow for later execution.
+
+        Args:
+            workflow: The workflow definition to register.
+        """
+        self._workflows[workflow.name] = workflow
+        logger.info("workflow_registered", workflow=workflow.name)
+
+    async def trigger_workflow(
+        self,
+        workflow_name: str,
+        event: dict[str, Any] | None = None,
+    ) -> WorkflowResult:
+        """Trigger a registered workflow by name.
+
+        Args:
+            workflow_name: Name of a previously registered workflow.
+            event: Event data to pass to the workflow.
+
+        Returns:
+            A :class:`WorkflowResult` with per-step outcomes.
+
+        Raises:
+            WorkflowError: If the workflow is not found.
+        """
+        from machina.exceptions import WorkflowError
+
+        workflow = self._workflows.get(workflow_name)
+        if workflow is None:
+            raise WorkflowError(f"Workflow '{workflow_name}' not registered")
+        return await self._engine.execute(workflow, event)
 
     # ------------------------------------------------------------------
     # Public API
@@ -162,6 +227,17 @@ class Agent:
         Raises:
             LLMError: If the underlying LLM call fails.
         """
+        if len(text) > self._max_message_length:
+            original_length = len(text)
+            text = text[: self._max_message_length]
+            logger.warning(
+                "message_truncated",
+                agent=self.name,
+                chat_id=chat_id,
+                original_length=original_length,
+                max_length=self._max_message_length,
+            )
+
         logger.info(
             "message_received",
             agent=self.name,
@@ -537,6 +613,14 @@ class Agent:
 
     async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
+        if self.sandbox:
+            logger.info(
+                "sandbox_create_work_order",
+                agent=self.name,
+                args=args,
+            )
+            return {"sandbox": True, "action": "create_work_order", "args": args}
+
         from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
         connectors = self._registry.find_by_capability("create_work_order")

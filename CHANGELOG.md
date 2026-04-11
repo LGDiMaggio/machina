@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workflow Engine** with trigger-step-action model, sequential execution,
+  template variable resolution (`{trigger.field}`, `{step_name.field}`),
+  per-step error policies (RETRY, SKIP, STOP, NOTIFY), guard conditions,
+  configurable timeouts, and action tracing
+- **Sandbox mode** for safe experimentation: write actions (create, update,
+  delete, send) are logged but not executed; read-only actions still run
+  normally.  Sandbox enforced in both WorkflowEngine and Agent tool dispatch
+- **`alarm_to_workorder` built-in workflow** — 7-step template from sensor
+  alarm through diagnosis, spare part check, work order creation, technician
+  notification, confirmation, and CMMS submission
+- **`SlackConnector`** — Slack integration via the Bolt SDK in Socket Mode
+  (WebSocket-based, no public endpoint required).  Supports channel
+  whitelisting, bot-message filtering, and bidirectional messaging
+- **`EmailConnector`** — Email integration with two backends:
+  - Standard SMTP/IMAP (zero external dependencies, TLS/SSL support)
+  - Gmail API backend via OAuth2 (`pip install machina-ai[gmail]`)
+  - Polling-based inbox monitoring with persistent IMAP connections
+- **`CalendarConnector`** with three pluggable backends:
+  - Google Calendar API v3 (OAuth2 + service account auth)
+  - Microsoft 365 / Outlook (MSAL client-credentials + Graph API)
+  - iCal `.ics` files and URLs (read-only, with RRULE expansion)
+  - Facade pattern with dynamic capabilities (read-only for iCal,
+    full CRUD for Google/Outlook)
+  - Convenience methods: `get_production_schedule()`,
+    `get_planned_downtime()`, `get_technician_availability()`
+- **`CalendarEvent`**, **`PlannedDowntime`**, **`ShiftPattern`** domain
+  entities with `EventType` enum
+- **`OpcUaConnector`** — OPC-UA client for real-time sensor data with
+  subscription-based monitoring, value-to-alarm conversion, and security
+  policy support (None, Sign, SignAndEncrypt)
+- **`MqttConnector`** — MQTT pub-sub with JSON, Sparkplug B, and raw
+  payload support.  Topic wildcards, TLS, and fan-out architecture for
+  concurrent subscriptions
+- **`Step.is_write`** field for explicit write-action marking, overriding
+  the keyword-based heuristic in sandbox mode
+- **Workflow `depends_on` validation** — the engine validates all step
+  dependency references at execution start, raising `WorkflowError` for
+  invalid references
+- **`IncomingMessage`** and **`MessageHandler`** extracted to
+  `machina.connectors.comms.types` for clean cross-connector imports
 - Phase 2 CMMS connectors: `SapPmConnector` (SAP PM OData), `MaximoConnector`
   (IBM Maximo OSLC/JSON), `UpKeepConnector` (UpKeep REST v2)
 - `OAuth2ClientCredentials` auth strategy for SAP S/4HANA and other
@@ -44,8 +84,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MaintenanceCause` → `WorkOrder.failure_cause`; `MaximoConnector` extracts
   `failurecode` → `failure_mode` and `failureremark` → `failure_cause`.
 
+### Security
+
+- **Secret redaction** in structured logs — fields matching `token`,
+  `password`, `secret`, `api_key`, `client_secret`, `authorization` are
+  automatically replaced with `***REDACTED***`
+- **Input length limit** — `Agent.handle_message()` truncates messages
+  exceeding 10,000 characters with a warning log
+- **Prompt hardening** — system prompt now includes guideline rejecting
+  instruction override attempts and role changes
+- **Sandbox enforcement** — `Agent._tool_create_work_order()` now
+  respects sandbox mode (previously bypassed)
+- **Insecure connection warnings** — OPC-UA and MQTT connectors log
+  warnings when security/TLS is disabled
+- **Dependabot** configured for weekly pip and GitHub Actions vulnerability
+  scanning
+- **`.gitignore`** expanded to block `*.pem`, `*.key`, `credentials.json`,
+  and client secret files
+- **Auth docstring examples** updated to use `os.environ[]` instead of
+  hardcoded secrets
+
 ### Fixed
 
+- **OPC-UA task reference leak** — `_DataChangeHandler` now tracks
+  background tasks in a `set` with `add_done_callback` to prevent
+  garbage collection of in-flight tasks under rapid data changes
+- **MQTT shared iterator bug** — replaced per-subscription `_message_loop`
+  with a single `_reader_loop` fan-out architecture, preventing competing
+  consumers on the `aiomqtt.Client.messages` async generator
+- **Guard condition exceptions** now logged with `exc_info=True` instead
+  of being silently swallowed
+- **Outlook Calendar token refresh** — MSAL app instance is now stored
+  and tokens are refreshed via `acquire_token_silent()` before each API
+  call, preventing failures after the initial 1-hour token expiry
+- **IMAP connection reuse** — `EmailConnector` now maintains a persistent
+  IMAP connection across poll cycles with automatic reconnection on
+  failure, reducing TCP/TLS handshake overhead
 - `SapPmConnector` CSRF token flow: `_fetch_csrf_token` replaced by
   `_write_with_csrf` which performs the CSRF fetch and the write (POST/PATCH)
   within a **single** `httpx.AsyncClient` context, sharing session cookies.

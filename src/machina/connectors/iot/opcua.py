@@ -198,6 +198,14 @@ class OpcUaConnector:
             security_mode=self._security_mode,
         )
 
+        if self._security_mode == "None":
+            logger.warning(
+                "insecure_connection",
+                connector="OpcUaConnector",
+                endpoint=self._endpoint,
+                message="OPC-UA security_mode is 'None'. Use 'SignAndEncrypt' in production.",
+            )
+
     async def disconnect(self) -> None:
         """Disconnect from the OPC-UA server and cancel all subscriptions."""
         for sub in list(self._subscriptions.values()):

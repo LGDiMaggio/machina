@@ -586,3 +586,281 @@ class TestTopicConfig:
     def test_string_format(self) -> None:
         cfg = TopicConfig(topic="test", payload_format="raw")
         assert cfg.payload_format == "raw"
+
+
+# ---------------------------------------------------------------------------
+# Dispatch message & alarm creation
+# ---------------------------------------------------------------------------
+
+
+class TestMqttDispatchMessage:
+    """Test _dispatch_message, alarm creation, and callback execution."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_creates_alarm_on_threshold_exceeded(self) -> None:
+        """dispatch_message creates an Alarm when value > threshold."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(
+            broker="localhost",
+            topics=[TopicConfig(topic="sensor/temp", threshold=50.0, parameter="temperature")],
+        )
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=50.0, parameter="temperature")],
+        )
+
+        payload = json.dumps({"value": 75.0}).encode()
+        await conn._dispatch_message("sensor/temp", payload, entry)
+
+        assert len(received) == 1
+        assert received[0].value == 75.0
+        assert received[0].parameter == "temperature"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_skips_below_threshold(self) -> None:
+        """dispatch_message skips alarm when value <= threshold."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=50.0)],
+        )
+
+        payload = json.dumps({"value": 30.0}).encode()
+        await conn._dispatch_message("sensor/temp", payload, entry)
+
+        assert len(received) == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_skips_unmatched_topic(self) -> None:
+        """dispatch_message skips when topic doesn't match any config."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/pressure", threshold=100.0)],
+        )
+
+        payload = json.dumps({"value": 200.0}).encode()
+        await conn._dispatch_message("other/topic", payload, entry)
+
+        assert len(received) == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_handles_parse_error(self) -> None:
+        """dispatch_message gracefully handles unparseable payloads."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=0.0)],
+        )
+
+        await conn._dispatch_message("sensor/temp", b"not-valid-json", entry)
+        assert len(received) == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_handles_callback_error(self) -> None:
+        """dispatch_message logs callback errors but doesn't crash."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        async def bad_callback(alarm: Alarm) -> None:
+            raise RuntimeError("Handler crashed")
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=bad_callback,
+            topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=0.0)],
+        )
+
+        # Should not raise
+        payload = json.dumps({"value": 100.0}).encode()
+        await conn._dispatch_message("sensor/temp", payload, entry)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_sparkplug_payload(self) -> None:
+        """dispatch_message handles Sparkplug B format."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[
+                TopicConfig(
+                    topic="spBv1.0/group/DDATA/node/device",
+                    threshold=0.0,
+                    payload_format=PayloadFormat.SPARKPLUG_B,
+                    parameter="vibration",
+                )
+            ],
+        )
+
+        sparkplug_data = json.dumps({"metrics": [{"name": "vibration", "value": 12.5}]}).encode()
+        await conn._dispatch_message("spBv1.0/group/DDATA/node/device", sparkplug_data, entry)
+
+        assert len(received) == 1
+        assert received[0].value == 12.5
+
+    @pytest.mark.asyncio
+    async def test_dispatch_raw_payload(self) -> None:
+        """dispatch_message handles raw numeric payloads."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[
+                TopicConfig(
+                    topic="sensor/raw",
+                    threshold=0.0,
+                    payload_format=PayloadFormat.RAW,
+                )
+            ],
+        )
+
+        await conn._dispatch_message("sensor/raw", b"42.5", entry)
+        assert len(received) == 1
+        assert received[0].value == 42.5
+
+
+# ---------------------------------------------------------------------------
+# Cancel subscription & normalise configs
+# ---------------------------------------------------------------------------
+
+
+class TestMqttSubscriptionManagement:
+    """Test subscription cancellation and config normalisation."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_subscription_removes_entry(self) -> None:
+        """_cancel_subscription removes the entry from _sub_entries."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        async def callback(alarm: Alarm) -> None:
+            pass
+
+        sub = MqttSubscription(id="sub-1")
+        conn._sub_entries["sub-1"] = _SubscriptionEntry(callback=callback, topic_cfgs=[])
+        conn._reader_task = None
+
+        await conn._cancel_subscription(sub)
+        assert "sub-1" not in conn._sub_entries
+
+    @pytest.mark.asyncio
+    async def test_cancel_last_subscription_stops_reader(self) -> None:
+        """When the last subscription is cancelled, the reader task is stopped."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        async def callback(alarm: Alarm) -> None:
+            pass
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        sub = MqttSubscription(id="sub-1")
+        conn._sub_entries["sub-1"] = _SubscriptionEntry(callback=callback, topic_cfgs=[])
+        conn._reader_task = asyncio.create_task(_hang())
+
+        await conn._cancel_subscription(sub)
+        assert conn._reader_task is None
+
+    def test_normalise_configs_from_dicts(self) -> None:
+        """_normalise_configs converts dicts to TopicConfig objects."""
+        configs = MqttConnector._normalise_configs(
+            [
+                {"topic": "t/1", "threshold": 10.0},
+                TopicConfig(topic="t/2"),
+            ]
+        )
+        assert len(configs) == 2
+        assert isinstance(configs[0], TopicConfig)
+        assert configs[0].topic == "t/1"
+        assert configs[0].threshold == 10.0
+        assert isinstance(configs[1], TopicConfig)
+
+    def test_parse_payload_json_invalid_returns_none(self) -> None:
+        """_parse_payload returns None for non-JSON data with JSON format."""
+        conn = MqttConnector(broker="localhost", topics=[])
+        cfg = TopicConfig(topic="t", payload_format=PayloadFormat.JSON)
+        result = conn._parse_payload(b"not-json-{{{", cfg)
+        assert result is None
+
+    def test_parse_payload_sparkplug_no_matching_metric(self) -> None:
+        """_parse_payload returns None when no metric matches."""
+        conn = MqttConnector(broker="localhost", topics=[])
+        cfg = TopicConfig(
+            topic="t",
+            payload_format=PayloadFormat.SPARKPLUG_B,
+            parameter="nonexistent",
+        )
+        data = json.dumps({"metrics": [{"name": "other", "value": 1.0}]}).encode()
+        result = conn._parse_payload(data, cfg)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_no_threshold_always_alarms(self) -> None:
+        """When threshold is 0, any positive value triggers alarm."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/x", threshold=0.0)],
+        )
+
+        # threshold=0 means the condition `value <= threshold` is 0.0 <= 0.0 = True → skip
+        # Actually with threshold=0 and value > 0, it passes
+        payload = json.dumps({"value": 0.1}).encode()
+        await conn._dispatch_message("sensor/x", payload, entry)
+        assert len(received) == 1

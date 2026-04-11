@@ -48,6 +48,13 @@ htmlcov/
 .env
 .env.*
 
+# === Credentials & certificates ===
+*.pem
+*.key
+credentials.json
+gmail_credentials.json
+client_secret*.json
+
 # === Documentation build ===
 site/
 

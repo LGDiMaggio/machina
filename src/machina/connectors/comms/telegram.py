@@ -8,54 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
 
-
-@dataclass
-class IncomingMessage:
-    """A message received from a communication channel.
-
-    Args:
-        text: The message text.
-        chat_id: Identifier for the chat/conversation.
-        user_id: Identifier for the sender.
-        user_name: Display name of the sender.
-        channel: Channel type (``"telegram"`` or ``"cli"``).
-        raw: Raw platform-specific message object.
-
-    Example:
-        ```python
-        from machina.connectors.comms.telegram import IncomingMessage
-
-        msg = IncomingMessage("Check pump P-201", chat_id="123", user_name="Mario")
-        ```
-    """
-
-    text: str
-    chat_id: str = ""
-    user_id: str = ""
-    user_name: str = ""
-    channel: str = "telegram"
-    raw: Any = None
-
-    def __repr__(self) -> str:
-        return (
-            f"IncomingMessage(channel={self.channel!r}, "
-            f"user={self.user_name!r}, text={self.text[:50]!r})"
-        )
-
-
-# Type alias for the handler callback
-MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, str]]
+# Re-export for backwards compatibility
+__all__ = ["CliChannel", "IncomingMessage", "MessageHandler", "TelegramConnector"]
 
 
 class TelegramConnector:

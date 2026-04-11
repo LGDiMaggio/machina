@@ -7,11 +7,12 @@ can round-trip through YAML/JSON in the future.
 
 Example:
     ```python
+    import os
     from machina.connectors.cmms import BearerAuth, GenericCmmsConnector
 
     cmms = GenericCmmsConnector(
         url="https://cmms.example.com/api",
-        auth=BearerAuth(token="secret"),
+        auth=BearerAuth(token=os.environ["CMMS_API_TOKEN"]),
     )
     ```
 """
@@ -97,12 +98,13 @@ class OAuth2ClientCredentials(BaseModel):
 
     Example:
         ```python
+        import os
         from machina.connectors.cmms import OAuth2ClientCredentials
 
         auth = OAuth2ClientCredentials(
             token_url="https://sap.example.com/oauth/token",
-            client_id="my-client",
-            client_secret="my-secret",
+            client_id=os.environ["SAP_CLIENT_ID"],
+            client_secret=os.environ["SAP_CLIENT_SECRET"],
         )
         # During connector connect():
         await auth.fetch_token(httpx_client)
