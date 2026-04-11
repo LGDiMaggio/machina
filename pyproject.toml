@@ -49,6 +49,10 @@ sap = ["pyodata>=1.10", "requests>=2.31"]
 opcua = ["asyncua>=1.0"]
 mqtt = ["aiomqtt>=2.0"]
 modbus = ["pymodbus>=3.5"]
+iot = [
+    "machina-ai[opcua]",
+    "machina-ai[mqtt]",
+]
 telegram = ["python-telegram-bot>=21.0"]
 cmms-rest = ["httpx>=0.27"]
 docs-rag = [

@@ -60,6 +60,8 @@ nav:
       - SAP PM: connectors/sap-pm.md
       - IBM Maximo: connectors/maximo.md
       - UpKeep: connectors/upkeep.md
+      - OPC-UA: connectors/opcua.md
+      - MQTT: connectors/mqtt.md
   - MCP Server: mcp-server.md
 
 markdown_extensions:
