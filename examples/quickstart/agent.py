@@ -21,17 +21,24 @@ from machina.connectors.docs import DocumentStoreConnector
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 
-# ── The entire agent ────────────────────────────────────────────
-agent = Agent(
-    name="Maintenance Assistant",
-    plant=Plant(name="Demo Plant"),
-    connectors=[
-        GenericCmmsConnector(data_dir=SAMPLE_DIR / "cmms"),
-        DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
-    ],
-    channels=[CliChannel()],
-    llm="ollama:llama3",
-)
+
+def _build_agent(llm: str = "ollama:llama3", sandbox: bool = False) -> Agent:
+    """Build the agent with the given LLM and sandbox settings."""
+    return Agent(
+        name="Maintenance Assistant",
+        plant=Plant(name="Demo Plant"),
+        connectors=[
+            GenericCmmsConnector(data_dir=SAMPLE_DIR / "cmms"),
+            DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
+        ],
+        channels=[CliChannel()],
+        llm=llm,
+        sandbox=sandbox,
+    )
+
+
+# ── The entire agent (13 lines) ────────────────────────────────
+agent = _build_agent()
 # ────────────────────────────────────────────────────────────────
 
 
@@ -58,9 +65,9 @@ def main() -> None:
     from _preflight import check
     check(llm=args.llm, sample_dir=SAMPLE_DIR)
 
-    # Apply CLI overrides
-    agent.llm = args.llm
-    agent.sandbox = args.sandbox
+    # Build agent with CLI overrides
+    global agent
+    agent = _build_agent(llm=args.llm, sandbox=args.sandbox)
 
     mode = "SANDBOX" if args.sandbox else "LIVE"
     print(f"\n{'='*60}")

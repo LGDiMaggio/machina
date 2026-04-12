@@ -40,13 +40,20 @@ pip install machina-ai[cmms-rest]
 |---|---|
 | `read_assets` | Read all assets (`/api/v2/assets`) |
 | `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw UpKeep string) |
-| `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `close_work_order` | Convenience wrapper: transition to CLOSED (maps to UpKeep `complete`) |
-| `cancel_work_order` | Convenience wrapper: transition to CANCELLED (maps to UpKeep `on hold`) |
 | `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
+
+### Convenience methods
+
+These methods are available but are **not** declared as agent-discoverable capabilities:
+
+| Method | Description |
+|---|---|
+| `get_work_order(id)` | Fetch a single work order by ID |
+| `close_work_order(id)` | Transition to CLOSED (maps to UpKeep `complete`) via `update_work_order` |
+| `cancel_work_order(id)` | Transition to CANCELLED (maps to UpKeep `on hold`) via `update_work_order` |
 
 ## Usage Examples
 

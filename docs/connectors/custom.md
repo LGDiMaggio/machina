@@ -210,7 +210,7 @@ Every connector must provide four things:
 
 | Attribute | Signature | Purpose |
 |---|---|---|
-| `capabilities` | `ClassVar[list[str]]` | Declares which operations this connector supports (e.g. `["read_assets", "read_work_orders"]`). The agent uses this to discover capabilities at runtime and enable matching LLM tools. |
+| `capabilities` | `@property -> list[str]` | Declares which operations this connector supports (e.g. `["read_assets", "read_work_orders"]`). The agent uses this to discover capabilities at runtime and enable matching LLM tools. Concrete classes typically use a `ClassVar[list[str]]` class attribute, which satisfies the Protocol's `@property` via structural typing. |
 | `connect()` | `async def connect() -> None` | Establish the underlying connection (open HTTP client, log into CMMS, subscribe to broker, …). |
 | `disconnect()` | `async def disconnect() -> None` | Clean up the connection. Called by `Agent.stop()`. |
 | `health_check()` | `async def health_check() -> ConnectorHealth` | Return a `ConnectorHealth` status the agent can use to decide whether the connector is usable. |

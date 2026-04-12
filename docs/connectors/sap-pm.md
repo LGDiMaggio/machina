@@ -70,13 +70,20 @@ pip install machina-ai[cmms-rest]
 |---|---|
 | `read_assets` | Read equipment master records (`API_EQUIPMENT/Equipment`) |
 | `read_work_orders` | Read maintenance orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw SAP code) |
-| `get_work_order` | Fetch a single maintenance order by number |
 | `create_work_order` | Create maintenance orders (CSRF token handled automatically) |
 | `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
-| `close_work_order` | Convenience wrapper: transition to CLOSED (SAP `TECO`) |
-| `cancel_work_order` | Convenience wrapper: transition to CANCELLED (SAP `DLFL`) |
 | `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) |
 | `read_maintenance_plans` | Read preventive-maintenance plans (`API_MAINTENANCEPLAN/MaintenancePlan`) |
+
+### Convenience methods
+
+These methods are available but are **not** declared as agent-discoverable capabilities:
+
+| Method | Description |
+|---|---|
+| `get_work_order(id)` | Fetch a single maintenance order by number |
+| `close_work_order(id)` | Transition to CLOSED (SAP `TECO`) via `update_work_order` |
+| `cancel_work_order(id)` | Transition to CANCELLED (SAP `DLFL`) via `update_work_order` |
 
 ## Usage Examples
 

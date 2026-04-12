@@ -68,13 +68,20 @@ pip install machina-ai[cmms-rest]
 |---|---|
 | `read_assets` | Read asset records (`mxasset` object structure) |
 | `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw Maximo code) |
-| `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `close_work_order` | Convenience wrapper: transition to CLOSED (Maximo `CLOSE`) |
-| `cancel_work_order` | Convenience wrapper: transition to CANCELLED (Maximo `CAN`) |
 | `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
+
+### Convenience methods
+
+These methods are available but are **not** declared as agent-discoverable capabilities:
+
+| Method | Description |
+|---|---|
+| `get_work_order(wonum)` | Fetch a single work order by `wonum` |
+| `close_work_order(wonum)` | Transition to CLOSED (Maximo `CLOSE`) via `update_work_order` |
+| `cancel_work_order(wonum)` | Transition to CANCELLED (Maximo `CAN`) via `update_work_order` |
 
 ## Usage Examples
 
