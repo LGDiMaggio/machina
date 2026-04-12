@@ -51,6 +51,7 @@ quickstart/  -->  01_alarm_response/  -->  02_predictive_pipeline/
 | [**03_cmms_portability/**](03_cmms_portability/) | Same agent works across SAP PM, Maximo, UpKeep | Connector abstraction, domain model portability |
 | [**04_custom_workflows/**](04_custom_workflows/) | Spare part reorder + preventive scheduling workflows | Workflow DSL: triggers, guards, error policies |
 | [**05_multi_agent_team/**](05_multi_agent_team/) | Specialist agents collaborate on diagnostics | Multi-agent orchestration (v0.3) |
+| [**06_yaml_config/**](06_yaml_config/) | Agent configured entirely via YAML -- zero Python | Declarative config, `Agent.from_config()` |
 
 ## Which Example is for Me?
 
@@ -63,6 +64,8 @@ quickstart/  -->  01_alarm_response/  -->  02_predictive_pipeline/
 **"I'm a system integrator deploying across multiple clients"** --> [03_cmms_portability/](03_cmms_portability/)
 
 **"I want to build my own workflows"** --> [04_custom_workflows/](04_custom_workflows/)
+
+**"I want to configure agents via YAML, no Python"** --> [06_yaml_config/](06_yaml_config/)
 
 ## Interactive Tour
 

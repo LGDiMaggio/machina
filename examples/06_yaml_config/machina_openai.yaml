@@ -1,0 +1,27 @@
+# OpenAI configuration — requires OPENAI_API_KEY environment variable.
+#
+#   export OPENAI_API_KEY=sk-...
+#   python agent.py --config machina_openai.yaml
+
+name: "Maintenance Assistant (OpenAI)"
+
+plant:
+  name: "North Plant"
+
+connectors:
+  cmms:
+    type: generic_cmms
+    settings:
+      data_dir: "../sample_data/cmms"
+  docs:
+    type: document_store
+    settings:
+      paths:
+        - "../sample_data/manuals"
+
+channels:
+  - type: cli
+
+llm:
+  provider: "openai:gpt-4o"
+  temperature: 0.1

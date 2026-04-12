@@ -12,6 +12,9 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 import structlog
 
 from machina.agent.entity_resolver import EntityResolver
@@ -125,6 +128,64 @@ class Agent:
 
         # Conversation history per chat
         self._histories: dict[str, list[dict[str, str]]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API — factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, path: str | Path) -> Agent:
+        """Create an Agent from a ``machina.yaml`` configuration file.
+
+        Connectors and channels are instantiated from their ``type``
+        strings.  Workflows cannot be defined in YAML (they may
+        contain Python callables); register them after construction
+        with :meth:`register_workflow`.
+
+        Args:
+            path: Path to the YAML configuration file.
+
+        Returns:
+            A fully configured ``Agent`` instance.
+
+        Example:
+            ```python
+            from machina import Agent
+
+            agent = Agent.from_config("machina.yaml")
+            agent.run()
+            ```
+        """
+        from machina.config import load_config
+        from machina.connectors.factory import create_channel, create_connector
+
+        config = load_config(path)
+
+        plant = Plant(name=config.plant.name, location=config.plant.location)
+
+        connectors = [
+            create_connector(cc.type, cc.settings)
+            for cc in config.connectors.values()
+            if cc.enabled
+        ]
+
+        if config.channels:
+            channels = [create_channel(ch.type, ch.settings) for ch in config.channels]
+        else:
+            from machina.connectors.comms.telegram import CliChannel
+
+            channels = [CliChannel()]
+
+        return cls(
+            name=config.name,
+            description=config.description,
+            plant=plant,
+            connectors=connectors,
+            channels=channels,
+            llm=config.llm.provider,
+            temperature=config.llm.temperature,
+            sandbox=config.sandbox,
+        )
 
     # ------------------------------------------------------------------
     # Public API — workflows
