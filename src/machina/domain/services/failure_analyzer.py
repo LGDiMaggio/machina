@@ -32,7 +32,7 @@ class FailureAnalyzer:
         self,
         alarms: list[Alarm] | None = None,
         **kwargs: Any,
-    ) -> list[dict[str, Any]] | list[FailureMode]:
+    ) -> list[Any]:
         """Return failure modes whose indicators match the alarm parameters.
 
         Can be called two ways:
