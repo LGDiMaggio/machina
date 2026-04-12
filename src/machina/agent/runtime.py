@@ -210,8 +210,8 @@ class Agent:
     def _build_domain_services(self) -> None:
         """Build domain services from loaded data and register them with the workflow engine."""
         from machina.domain.services.failure_analyzer import FailureAnalyzer
-        from machina.domain.services.work_order_factory import WorkOrderFactory
         from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
+        from machina.domain.services.work_order_factory import WorkOrderFactory
 
         # Collect failure modes from connectors that provide them
         all_failure_modes = []

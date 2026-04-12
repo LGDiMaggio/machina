@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
@@ -34,7 +34,7 @@ class SimulatedSensorConnector:
         }
     """
 
-    capabilities = [
+    capabilities: ClassVar[list[str]] = [
         "read_sensor_data",
         "get_related_readings",
         "get_latest_reading",
