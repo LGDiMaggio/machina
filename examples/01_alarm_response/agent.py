@@ -2,7 +2,7 @@
 """Alarm fires on pump P-201. Agent handles it end-to-end.
 
 The built-in alarm-to-work-order workflow: diagnose, check parts,
-create work order, notify the team. 7 steps, only 2 use the LLM.
+create work order, notify the team. 6 steps, only 2 use the LLM.
 
     python agent.py                     # sandbox (default)
     python agent.py --live              # execute writes
@@ -95,6 +95,11 @@ def main() -> None:
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    # Pre-flight: check sample data, LLM provider, and required extras
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _preflight import check
+    check(llm=args.llm)
 
     if args.verbose:
         from machina.observability.logging import configure_logging

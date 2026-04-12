@@ -7,8 +7,7 @@ When a sensor alarm fires, this workflow:
 3. Verifies spare parts availability
 4. Generates a work order with auto-populated fields
 5. Notifies the maintenance technician
-6. Awaits confirmation
-7. Submits the work order to the CMMS
+6. Submits the work order to the CMMS
 """
 
 from machina.workflows.models import (
@@ -73,13 +72,6 @@ alarm_to_workorder = Workflow(
                 "Spare Parts: {check_spare_parts}"
             ),
             on_error=ErrorPolicy.NOTIFY,
-        ),
-        Step(
-            "await_confirmation",
-            action="channels.wait_for_reply",
-            description="Wait for the technician to confirm the work order",
-            on_error=ErrorPolicy.SKIP,
-            timeout_seconds=3600,
         ),
         Step(
             "submit_work_order",

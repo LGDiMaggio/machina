@@ -35,7 +35,7 @@ Any [LiteLLM-compatible provider](https://docs.litellm.ai/docs/providers) works.
 ## Run It
 
 ```bash
-pip install machina-ai[litellm]
+pip install machina-ai[litellm,docs-rag]
 cd examples/quickstart
 
 # With Ollama (default):

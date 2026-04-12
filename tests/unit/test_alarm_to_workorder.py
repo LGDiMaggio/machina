@@ -81,7 +81,7 @@ class _FakeCmmsConnector:
 class _FakeCommsConnector:
     """Communication connector for notifications."""
 
-    capabilities: ClassVar[list[str]] = ["send_message", "wait_for_reply"]
+    capabilities: ClassVar[list[str]] = ["send_message"]
 
     def __init__(self) -> None:
         self.messages_sent: list[str] = []
@@ -97,9 +97,6 @@ class _FakeCommsConnector:
 
     async def send_message(self, channel: str, message: str, **kwargs: Any) -> None:
         self.messages_sent.append(message)
-
-    async def wait_for_reply(self, **kwargs: Any) -> str:
-        return "confirmed"
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +138,7 @@ class TestAlarmToWorkorderWorkflow:
 
     @pytest.mark.asyncio
     async def test_full_execution(self) -> None:
-        """All 7 steps execute successfully end-to-end."""
+        """All 6 steps execute successfully end-to-end."""
         engine, _cmms, _comms = self._build_engine()
         trigger = {"asset_id": "P-201", "severity": "critical", "parameter": "vibration"}
 
@@ -149,7 +146,7 @@ class TestAlarmToWorkorderWorkflow:
 
         assert result.success is True
         assert result.workflow_name == "Alarm to Work Order"
-        assert len(result.step_results) == 7
+        assert len(result.step_results) == 6
 
         # All steps completed
         step_names = [sr.step_name for sr in result.step_results]
@@ -159,7 +156,6 @@ class TestAlarmToWorkorderWorkflow:
             "check_spare_parts",
             "generate_work_order",
             "notify_technician",
-            "await_confirmation",
             "submit_work_order",
         ]
 
@@ -248,14 +244,13 @@ class TestAlarmToWorkorderWorkflow:
     @pytest.mark.asyncio
     async def test_step_count_and_names(self) -> None:
         """Verify the workflow structure is correct."""
-        assert len(alarm_to_workorder.steps) == 7
+        assert len(alarm_to_workorder.steps) == 6
         assert alarm_to_workorder.step_names == [
             "analyze_alarm",
             "check_history",
             "check_spare_parts",
             "generate_work_order",
             "notify_technician",
-            "await_confirmation",
             "submit_work_order",
         ]
 
@@ -270,5 +265,4 @@ class TestAlarmToWorkorderWorkflow:
         # Non-critical steps are SKIP or NOTIFY
         assert policies["check_history"] == ErrorPolicy.SKIP
         assert policies["check_spare_parts"] == ErrorPolicy.SKIP
-        assert policies["await_confirmation"] == ErrorPolicy.SKIP
         assert policies["notify_technician"] == ErrorPolicy.NOTIFY
