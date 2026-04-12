@@ -140,28 +140,39 @@ python agent.py
 If a referenced variable is not set, `load_config()` raises `ValueError`
 with a clear message.
 
-## Adding Workflows
+## When to Use YAML vs Python
 
-Workflows contain Python callables (lambdas, guard conditions) that can't be
-expressed in YAML. Register them after loading:
+YAML config is designed for **knowledge-base agents** — the kind that answer
+technician questions over CMMS data, equipment manuals, and spare part
+inventories. These agents need connectors, an LLM, and a chat channel, but
+no custom automation logic.
 
-```python
-from machina import Agent
-from machina.workflows.builtins import alarm_to_workorder
+For **agents with automated workflows** (alarm response, predictive pipelines,
+spare part reorder), use Python. Workflows contain logic that YAML can't
+express: guard conditions with lambdas, error policies, LLM reasoning steps,
+and template variables. This is a deliberate design choice — encoding
+arbitrary Python logic in YAML would be fragile and hard to debug.
 
-agent = Agent.from_config("machina.yaml")
-agent.register_workflow(alarm_to_workorder)
-agent.run()
-```
+| | YAML config | Python |
+|-|-------------|--------|
+| **Agent type** | Knowledge-base / Q&A | Workflow automation |
+| **What you configure** | Connectors, LLM, channels, plant | Everything + workflows with guards, lambdas |
+| **Workflows** | Not supported | Full DSL ([examples 01-04](../examples/)) |
+| **Best for** | Standard deployments, Docker, ops teams | Complex agents, custom integrations |
+| **Example** | [06_yaml_config/](../examples/06_yaml_config/) | [quickstart/](../examples/quickstart/), [01-04](../examples/) |
 
-## Python vs YAML
+!!! note "Hybrid approach"
+    You can combine both: configure connectors and LLM via YAML, then
+    register workflows in Python:
 
-| | Python | YAML |
-|-|--------|------|
-| **Control** | Full -- custom logic, lambdas, guards | Declarative -- connectors, LLM, channels |
-| **Workflows** | Yes -- full DSL | Register after `from_config()` |
-| **Best for** | Complex agents, custom integrations | Standard deployments, Docker, ops teams |
-| **Example** | [quickstart/](../examples/quickstart/) | [06_yaml_config/](../examples/06_yaml_config/) |
+    ```python
+    from machina import Agent
+    from machina.workflows.builtins import alarm_to_workorder
+
+    agent = Agent.from_config("machina.yaml")
+    agent.register_workflow(alarm_to_workorder)
+    agent.run()
+    ```
 
 ## Next Steps
 

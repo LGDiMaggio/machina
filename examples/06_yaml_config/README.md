@@ -110,15 +110,19 @@ export SAP_TOKEN=eyJhbGci...
 python agent.py
 ```
 
-## Python vs YAML
+## When to Use YAML vs Python
 
-| Python (examples 01-05) | YAML (this example) |
-|--------------------------|---------------------|
-| Full control, custom logic | Declarative, no code |
-| Workflows with guards and lambdas | Connectors + LLM + channels only |
-| Best for: complex agents | Best for: standard deployments |
+YAML config is designed for **knowledge-base agents** — the kind that answer technician questions over CMMS data, equipment manuals, and spare parts. No custom automation, just Q&A.
 
-**Workflows stay in Python** -- they can contain lambdas, guard conditions, and custom logic that can't be expressed in YAML. Use `agent.register_workflow()` after `from_config()`:
+For **agents with workflows** (alarm response, predictive pipelines), use Python. Workflows need guards, lambdas, and error policies that YAML can't express. This is by design — encoding Python logic in YAML would be fragile and hard to debug.
+
+| | YAML (this example) | Python (examples 01-05) |
+|-|---------------------|--------------------------|
+| **Agent type** | Knowledge-base / Q&A | Workflow automation |
+| **Configures** | Connectors, LLM, channels, plant | Everything + workflows |
+| **Best for** | Standard deployments, Docker, ops | Complex agents, custom logic |
+
+You can also combine both — YAML for infra, Python for workflows:
 
 ```python
 from machina import Agent

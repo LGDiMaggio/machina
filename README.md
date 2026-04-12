@@ -99,7 +99,7 @@ Try it now: `cd examples/quickstart && python agent.py` -- [full quickstart guid
 
 ### Or configure via YAML
 
-Prefer declarative configuration? Define your agent in `machina.yaml` -- no Python needed:
+For knowledge-base agents (Q&A over CMMS data, manuals, spare parts), you can skip Python entirely and configure via YAML:
 
 ```yaml
 name: "Maintenance Assistant"
@@ -127,7 +127,7 @@ agent = Agent.from_config("machina.yaml")
 agent.run()
 ```
 
-Secrets stay in environment variables (`${SAP_TOKEN}` syntax supported). See the [YAML config example](examples/06_yaml_config/) for the full guide.
+YAML config is ideal for knowledge-base agents — technician Q&A, document search, asset lookup. For agents with automated workflows (alarm response, predictive pipelines), use Python — workflows need logic (guards, error policies, LLM reasoning steps) that YAML can't express. See the [YAML config guide](examples/06_yaml_config/) for details.
 
 ## What You Can Build
 
