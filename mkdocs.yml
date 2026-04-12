@@ -65,6 +65,7 @@ nav:
       - Slack: connectors/slack.md
       - Email: connectors/email.md
       - Calendar: connectors/calendar.md
+  - YAML Configuration: yaml-config.md
   - MCP Server: mcp-server.md
 
 markdown_extensions:

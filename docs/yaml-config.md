@@ -55,6 +55,7 @@ agent.run()
 | `channels` | list | `[]` (defaults to CLI) | Communication channels |
 | `llm` | object | `{provider: "ollama:llama3"}` | LLM provider settings |
 | `sandbox` | boolean | `false` | Enable sandbox mode (writes logged, not executed) |
+| `logging` | object | `{}` | Logging configuration overrides |
 
 ### Plant
 

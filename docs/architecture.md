@@ -17,9 +17,12 @@ Connectors declare their capabilities as a simple list (`["read_assets",
 "read_work_orders", "create_work_order"]`) so the agent runtime can discover at
 runtime what actions are available and enable the matching LLM tools.
 
-Current connectors: `GenericCmmsConnector` (local JSON + REST with Bearer auth),
-`DocumentStoreConnector` (manuals with keyword-fallback or ChromaDB-backed RAG),
-`TelegramConnector` + `CliChannel` (communication channels).
+Available connectors: **CMMS** — `GenericCmmsConnector` (local JSON + REST),
+`SapPmConnector`, `MaximoConnector`, `UpKeepConnector`; **IoT** —
+`OpcUaConnector`, `MqttConnector`; **Documents** — `DocumentStoreConnector`
+(manuals with keyword-fallback or ChromaDB-backed RAG); **Communication** —
+`TelegramConnector`, `SlackConnector`, `EmailConnector`, `CalendarConnector`,
+`CliChannel`.
 
 ### 2. Domain Model
 
