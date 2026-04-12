@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from machina.domain.plant import Plant  # noqa: TC001
+from machina.exceptions import AssetNotFoundError
 
 
 class AssetService:
@@ -36,8 +37,9 @@ class AssetService:
             A dict with ``asset_id``, ``criticality``, and ``name``.
             If the asset is not found, ``criticality`` is ``"unknown"``.
         """
-        asset = self._plant.get_asset(asset_id)
-        if asset is None:
+        try:
+            asset = self._plant.get_asset(asset_id)
+        except AssetNotFoundError:
             return {
                 "asset_id": asset_id,
                 "criticality": "unknown",

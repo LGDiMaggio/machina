@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from machina.config.schema import ConnectorConfig, LLMConfig, MachinaConfig
+from machina.config.schema import (
+    ChannelConfig,
+    ConnectorConfig,
+    LLMConfig,
+    MachinaConfig,
+    PlantConfig,
+)
 
 
 class TestConnectorConfig:
@@ -42,7 +48,7 @@ class TestLLMConfig:
 
     def test_defaults(self) -> None:
         cfg = LLMConfig()
-        assert cfg.provider == "openai:gpt-4o"
+        assert cfg.provider == "ollama:llama3"
         assert cfg.temperature == 0.1
         assert cfg.max_tokens == 4096
 
@@ -108,3 +114,93 @@ class TestMachinaConfig:
     def test_allows_extra_fields(self) -> None:
         cfg = MachinaConfig(custom_section={"key": "value"})
         assert cfg.custom_section == {"key": "value"}  # type: ignore[attr-defined]
+
+    def test_plant_config_defaults(self) -> None:
+        cfg = MachinaConfig()
+        assert cfg.plant.name == "Default Plant"
+        assert cfg.plant.location == ""
+
+    def test_plant_config_custom(self) -> None:
+        cfg = MachinaConfig(plant=PlantConfig(name="North Plant", location="Building A"))
+        assert cfg.plant.name == "North Plant"
+        assert cfg.plant.location == "Building A"
+
+    def test_channels_default_empty(self) -> None:
+        cfg = MachinaConfig()
+        assert cfg.channels == []
+
+    def test_channels_configured(self) -> None:
+        cfg = MachinaConfig(
+            channels=[
+                ChannelConfig(type="cli"),
+                ChannelConfig(type="telegram", settings={"bot_token": "tok"}),
+            ]
+        )
+        assert len(cfg.channels) == 2
+        assert cfg.channels[0].type == "cli"
+        assert cfg.channels[1].settings["bot_token"] == "tok"
+
+    def test_sandbox_default_false(self) -> None:
+        cfg = MachinaConfig()
+        assert cfg.sandbox is False
+
+    def test_sandbox_enabled(self) -> None:
+        cfg = MachinaConfig(sandbox=True)
+        assert cfg.sandbox is True
+
+    def test_description_field(self) -> None:
+        cfg = MachinaConfig(description="Custom agent")
+        assert cfg.description == "Custom agent"
+
+    def test_full_yaml_style_config(self) -> None:
+        """Validate a config that mirrors a typical machina.yaml."""
+        cfg = MachinaConfig.model_validate(
+            {
+                "name": "Test Agent",
+                "description": "Test",
+                "plant": {"name": "Plant 1", "location": "Zone A"},
+                "connectors": {
+                    "cmms": {"type": "generic_cmms", "settings": {"data_dir": "/data"}},
+                    "docs": {"type": "document_store", "settings": {"paths": ["/manuals"]}},
+                },
+                "channels": [{"type": "cli"}],
+                "llm": {"provider": "ollama:llama3", "temperature": 0.2},
+                "sandbox": True,
+            }
+        )
+        assert cfg.name == "Test Agent"
+        assert cfg.plant.name == "Plant 1"
+        assert len(cfg.connectors) == 2
+        assert cfg.channels[0].type == "cli"
+        assert cfg.llm.provider == "ollama:llama3"
+        assert cfg.sandbox is True
+
+
+class TestPlantConfig:
+    """Test PlantConfig validation."""
+
+    def test_defaults(self) -> None:
+        cfg = PlantConfig()
+        assert cfg.name == "Default Plant"
+        assert cfg.location == ""
+
+    def test_custom(self) -> None:
+        cfg = PlantConfig(name="South Plant", location="Building B")
+        assert cfg.name == "South Plant"
+
+
+class TestChannelConfig:
+    """Test ChannelConfig validation."""
+
+    def test_minimal(self) -> None:
+        cfg = ChannelConfig(type="cli")
+        assert cfg.type == "cli"
+        assert cfg.settings == {}
+
+    def test_with_settings(self) -> None:
+        cfg = ChannelConfig(type="telegram", settings={"bot_token": "tok"})
+        assert cfg.settings["bot_token"] == "tok"
+
+    def test_type_required(self) -> None:
+        with pytest.raises(ValidationError):
+            ChannelConfig()  # type: ignore[call-arg]

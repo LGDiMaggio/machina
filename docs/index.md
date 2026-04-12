@@ -46,6 +46,11 @@ pip install machina-ai[all]          # Everything
     Build your own connector by implementing a simple `BaseConnector` Protocol.
     No ABCs, no decorators — just a Python class that exposes `capabilities`.
 
+- :material-file-cog: **[YAML Configuration](yaml-config.md)**
+
+    Define your agent entirely in `machina.yaml` — connectors, LLM, channels,
+    plant. Load with `Agent.from_config("machina.yaml")`. Zero Python needed.
+
 </div>
 
 ## Why Machina?
