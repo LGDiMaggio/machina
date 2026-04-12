@@ -1,10 +1,7 @@
-"""End-to-end smoke test for the Knowledge Agent quickstart.
+"""End-to-end smoke test for the quickstart example.
 
-Verifies that ``examples/knowledge_agent/main.build_agent()`` constructs
-a working Agent end-to-end: connectors wire up, the sample CMMS data
-loads into the plant registry, :meth:`Agent.start` succeeds with a stub
-LLM, AND a grounded question actually retrieves the right asset context
-and passes it to the LLM.
+Verifies that the quickstart agent constructs correctly, loads sample data,
+and passes grounded context to the LLM.
 
 Does NOT call :meth:`Agent.run` (would block on CliChannel stdin) and
 does NOT call a real LLM — uses capturing stubs to inspect the messages
@@ -13,29 +10,18 @@ that reach the provider.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
-if TYPE_CHECKING:
-    from types import ModuleType
+from machina import Agent, Plant
+from machina.connectors.cmms import GenericCmmsConnector
+from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.docs import DocumentStoreConnector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-MAIN_PATH = REPO_ROOT / "examples" / "knowledge_agent" / "main.py"
-
-
-def _load_knowledge_agent_main() -> ModuleType:
-    """Dynamically import examples/knowledge_agent/main.py without
-    turning the examples directory into a Python package."""
-    spec = importlib.util.spec_from_file_location("knowledge_agent_main", MAIN_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["knowledge_agent_main"] = module
-    spec.loader.exec_module(module)
-    return module
+SAMPLE_DIR = REPO_ROOT / "examples" / "sample_data"
 
 
 class _StubLLM:
@@ -60,11 +46,7 @@ class _StubLLM:
 
 
 class _CapturingStubLLM:
-    """LLM stub that captures every messages list it receives.
-
-    Lets tests inspect exactly what context reached the LLM, proving
-    that retrieved entity metadata made it into the system prompt.
-    """
+    """LLM stub that captures every messages list it receives."""
 
     model = "stub:capture"
 
@@ -89,51 +71,71 @@ class _CapturingStubLLM:
         return {"content": "stub response (with tools)", "tool_calls": None}
 
 
-class TestKnowledgeAgentQuickstart:
+def _build_agent(llm: Any = None) -> Agent:
+    """Build the quickstart agent with sample data and an optional LLM override."""
+    return Agent(
+        name="Quickstart Test Agent",
+        plant=Plant(name="Demo Plant"),
+        connectors=[
+            GenericCmmsConnector(data_dir=SAMPLE_DIR / "cmms"),
+            DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
+        ],
+        channels=[CliChannel()],
+        llm=llm or _StubLLM(),
+    )
+
+
+class TestQuickstartAgent:
     """MACHINA_SPEC R9 — the quickstart builds end-to-end with sample data."""
 
     def test_build_agent_constructs_successfully(self) -> None:
         """The quickstart builds without errors and wires up its connectors."""
-        main_module = _load_knowledge_agent_main()
-        agent = main_module.build_agent(llm=_StubLLM())
-        assert agent.name == "Maintenance Knowledge Agent"
-        # One channel (CliChannel by default)
+        agent = _build_agent()
+        assert agent.name == "Quickstart Test Agent"
         assert len(agent._channels) == 1
-        # Two connectors: GenericCmmsConnector and DocumentStoreConnector
         registered = agent._registry.all()
         assert len(registered) == 2
 
     @pytest.mark.asyncio
     async def test_build_agent_start_loads_sample_assets(self) -> None:
         """agent.start() connects everything and loads the 6 sample assets."""
-        main_module = _load_knowledge_agent_main()
-        agent = main_module.build_agent(llm=_StubLLM())
+        agent = _build_agent()
         await agent.start()
         try:
-            # 6 assets in examples/knowledge_agent/sample_data/cmms/assets.json
             assert len(agent.plant.assets) == 6
             assert "P-201" in agent.plant.assets
             p201 = agent.plant.assets["P-201"]
-            # ISO 14224 field survived the load pipeline
             assert p201.equipment_class_code == "PU"
+        finally:
+            await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_loads_failure_modes_and_domain_services(self) -> None:
+        """agent.start() wires domain services with failure modes from CMMS."""
+        agent = _build_agent()
+        await agent.start()
+        try:
+            services = agent._engine._services
+            assert "failure_analyzer" in services
+            assert "work_order_factory" in services
+            assert "maintenance_scheduler" in services
+
+            analyzer = services["failure_analyzer"]
+            assert len(analyzer._failure_modes) == 10
+
+            # Vibration alarm should match bearing wear
+            result = analyzer.diagnose(parameter="vibration_velocity_mm_s")
+            codes = [r["code"] for r in result]
+            assert "BEAR-WEAR-01" in codes
         finally:
             await agent.stop()
 
     @pytest.mark.asyncio
     async def test_quickstart_handles_grounded_question(self) -> None:
         """R9 grounding: ask about a real sample asset and verify the asset's
-        metadata was actually injected into the LLM's system context.
-
-        This is the full end-to-end quickstart path:
-            user question -> entity resolver -> context gathering ->
-            prompt building -> LLM invocation
-
-        We use a capturing stub LLM so we can inspect exactly which messages
-        reached the provider and assert the P-201 asset metadata is present.
-        """
-        main_module = _load_knowledge_agent_main()
+        metadata was actually injected into the LLM's system context."""
         stub = _CapturingStubLLM()
-        agent = main_module.build_agent(llm=stub)
+        agent = _build_agent(llm=stub)
         await agent.start()
         try:
             response = await agent.handle_message(
@@ -141,12 +143,9 @@ class TestKnowledgeAgentQuickstart:
                 chat_id="test-chat",
             )
 
-            # The stub LLM was actually invoked
             assert stub.captured_messages, "LLM was never called"
             assert "stub response" in response
 
-            # The last LLM call carried the retrieved context with P-201's
-            # metadata — this is what "grounded" means for R9
             last_call = stub.captured_messages[-1]
             system_content = " ".join(
                 m.get("content", "") for m in last_call if m.get("role") == "system"

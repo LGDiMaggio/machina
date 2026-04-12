@@ -1,7 +1,7 @@
 """Integration tests for DocumentStoreConnector against real sample manuals.
 
 Exercises the keyword-fallback search path (no RAG backend required) using
-the real .md files in ``examples/knowledge_agent/sample_data/manuals/``.
+the real .md files in ``examples/sample_data/manuals/``.
 
 Note: Markdown files do not carry page numbers, so these tests assert on
 source-file citations (part of R4 AC: "cites the relevant section"), not
@@ -21,11 +21,7 @@ from machina.connectors.docs.document_store import (
 )
 
 MANUALS_DIR = (
-    Path(__file__).resolve().parent.parent.parent
-    / "examples"
-    / "knowledge_agent"
-    / "sample_data"
-    / "manuals"
+    Path(__file__).resolve().parent.parent.parent / "examples" / "sample_data" / "manuals"
 )
 
 

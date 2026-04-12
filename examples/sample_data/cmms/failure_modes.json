@@ -1,0 +1,112 @@
+[
+  {
+    "code": "BEAR-WEAR-01",
+    "name": "Bearing Wear — Drive End",
+    "iso_14224_code": "VIB",
+    "mechanism": "fatigue",
+    "category": "mechanical",
+    "detection_methods": ["vibration_analysis", "temperature_monitoring", "oil_analysis"],
+    "typical_indicators": ["vibration_velocity_mm_s", "bearing_temperature_c", "vibration_acceleration_g"],
+    "recommended_actions": ["replace_bearing", "check_alignment", "verify_lubrication"],
+    "mtbf_hours": 26000
+  },
+  {
+    "code": "SEAL-LEAK-01",
+    "name": "Mechanical Seal Leakage",
+    "iso_14224_code": "ELP",
+    "mechanism": "wear",
+    "category": "mechanical",
+    "detection_methods": ["visual_inspection", "pressure_monitoring", "flow_measurement"],
+    "typical_indicators": ["seal_pressure_bar", "leakage_rate_ml_min", "flow_rate_m3h"],
+    "recommended_actions": ["replace_seal", "check_shaft_runout", "verify_alignment"],
+    "mtbf_hours": 18000
+  },
+  {
+    "code": "IMP-EROSION-01",
+    "name": "Impeller Erosion",
+    "iso_14224_code": "BRD",
+    "mechanism": "erosion",
+    "category": "mechanical",
+    "detection_methods": ["vibration_analysis", "performance_monitoring", "visual_inspection"],
+    "typical_indicators": ["vibration_velocity_mm_s", "differential_pressure_bar", "flow_rate_m3h"],
+    "recommended_actions": ["replace_impeller", "check_fluid_quality", "inspect_casing"],
+    "mtbf_hours": 35000
+  },
+  {
+    "code": "VALVE-FAIL-01",
+    "name": "Valve Failure — Stuck or Leaking",
+    "iso_14224_code": "ELP",
+    "mechanism": "wear",
+    "category": "mechanical",
+    "detection_methods": ["pressure_monitoring", "flow_measurement", "acoustic_emission"],
+    "typical_indicators": ["discharge_pressure_bar", "flow_rate_m3h", "valve_position_pct"],
+    "recommended_actions": ["replace_valve", "clean_valve_seat", "check_actuator"],
+    "mtbf_hours": 22000
+  },
+  {
+    "code": "FILTER-CLOG-01",
+    "name": "Filter Clogging",
+    "iso_14224_code": "PLU",
+    "mechanism": "contamination",
+    "category": "mechanical",
+    "detection_methods": ["differential_pressure_monitoring", "visual_inspection"],
+    "typical_indicators": ["differential_pressure_bar", "discharge_pressure_bar", "flow_rate_m3h"],
+    "recommended_actions": ["replace_filter", "clean_filter", "check_fluid_quality"],
+    "mtbf_hours": 4000
+  },
+  {
+    "code": "BELT-WEAR-01",
+    "name": "Conveyor Belt Wear",
+    "iso_14224_code": "BRD",
+    "mechanism": "wear",
+    "category": "mechanical",
+    "detection_methods": ["visual_inspection", "thickness_measurement", "vibration_analysis"],
+    "typical_indicators": ["belt_speed_m_s", "vibration_velocity_mm_s", "motor_current_a"],
+    "recommended_actions": ["replace_belt", "adjust_tension", "check_rollers"],
+    "mtbf_hours": 15000
+  },
+  {
+    "code": "MOTOR-OVERHEAT-01",
+    "name": "Motor Overheating",
+    "iso_14224_code": "OHE",
+    "mechanism": "overheating",
+    "category": "electrical",
+    "detection_methods": ["temperature_monitoring", "current_monitoring", "thermography"],
+    "typical_indicators": ["winding_temperature_c", "motor_current_a", "bearing_temperature_c"],
+    "recommended_actions": ["check_ventilation", "verify_load", "inspect_windings", "check_bearings"],
+    "mtbf_hours": 30000
+  },
+  {
+    "code": "INSULATION-FAIL-01",
+    "name": "Winding Insulation Failure",
+    "iso_14224_code": "ELF",
+    "mechanism": "degradation",
+    "category": "electrical",
+    "detection_methods": ["insulation_resistance_test", "partial_discharge_test", "thermography"],
+    "typical_indicators": ["insulation_resistance_mohm", "winding_temperature_c", "motor_current_a"],
+    "recommended_actions": ["rewind_motor", "replace_motor", "check_supply_voltage"],
+    "mtbf_hours": 50000
+  },
+  {
+    "code": "FOULING-01",
+    "name": "Heat Exchanger Fouling",
+    "iso_14224_code": "PLU",
+    "mechanism": "contamination",
+    "category": "process",
+    "detection_methods": ["performance_monitoring", "pressure_drop_analysis", "temperature_monitoring"],
+    "typical_indicators": ["differential_pressure_bar", "outlet_temperature_c", "flow_rate_m3h"],
+    "recommended_actions": ["clean_exchanger", "chemical_flush", "inspect_tubes"],
+    "mtbf_hours": 12000
+  },
+  {
+    "code": "GASKET-FAIL-01",
+    "name": "Gasket Failure",
+    "iso_14224_code": "ELP",
+    "mechanism": "degradation",
+    "category": "mechanical",
+    "detection_methods": ["visual_inspection", "pressure_test", "leak_detection"],
+    "typical_indicators": ["seal_pressure_bar", "leakage_rate_ml_min"],
+    "recommended_actions": ["replace_gasket", "inspect_flange_faces", "verify_bolt_torque"],
+    "mtbf_hours": 20000
+  }
+]

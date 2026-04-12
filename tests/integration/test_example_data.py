@@ -1,4 +1,4 @@
-"""Integration tests exercising the real sample data from examples/knowledge_agent/.
+"""Integration tests exercising the real sample data from examples/sample_data/.
 
 These tests guard against example-data drift — if anyone changes the
 sample JSON in a way that breaks the parser or loses ISO 14224 fields,
@@ -15,11 +15,7 @@ from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.domain import FailureImpact
 
 SAMPLE_CMMS_DIR = (
-    Path(__file__).resolve().parent.parent.parent
-    / "examples"
-    / "knowledge_agent"
-    / "sample_data"
-    / "cmms"
+    Path(__file__).resolve().parent.parent.parent / "examples" / "sample_data" / "cmms"
 )
 
 
