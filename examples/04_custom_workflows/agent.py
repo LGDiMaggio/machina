@@ -80,6 +80,8 @@ spare_part_reorder = Workflow(
              ),
              on_error=ErrorPolicy.SKIP),
 
+        # NOTE: requires an ERP connector (planned for v0.3+).
+        # In sandbox mode this step is blocked automatically (is_write=True).
         Step("place_order",
              action="erp.create_purchase_order",
              is_write=True,
@@ -212,6 +214,11 @@ def main() -> None:
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    # Pre-flight: check sample data, LLM provider, and required extras
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _preflight import check
+    check(llm=args.llm)
 
     if args.verbose:
         from machina.observability.logging import configure_logging

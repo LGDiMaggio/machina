@@ -209,6 +209,7 @@ class Agent:
 
     def _build_domain_services(self) -> None:
         """Build domain services from loaded data and register them with the workflow engine."""
+        from machina.domain.services.asset_service import AssetService
         from machina.domain.services.failure_analyzer import FailureAnalyzer
         from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
         from machina.domain.services.work_order_factory import WorkOrderFactory
@@ -219,14 +220,22 @@ class Agent:
             if hasattr(conn, "_failure_modes"):
                 all_failure_modes.extend(conn._failure_modes)
 
+        # Collect maintenance plans from connectors that provide them
+        all_plans = []
+        for _name, conn in self._registry.all().items():
+            if hasattr(conn, "_maintenance_plans"):
+                all_plans.extend(conn._maintenance_plans)
+
         analyzer = FailureAnalyzer(failure_modes=all_failure_modes)
         factory = WorkOrderFactory()
-        scheduler = MaintenanceScheduler()
+        scheduler = MaintenanceScheduler(plans=all_plans)
+        asset_service = AssetService(plant=self.plant)
 
         self._engine._services = {
             "failure_analyzer": analyzer,
             "work_order_factory": factory,
             "maintenance_scheduler": scheduler,
+            "domain": asset_service,
         }
 
         if all_failure_modes:
@@ -313,9 +322,24 @@ class Agent:
         """Start the agent with all channels (blocking, sync wrapper).
 
         Connects connectors, loads assets, and starts listening on
-        all configured channels.
+        all configured channels.  Automatically detects Jupyter
+        notebooks and other environments with an already-running
+        event loop.
         """
-        asyncio.run(self._run_async())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            # Already inside an event loop (Jupyter, async REPL, etc.)
+            # Schedule the coroutine on the existing loop.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(asyncio.run, self._run_async()).result()
+        else:
+            asyncio.run(self._run_async())
 
     async def _run_async(self) -> None:
         """Async main loop — start agent and listen on channels."""

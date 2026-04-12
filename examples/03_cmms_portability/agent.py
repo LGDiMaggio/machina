@@ -144,6 +144,11 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    # Pre-flight: check sample data, LLM provider, and required extras
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _preflight import check
+    check(llm=args.llm)
+
     if args.verbose:
         from machina.observability.logging import configure_logging
         configure_logging(level="DEBUG")

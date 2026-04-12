@@ -45,6 +45,31 @@ jobs:
           file: ./coverage.xml
           fail_ci_if_error: false
 
+  validate-examples:
+    name: Validate examples & doc snippets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Validate doc snippets (syntax + imports)
+        run: python tests/validate_doc_snippets.py
+
+      - name: Validate example scripts (syntax + imports)
+        run: python tests/validate_examples.py
+
+      - name: Validate workflow action strings
+        run: pytest tests/test_example_actions.py -v
+
   docs:
     name: Docs build (strict)
     runs-on: ubuntu-latest

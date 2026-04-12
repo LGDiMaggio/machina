@@ -23,27 +23,40 @@
 ## Quick Start
 
 ```bash
-pip install machina-ai[litellm]
-ollama pull llama3
+pip install machina-ai[litellm,docs-rag]
 git clone https://github.com/LGDiMaggio/machina.git
 cd machina/examples/quickstart
 python agent.py
 ```
 
+> **LLM provider required.** Choose one:
+>
+> | Provider | Setup |
+> |----------|-------|
+> | **Ollama** (local, free) | Install from [ollama.com](https://ollama.com), then `ollama pull llama3` |
+> | **OpenAI** | `export OPENAI_API_KEY=sk-...` |
+> | **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` |
+>
+> Override the default with `python agent.py --llm openai:gpt-4o` or `--llm anthropic:claude-sonnet-4-20250514`.
+
 The agent is built in 13 lines:
 
 ```python
+from pathlib import Path
+
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
 from machina.connectors.docs import DocumentStoreConnector
 from machina.connectors.comms.telegram import CliChannel
 
+SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+
 agent = Agent(
     name="Maintenance Assistant",
     plant=Plant(name="Demo Plant"),
     connectors=[
-        GenericCmmsConnector(data_dir="../sample_data/cmms"),
-        DocumentStoreConnector(paths=["../sample_data/manuals"]),
+        GenericCmmsConnector(data_dir=SAMPLE_DIR / "cmms"),
+        DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
     ],
     channels=[CliChannel()],
     llm="ollama:llama3",  # or "openai:gpt-4o", "anthropic:claude-sonnet"
@@ -268,7 +281,7 @@ alarm_to_workorder = Workflow(
     steps=[
         Step("diagnose", action="failure_analyzer.diagnose",
              on_error=ErrorPolicy.STOP),
-        Step("check_history", action="cmms.get_asset_history",
+        Step("check_history", action="cmms.read_maintenance_history",
              inputs={"asset_id": "{trigger.asset_id}"},
              on_error=ErrorPolicy.SKIP),
         Step("create_wo", action="work_order_factory.create",

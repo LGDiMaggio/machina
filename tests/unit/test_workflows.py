@@ -374,6 +374,6 @@ class TestBuiltinAlarmToWorkorder:
         assert alarm_to_workorder.name == "Alarm to Work Order"
         assert isinstance(alarm_to_workorder.trigger, Trigger)
         assert alarm_to_workorder.trigger.type == TriggerType.ALARM
-        assert len(alarm_to_workorder.steps) == 7
+        assert len(alarm_to_workorder.steps) == 6
         assert alarm_to_workorder.step_names[0] == "analyze_alarm"
         assert alarm_to_workorder.step_names[-1] == "submit_work_order"

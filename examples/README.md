@@ -24,8 +24,7 @@ agent.run()
 ```
 
 ```bash
-pip install machina-ai[litellm]
-ollama pull llama3
+pip install machina-ai[litellm,docs-rag]
 cd examples/quickstart && python agent.py
 ```
 
@@ -79,12 +78,32 @@ All examples share `sample_data/` -- a fictional manufacturing plant:
 - **2 equipment manuals**: Grundfos pump, Atlas Copco compressor
 - **Sensor readings**: vibration + temperature time series for pump P-201
 
-## LLM Options
+## Prerequisites
 
-Every example defaults to `ollama:llama3` (local, no API key). Override with `--llm`:
+### Install
 
 ```bash
-python agent.py --llm openai:gpt-4o
-python agent.py --llm anthropic:claude-sonnet-4-20250514
-python agent.py --llm ollama:mistral
+pip install machina-ai[litellm,docs-rag]
+```
+
+- `litellm` — LLM provider abstraction (required for all examples)
+- `docs-rag` — document search with ChromaDB (used by all examples for manual search)
+
+### LLM Provider Setup
+
+Every example needs one LLM provider. Pick one:
+
+| Provider | Setup | Cost |
+|----------|-------|------|
+| **Ollama** | Install from [ollama.com](https://ollama.com), then `ollama pull llama3` | Free, runs locally |
+| **OpenAI** | `export OPENAI_API_KEY=sk-...` ([get key](https://platform.openai.com/api-keys)) | Pay-per-token |
+| **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` ([get key](https://console.anthropic.com/)) | Pay-per-token |
+
+All examples default to `ollama:llama3`. Override with `--llm`:
+
+```bash
+python agent.py                              # default: ollama:llama3
+python agent.py --llm openai:gpt-4o          # requires OPENAI_API_KEY
+python agent.py --llm anthropic:claude-sonnet-4-20250514  # requires ANTHROPIC_API_KEY
+python agent.py --llm ollama:mistral          # any Ollama model
 ```

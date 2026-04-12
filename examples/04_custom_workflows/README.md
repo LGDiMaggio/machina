@@ -126,7 +126,7 @@ my_workflow = Workflow(
     name="My Custom Workflow",
     trigger=Trigger(type=TriggerType.MANUAL),
     steps=[
-        Step("step_1", action="cmms.get_assets",         on_error=ErrorPolicy.STOP),
+        Step("step_1", action="cmms.read_assets",          on_error=ErrorPolicy.STOP),
         Step("step_2", action="agent.reason",             prompt="Analyze {step_1}..."),
         Step("step_3", action="channels.send_message",    template="Result: {step_2}"),
     ],

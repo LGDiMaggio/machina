@@ -39,8 +39,6 @@ agent = Agent(
 
 def main() -> None:
     import argparse
-    import shutil
-    import subprocess
 
     from machina.observability.logging import configure_logging
 
@@ -55,16 +53,10 @@ def main() -> None:
 
     configure_logging(level="DEBUG" if args.verbose else "INFO")
 
-    if not SAMPLE_DIR.exists():
-        print("Error: sample data not found at examples/sample_data/")
-        sys.exit(1)
-
-    if args.llm.startswith("ollama:") and shutil.which("ollama"):
-        try:
-            subprocess.run(["ollama", "list"], capture_output=True, timeout=5)
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            print("Ollama does not seem to be running. Install: https://ollama.com")
-            sys.exit(1)
+    # Pre-flight: check sample data, LLM provider, and required extras
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _preflight import check
+    check(llm=args.llm, sample_dir=SAMPLE_DIR)
 
     # Apply CLI overrides
     agent.llm = args.llm

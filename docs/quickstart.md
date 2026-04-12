@@ -13,7 +13,7 @@ them over a CLI chat — no external accounts required to try it out.
     - A local [Ollama](https://ollama.ai/) install with a model pulled (e.g. `ollama pull llama3`)
 
 You do **not** need SAP, Maximo, or any real CMMS installed. The quickstart uses
-the sample data that ships with the `examples/knowledge_agent/` folder.
+the sample data that ships with the `examples/sample_data/` folder.
 
 ## 1. Install
 
@@ -37,7 +37,7 @@ from machina.connectors.comms.telegram import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
 # Point at the sample data that ships with the examples folder
-sample_dir = Path("examples/knowledge_agent/sample_data")
+sample_dir = Path("examples/sample_data")
 
 cmms = GenericCmmsConnector(data_dir=sample_dir / "cmms")
 docs = DocumentStoreConnector(paths=[sample_dir / "manuals"])
@@ -93,6 +93,6 @@ Behind that single `agent.run()` call, Machina did the following for each questi
   and the rest of the ISO 14224-aligned entities.
 - **[Custom Connectors](connectors/custom.md)** — Build a connector for your own
   CMMS or sensor system using the `BaseConnector` Protocol.
-- **Run the real example** — `python examples/knowledge_agent/main.py --llm openai:gpt-4o`
+- **Run the real example** — `python examples/quickstart/agent.py --llm openai:gpt-4o`
   is the full version of the script above, with CLI args for LLM selection, verbose
-  logging, and an optional `--telegram` flag to run the agent as a Telegram bot.
+  logging, and sandbox mode.
