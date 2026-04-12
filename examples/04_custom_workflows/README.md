@@ -25,11 +25,11 @@ spare_part_reorder = Workflow(
     trigger=Trigger(type=TriggerType.CONDITION,
                     filter={"condition": "stock_below_reorder_point"}),
     steps=[
-        Step("lookup_part",        action="cmms.get_spare_part",
+        Step("lookup_part",        action="cmms.read_spare_parts",
              inputs={"part_id": "{trigger.part_id}"},
              on_error=ErrorPolicy.STOP),
 
-        Step("check_dependencies", action="cmms.get_compatible_assets",
+        Step("check_dependencies", action="cmms.read_assets",
              on_error=ErrorPolicy.SKIP),
 
         Step("verify_criticality", action="domain.check_asset_criticality",
