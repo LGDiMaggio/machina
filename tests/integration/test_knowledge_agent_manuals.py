@@ -21,10 +21,7 @@ from machina.connectors.docs.document_store import (
 )
 
 MANUALS_DIR = (
-    Path(__file__).resolve().parent.parent.parent
-    / "examples"
-    / "sample_data"
-    / "manuals"
+    Path(__file__).resolve().parent.parent.parent / "examples" / "sample_data" / "manuals"
 )
 
 
