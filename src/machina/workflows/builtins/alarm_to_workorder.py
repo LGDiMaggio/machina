@@ -34,6 +34,12 @@ alarm_to_workorder = Workflow(
             "analyze_alarm",
             action="failure_analyzer.diagnose",
             description="Diagnose probable failure modes from the alarm data",
+            inputs={
+                "asset_id": "{trigger.asset_id}",
+                "parameter": "{trigger.parameter}",
+                "value": "{trigger.value}",
+                "severity": "{trigger.severity}",
+            },
             on_error=ErrorPolicy.STOP,
         ),
         Step(

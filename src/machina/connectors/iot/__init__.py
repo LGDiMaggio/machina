@@ -2,6 +2,7 @@
 
 from machina.connectors.iot.mqtt import MqttConnector
 from machina.connectors.iot.opcua import OpcUaConnector
+from machina.connectors.iot.simulated import SimulatedSensorConnector
 
 # Short public API aliases
 MQTT = MqttConnector
@@ -12,4 +13,5 @@ __all__ = [
     "MqttConnector",
     "OpcUA",
     "OpcUaConnector",
+    "SimulatedSensorConnector",
 ]

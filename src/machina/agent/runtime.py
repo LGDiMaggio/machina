@@ -193,6 +193,9 @@ class Agent:
                 count=len(assets),
             )
 
+        # Auto-load failure modes and build domain services
+        self._build_domain_services()
+
         # Connect channels
         for channel in self._channels:
             await channel.connect()
@@ -203,6 +206,35 @@ class Agent:
             asset_count=len(self.plant.assets),
             connectors=list(self._registry.all().keys()),
         )
+
+    def _build_domain_services(self) -> None:
+        """Build domain services from loaded data and register them with the workflow engine."""
+        from machina.domain.services.failure_analyzer import FailureAnalyzer
+        from machina.domain.services.work_order_factory import WorkOrderFactory
+        from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
+
+        # Collect failure modes from connectors that provide them
+        all_failure_modes = []
+        for _name, conn in self._registry.all().items():
+            if hasattr(conn, "_failure_modes"):
+                all_failure_modes.extend(conn._failure_modes)
+
+        analyzer = FailureAnalyzer(failure_modes=all_failure_modes)
+        factory = WorkOrderFactory()
+        scheduler = MaintenanceScheduler()
+
+        self._engine._services = {
+            "failure_analyzer": analyzer,
+            "work_order_factory": factory,
+            "maintenance_scheduler": scheduler,
+        }
+
+        if all_failure_modes:
+            logger.info(
+                "domain_services_ready",
+                agent=self.name,
+                failure_modes=len(all_failure_modes),
+            )
 
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""

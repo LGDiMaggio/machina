@@ -33,6 +33,7 @@ GenericCmms = GenericCmmsConnector
 Maximo = MaximoConnector
 MQTT = MqttConnector
 OpcUA = OpcUaConnector
+OpcUa = OpcUaConnector  # convenience alias (README-friendly casing)
 SapPM = SapPmConnector
 Slack = SlackConnector
 Telegram = TelegramConnector
@@ -65,6 +66,7 @@ __all__ = [
     "OAuth2ClientCredentials",
     "OffsetLimitPagination",
     "OpcUA",
+    "OpcUa",
     "OpcUaConnector",
     "PageNumberPagination",
     "PaginationStrategy",

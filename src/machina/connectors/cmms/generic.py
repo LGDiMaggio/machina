@@ -30,6 +30,7 @@ from machina.connectors.cmms.pagination import (
     PageNumberPagination,
 )
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import (
@@ -195,6 +196,7 @@ class GenericCmmsConnector:
         self._work_orders: list[WorkOrder] = []
         self._spare_parts: list[SparePart] = []
         self._maintenance_plans: list[MaintenancePlan] = []
+        self._failure_modes: list[FailureMode] = []
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -243,6 +245,11 @@ class GenericCmmsConnector:
     # ------------------------------------------------------------------
     # Read operations
     # ------------------------------------------------------------------
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        """Return all known failure modes."""
+        self._ensure_connected()
+        return list(self._failure_modes)
 
     async def read_assets(self) -> list[Asset]:
         """Return all known assets."""
@@ -476,6 +483,18 @@ class GenericCmmsConnector:
                 "loaded_maintenance_plans",
                 connector="GenericCmmsConnector",
                 count=len(self._maintenance_plans),
+            )
+
+        failure_modes_file = self._data_dir / "failure_modes.json"
+        if failure_modes_file.exists():
+            text = await asyncio.to_thread(failure_modes_file.read_text, encoding="utf-8")
+            raw = json.loads(text)
+            for item in raw:
+                self._failure_modes.append(FailureMode(**item))
+            logger.debug(
+                "loaded_failure_modes",
+                connector="GenericCmmsConnector",
+                count=len(self._failure_modes),
             )
 
     def _apply_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
