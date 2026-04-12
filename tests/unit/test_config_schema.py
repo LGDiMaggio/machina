@@ -48,7 +48,7 @@ class TestLLMConfig:
 
     def test_defaults(self) -> None:
         cfg = LLMConfig()
-        assert cfg.provider == "openai:gpt-4o"
+        assert cfg.provider == "ollama:llama3"
         assert cfg.temperature == 0.1
         assert cfg.max_tokens == 4096
 

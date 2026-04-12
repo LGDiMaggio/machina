@@ -24,7 +24,7 @@ class LLMConfig(BaseModel):
     """Configuration for the LLM provider."""
 
     provider: str = Field(
-        default="openai:gpt-4o",
+        default="ollama:llama3",
         description="Provider and model in 'provider:model' format",
     )
     temperature: float = Field(default=0.1, ge=0, le=2)

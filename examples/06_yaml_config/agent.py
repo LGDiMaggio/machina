@@ -18,6 +18,17 @@ sys.path.insert(0, str(_repo_root / "src"))
 from machina import Agent
 
 
+def _resolve_llm(config_path: str, cli_llm: str | None) -> str:
+    """Read the LLM provider from YAML, with optional CLI override."""
+    if cli_llm:
+        return cli_llm
+    import yaml
+
+    with open(config_path) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("llm", {}).get("provider", "ollama:llama3")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="YAML-configured Machina Agent")
     parser.add_argument(
@@ -30,20 +41,23 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    # Pre-flight checks
+    # Pre-flight: check sample data and LLM BEFORE building the agent
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _preflight import check
+
+    llm = _resolve_llm(args.config, args.llm)
+    check(llm=llm)
 
     # Build agent from YAML
     agent = Agent.from_config(args.config)
 
     # CLI overrides take precedence over YAML
     if args.llm:
-        agent._llm = __import__("machina.llm.provider", fromlist=["LLMProvider"]).LLMProvider(model=args.llm)
+        from machina.llm.provider import LLMProvider
+
+        agent._llm = LLMProvider(model=args.llm)
     if args.sandbox:
         agent.sandbox = True
-
-    check(llm=agent._llm.model)
 
     if args.verbose:
         from machina.observability.logging import configure_logging
