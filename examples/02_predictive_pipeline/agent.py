@@ -44,7 +44,7 @@ predictive_maintenance = Workflow(
              action="failure_analyzer.diagnose",
              description="Rule-based diagnosis from failure mode taxonomy"),
         Step("search_manuals",
-             action="docs.search",
+             action="docs.search_documents",
              description="RAG search in equipment manuals"),
         Step("diagnose_llm",
              action="agent.reason",
@@ -58,10 +58,10 @@ predictive_maintenance = Workflow(
 
         # Phase 3: Action
         Step("check_parts",
-             action="cmms.check_spare_parts",
+             action="cmms.read_spare_parts",
              description="Verify spare parts for the diagnosed failure"),
         Step("check_history",
-             action="cmms.get_asset_history",
+             action="cmms.read_maintenance_history",
              description="Recent maintenance history"),
         Step("draft_wo",
              action="agent.reason",

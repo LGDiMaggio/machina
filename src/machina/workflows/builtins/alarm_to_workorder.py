@@ -44,14 +44,14 @@ alarm_to_workorder = Workflow(
         ),
         Step(
             "check_history",
-            action="cmms.get_asset_history",
+            action="cmms.read_maintenance_history",
             description="Retrieve recent maintenance history for the asset",
             inputs={"asset_id": "{trigger.asset_id}"},
             on_error=ErrorPolicy.SKIP,
         ),
         Step(
             "check_spare_parts",
-            action="cmms.check_spare_parts",
+            action="cmms.read_spare_parts",
             description="Verify spare parts availability for the diagnosed failure mode",
             inputs={"asset_id": "{trigger.asset_id}"},
             on_error=ErrorPolicy.SKIP,

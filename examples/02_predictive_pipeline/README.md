@@ -72,13 +72,13 @@ predictive_maintenance = Workflow(
 
         # Phase 2: Diagnosis
         Step("diagnose_rules", action="failure_analyzer.diagnose"),
-        Step("search_manuals", action="docs.search"),
+        Step("search_manuals", action="docs.search_documents"),
         Step("diagnose_llm",  action="agent.reason",
              prompt="...synthesize {diagnose_rules} + {search_manuals}..."),
 
         # Phase 3: Action
-        Step("check_parts",   action="cmms.check_spare_parts"),
-        Step("check_history", action="cmms.get_asset_history"),
+        Step("check_parts",   action="cmms.read_spare_parts"),
+        Step("check_history", action="cmms.read_maintenance_history"),
         Step("draft_wo",      action="agent.reason",
              prompt="...create WO from {diagnose_llm} + {check_parts}..."),
         Step("submit_wo",     action="work_order_factory.create"),

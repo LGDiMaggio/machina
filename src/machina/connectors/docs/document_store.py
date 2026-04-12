@@ -181,6 +181,17 @@ class DocumentStoreConnector:
             return await asyncio.to_thread(self._rag_search, query, top_k=top_k, asset_id=asset_id)
         return self._keyword_search(query, top_k=top_k, asset_id=asset_id)
 
+    async def search_documents(
+        self,
+        query: str = "",
+        *,
+        top_k: int = 5,
+        asset_id: str = "",
+        **kwargs: Any,
+    ) -> list[DocumentChunk]:
+        """Alias for :meth:`search` matching the declared capability name."""
+        return await self.search(query, top_k=top_k, asset_id=asset_id)
+
     async def retrieve_section(
         self,
         source: str,
