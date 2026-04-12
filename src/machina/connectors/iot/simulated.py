@@ -35,7 +35,6 @@ class SimulatedSensorConnector:
     """
 
     capabilities: ClassVar[list[str]] = [
-        "read_sensor_data",
         "get_related_readings",
         "get_latest_reading",
     ]

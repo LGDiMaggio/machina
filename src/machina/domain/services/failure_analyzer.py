@@ -74,7 +74,13 @@ class FailureAnalyzer:
                     "mechanism": fm.mechanism,
                     "matching_indicators": list(alarm_params & set(fm.typical_indicators)),
                     "recommended_actions": fm.recommended_actions,
-                    "confidence": "high" if score >= 2 else "medium" if score == 1 else "low",
+                    # Confidence based on match ratio: what fraction of the
+                    # failure mode's indicators are currently alarming.
+                    "confidence": (
+                        "high" if score / len(fm.typical_indicators) >= 0.5
+                        else "medium" if score / len(fm.typical_indicators) >= 0.2
+                        else "low"
+                    ),
                 }
                 for score, fm in scored
             ]
