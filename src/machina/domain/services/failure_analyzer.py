@@ -77,8 +77,10 @@ class FailureAnalyzer:
                     # Confidence based on match ratio: what fraction of the
                     # failure mode's indicators are currently alarming.
                     "confidence": (
-                        "high" if score / len(fm.typical_indicators) >= 0.5
-                        else "medium" if score / len(fm.typical_indicators) >= 0.2
+                        "high"
+                        if score / len(fm.typical_indicators) >= 0.5
+                        else "medium"
+                        if score / len(fm.typical_indicators) >= 0.2
                         else "low"
                     ),
                 }
