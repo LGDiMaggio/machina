@@ -97,6 +97,38 @@ The agent resolves "pump P-201" to the actual asset, retrieves context from your
 
 Try it now: `cd examples/quickstart && python agent.py` -- [full quickstart guide](examples/quickstart/)
 
+### Or configure via YAML
+
+Prefer declarative configuration? Define your agent in `machina.yaml` -- no Python needed:
+
+```yaml
+name: "Maintenance Assistant"
+plant:
+  name: "North Plant"
+connectors:
+  cmms:
+    type: generic_cmms
+    settings:
+      data_dir: "./sample_data/cmms"
+  docs:
+    type: document_store
+    settings:
+      paths: ["./sample_data/manuals"]
+channels:
+  - type: cli
+llm:
+  provider: "ollama:llama3"
+```
+
+```python
+from machina import Agent
+
+agent = Agent.from_config("machina.yaml")
+agent.run()
+```
+
+Secrets stay in environment variables (`${SAP_TOKEN}` syntax supported). See the [YAML config example](examples/06_yaml_config/) for the full guide.
+
 ## What You Can Build
 
 Every example is a complete, runnable agent. Start with quickstart, then pick what matches your use case:
@@ -108,6 +140,7 @@ Every example is a complete, runnable agent. Start with quickstart, then pick wh
 | **Go autonomous** | [02_predictive_pipeline/](examples/02_predictive_pipeline/) | 10-step pipeline: sensor anomaly to diagnosed root cause to scheduled maintenance. 3 LLM steps, 7 deterministic |
 | **Stay portable** | [03_cmms_portability/](examples/03_cmms_portability/) | Same agent runs on SAP PM, IBM Maximo, UpKeep -- change one line, everything else stays identical |
 | **Build your own** | [04_custom_workflows/](examples/04_custom_workflows/) | Define any maintenance process as a workflow: spare part reorder, preventive scheduling, anything |
+| **Zero code** | [06_yaml_config/](examples/06_yaml_config/) | Configure agent entirely via YAML -- `Agent.from_config("machina.yaml")` |
 | **Collaborate** | [05_multi_agent_team/](examples/05_multi_agent_team/) | Specialist agents (diagnostics, inventory, scheduling) collaborate on complex scenarios -- *v0.3* |
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`

@@ -93,6 +93,8 @@ Behind that single `agent.run()` call, Machina did the following for each questi
   and the rest of the ISO 14224-aligned entities.
 - **[Custom Connectors](connectors/custom.md)** — Build a connector for your own
   CMMS or sensor system using the `BaseConnector` Protocol.
+- **[YAML Configuration](yaml-config.md)** — Prefer declarative config? Define your
+  agent in `machina.yaml` and load it with `Agent.from_config("machina.yaml")`.
 - **Run the real example** — `python examples/quickstart/agent.py --llm openai:gpt-4o`
   is the full version of the script above, with CLI args for LLM selection, verbose
   logging, and sandbox mode.
