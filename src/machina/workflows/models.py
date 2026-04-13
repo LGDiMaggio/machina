@@ -7,8 +7,9 @@ multi-step maintenance workflows.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from machina._compat import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from machina._compat import StrEnum
 
 if TYPE_CHECKING:
     from collections.abc import Callable
