@@ -846,6 +846,7 @@ class Agent:
             logger.warning(
                 "workflow_execution_failed",
                 agent=self.name,
+                operation="execute_workflow",
                 workflow=workflow_name,
                 error=str(exc),
             )
