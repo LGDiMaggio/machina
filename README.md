@@ -141,6 +141,7 @@ Every example is a complete, runnable agent. Start with quickstart, then pick wh
 | **Stay portable** | [03_cmms_portability/](examples/03_cmms_portability/) | Same agent runs on SAP PM, IBM Maximo, UpKeep -- change one line, everything else stays identical |
 | **Build your own** | [04_custom_workflows/](examples/04_custom_workflows/) | Define any maintenance process as a workflow: spare part reorder, preventive scheduling, anything |
 | **Zero code** | [06_yaml_config/](examples/06_yaml_config/) | Configure agent entirely via YAML -- `Agent.from_config("machina.yaml")` |
+| **Think & act** | [07_agent_driven/](examples/07_agent_driven/) | Agent receives a complex scenario and autonomously decides which tools to use -- no predefined workflows |
 | **Collaborate** | [05_multi_agent_team/](examples/05_multi_agent_team/) | Specialist agents (diagnostics, inventory, scheduling) collaborate on complex scenarios -- *v0.3* |
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
