@@ -52,6 +52,7 @@ quickstart/  -->  01_alarm_response/  -->  02_predictive_pipeline/
 | [**04_custom_workflows/**](04_custom_workflows/) | Spare part reorder + preventive scheduling workflows | Workflow DSL: triggers, guards, error policies |
 | [**05_multi_agent_team/**](05_multi_agent_team/) | Specialist agents collaborate on diagnostics | Multi-agent orchestration (v0.3) |
 | [**06_yaml_config/**](06_yaml_config/) | Agent configured entirely via YAML -- zero Python | Declarative config, `Agent.from_config()` |
+| [**07_agent_driven/**](07_agent_driven/) | Autonomous agent reasons and acts without workflows | Tool-based reasoning, no predefined steps |
 
 ## Which Example is for Me?
 
@@ -66,6 +67,8 @@ quickstart/  -->  01_alarm_response/  -->  02_predictive_pipeline/
 **"I want to build my own workflows"** --> [04_custom_workflows/](04_custom_workflows/)
 
 **"I want to configure agents via YAML, no Python"** --> [06_yaml_config/](06_yaml_config/)
+
+**"I want to see an agent reason and act autonomously"** --> [07_agent_driven/](07_agent_driven/)
 
 ## Interactive Tour
 

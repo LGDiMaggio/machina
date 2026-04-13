@@ -693,6 +693,12 @@ class Agent:
         if name == "get_maintenance_schedule":
             return {"info": "Maintenance schedule lookup not yet connected to a data source."}
 
+        if name == "execute_workflow":
+            return await self._tool_execute_workflow(
+                args.get("workflow_name", ""),
+                args.get("event"),
+            )
+
         return {"error": f"Unknown tool: {name}"}
 
     # ------------------------------------------------------------------
@@ -814,6 +820,38 @@ class Agent:
                 "note": "No failure mode data available for this asset.",
             }
 
+    async def _tool_execute_workflow(
+        self,
+        workflow_name: str,
+        event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered workflow and return results."""
+        try:
+            result = await self.trigger_workflow(workflow_name, event or {})
+            return {
+                "workflow_name": result.workflow_name,
+                "success": result.success,
+                "duration_ms": result.duration_ms,
+                "steps": [
+                    {
+                        "step": sr.step_name,
+                        "success": sr.success,
+                        "output_summary": str(sr.output)[:500] if sr.output else None,
+                        "error": str(sr.error) if sr.error else None,
+                    }
+                    for sr in result.step_results
+                ],
+            }
+        except Exception as exc:
+            logger.warning(
+                "workflow_execution_failed",
+                agent=self.name,
+                operation="execute_workflow",
+                workflow=workflow_name,
+                error=str(exc),
+            )
+            return {"error": str(exc), "workflow_name": workflow_name}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -841,6 +879,10 @@ class Agent:
         # Always include diagnosis and schedule tools
         enabled_tool_names.add("diagnose_failure")
         enabled_tool_names.add("get_maintenance_schedule")
+
+        # Include workflow tool only when workflows are registered
+        if self._workflows:
+            enabled_tool_names.add("execute_workflow")
 
         return [tool for tool in BUILTIN_TOOLS if tool["function"]["name"] in enabled_tool_names]
 
