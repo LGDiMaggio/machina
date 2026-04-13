@@ -49,8 +49,9 @@ class TestBuiltinTools:
             "check_spare_parts",
             "diagnose_failure",
             "get_maintenance_schedule",
+            "execute_workflow",
         }
         assert expected == names
 
     def test_tool_count(self) -> None:
-        assert len(BUILTIN_TOOLS) == 8
+        assert len(BUILTIN_TOOLS) == 9

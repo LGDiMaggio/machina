@@ -200,6 +200,34 @@ GET_MAINTENANCE_SCHEDULE_TOOL = make_tool(
 )
 
 
+EXECUTE_WORKFLOW_TOOL = make_tool(
+    name="execute_workflow",
+    description=(
+        "Execute a registered maintenance workflow by name. "
+        "Use this to trigger a predefined multi-step process such as "
+        "alarm response, predictive diagnostics, or spare-part reordering. "
+        "The workflow runs all its steps and returns the outcome."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "workflow_name": {
+                "type": "string",
+                "description": "Name of the workflow to execute (e.g. 'alarm_to_workorder').",
+            },
+            "event": {
+                "type": "object",
+                "description": (
+                    "Event data to pass to the workflow trigger "
+                    "(e.g. {'asset_id': 'P-201', 'severity': 'critical'})."
+                ),
+            },
+        },
+        "required": ["workflow_name"],
+    },
+)
+
+
 # All built-in tools, ready for the agent runtime
 BUILTIN_TOOLS: list[dict[str, Any]] = [
     SEARCH_ASSETS_TOOL,
@@ -210,4 +238,5 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
     CHECK_SPARE_PARTS_TOOL,
     DIAGNOSE_FAILURE_TOOL,
     GET_MAINTENANCE_SCHEDULE_TOOL,
+    EXECUTE_WORKFLOW_TOOL,
 ]
