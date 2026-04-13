@@ -146,9 +146,7 @@ def test_model_attribute_access() -> None:
     """All attribute accesses on known model objects must resolve."""
     errors = validate_all()
     if errors:
-        msg = "Model attribute access validation failed:\n" + "\n".join(
-            f"  {e}" for e in errors
-        )
+        msg = "Model attribute access validation failed:\n" + "\n".join(f"  {e}" for e in errors)
         raise AssertionError(msg)
 
 
