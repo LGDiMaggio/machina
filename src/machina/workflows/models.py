@@ -7,8 +7,9 @@ multi-step maintenance workflows.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from machina._compat import StrEnum
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -239,6 +240,11 @@ class StepResult:
     duration_ms: float = 0.0
     skipped: bool = False
 
+    @property
+    def name(self) -> str:
+        """Alias for :attr:`step_name` (used by examples)."""
+        return self.step_name
+
 
 @dataclass
 class WorkflowResult:
@@ -257,6 +263,16 @@ class WorkflowResult:
     step_results: list[StepResult] = field(default_factory=list)
     success: bool = True
     duration_ms: float = 0.0
+
+    @property
+    def steps(self) -> list[StepResult]:
+        """Alias for :attr:`step_results` (used by examples)."""
+        return self.step_results
+
+    @property
+    def duration_seconds(self) -> float:
+        """Duration in seconds (convenience wrapper over :attr:`duration_ms`)."""
+        return self.duration_ms / 1000.0
 
 
 # ------------------------------------------------------------------
