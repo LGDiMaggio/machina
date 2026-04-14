@@ -25,7 +25,7 @@ class LLMProvider:
         temperature: float = 0.1,
         max_tokens: int = 4096,
     ) -> None:
-        self.model = model
+        self.model = model.replace(":", "/", 1)
         self.temperature = temperature
         self.max_tokens = max_tokens
 

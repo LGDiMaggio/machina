@@ -23,7 +23,7 @@ class TestLLMProviderInit:
 
     def test_default_parameters(self) -> None:
         provider = LLMProvider()
-        assert provider.model == "openai:gpt-4o"
+        assert provider.model == "openai/gpt-4o"
         assert provider.temperature == 0.1
         assert provider.max_tokens == 4096
 
@@ -33,7 +33,7 @@ class TestLLMProviderInit:
             temperature=0.7,
             max_tokens=2048,
         )
-        assert provider.model == "ollama:llama3"
+        assert provider.model == "ollama/llama3"
         assert provider.temperature == 0.7
         assert provider.max_tokens == 2048
 

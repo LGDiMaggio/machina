@@ -401,7 +401,7 @@ class TestAgentInit:
 
     def test_string_llm(self) -> None:
         agent = Agent(llm="openai:gpt-4o")
-        assert agent._llm.model == "openai:gpt-4o"
+        assert agent._llm.model == "openai/gpt-4o"
 
     def test_llm_instance(self) -> None:
         llm = _FakeLLM()
