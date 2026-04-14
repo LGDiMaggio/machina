@@ -70,6 +70,9 @@ jobs:
       - name: Validate workflow action strings
         run: pytest tests/test_example_actions.py -v
 
+      - name: Validate model attribute access
+        run: python tests/validate_model_access.py
+
   docs:
     name: Docs build (strict)
     runs-on: ubuntu-latest
