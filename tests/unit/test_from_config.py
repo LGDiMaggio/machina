@@ -57,7 +57,7 @@ class TestFromConfig:
             },
         )
         agent = Agent.from_config(cfg_path)
-        assert agent._llm.model == "ollama:mistral"
+        assert agent._llm.model == "ollama/mistral"
         assert agent._llm.temperature == 0.5
 
     def test_disabled_connector_excluded(self, tmp_path: Path) -> None:
