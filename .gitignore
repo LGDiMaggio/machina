@@ -11,6 +11,7 @@ linkedin-post-en.md
 # === Local planning artifacts — NEVER commit ===
 docs/plans/
 docs/brainstorms/
+docs/solutions/
 .compound-engineering/
 
 # === Python ===
