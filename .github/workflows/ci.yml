@@ -38,6 +38,17 @@ jobs:
       - name: Tests
         run: pytest tests/ -v --cov=machina --cov-report=term-missing --cov-report=xml
 
+      - name: Per-module coverage floors (core modules)
+        # Floors set below the measured baseline with a ~5% buffer so
+        # refactors have headroom but a silent regression in any core
+        # module fails CI. Raise over time; never lower without a reason.
+        run: |
+          coverage report --include='src/machina/agent/*'         --fail-under=88
+          coverage report --include='src/machina/config/*'        --fail-under=95
+          coverage report --include='src/machina/llm/*'           --fail-under=95
+          coverage report --include='src/machina/observability/*' --fail-under=85
+          coverage report --include='src/machina/workflows/*'     --fail-under=90
+
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v6
