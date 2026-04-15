@@ -12,8 +12,8 @@ connectors' capabilities become tools the client can call directly.
     importable so the import path stays stable across v0.2 → v0.3, but
     instantiating `machina.mcp.MCPServer` raises `NotImplementedError`
     with a pointer back here. The full implementation is planned for
-    **v0.3** — see the [Roadmap](roadmap.md). Until then, use the `Agent`
-    class directly — see the [Quickstart](quickstart.md).
+    **v0.3**. Until then, use the `Agent` class directly — see the
+    [Quickstart](quickstart.md).
 
 ## Why MCP?
 
