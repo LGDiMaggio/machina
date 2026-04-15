@@ -1,8 +1,17 @@
 # === Private files — NEVER commit ===
 MACHINA_SPEC.md
 CLAUDE.md
+MACHINA_HEALTH_REPORT.md
+machina-medium-article-en.md
+machina-medium-article-it.md
+linkedin-post-en.md
 .claude/
 .github/skills/
+
+# === Local planning artifacts — NEVER commit ===
+docs/plans/
+docs/brainstorms/
+.compound-engineering/
 
 # === Python ===
 __pycache__/
@@ -65,3 +74,4 @@ Desktop.ini
 
 # === Jupyter ===
 .ipynb_checkpoints/
+.compound-engineering/*.local.yaml

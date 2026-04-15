@@ -8,10 +8,12 @@ of agent code. You point your MCP client at a Machina server, and your
 connectors' capabilities become tools the client can call directly.
 
 !!! warning "Not available yet"
-    The MCP layer is a **placeholder** (`src/machina/mcp/` exists as
-    an empty module). The implementation is planned for **v0.3** as part of
-    Phase 3 of the roadmap. Until then, use the `Agent` class directly — see
-    the [Quickstart](quickstart.md).
+    The MCP layer is a **placeholder**. The `machina.mcp` namespace is
+    importable so the import path stays stable across v0.2 → v0.3, but
+    instantiating `machina.mcp.MCPServer` raises `NotImplementedError`
+    with a pointer back here. The full implementation is planned for
+    **v0.3** — see the [Roadmap](roadmap.md). Until then, use the `Agent`
+    class directly — see the [Quickstart](quickstart.md).
 
 ## Why MCP?
 
