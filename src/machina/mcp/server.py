@@ -12,7 +12,7 @@ __all__ = ["MCPServer"]
 
 _ROADMAP_MESSAGE = (
     "MCP server is planned for v0.3. "
-    "See https://github.com/LGDiMaggio/machina/blob/main/docs/mcp-server.md "
+    "See https://github.com/LGDiMaggio/machina/blob/main/docs/roadmap.md "
     "for the roadmap."
 )
 
