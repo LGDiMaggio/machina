@@ -35,12 +35,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES_DIR = REPO_ROOT / "examples"
 
-# Example directories that intentionally have no runnable `agent.py`
-# (placeholder READMEs for planned features). Keep this list empty by
-# default — adding an entry is an explicit decision that a demo is not
-# expected to be runnable yet.
-_SKIP_CONSTRUCT_DIRS: set[str] = {"05_multi_agent_team"}
-
 
 def find_example_scripts() -> list[Path]:
     """Return all Python files under ``examples/``."""
@@ -48,11 +42,17 @@ def find_example_scripts() -> list[Path]:
 
 
 def find_runnable_agent_modules() -> list[Path]:
-    """Return every ``examples/<dir>/agent.py`` that should be constructible."""
+    """Return every ``examples/<dir>/agent.py`` that should be constructible.
+
+    ``05_multi_agent_team`` is a placeholder directory (README-only,
+    ``AgentTeam`` lands in v0.3) and is skipped here. If another example
+    intentionally has no runnable ``agent.py`` in future, promote this
+    check into a named list with a one-line rationale.
+    """
     return sorted(
         path
         for path in EXAMPLES_DIR.glob("*/agent.py")
-        if path.parent.name not in _SKIP_CONSTRUCT_DIRS
+        if path.parent.name != "05_multi_agent_team"
     )
 
 
@@ -106,10 +106,13 @@ def check_module_constructs(agent_path: Path) -> str | None:
     example_dir = agent_path.parent
     # Each example manipulates sys.path relative to its own location
     # (e.g. `_preflight.py` lives one directory up). Match that layout.
-    dir_paths = [str(example_dir.parent), str(example_dir)]
-    added = [p for p in dir_paths if p not in sys.path]
-    sys.path[:0] = added
+    sys.path[:0] = [str(example_dir.parent), str(example_dir)]
     module_name = f"_machina_example_{example_dir.name}"
+    # Snapshot sys.path and the target module slot so we can restore both
+    # verbatim — each example also does its own `sys.path.insert(0, ...)`
+    # inside its module body, and we want those injections undone too so
+    # the caller's environment is bit-exact after each check.
+    path_snapshot = list(sys.path)
     prev_module = sys.modules.pop(module_name, None)
 
     try:
@@ -138,9 +141,11 @@ def check_module_constructs(agent_path: Path) -> str | None:
         sys.modules.pop(module_name, None)
         if prev_module is not None:
             sys.modules[module_name] = prev_module
-        for p in added:
-            if p in sys.path:
-                sys.path.remove(p)
+        # Restore the full sys.path snapshot — undoes both our prepends
+        # and any insertions the example module body performed.
+        sys.path[:] = [
+            p for p in path_snapshot if p not in {str(example_dir.parent), str(example_dir)}
+        ]
 
 
 def validate_all() -> list[str]:
