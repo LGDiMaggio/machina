@@ -67,6 +67,21 @@ The LLM reasons where it adds value (diagnosis synthesis, work order writing). E
   Result: SUCCESS (2.34s)
 ```
 
+## Email Notifications (optional)
+
+The `notify_technician` step routes through every configured channel. By default the example uses `CliChannel`. To also send the alert via SMTP, set these env vars before running:
+
+```bash
+export MACHINA_SMTP_HOST=smtp.example.com
+export MACHINA_SMTP_USER=agent@example.com
+export MACHINA_SMTP_PASSWORD='...'           # or app-specific password
+# optional:
+export MACHINA_SMTP_PORT=465                 # default 465 (SSL)
+export MACHINA_SMTP_FROM=agent@example.com   # defaults to SMTP_USER
+```
+
+When set, the agent constructs an `EmailConnector` alongside `CliChannel` and the workflow's notification step fans out to both. With them unset, the example stays a zero-config demo. See [`docs/connectors/email.md`](../../docs/connectors/email.md) for the full connector reference.
+
 ## Sandbox Mode
 
 Sandbox mode is on by default. Write operations (create WO, send notifications, submit to CMMS) are logged but not executed. Read operations (asset lookup, spare parts check, manual search) run normally.
