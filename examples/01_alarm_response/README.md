@@ -67,6 +67,23 @@ The LLM reasons where it adds value (diagnosis synthesis, work order writing). E
   Result: SUCCESS (2.34s)
 ```
 
+## Email Channel (optional, discoverability demo)
+
+The example imports and conditionally constructs an `EmailConnector` so you can see exactly how it plugs into an agent. Set these env vars to attach it alongside `CliChannel`:
+
+```bash
+export MACHINA_SMTP_HOST=smtp.example.com
+export MACHINA_SMTP_USER=agent@example.com
+export MACHINA_SMTP_PASSWORD='...'           # or app-specific password
+# optional:
+export MACHINA_SMTP_PORT=465                 # default 465 (SSL)
+export MACHINA_SMTP_FROM=agent@example.com   # defaults to SMTP_USER
+```
+
+With them unset, the example stays a zero-config CLI demo. See [`docs/connectors/email.md`](../../docs/connectors/email.md) for the full connector reference.
+
+> ⚠️ **Heads-up.** The built-in `notify_technician` step currently resolves communication connectors via the agent's connector registry, not the channels list, so the `EmailConnector` attached here shows up in `agent.channels` for discoverability but is **not** invoked by the notification step today. Unifying those two paths is tracked in [issue #31](https://github.com/LGDiMaggio/machina/issues/31). Direct usage of `EmailConnector().send_message(...)` works as documented.
+
 ## Sandbox Mode
 
 Sandbox mode is on by default. Write operations (create WO, send notifications, submit to CMMS) are logged but not executed. Read operations (asset lookup, spare parts check, manual search) run normally.

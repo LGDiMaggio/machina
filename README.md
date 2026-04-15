@@ -136,7 +136,7 @@ Every example is a complete, runnable agent. Start with quickstart, then pick wh
 | | Example | What your agent does |
 |-|---------|---------------------|
 | **Start here** | [quickstart/](examples/quickstart/) | Answers questions about equipment, procedures, spare parts, maintenance history |
-| **Automate** | [01_alarm_response/](examples/01_alarm_response/) | Alarm fires -- agent diagnoses the failure, checks parts, creates a work order, notifies the team |
+| **Automate** | [01_alarm_response/](examples/01_alarm_response/) | Alarm fires -- agent diagnoses the failure, checks parts, creates a work order, notifies the team via CLI (and optionally SMTP via `EmailConnector`) |
 | **Go autonomous** | [02_predictive_pipeline/](examples/02_predictive_pipeline/) | 10-step pipeline: sensor anomaly to diagnosed root cause to scheduled maintenance. 3 LLM steps, 7 deterministic |
 | **Stay portable** | [03_cmms_portability/](examples/03_cmms_portability/) | Same agent runs on SAP PM, IBM Maximo, UpKeep -- change one line, everything else stays identical |
 | **Build your own** | [04_custom_workflows/](examples/04_custom_workflows/) | Define any maintenance process as a workflow: spare part reorder, preventive scheduling, anything |
