@@ -8,9 +8,16 @@ create work order, notify the team. 6 steps, only 2 use the LLM.
     python agent.py --live              # execute writes
     python agent.py --llm openai:gpt-4o
 
-Email notifications (optional): set MACHINA_SMTP_HOST, MACHINA_SMTP_USER,
-MACHINA_SMTP_PASSWORD and MACHINA_NOTIFY_EMAIL to also send the
-notification step via SMTP. Without these the agent uses CliChannel only.
+Email channel (optional, discoverability demo): set MACHINA_SMTP_HOST,
+MACHINA_SMTP_USER, and MACHINA_SMTP_PASSWORD to attach an EmailConnector
+alongside CliChannel. Without these the agent uses CliChannel only.
+
+Note: the built-in ``alarm_to_workorder`` workflow's ``notify_technician``
+step currently resolves communication connectors via the connector
+registry — not the channels list — so until that is unified (tracked
+in issue #31) the EmailConnector shows up in ``agent.channels`` for
+discoverability but is not invoked by the notify step. The import and
+construction code below is the point of this example.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from machina.workflows.builtins import alarm_to_workorder
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 
 
-def _build_channels() -> list[object]:
+def _build_channels() -> list[BaseConnector]:
     """Always include CliChannel; add EmailConnector when SMTP env vars are set.
 
     This wiring is the discoverability point for the EmailConnector — running
@@ -43,17 +50,25 @@ def _build_channels() -> list[object]:
     import + construction code is right here for any reader who wants to see
     how Email plugs into a workflow.
     """
-    channels: list[object] = [CliChannel()]
+    channels: list[BaseConnector] = [CliChannel()]
 
     smtp_host = os.environ.get("MACHINA_SMTP_HOST")
     smtp_user = os.environ.get("MACHINA_SMTP_USER")
     smtp_password = os.environ.get("MACHINA_SMTP_PASSWORD")
 
     if smtp_host and smtp_user and smtp_password:
+        smtp_port_raw = os.environ.get("MACHINA_SMTP_PORT", "465")
+        try:
+            smtp_port = int(smtp_port_raw)
+        except ValueError as exc:
+            raise SystemExit(
+                f"MACHINA_SMTP_PORT must be an integer (got {smtp_port_raw!r})."
+            ) from exc
+
         channels.append(
             EmailConnector(
                 smtp_host=smtp_host,
-                smtp_port=int(os.environ.get("MACHINA_SMTP_PORT", "465")),
+                smtp_port=smtp_port,
                 username=smtp_user,
                 password=smtp_password,
                 from_address=os.environ.get("MACHINA_SMTP_FROM", smtp_user),
