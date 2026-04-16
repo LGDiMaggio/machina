@@ -36,6 +36,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -371,14 +372,16 @@ class SapPmConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "read_assets",
-        "read_work_orders",
-        "create_work_order",
-        "update_work_order",
-        "read_spare_parts",
-        "read_maintenance_plans",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_ASSETS,
+            Capability.READ_WORK_ORDERS,
+            Capability.CREATE_WORK_ORDER,
+            Capability.UPDATE_WORK_ORDER,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_PLANS,
+        }
+    )
 
     _PAGE_SIZE: ClassVar[int] = 100
 

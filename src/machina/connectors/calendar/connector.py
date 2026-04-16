@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.domain.calendar import CalendarEvent, EventType
 from machina.exceptions import ConnectorError
 
@@ -35,12 +36,14 @@ logger = structlog.get_logger(__name__)
 
 _BACKENDS = frozenset({"google", "outlook", "ical"})
 
-_FULL_CAPABILITIES: list[str] = [
-    "read_calendar_events",
-    "create_calendar_event",
-    "delete_calendar_event",
-]
-_READONLY_CAPABILITIES: list[str] = ["read_calendar_events"]
+_FULL_CAPABILITIES: frozenset[Capability] = frozenset(
+    {
+        Capability.READ_CALENDAR_EVENTS,
+        Capability.CREATE_CALENDAR_EVENT,
+        Capability.DELETE_CALENDAR_EVENT,
+    }
+)
+_READONLY_CAPABILITIES: frozenset[Capability] = frozenset({Capability.READ_CALENDAR_EVENTS})
 
 
 class CalendarConnector:
@@ -104,9 +107,9 @@ class CalendarConnector:
 
         # Set capabilities based on backend
         if backend == "ical":
-            self.capabilities = list(_READONLY_CAPABILITIES)
+            self.capabilities: frozenset[Capability] = _READONLY_CAPABILITIES
         else:
-            self.capabilities = list(_FULL_CAPABILITIES)
+            self.capabilities = _FULL_CAPABILITIES
 
         # Defer backend construction to connect() to keep __init__ cheap
         self._backend_kwargs = {

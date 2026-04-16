@@ -83,7 +83,7 @@ class TestCalendarConnectorInit:
 
     def test_ical_capabilities_readonly(self) -> None:
         conn = CalendarConnector(backend="ical")
-        assert conn.capabilities == ["read_calendar_events"]
+        assert conn.capabilities == frozenset({"read_calendar_events"})
 
     def test_google_capabilities_full(self) -> None:
         conn = CalendarConnector(backend="google")

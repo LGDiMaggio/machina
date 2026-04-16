@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
@@ -107,12 +108,14 @@ class OpcUaConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "subscribe_to_nodes",
-        "read_node_value",
-        "read_node_values",
-        "browse_nodes",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.SUBSCRIBE_TO_NODES,
+            Capability.READ_NODE_VALUE,
+            Capability.READ_NODE_VALUES,
+            Capability.BROWSE_NODES,
+        }
+    )
 
     def __init__(
         self,

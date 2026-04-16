@@ -17,6 +17,7 @@ import jmespath
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,
@@ -131,36 +132,38 @@ class GenericCmmsConnector:
         ```
     """
 
-    _BASE_CAPABILITIES: ClassVar[list[str]] = [
-        "read_assets",
-        "read_work_orders",
-        "create_work_order",
-        "read_spare_parts",
-        "read_maintenance_history",
-    ]
+    _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_ASSETS,
+            Capability.READ_WORK_ORDERS,
+            Capability.CREATE_WORK_ORDER,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_HISTORY,
+        }
+    )
 
-    # Maps optional capability names to the endpoint config key that enables them.
-    _OPTIONAL_CAPABILITIES: ClassVar[dict[str, str]] = {
-        "get_work_order": "get_work_order",
-        "update_work_order": "update_work_order",
-        "close_work_order": "update_work_order",
-        "cancel_work_order": "update_work_order",
-        "read_maintenance_plans": "read_maintenance_plans",
+    # Maps optional capabilities to the endpoint config key that enables them.
+    _OPTIONAL_CAPABILITIES: ClassVar[dict[Capability, str]] = {
+        Capability.GET_WORK_ORDER: "get_work_order",
+        Capability.UPDATE_WORK_ORDER: "update_work_order",
+        Capability.CLOSE_WORK_ORDER: "update_work_order",
+        Capability.CANCEL_WORK_ORDER: "update_work_order",
+        Capability.READ_MAINTENANCE_PLANS: "read_maintenance_plans",
     }
 
     @property
-    def capabilities(self) -> list[str]:
+    def capabilities(self) -> frozenset[Capability]:
         """Return capabilities based on configuration.
 
         Base capabilities are always available. Optional capabilities
         are added when running in local mode (all supported) or when
         the corresponding endpoint is configured in REST mode.
         """
-        caps = list(self._BASE_CAPABILITIES)
+        caps = set(self._BASE_CAPABILITIES)
         for cap, endpoint_key in self._OPTIONAL_CAPABILITIES.items():
             if self._data_dir or endpoint_key in self._endpoints:
-                caps.append(cap)
-        return caps
+                caps.add(cap)
+        return frozenset(caps)
 
     def __init__(
         self,
