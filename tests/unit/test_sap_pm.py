@@ -9,21 +9,36 @@ from __future__ import annotations
 import pytest
 
 from machina.connectors.cmms.auth import BasicAuth
-from machina.connectors.cmms.sap_pm import (
-    SapPmConnector,
+from machina.connectors.cmms.mappers.sap_pm import (
     _map_sap_status,
-    _parse_asset,
-    _parse_maintenance_plan,
-    _parse_sap_datetime,
-    _parse_spare_part,
-    _parse_work_order,
-    _require_httpx,
-    _reverse_order_type,
-    _reverse_priority,
-    _reverse_status,
     _sap_criticality,
     _sap_cycle_to_interval,
 )
+from machina.connectors.cmms.mappers.sap_pm import (
+    parse_asset as _parse_asset,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    parse_maintenance_plan as _parse_maintenance_plan,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    parse_sap_datetime as _parse_sap_datetime,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    parse_spare_part as _parse_spare_part,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    parse_work_order as _parse_work_order,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    reverse_order_type as _reverse_order_type,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    reverse_priority as _reverse_priority,
+)
+from machina.connectors.cmms.mappers.sap_pm import (
+    reverse_status as _reverse_status,
+)
+from machina.connectors.cmms.sap_pm import SapPmConnector, _require_httpx
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
