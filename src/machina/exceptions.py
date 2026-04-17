@@ -24,6 +24,18 @@ class ConnectorTimeoutError(ConnectorError):
     """A connector operation timed out."""
 
 
+class ConnectorConfigError(ConnectorError):
+    """A connector's configuration is invalid or incomplete."""
+
+
+class ConnectorSchemaError(ConnectorError):
+    """A schema mapping does not match the external data source."""
+
+
+class ConnectorLockedError(ConnectorError):
+    """The target resource is locked by another process."""
+
+
 # --- Domain errors ---
 
 

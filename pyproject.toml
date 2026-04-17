@@ -72,6 +72,7 @@ calendar = [
     "machina-ai[outlook-calendar]",
     "machina-ai[ical]",
 ]
+excel = ["openpyxl>=3.1", "watchdog>=4.0"]
 cmms-rest = ["httpx>=0.27"]
 docs-rag = [
     "langchain>=0.2",
@@ -87,6 +88,7 @@ all = [
     "machina-ai[telegram]",
     "machina-ai[slack]",
     "machina-ai[calendar]",
+    "machina-ai[excel]",
     "machina-ai[cmms-rest]",
     "machina-ai[docs-rag]",
 ]
