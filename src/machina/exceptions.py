@@ -36,6 +36,18 @@ class ConnectorLockedError(ConnectorError):
     """The target resource is locked by another process."""
 
 
+class ConnectorTransientError(ConnectorError):
+    """A transient error (deadlock, timeout) that may succeed on retry."""
+
+
+class ConnectorDriverError(ConnectorError):
+    """A required database driver is not installed on the system."""
+
+
+class ConnectorDependencyError(ConnectorError):
+    """A required Python package (extra) is not installed."""
+
+
 # --- Domain errors ---
 
 
