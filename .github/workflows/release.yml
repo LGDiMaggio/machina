@@ -56,7 +56,7 @@ jobs:
 
       # ── GitHub Release ─────────────────────────────────────────────────────
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "machina-ai v${{ steps.release_notes.outputs.version }}"
           body_path: release_notes.md
