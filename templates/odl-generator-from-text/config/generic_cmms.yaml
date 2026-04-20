@@ -1,0 +1,87 @@
+# GenericCmms YAML mapping — alternative substrate for odl-generator-from-text
+#
+# Maps the mock CMMS REST API to Machina domain entities.
+# Activate by setting MACHINA_SUBSTRATE=generic_cmms_yaml in .env
+# and uncommenting the generic_cmms block in config.yaml.
+
+entity_mappings:
+  asset:
+    endpoint: "/api/assets"
+    fields:
+      id:
+        source: "id"
+        required: true
+      name:
+        source: "name"
+        required: true
+      type:
+        source: "type"
+        coerce: "enum_map"
+        enum_map:
+          rotating_equipment: "rotating_equipment"
+          static_equipment: "static_equipment"
+          electrical: "electrical"
+          instrument: "instrument"
+          safety: "safety"
+      location:
+        source: "location"
+      criticality:
+        source: "criticality"
+        coerce: "enum_map"
+        enum_map:
+          A: "A"
+          B: "B"
+          C: "C"
+      manufacturer:
+        source: "manufacturer"
+      model:
+        source: "model"
+
+  work_order:
+    endpoint: "/api/work-orders"
+    fields:
+      id:
+        source: "id"
+        required: true
+      type:
+        source: "type"
+        coerce: "enum_map"
+        enum_map:
+          corrective: "corrective"
+          preventive: "preventive"
+          predictive: "predictive"
+      priority:
+        source: "priority"
+        coerce: "enum_map"
+        enum_map:
+          emergency: "emergency"
+          high: "high"
+          medium: "medium"
+          low: "low"
+      status:
+        source: "status"
+      asset_id:
+        source: "asset_id"
+        required: true
+      description:
+        source: "description"
+      assigned_to:
+        source: "assigned_to"
+
+  spare_part:
+    endpoint: "/api/spare-parts"
+    fields:
+      sku:
+        source: "sku"
+        required: true
+      name:
+        source: "name"
+        required: true
+      manufacturer:
+        source: "manufacturer"
+      stock_quantity:
+        source: "stock_quantity"
+        coerce: "int"
+      reorder_point:
+        source: "reorder_point"
+        coerce: "int"

@@ -67,6 +67,8 @@ nav:
       - Calendar: connectors/calendar.md
   - YAML Configuration: yaml-config.md
   - MCP Server: mcp-server.md
+  - Templates:
+      - OdL Generator from Text: templates/odl-generator-from-text.md
   - Deployment:
       - On-Premise: deployment/on-premise.md
       - Uptime & Resilience: deployment/uptime.md

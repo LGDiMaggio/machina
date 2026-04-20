@@ -1,0 +1,18 @@
+{
+  "update_id": 100001,
+  "message": {
+    "message_id": 1,
+    "from": {
+      "id": 123456789,
+      "is_bot": false,
+      "first_name": "Mario",
+      "last_name": "Rossi"
+    },
+    "chat": {
+      "id": 123456789,
+      "type": "private"
+    },
+    "date": 1745132100,
+    "text": "pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"
+  }
+}

@@ -1,0 +1,66 @@
+# odl-generator-from-text — Machina agent configuration
+#
+# Substrate switch: set MACHINA_SUBSTRATE=excel (default) or generic_cmms_yaml
+# All secrets come from .env — never hardcode them here.
+
+name: "OdL Generator"
+description: >
+  Receives free-text maintenance requests via email or Telegram,
+  resolves assets, and creates structured Work Orders.
+
+plant:
+  name: "Stabilimento Demo"
+  location: "Italia"
+
+connectors:
+  # --- Excel substrate (default) ---
+  excel_assets:
+    type: excel_csv
+    primary: true
+    settings:
+      file_path: "data/asset_registry.xlsx"
+      read_only: true
+
+  excel_workorders:
+    type: excel_csv
+    settings:
+      file_path: "data/workorders.xlsx"
+      write_mode: append
+
+  # --- GenericCmms YAML substrate (alternative) ---
+  # Activate by setting MACHINA_SUBSTRATE=generic_cmms_yaml in .env
+  # generic_cmms:
+  #   type: generic_cmms
+  #   primary: true
+  #   settings:
+  #     url: "${MACHINA_CMMS_URL}"
+  #     yaml_mapping_file: "config/generic_cmms.yaml"
+
+  # --- Email ---
+  email:
+    type: email
+    settings:
+      smtp_host: "${MACHINA_SMTP_HOST}"
+      smtp_port: "${MACHINA_SMTP_PORT}"
+      username: "${MACHINA_EMAIL_USERNAME}"
+      password: "${MACHINA_EMAIL_PASSWORD}"
+      from_address: "${MACHINA_SMTP_FROM}"
+      imap_host: "${MACHINA_IMAP_HOST}"
+      imap_port: "${MACHINA_IMAP_PORT}"
+
+channels:
+  - type: email
+  # Uncomment to add Telegram:
+  # - type: telegram
+  #   settings:
+  #     bot_token: "${MACHINA_TELEGRAM_BOT_TOKEN}"
+  #     allowed_chat_ids: "${MACHINA_TELEGRAM_CHAT_IDS}"
+
+llm:
+  provider: "${MACHINA_LLM_MODEL}"
+  temperature: 0.1
+
+sandbox: true
+
+logging:
+  level: "${MACHINA_LOG_LEVEL}"

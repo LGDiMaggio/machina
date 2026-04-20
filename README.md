@@ -146,6 +146,23 @@ Every example is a complete, runnable agent. Start with quickstart, then pick wh
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
 
+## Starter Kit
+
+Ready to deploy? The **odl-generator-from-text** template is a complete, clone-configure-deploy package:
+
+```bash
+cp -r templates/odl-generator-from-text my-agent
+cd my-agent
+cp .env.example .env    # fill in your LLM key
+docker compose up       # sandbox mode by default
+```
+
+A technician sends an email or Telegram message in Italian:
+
+> *"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"*
+
+The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
+
 ## From Demo to Production
 
 The quickstart uses sample data. When you're ready, swap connectors to your real systems -- the agent logic doesn't change:
