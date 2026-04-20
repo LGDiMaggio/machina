@@ -115,7 +115,7 @@ def build_verifier(config: Any) -> Any:
         from machina.runtime import _import_class
 
         cls = _import_class(verifier_class_path)
-        return cls(config)  # type: ignore[no-any-return]
+        return cls(config)
 
     tokens = load_tokens_from_env()
     return StaticBearerTokenVerifier(tokens)
