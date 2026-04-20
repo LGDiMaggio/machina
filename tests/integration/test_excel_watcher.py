@@ -6,9 +6,12 @@ Uses real temporary directories and real file-system events.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import openpyxl
+
+if TYPE_CHECKING:
+    from pathlib import Path
 import pytest
 
 from machina.connectors.docs.excel import ExcelCsvConnector

@@ -43,7 +43,7 @@ class TestDeprecationShim:
     def test_mcp_server_access_warns_and_raises(self) -> None:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            with pytest.raises(AttributeError, match="removed in v0.3"):
+            with pytest.raises(AttributeError, match=r"removed in v0\.3"):
                 from machina import mcp
 
                 mcp.MCPServer  # noqa: B018
