@@ -28,7 +28,7 @@ _INJECTION_GUARD = (
 def register_prompts(server: Any) -> None:
     """Register domain prompt templates on the MCP server."""
 
-    @server.prompt(
+    @server.prompt(  # type: ignore[misc,untyped-decorator,unused-ignore]
         name="diagnose_asset_failure",
         title="Diagnose asset failure",
         description=(
@@ -52,7 +52,7 @@ def register_prompts(server: Any) -> None:
         )
         return prompt + _INJECTION_GUARD
 
-    @server.prompt(
+    @server.prompt(  # type: ignore[misc,untyped-decorator,unused-ignore]
         name="draft_preventive_plan",
         title="Draft preventive maintenance plan",
         description=(
@@ -77,7 +77,7 @@ def register_prompts(server: Any) -> None:
         )
         return prompt + _INJECTION_GUARD
 
-    @server.prompt(
+    @server.prompt(  # type: ignore[misc,untyped-decorator,unused-ignore]
         name="summarize_maintenance_history",
         title="Summarize maintenance history",
         description=(

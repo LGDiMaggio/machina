@@ -388,12 +388,12 @@ class GenericCmmsConnector:
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)  # type: ignore[no-any-return]
 
     @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Read preventive-maintenance plans.

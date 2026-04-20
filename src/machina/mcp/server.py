@@ -32,7 +32,7 @@ logger = structlog.get_logger(__name__)
 
 def _require_fastmcp() -> Any:
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found,unused-ignore]
     except ImportError as exc:
         raise ConnectorError(
             "The MCP SDK is required. Install with: pip install machina-ai[mcp]"
@@ -98,8 +98,12 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
 
     verifier = build_verifier(config)
 
-    from mcp.server.auth.settings import AuthSettings
-    from mcp.server.transport_security import TransportSecuritySettings
+    from mcp.server.auth.settings import (
+        AuthSettings,  # type: ignore[import-not-found,unused-ignore]
+    )
+    from mcp.server.transport_security import (
+        TransportSecuritySettings,  # type: ignore[import-not-found,unused-ignore]
+    )
 
     mcp_cfg = getattr(config, "mcp", None)
     allowed_origins = getattr(
@@ -107,8 +111,8 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
     )
 
     auth_settings = AuthSettings(
-        issuer_url="https://machina.local",  # type: ignore[arg-type]
-        resource_server_url="https://machina.local",  # type: ignore[arg-type]
+        issuer_url="https://machina.local",
+        resource_server_url="https://machina.local",
         required_scopes=["mcp:use"],
     )
 

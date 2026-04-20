@@ -858,7 +858,7 @@ class Agent:
 
     def _get_available_tools(self) -> list[dict[str, Any]]:
         """Return the tool definitions relevant to configured connectors."""
-        all_caps = set()
+        all_caps: set[str] = set()
         for _, conn in self._registry.all().items():
             all_caps.update(conn.capabilities)
 

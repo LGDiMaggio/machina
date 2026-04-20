@@ -28,7 +28,7 @@ class RefreshableConnector(Protocol):
 
 def _require_watchdog() -> Any:
     try:
-        import watchdog
+        import watchdog  # type: ignore[import-not-found,unused-ignore]
     except ImportError as exc:
         from machina.exceptions import ConnectorError
 
@@ -106,9 +106,13 @@ class FileWatcher:
     async def start(self) -> None:
         """Start watching in a background thread."""
         _require_watchdog()
-        from watchdog.events import FileSystemEventHandler
-        from watchdog.observers import Observer
-        from watchdog.observers.polling import PollingObserver
+        from watchdog.events import (
+            FileSystemEventHandler,  # type: ignore[import-not-found,unused-ignore]
+        )
+        from watchdog.observers import Observer  # type: ignore[import-not-found,unused-ignore]
+        from watchdog.observers.polling import (
+            PollingObserver,  # type: ignore[import-not-found,unused-ignore]
+        )
 
         path_strs = {str(p) for p in self._paths}
         handler = _DebouncedHandler(
@@ -118,7 +122,7 @@ class FileWatcher:
         )
 
         # Wrap _DebouncedHandler so watchdog recognizes it
-        class _WatchdogAdapter(FileSystemEventHandler):
+        class _WatchdogAdapter(FileSystemEventHandler):  # type: ignore[misc,unused-ignore]
             def on_any_event(self, event: Any) -> None:
                 handler.dispatch(event)
 

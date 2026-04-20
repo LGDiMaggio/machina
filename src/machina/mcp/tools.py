@@ -367,7 +367,7 @@ async def machina_get_sensor_reading(
     if not matches:
         return {"error": "No IoT connector configured"}
     _, iot = matches[0]
-    return await iot.get_latest_reading(asset_id)
+    return await iot.get_latest_reading(asset_id)  # type: ignore[no-any-return]
 
 
 async def machina_get_alarms(
@@ -390,7 +390,7 @@ async def machina_get_alarms(
             {
                 "id": getattr(a, "id", ""),
                 "asset_id": getattr(a, "asset_id", ""),
-                "severity": getattr(a, "severity", "").value
+                "severity": getattr(a, "severity", "").value  # type: ignore[union-attr]
                 if hasattr(getattr(a, "severity", ""), "value")
                 else str(getattr(a, "severity", "")),
                 "parameter": getattr(a, "parameter", ""),

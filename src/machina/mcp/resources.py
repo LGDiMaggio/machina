@@ -84,7 +84,7 @@ BUILTIN_FAILURE_TAXONOMY: list[dict[str, Any]] = [
 
 
 def _runtime_from_ctx(ctx: Any) -> MachinaRuntime:
-    return ctx.request_context.lifespan_context["runtime"]
+    return ctx.request_context.lifespan_context["runtime"]  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def _runtime_from_ctx(ctx: Any) -> MachinaRuntime:
 def register_resources(server: Any) -> None:
     """Register all MCP resources on the server."""
 
-    @server.resource(
+    @server.resource(  # type: ignore[misc,untyped-decorator,unused-ignore]
         "machina://v1/assets/{asset_id}",
         name="machina_asset",
         title="Asset details",
@@ -106,12 +106,12 @@ def register_resources(server: Any) -> None:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)
         cmms = runtime.get_primary_cmms()
-        asset = await cmms.get_asset(asset_id)
+        asset = await cmms.get_asset(asset_id)  # type: ignore[attr-defined]
         if asset is None:
             return json.dumps({"error": f"Asset {asset_id!r} not found"})
-        return asset.model_dump_json()
+        return asset.model_dump_json()  # type: ignore[no-any-return]
 
-    @server.resource(
+    @server.resource(  # type: ignore[misc,untyped-decorator,unused-ignore]
         "machina://v1/work-orders/{wo_id}",
         name="machina_work_order",
         title="Work order details",
@@ -122,12 +122,12 @@ def register_resources(server: Any) -> None:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)
         cmms = runtime.get_primary_cmms()
-        wo = await cmms.get_work_order(wo_id)
+        wo = await cmms.get_work_order(wo_id)  # type: ignore[attr-defined]
         if wo is None:
             return json.dumps({"error": f"Work order {wo_id!r} not found"})
-        return wo.model_dump_json()
+        return wo.model_dump_json()  # type: ignore[no-any-return]
 
-    @server.resource(
+    @server.resource(  # type: ignore[misc,untyped-decorator,unused-ignore]
         "machina://v1/failure-taxonomy",
         name="machina_failure_taxonomy",
         title="Failure taxonomy",

@@ -42,7 +42,9 @@ class StaticBearerTokenVerifier:
         if client_id is None:
             return None
 
-        from mcp.server.auth.provider import AccessToken
+        from mcp.server.auth.provider import (
+            AccessToken,  # type: ignore[import-not-found,unused-ignore]
+        )
 
         return AccessToken(
             token=token,
@@ -104,7 +106,7 @@ def build_verifier(config: Any) -> StaticBearerTokenVerifier:
         from machina.runtime import _import_class
 
         cls = _import_class(verifier_class_path)
-        return cls(config)  # type: ignore[return-value]
+        return cls(config)  # type: ignore[no-any-return]
 
     tokens = load_tokens_from_env()
     return StaticBearerTokenVerifier(tokens)
