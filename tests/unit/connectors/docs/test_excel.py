@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("openpyxl")
+
 from machina.connectors.docs.excel import (
     COERCER_REGISTRY,
     ExcelCsvConnector,
