@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 import jmespath
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
@@ -295,6 +295,7 @@ class GenericCmmsConnector:
             return results
         return await self._rest_read_work_orders(asset_id=asset_id, status=status)
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order."""
         self._ensure_connected()
@@ -350,6 +351,7 @@ class GenericCmmsConnector:
             return None
         return await self._rest_get_work_order(work_order_id)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -383,10 +385,12 @@ class GenericCmmsConnector:
             description=description,
         )
 
+    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
 
+    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
@@ -220,6 +220,7 @@ class UpKeepConnector:
         result = body.get("result", body)
         return upkeep_mapper.parse_work_order(result)
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order in UpKeep.
 
@@ -261,6 +262,7 @@ class UpKeepConnector:
         )
         return upkeep_mapper.parse_work_order(result)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -316,10 +318,12 @@ class UpKeepConnector:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
         return updated
 
+    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED (maps to 'complete' in UpKeep)."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
 
+    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED (maps to 'on hold' in UpKeep)."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)

@@ -52,6 +52,7 @@ class MachinaRuntime:
     Args:
         connectors: Named connector instances.
         sandbox_mode: If True, write operations should be blocked.
+        primary_cmms_name: Name of the connector marked ``primary: true``.
 
     Example:
         ```python
@@ -68,12 +69,14 @@ class MachinaRuntime:
         *,
         connectors: dict[str, BaseConnector] | None = None,
         sandbox_mode: bool = False,
+        primary_cmms_name: str = "",
     ) -> None:
         self._registry = ConnectorRegistry()
         self.connectors: dict[str, BaseConnector] = connectors or {}
         for name, conn in self.connectors.items():
             self._registry.register(name, conn)
         self.sandbox_mode = sandbox_mode
+        self._primary_cmms_name = primary_cmms_name
 
     @classmethod
     def from_config(cls, config: MachinaConfig) -> MachinaRuntime:
@@ -101,7 +104,22 @@ class MachinaRuntime:
                     connector_type=conn_cfg.type,
                     error=str(exc),
                 )
-        return cls(connectors=connectors, sandbox_mode=config.sandbox)
+        primary_names = [
+            name
+            for name, cfg in config.connectors.items()
+            if cfg.enabled and getattr(cfg, "primary", False)
+        ]
+        if len(primary_names) > 1:
+            raise ConnectorError(
+                f"Multiple connectors marked primary: {primary_names!r} — "
+                "at most one connector may be primary"
+            )
+        primary_cmms_name = primary_names[0] if primary_names else ""
+        return cls(
+            connectors=connectors,
+            sandbox_mode=config.sandbox,
+            primary_cmms_name=primary_cmms_name,
+        )
 
     async def connect_all(self) -> None:
         """Connect all registered connectors."""
@@ -125,14 +143,26 @@ class MachinaRuntime:
     def get_primary_cmms(self) -> BaseConnector:
         """Return the primary CMMS connector.
 
-        Returns the first connector that supports READ_ASSETS.
+        If a connector is marked ``primary: true`` in config, it is
+        returned.  Otherwise falls back to the first connector that
+        supports READ_ASSETS and logs a warning.
 
         Raises:
             ConnectorError: If no CMMS connector is configured.
         """
+        if self._primary_cmms_name:
+            conn = self._registry.get(self._primary_cmms_name)
+            if conn is not None:
+                return conn
         matches = self._registry.find_by_capability(Capability.READ_ASSETS)
         if not matches:
             raise ConnectorError("No CMMS connector configured")
+        if not self._primary_cmms_name:
+            logger.warning(
+                "no_primary_cmms_configured",
+                using=matches[0][0],
+                hint="Set 'primary: true' on one connector in config",
+            )
         return matches[0][1]
 
     def find_by_capability(self, capability: Capability) -> list[tuple[str, BaseConnector]]:

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
@@ -230,6 +230,7 @@ class MaximoConnector:
         )
         return maximo_mapper.parse_work_order(raw[0]) if raw else None
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order in Maximo.
 
@@ -271,6 +272,7 @@ class MaximoConnector:
         )
         return maximo_mapper.parse_work_order(body)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -327,10 +329,12 @@ class MaximoConnector:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
         return updated
 
+    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
 
+    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)

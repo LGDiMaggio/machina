@@ -12,6 +12,10 @@ class ConnectorConfig(BaseModel):
 
     type: str = Field(..., description="Connector type (e.g. 'generic_cmms', 'opcua')")
     enabled: bool = Field(default=True)
+    primary: bool = Field(
+        default=False,
+        description="Mark as the primary connector for its category (e.g. primary CMMS)",
+    )
     settings: dict[str, Any] = Field(
         default_factory=dict,
         description="Connector-specific settings",
@@ -50,6 +54,17 @@ class ChannelConfig(BaseModel):
     )
 
 
+class McpConfig(BaseModel):
+    """Configuration for the MCP server layer."""
+
+    enable_vendor_tools: bool = Field(
+        default=False,
+        description="Register vendor-specific escape-hatch tools (non-portable)",
+    )
+
+    model_config = {"extra": "allow"}
+
+
 class MachinaConfig(BaseModel):
     """Top-level Machina configuration.
 
@@ -61,6 +76,7 @@ class MachinaConfig(BaseModel):
         connectors:
           cmms:
             type: generic_cmms
+            primary: true
             settings:
               data_dir: "./sample_data/cmms"
         channels:
@@ -85,6 +101,7 @@ class MachinaConfig(BaseModel):
         description="Communication channels (defaults to CLI if empty)",
     )
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
     sandbox: bool = Field(
         default=False, description="Enable sandbox mode (writes are logged, not executed)"
     )

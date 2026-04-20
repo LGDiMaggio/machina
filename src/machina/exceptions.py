@@ -48,6 +48,10 @@ class ConnectorDependencyError(ConnectorError):
     """A required Python package (extra) is not installed."""
 
 
+class SandboxViolationError(ConnectorError):
+    """A write operation was blocked because sandbox mode is active."""
+
+
 # --- Domain errors ---
 
 

@@ -7,13 +7,51 @@ the agent works with whatever connectors are configured.
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import warnings
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from pydantic import BaseModel, Field
 
 from machina.connectors.capabilities import Capability
+from machina.exceptions import SandboxViolationError
+
+_sandbox_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "machina_sandbox_mode", default=False
+)
+
+
+def set_sandbox_mode(enabled: bool) -> contextvars.Token[bool]:
+    """Set sandbox mode for the current async context."""
+    return _sandbox_mode.set(enabled)
+
+
+def get_sandbox_mode() -> bool:
+    """Read sandbox mode from the current async context."""
+    return _sandbox_mode.get()
+
+
+def sandbox_aware(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator that blocks write operations when sandbox mode is active.
+
+    Reads sandbox state from the ``_sandbox_mode`` context-var.  When True,
+    raises :class:`SandboxViolationError` before the wrapped method executes.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if _sandbox_mode.get():
+            raise SandboxViolationError(
+                f"Write operation {fn.__qualname__!r} blocked — sandbox mode is active"
+            )
+        return await fn(*args, **kwargs)
+
+    return wrapper
 
 
 class ConnectorStatus(StrEnum):

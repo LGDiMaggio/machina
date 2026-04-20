@@ -19,10 +19,21 @@ class TestBuildServer:
         server = build_server(config)
         assert server.name == "machina"
 
-    def test_list_assets_tool_registered(self) -> None:
+    def test_no_tools_without_connectors(self) -> None:
         from machina.mcp.server import build_server
 
         config = MachinaConfig()
+        server = build_server(config)
+        tool_names = [t.name for t in server._tool_manager.list_tools()]
+        assert tool_names == []
+
+    def test_list_assets_tool_registered_with_cmms(self) -> None:
+        from machina.config.schema import ConnectorConfig
+        from machina.mcp.server import build_server
+
+        config = MachinaConfig(
+            connectors={"cmms": ConnectorConfig(type="generic_cmms", settings={})}
+        )
         server = build_server(config)
         tool_names = [t.name for t in server._tool_manager.list_tools()]
         assert "machina_list_assets" in tool_names
@@ -47,7 +58,7 @@ class TestDeprecationShim:
 
 class TestListAssetsTool:
     @pytest.mark.asyncio
-    async def test_returns_empty_without_cmms(self) -> None:
+    async def test_returns_error_without_cmms(self) -> None:
         from machina.mcp.tools import machina_list_assets
         from machina.runtime import MachinaRuntime
 
@@ -55,7 +66,8 @@ class TestListAssetsTool:
         ctx = MagicMock()
         ctx.request_context.lifespan_context = {"runtime": runtime}
         result = await machina_list_assets(ctx)
-        assert result == []
+        assert len(result) == 1
+        assert "error" in result[0]
 
     @pytest.mark.asyncio
     async def test_returns_assets(self) -> None:

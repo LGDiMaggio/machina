@@ -1,8 +1,9 @@
-"""MCP server — FastMCP-based server with Plant lifespan.
+"""MCP server — FastMCP-based server with capability-driven tool registration.
 
-Replaces the v0.2 placeholder stub. Uses FastMCP from the MCP Python
-SDK for JSON-RPC transport, with a lifespan that connects all
-configured connectors at startup and disconnects on shutdown.
+Uses FastMCP from the MCP Python SDK for JSON-RPC transport, with a
+lifespan that connects all configured connectors at startup and
+disconnects on shutdown.  Tools are auto-registered based on the
+capabilities declared by each connector.
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ if TYPE_CHECKING:
 
 import structlog
 
+from machina.connectors.base import set_sandbox_mode
 from machina.exceptions import ConnectorError
 
 if TYPE_CHECKING:
     from machina.config.schema import MachinaConfig
+    from machina.connectors.capabilities import Capability
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +40,10 @@ def _require_fastmcp() -> Any:
 def build_server(config: MachinaConfig) -> Any:
     """Build a FastMCP server wired to Machina connectors.
 
+    Tools are auto-registered from the ``CAPABILITY_TO_TOOL`` map:
+    only tools whose required capability is present across all
+    configured connectors are registered.
+
     Args:
         config: Parsed Machina configuration.
 
@@ -50,6 +57,7 @@ def build_server(config: MachinaConfig) -> Any:
         from machina.runtime import MachinaRuntime
 
         runtime = MachinaRuntime.from_config(config)
+        set_sandbox_mode(runtime.sandbox_mode)
         await runtime.connect_all()
         logger.info(
             "mcp_server_ready",
@@ -62,15 +70,46 @@ def build_server(config: MachinaConfig) -> Any:
             await runtime.disconnect_all()
 
     server = fastmcp_cls("machina", lifespan=machina_lifespan)
-    _register_tools(server)
+    _register_tools(server, config)
     return server
 
 
-def _register_tools(server: Any) -> None:
-    """Register proof-of-life tools on the server."""
-    from machina.mcp.tools import machina_list_assets
+def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
+    """Gather the union of all capabilities from enabled connectors."""
+    from machina.runtime import MachinaRuntime
 
-    server.add_tool(machina_list_assets)
+    runtime = MachinaRuntime.from_config(config)
+    all_caps: set[Capability] = set()
+    for _name, conn in runtime.connectors.items():
+        all_caps.update(conn.capabilities)
+    return frozenset(all_caps)
+
+
+def _register_tools(server: Any, config: MachinaConfig) -> None:
+    """Auto-register domain tools based on connector capabilities."""
+    from machina.mcp.tools import get_tools_for_capabilities
+
+    capabilities = _collect_capabilities(config)
+    tools = get_tools_for_capabilities(capabilities)
+    for tool_fn in tools:
+        server.add_tool(tool_fn)
+    logger.info(
+        "mcp_tools_registered",
+        tool_count=len(tools),
+        tool_names=[t.__name__ for t in tools],
+    )
+
+    enable_vendor = getattr(getattr(config, "mcp", None), "enable_vendor_tools", False)
+    if enable_vendor:
+        from machina.mcp.tools_vendor import VENDOR_TOOLS
+
+        for tool_fn in VENDOR_TOOLS:
+            server.add_tool(tool_fn)
+        logger.info(
+            "mcp_vendor_tools_registered",
+            tool_count=len(VENDOR_TOOLS),
+            tool_names=[t.__name__ for t in VENDOR_TOOLS],
+        )
 
 
 def serve(
