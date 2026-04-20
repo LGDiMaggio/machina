@@ -71,6 +71,8 @@ def build_server(config: MachinaConfig) -> Any:
 
     server = fastmcp_cls("machina", lifespan=machina_lifespan)
     _register_tools(server, config)
+    _register_resources(server)
+    _register_prompts(server)
     return server
 
 
@@ -110,6 +112,20 @@ def _register_tools(server: Any, config: MachinaConfig) -> None:
             tool_count=len(VENDOR_TOOLS),
             tool_names=[t.__name__ for t in VENDOR_TOOLS],
         )
+
+
+def _register_resources(server: Any) -> None:
+    """Register MCP resources (versioned URI scheme)."""
+    from machina.mcp.resources import register_resources
+
+    register_resources(server)
+
+
+def _register_prompts(server: Any) -> None:
+    """Register MCP prompt templates."""
+    from machina.mcp.prompts import register_prompts
+
+    register_prompts(server)
 
 
 def serve(
