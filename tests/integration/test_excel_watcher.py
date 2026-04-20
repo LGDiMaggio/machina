@@ -15,14 +15,14 @@ openpyxl = pytest.importorskip("openpyxl")
 if TYPE_CHECKING:
     from pathlib import Path
 
-from machina.connectors.docs.excel import ExcelCsvConnector
-from machina.connectors.docs.excel_schema import (
+from machina.connectors.docs.excel import ExcelCsvConnector  # noqa: E402
+from machina.connectors.docs.excel_schema import (  # noqa: E402
     ColumnMapping,
     ExcelConnectorConfig,
     SheetSchema,
     WatcherConfig,
 )
-from machina.connectors.docs.watcher import FileWatcher
+from machina.connectors.docs.watcher import FileWatcher  # noqa: E402
 
 
 def _create_asset_file(path: Path, rows: list[tuple[str, str]]) -> None:
