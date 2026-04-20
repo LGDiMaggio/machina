@@ -67,6 +67,11 @@ nav:
       - Calendar: connectors/calendar.md
   - YAML Configuration: yaml-config.md
   - MCP Server: mcp-server.md
+  - Deployment:
+      - On-Premise: deployment/on-premise.md
+      - Uptime & Resilience: deployment/uptime.md
+      - Security: deployment/security.md
+      - Scaling: deployment/scaling.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md
 
