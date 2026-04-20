@@ -106,12 +106,12 @@ class FileWatcher:
     async def start(self) -> None:
         """Start watching in a background thread."""
         _require_watchdog()
-        from watchdog.events import (
-            FileSystemEventHandler,  # type: ignore[import-not-found,unused-ignore]
+        from watchdog.events import (  # type: ignore[import-not-found,unused-ignore]
+            FileSystemEventHandler,
         )
         from watchdog.observers import Observer  # type: ignore[import-not-found,unused-ignore]
-        from watchdog.observers.polling import (
-            PollingObserver,  # type: ignore[import-not-found,unused-ignore]
+        from watchdog.observers.polling import (  # type: ignore[import-not-found,unused-ignore]
+            PollingObserver,
         )
 
         path_strs = {str(p) for p in self._paths}

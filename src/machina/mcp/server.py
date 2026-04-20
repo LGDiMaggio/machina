@@ -98,11 +98,11 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
 
     verifier = build_verifier(config)
 
-    from mcp.server.auth.settings import (
-        AuthSettings,  # type: ignore[import-not-found,unused-ignore]
+    from mcp.server.auth.settings import (  # type: ignore[import-not-found,unused-ignore]
+        AuthSettings,
     )
-    from mcp.server.transport_security import (
-        TransportSecuritySettings,  # type: ignore[import-not-found,unused-ignore]
+    from mcp.server.transport_security import (  # type: ignore[import-not-found,unused-ignore]
+        TransportSecuritySettings,
     )
 
     mcp_cfg = getattr(config, "mcp", None)

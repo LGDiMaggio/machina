@@ -42,8 +42,8 @@ class StaticBearerTokenVerifier:
         if client_id is None:
             return None
 
-        from mcp.server.auth.provider import (
-            AccessToken,  # type: ignore[import-not-found,unused-ignore]
+        from mcp.server.auth.provider import (  # type: ignore[import-not-found,unused-ignore]
+            AccessToken,
         )
 
         return AccessToken(

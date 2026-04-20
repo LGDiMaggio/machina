@@ -224,8 +224,8 @@ class DocumentStoreConnector:
         from langchain.text_splitter import (  # type: ignore[import-not-found,unused-ignore]
             RecursiveCharacterTextSplitter,
         )
-        from langchain_community.vectorstores import (
-            Chroma,  # type: ignore[import-not-found,unused-ignore]
+        from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
+            Chroma,
         )
 
         splitter = RecursiveCharacterTextSplitter(
