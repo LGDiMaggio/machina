@@ -14,14 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
 from machina.connectors.sql.drivers import connect_jdbc, connect_odbc
-from machina.domain.asset import Asset
-from machina.domain.work_order import (
-    WorkOrder,
-)
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -31,6 +29,8 @@ from machina.exceptions import (
 
 if TYPE_CHECKING:
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
+    from machina.domain.asset import Asset
+    from machina.domain.work_order import WorkOrder
 
 logger = structlog.get_logger(__name__)
 
@@ -95,8 +95,6 @@ def _row_to_dict(
     return result
 
 
-from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
-from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 
 _ENTITY_BUILDERS: dict[str, Any] = {
     "Asset": _dict_to_asset,

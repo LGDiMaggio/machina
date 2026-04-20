@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
+from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 
@@ -26,10 +28,8 @@ if TYPE_CHECKING:
         ExcelConnectorConfig,
         SheetSchema,
     )
-from machina.domain.asset import Asset
-from machina.domain.work_order import (
-    WorkOrder,
-)
+    from machina.domain.asset import Asset
+    from machina.domain.work_order import WorkOrder
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -279,9 +279,6 @@ def _rows_to_dicts(
             results.append(record)
     return results
 
-
-from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
-from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 
 # ------------------------------------------------------------------
 # Write helpers
