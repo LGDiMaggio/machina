@@ -76,8 +76,8 @@ nav:
       - Resources: mcp/resources.md
       - Prompts: mcp/prompts.md
       - Authentication: mcp/auth.md
-  - Templates:
-      - OdL Generator from Text: templates/odl-generator-from-text.md
+  - Starter Kits:
+      - OdL Generator from Text: starter-kits/odl-generator-from-text.md
   - Deployment:
       - Docker: deployment/docker.md
       - On-Premise: deployment/on-premise.md
