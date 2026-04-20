@@ -61,6 +61,18 @@ class McpConfig(BaseModel):
         default=False,
         description="Register vendor-specific escape-hatch tools (non-portable)",
     )
+    token_verifier_class: str = Field(
+        default="",
+        description=(
+            "Dotted path to a custom TokenVerifier class "
+            "(e.g. 'mymodule:VaultTokenVerifier'). When set, replaces the "
+            "default static bearer token verifier."
+        ),
+    )
+    allowed_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost", "https://localhost"],
+        description="Allowed origins for streamable-http transport (DNS-rebinding defense)",
+    )
 
     model_config = {"extra": "allow"}
 

@@ -4,10 +4,13 @@ Uses FastMCP from the MCP Python SDK for JSON-RPC transport, with a
 lifespan that connects all configured connectors at startup and
 disconnects on shutdown.  Tools are auto-registered based on the
 capabilities declared by each connector.
+
+For streamable-http transport, static bearer token auth is required.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -37,15 +40,23 @@ def _require_fastmcp() -> Any:
     return FastMCP
 
 
-def build_server(config: MachinaConfig) -> Any:
+def build_server(
+    config: MachinaConfig,
+    *,
+    transport: str = "stdio",
+) -> Any:
     """Build a FastMCP server wired to Machina connectors.
 
     Tools are auto-registered from the ``CAPABILITY_TO_TOOL`` map:
     only tools whose required capability is present across all
     configured connectors are registered.
 
+    For ``streamable-http`` transport, bearer token auth and origin
+    validation are configured automatically.
+
     Args:
         config: Parsed Machina configuration.
+        transport: Transport type (``"stdio"`` or ``"streamable-http"``).
 
     Returns:
         A ``FastMCP`` instance ready to run.
@@ -69,11 +80,49 @@ def build_server(config: MachinaConfig) -> Any:
         finally:
             await runtime.disconnect_all()
 
-    server = fastmcp_cls("machina", lifespan=machina_lifespan)
+    kwargs: dict[str, Any] = {"lifespan": machina_lifespan}
+
+    if transport == "streamable-http":
+        kwargs.update(_build_http_kwargs(config))
+
+    server = fastmcp_cls("machina", **kwargs)
     _register_tools(server, config)
     _register_resources(server)
     _register_prompts(server)
     return server
+
+
+def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
+    """Build FastMCP constructor kwargs for authenticated HTTP transport."""
+    from machina.mcp.auth import build_verifier
+
+    verifier = build_verifier(config)
+
+    from mcp.server.auth.settings import AuthSettings
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    mcp_cfg = getattr(config, "mcp", None)
+    allowed_origins = getattr(
+        mcp_cfg, "allowed_origins", ["http://localhost", "https://localhost"]
+    )
+
+    auth_settings = AuthSettings(
+        issuer_url="https://machina.local",  # type: ignore[arg-type]
+        resource_server_url="https://machina.local",  # type: ignore[arg-type]
+        required_scopes=["mcp:use"],
+    )
+
+    transport_security = TransportSecuritySettings(
+        allowed_origins=allowed_origins,
+    )
+
+    return {
+        "token_verifier": verifier,
+        "auth": auth_settings,
+        "transport_security": transport_security,
+        "stateless_http": True,
+        "json_response": False,
+    }
 
 
 def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
@@ -128,6 +177,60 @@ def _register_prompts(server: Any) -> None:
     register_prompts(server)
 
 
+# ---------------------------------------------------------------------------
+# Health endpoint (ASGI)
+# ---------------------------------------------------------------------------
+
+
+async def health_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """Minimal ASGI health endpoint.
+
+    Unauthenticated: returns ``{"status": "healthy"}`` only.
+    Authenticated (bearer token): returns full payload with connector
+    details, sandbox mode, and version.
+    """
+    if scope["type"] != "http" or scope["path"] != "/health":
+        await send({"type": "http.response.start", "status": 404, "headers": []})
+        await send({"type": "http.response.body", "body": b"Not Found"})
+        return
+
+    auth_header = ""
+    for header_name, header_value in scope.get("headers", []):
+        if header_name == b"authorization":
+            auth_header = header_value.decode()
+            break
+
+    body: dict[str, Any] = {"status": "healthy"}
+
+    if auth_header.startswith("Bearer ") and hasattr(scope.get("app"), "_runtime_ref"):
+        runtime = scope["app"]._runtime_ref
+        if runtime:
+            body.update(
+                {
+                    "connectors": list(runtime.connectors.keys()),
+                    "sandbox_mode": runtime.sandbox_mode,
+                    "version": "0.3.0",
+                }
+            )
+
+    response_body = json.dumps(body).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", b"application/json"],
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": response_body})
+
+
+# ---------------------------------------------------------------------------
+# serve() — build and run
+# ---------------------------------------------------------------------------
+
+
 def serve(
     config: MachinaConfig,
     *,
@@ -146,7 +249,7 @@ def serve(
     if transport == "stdio":
         os.environ["MACHINA_MCP_STDIO"] = "1"
 
-    server = build_server(config)
+    server = build_server(config, transport=transport)
 
     if transport == "stdio":
         server.run(transport="stdio")
