@@ -60,20 +60,36 @@ nav:
       - SAP PM: connectors/sap-pm.md
       - IBM Maximo: connectors/maximo.md
       - UpKeep: connectors/upkeep.md
+      - Excel / CSV: connectors/excel.md
+      - SQL: connectors/sql.md
+      - GenericCmms YAML: connectors/generic_cmms.md
       - OPC-UA: connectors/opcua.md
       - MQTT: connectors/mqtt.md
       - Slack: connectors/slack.md
       - Email: connectors/email.md
       - Calendar: connectors/calendar.md
   - YAML Configuration: yaml-config.md
-  - MCP Server: mcp-server.md
+  - MCP Server:
+      - Overview: mcp-server.md
+      - Setup: mcp/setup.md
+      - Tools: mcp/tools.md
+      - Resources: mcp/resources.md
+      - Prompts: mcp/prompts.md
+      - Authentication: mcp/auth.md
   - Templates:
       - OdL Generator from Text: templates/odl-generator-from-text.md
   - Deployment:
+      - Docker: deployment/docker.md
       - On-Premise: deployment/on-premise.md
+      - Secrets: deployment/secrets.md
       - Uptime & Resilience: deployment/uptime.md
       - Security: deployment/security.md
       - Scaling: deployment/scaling.md
+  - Observability:
+      - Action Traces: observability/traces.md
+      - Cost Tracking: observability/cost.md
+  - Migration:
+      - v0.2 to v0.3: migration/v0.2-to-v0.3.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md
 

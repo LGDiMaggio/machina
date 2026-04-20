@@ -197,7 +197,7 @@ Building an AI maintenance agent today means writing custom connectors for SAP P
 Machina provides the missing vertical layer between general-purpose frameworks (LangChain, CrewAI) and the industrial maintenance world:
 
 - **Pre-built connectors** for CMMS, IoT sensors, communication platforms, and document stores
-- **Domain model aligned with ISO 14224** -- Asset, WorkOrder, FailureMode, SparePart, Alarm with hierarchies and validation
+- **Canonical maintenance domain model** -- Asset, WorkOrder, FailureMode, SparePart, Alarm with hierarchies and validation
 - **Domain-aware AI** -- agents that resolve equipment references, inject maintenance context, and ground answers in real data
 - **Rule-based + LLM intelligence** -- deterministic services (`FailureAnalyzer`, `WorkOrderFactory`, `MaintenanceScheduler`) work alongside the LLM, not instead of it
 - **Workflow engine** -- composable multi-step workflows with error policies, guard conditions, and sandbox mode
@@ -208,7 +208,7 @@ Machina provides the missing vertical layer between general-purpose frameworks (
 
 When a user asks *"What's wrong with pump P-201?"*, the agent:
 
-1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset with its ISO 14224 metadata, failure history, and criticality
+1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset with its domain metadata, failure history, and criticality
 2. **Gathers context** -- parallel async queries to all connectors: work orders from CMMS, readings from sensors, procedures from manuals (RAG)
 3. **Grounds the LLM** -- the retrieved context (real asset data, real inventory, real history) is injected into the prompt, so the LLM reasons with facts, not hallucinations
 4. **Takes action** -- workflows mix deterministic steps (rule-based diagnosis, spare part checks) with LLM reasoning (root cause synthesis, work order drafting)
@@ -290,8 +290,8 @@ The domain model is the backbone of Machina. Every connector normalizes external
 
 - **Portability** -- Switch CMMS backends, your agent logic doesn't change
 - **Deterministic logic where it counts** -- FailureAnalyzer, WorkOrderFactory, MaintenanceScheduler encode expertise as code, not LLM guesses
-- **LLM grounding** -- the LLM works with real, validated data (ISO 14224 codes, failure history, inventory levels), not hallucinated IDs
-- **Industry standard** -- failure modes and equipment classes follow ISO 14224
+- **LLM grounding** -- the LLM works with real, validated data (failure codes, maintenance history, inventory levels), not hallucinated IDs
+- **Industry-aligned taxonomy** -- failure modes and equipment classes follow established industrial standards
 
 ```python
 from machina.domain import Asset, AssetType, FailureMode
