@@ -97,6 +97,33 @@ The agent resolves "pump P-201" to the actual asset, retrieves context from your
 
 Try it now: `cd examples/quickstart && python agent.py` -- [full quickstart guide](examples/quickstart/)
 
+### Now Make It Automate
+
+Add one line to register a workflow. The agent handles alarms end-to-end:
+
+```python
+from machina.workflows.builtins import alarm_to_workorder
+
+agent = Agent(
+    connectors=[cmms, docs],
+    workflows=[alarm_to_workorder],  # alarm → diagnosis → WO → notify
+    sandbox=True,
+)
+```
+
+```
+  Alarm: P-201 | vibration_velocity = 7.8 mm/s (threshold: 6.0)
+
+    [+] analyze_alarm      — Bearing wear (BEAR-WEAR-01), confidence: HIGH
+    [+] check_spare_parts  — SKF 6310-2RS in stock (4 units)
+    [+] create_work_order  — [LLM] Priority HIGH, est. 4 hours
+    [+] notify_technician  — [SANDBOX] Message logged
+
+  Result: SUCCESS (2.34s)
+```
+
+6 steps, only 2 use the LLM. The rest are deterministic -- fast, predictable, testable. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
+
 ### Or configure via YAML
 
 For knowledge-base agents (Q&A over CMMS data, manuals, spare parts), you can skip Python entirely and configure via YAML:
@@ -127,24 +154,21 @@ agent = Agent.from_config("machina.yaml")
 agent.run()
 ```
 
-YAML config is ideal for knowledge-base agents — technician Q&A, document search, asset lookup. For agents with automated workflows (alarm response, predictive pipelines), use Python — workflows need logic (guards, error policies, LLM reasoning steps) that YAML can't express. See the [YAML config guide](examples/06_yaml_config/) for details.
+YAML config is ideal for knowledge-base agents — technician Q&A, document search, asset lookup. For agents with automated workflows (alarm response, predictive pipelines), use Python — workflows need logic (guards, error policies, LLM reasoning steps) that YAML can't express. See the [YAML config guide](examples/reference/yaml_config/) for details.
 
 ## What You Can Build
 
-Every example is a complete, runnable agent. Start with quickstart, then pick what matches your use case:
+Two examples take you from zero to automation. Then deploy with the starter kit.
 
-| | Example | What your agent does |
-|-|---------|---------------------|
-| **Start here** | [quickstart/](examples/quickstart/) | Answers questions about equipment, procedures, spare parts, maintenance history |
-| **Automate** | [01_alarm_response/](examples/01_alarm_response/) | Alarm fires -- agent diagnoses the failure, checks parts, creates a work order, notifies the team via CLI (and optionally SMTP via `EmailConnector`) |
-| **Go autonomous** | [02_predictive_pipeline/](examples/02_predictive_pipeline/) | 10-step pipeline: sensor anomaly to diagnosed root cause to scheduled maintenance. 3 LLM steps, 7 deterministic |
-| **Stay portable** | [03_cmms_portability/](examples/03_cmms_portability/) | Same agent runs on SAP PM, IBM Maximo, UpKeep -- change one line, everything else stays identical |
-| **Build your own** | [04_custom_workflows/](examples/04_custom_workflows/) | Define any maintenance process as a workflow: spare part reorder, preventive scheduling, anything |
-| **Zero code** | [06_yaml_config/](examples/06_yaml_config/) | Configure agent entirely via YAML -- `Agent.from_config("machina.yaml")` |
-| **Think & act** | [07_agent_driven/](examples/07_agent_driven/) | Agent receives a complex scenario and autonomously decides which tools to use -- no predefined workflows |
-| **Collaborate** | [05_multi_agent_team/](examples/05_multi_agent_team/) | Specialist agents (diagnostics, inventory, scheduling) collaborate on complex scenarios -- *v0.3* |
+| Step | Example | What happens |
+|------|---------|--------------|
+| **1. Understand** | [quickstart/](examples/quickstart/) | Agent answers questions about equipment, procedures, spare parts, maintenance history |
+| **2. Automate** | [alarm_to_workorder/](examples/alarm_to_workorder/) | Alarm fires -- agent diagnoses failure, checks parts, creates work order, notifies team |
+| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Italian free-text messages become Work Orders. Docker, sandbox-first, production-ready |
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
+
+**More patterns** in [examples/reference/](examples/reference/): predictive pipelines, CMMS portability, custom workflows, YAML config, autonomous agents.
 
 ## Starter Kit
 

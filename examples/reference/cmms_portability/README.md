@@ -5,7 +5,7 @@ Switch from SAP PM to IBM Maximo by changing one line. Your agent logic, workflo
 ## Run It
 
 ```bash
-cd examples/03_cmms_portability
+cd examples/reference/cmms_portability
 python agent.py                     # GenericCmms with sample data
 python agent.py --backend sap       # show SAP PM configuration
 python agent.py --backend maximo    # show Maximo configuration
@@ -65,5 +65,5 @@ If you're a **developer** evaluating Machina:
 
 ## Next Steps
 
-- [quickstart/](../quickstart/) -- Start with the basics
-- [01_alarm_response/](../01_alarm_response/) -- See a workflow in action across any CMMS
+- [quickstart/](../../quickstart/) -- Start with the basics
+- [alarm_to_workorder/](../../alarm_to_workorder/) -- See a workflow in action across any CMMS

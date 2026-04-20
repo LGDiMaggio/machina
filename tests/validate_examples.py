@@ -42,18 +42,8 @@ def find_example_scripts() -> list[Path]:
 
 
 def find_runnable_agent_modules() -> list[Path]:
-    """Return every ``examples/<dir>/agent.py`` that should be constructible.
-
-    ``05_multi_agent_team`` is a placeholder directory (README-only,
-    ``AgentTeam`` lands in v0.3) and is skipped here. If another example
-    intentionally has no runnable ``agent.py`` in future, promote this
-    check into a named list with a one-line rationale.
-    """
-    return sorted(
-        path
-        for path in EXAMPLES_DIR.glob("*/agent.py")
-        if path.parent.name != "05_multi_agent_team"
-    )
+    """Return every ``examples/**/agent.py`` that should be constructible."""
+    return sorted(EXAMPLES_DIR.rglob("agent.py"))
 
 
 def check_syntax(filepath: Path) -> str | None:

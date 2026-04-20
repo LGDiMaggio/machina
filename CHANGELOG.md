@@ -61,7 +61,7 @@ A focused consolidation release between v0.2.0 and v0.3. No new features; the go
 - **`docs/roadmap.md`** — what ships in v0.2.1 and what's planned for v0.3 (MCP server, `#31` channels/registry unification, MaintainX/Limble/Fiix, `AgentTeam`, anomaly detection, plugin system, WhatsApp/Teams).
 - **`docs/troubleshooting.md`** — short entries for the issues adopters hit most: LLM provider model strings, sandbox vs live mode, connector capability discovery, config-loader errors.
 - **Loud stub for `machina.mcp.MCPServer`** — instantiation raises `NotImplementedError` with a pointer to the roadmap. `import machina.mcp` continues to work, reserving the import path across the v0.2 → v0.3 jump.
-- **`EmailConnector` discoverability example** — `examples/01_alarm_response/agent.py` now imports `EmailConnector` and conditionally attaches it to the agent's channels when `MACHINA_SMTP_HOST` / `USER` / `PASSWORD` are set. Without the env vars, the example stays a zero-config CLI demo.
+- **`EmailConnector`** — available as a communication connector for workflow notification. See `docs/connectors/email.md` for setup.
 - **LiteLLM contract tests** (`tests/unit/test_llm_provider.py::TestLiteLLMModelStringContract`) — exercise the real `litellm.get_llm_provider` parser, pinning the `provider:model → provider/model` normalization introduced in `b48f649` and anchoring that the colon form keeps being rejected by LiteLLM.
 - **`tests/validate_examples.py` construct check** — now imports every runnable `examples/*/agent.py` so module-level `Agent(...)` construction actually runs. Catches the "imports fine but blows up at first call" class of regression that produced the post-v0.2.0 reactive-fix cadence.
 - **Per-module coverage floors in CI** (agent 88%, config 95%, llm 95%, observability 85%, workflows 90%). Floors sit ~5% below the measured baseline; any silent regression in a core module now trips CI.
@@ -85,7 +85,7 @@ A focused consolidation release between v0.2.0 and v0.3. No new features; the go
 
 ### Notes
 
-- A framework gap surfaced during consolidation: workflow notification steps resolve channels via the connector registry while `Agent(channels=[...])` lives on a separate list, and `sandbox=True` does not gate `channel.connect()`. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3. The `examples/01_alarm_response/README.md` documents the implication inline so adopters aren't surprised.
+- A framework gap surfaced during consolidation: workflow notification steps resolve channels via the connector registry while `Agent(channels=[...])` lives on a separate list, and `sandbox=True` does not gate `channel.connect()`. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3.
 
 ## [0.2.0] - 2026-04-11
 

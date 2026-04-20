@@ -6,7 +6,7 @@ Configure an agent entirely in YAML -- zero Python needed for basic setups.
 
 ```bash
 pip install machina-ai[litellm,docs-rag]
-cd examples/06_yaml_config
+cd examples/reference/yaml_config
 
 # Default (Ollama):
 python agent.py
@@ -135,5 +135,5 @@ agent.run()
 
 ## Next Steps
 
-- [quickstart/](../quickstart/) -- Python-first approach
-- [04_custom_workflows/](../04_custom_workflows/) -- Build workflows to register with your YAML-configured agent
+- [quickstart/](../../quickstart/) -- Python-first approach
+- [custom_workflows/](../custom_workflows/) -- Build workflows to register with your YAML-configured agent

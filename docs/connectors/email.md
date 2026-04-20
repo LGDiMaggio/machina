@@ -2,7 +2,7 @@
 
 The `EmailConnector` provides email-based communication using standard **SMTP/IMAP** (zero external dependencies) with an optional **Gmail API** backend for Google Workspace environments.
 
-> **Used in [`examples/01_alarm_response/`](https://github.com/LGDiMaggio/machina/blob/main/examples/01_alarm_response/agent.py)** — set the `MACHINA_SMTP_*` env vars to fan out the workflow's `notify_technician` step to email alongside the CLI.
+> **See [`examples/alarm_to_workorder/`](https://github.com/LGDiMaggio/machina/blob/main/examples/alarm_to_workorder/agent.py)** for a workflow that includes a `notify_technician` step.
 
 ## Prerequisites
 

@@ -15,14 +15,14 @@ import asyncio
 import sys
 from pathlib import Path
 
-_repo_root = Path(__file__).resolve().parent.parent.parent
+_repo_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
 from machina.connectors.docs import DocumentStoreConnector
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "sample_data"
 
 # The scenario: an operator reports a problem. The agent must figure out
 # what to do — look up the asset, check history, diagnose, search manuals,
@@ -94,7 +94,7 @@ def main() -> None:
     sandbox = not args.live
 
     # Pre-flight checks
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
 
     check(llm=args.llm, sample_dir=SAMPLE_DIR)

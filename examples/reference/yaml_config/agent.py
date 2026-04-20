@@ -12,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-_repo_root = Path(__file__).resolve().parent.parent.parent
+_repo_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
 
 from machina import Agent
@@ -42,7 +42,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Pre-flight: check sample data and LLM BEFORE building the agent
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
 
     llm = _resolve_llm(args.config, args.llm)

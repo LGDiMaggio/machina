@@ -19,12 +19,12 @@ connectors:
   cmms:
     type: generic_cmms
     settings:
-      data_dir: "../sample_data/cmms"
+      data_dir: "../../sample_data/cmms"
   docs:
     type: document_store
     settings:
       paths:
-        - "../sample_data/manuals"
+        - "../../sample_data/manuals"
 
 channels:
   - type: cli

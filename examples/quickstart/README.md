@@ -183,9 +183,6 @@ The agent logic doesn't change. Only the connectors do.
 
 ## Next Steps
 
-| Example | What you'll learn |
-|---------|-------------------|
-| [01_alarm_response/](../01_alarm_response/) | Automate alarm-to-work-order with a built-in workflow |
-| [02_predictive_pipeline/](../02_predictive_pipeline/) | Full autonomous pipeline: sensor to scheduled maintenance |
-| [03_cmms_portability/](../03_cmms_portability/) | Same agent, different CMMS backends |
-| [04_custom_workflows/](../04_custom_workflows/) | Build your own multi-step workflows |
+- [**alarm_to_workorder/**](../alarm_to_workorder/) -- Automate: alarm fires, agent creates a work order (10 min)
+- [**Deploy to production**](../../templates/odl-generator-from-text/) -- Clone-configure-deploy starter kit with Docker
+- [**More examples**](../reference/) -- Predictive pipelines, custom workflows, CMMS portability

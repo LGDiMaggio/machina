@@ -7,7 +7,7 @@ Autonomous end-to-end pipeline: sensor alarm triggers diagnosis, work order crea
 ## Run It
 
 ```bash
-cd examples/02_predictive_pipeline
+cd examples/reference/predictive_pipeline
 python agent.py
 python agent.py --sandbox           # log-only mode
 python agent.py --llm ollama:llama3
@@ -116,5 +116,5 @@ The workflow definition stays exactly the same. That's the power of Machina's do
 
 ## Next Steps
 
-- [01_alarm_response/](../01_alarm_response/) -- Simpler 7-step built-in workflow
-- [04_custom_workflows/](../04_custom_workflows/) -- Build your own workflows from scratch
+- [alarm_to_workorder/](../../alarm_to_workorder/) -- Simpler 6-step built-in workflow
+- [custom_workflows/](../custom_workflows/) -- Build your own workflows from scratch

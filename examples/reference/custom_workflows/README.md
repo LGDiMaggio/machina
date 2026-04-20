@@ -5,7 +5,7 @@ Your maintenance process, encoded as a workflow with LLM-powered decision steps.
 ## Run It
 
 ```bash
-cd examples/04_custom_workflows
+cd examples/reference/custom_workflows
 python agent.py                     # sandbox (default)
 python agent.py --live              # execute writes
 python agent.py --llm openai:gpt-4o
@@ -138,5 +138,5 @@ result = await agent.trigger_workflow("My Custom Workflow", {"key": "value"})
 
 ## Next Steps
 
-- [01_alarm_response/](../01_alarm_response/) -- Built-in workflow template
-- [02_predictive_pipeline/](../02_predictive_pipeline/) -- Full 10-step pipeline
+- [alarm_to_workorder/](../../alarm_to_workorder/) -- Built-in workflow template
+- [predictive_pipeline/](../predictive_pipeline/) -- Full 10-step pipeline

@@ -15,7 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
-_repo_root = Path(__file__).resolve().parent.parent.parent
+_repo_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
 
 from machina import Agent, Plant
@@ -24,7 +24,7 @@ from machina.connectors.comms.telegram import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 from machina.workflows import Step, Workflow
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "sample_data"
 
 
 # ── Workflow definition: the star of this example ───────────────
@@ -122,7 +122,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Pre-flight: check sample data, LLM provider, and required extras
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
     check(llm=args.llm)
 
