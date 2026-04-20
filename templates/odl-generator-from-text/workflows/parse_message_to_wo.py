@@ -14,6 +14,17 @@ from machina.workflows.models import (
     Workflow,
 )
 
+# Reply templates — swap REPLY_TEMPLATE to match your deployment language.
+REPLY_TEMPLATE_IT = (
+    "OdL creati:\n\n{create_work_orders}\n\nSe un asset non corrisponde, rispondi CORREGGI <id>."
+)
+REPLY_TEMPLATE_EN = (
+    "Work Orders created:\n\n"
+    "{create_work_orders}\n\n"
+    "If an asset doesn't match, reply CORRECT <id>."
+)
+REPLY_TEMPLATE = REPLY_TEMPLATE_IT  # change to REPLY_TEMPLATE_EN for English deployments
+
 message_to_workorder = Workflow(
     name="Free-Text Message to Work Order",
     description=(
@@ -30,9 +41,9 @@ message_to_workorder = Workflow(
             "parse_message",
             action="llm.chat",
             description=(
-                "Parse the Italian free-text message to extract asset "
+                "Parse the free-text maintenance message to extract asset "
                 "references, failure descriptions, and priority hints. "
-                "Use the IT entity-resolver prompt template."
+                "Select the matching entity-resolver prompt for your deployment language."
             ),
             prompt="{trigger.text}",
             on_error=ErrorPolicy.STOP,
@@ -67,11 +78,7 @@ message_to_workorder = Workflow(
             "reply_to_technician",
             action="channels.send_message",
             description="Send confirmation back to the technician on the original channel",
-            template=(
-                "OdL creati:\n\n"
-                "{create_work_orders}\n\n"
-                "Se un asset non corrisponde, rispondi CORREGGI <id>."
-            ),
+            template=REPLY_TEMPLATE,
             on_error=ErrorPolicy.NOTIFY,
         ),
     ],

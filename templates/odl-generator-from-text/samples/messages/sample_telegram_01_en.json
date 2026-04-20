@@ -1,0 +1,10 @@
+{
+  "update_id": 100003,
+  "message": {
+    "message_id": 3,
+    "from": {"id": 987654321, "is_bot": false, "first_name": "John", "last_name": "Smith"},
+    "chat": {"id": 987654321, "type": "private"},
+    "date": 1745132100,
+    "text": "pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"
+  }
+}

@@ -1,13 +1,18 @@
 # OdL Generator from Text
 
 A technician sends a free-text message — via email or Telegram — describing a
-maintenance issue in Italian:
+maintenance issue in their language (Italian or English):
 
 > *"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"*
 
+> **English:** *"pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"*
+
+> **Note:** *OdL* (*Ordine di Lavoro*) is Italian for Work Order. The template is named
+> after its original Italian-market use case but works with any language.
+
 The agent:
 
-1. Parses the Italian text (tolerates typos, abbreviations, synonyms)
+1. Parses the free-text message (tolerates typos, abbreviations, synonyms)
 2. Resolves asset references against the plant registry
 3. Creates structured Work Orders with inferred priority and failure mode
 4. Writes them to the configured substrate (Excel or CMMS)
@@ -57,6 +62,8 @@ msg['From'] = 'mario.rossi@example.com'
 msg['To'] = 'machina@example.com'
 msg['Subject'] = 'Richiesta OdL'
 msg.set_content('pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL')
+# English alternative:
+# msg.set_content('pump P-201 leaking water, boiler C-3 abnormal noise, please create WO')
 with smtplib.SMTP('localhost', 1025) as s:
     s.send_message(msg)
 print('Sent!')
@@ -155,7 +162,11 @@ Replace it with your own asset data. The entity resolver matches by:
 3. Location (e.g., "edificio A")
 4. Fuzzy keyword match across all fields
 
-The Italian prompt (`prompts/entity_resolver_it.txt`) adds LLM-powered
+The sample registry (`data/asset_registry.json`) uses Italian asset names (PMI-Italia style).
+An English-named equivalent is available at `data/asset_registry_en.json`.
+
+Two entity resolver prompts are available: `prompts/entity_resolver_it.txt` (Italian) and
+`prompts/entity_resolver_en.txt` (English). Both add LLM-powered
 fuzzy matching for typos, abbreviations, and synonyms.
 
 ## File Structure
@@ -172,14 +183,20 @@ odl-generator-from-text/
 │   └── parse_message_to_wo.py   # Message → Entity → WO → Reply
 ├── data/
 │   ├── asset_registry.json      # 20 sample assets (PMI Italia style)
-│   └── workorders_blank.json    # Write target (empty)
+│   ├── workorders_blank.json    # Write target (empty)
+│   └── asset_registry_en.json   # 20 sample assets (English names)
 ├── config/
 │   └── generic_cmms.yaml        # YAML mapping for CMMS substrate
 ├── prompts/
-│   └── entity_resolver_it.txt   # Italian entity resolution prompt
+│   ├── entity_resolver_it.txt   # Italian entity resolution prompt
+│   └── entity_resolver_en.txt   # English entity resolution prompt
 └── samples/messages/
     ├── sample_email_01.eml      # Sample email (2 assets, 2 problems)
     ├── sample_email_02.eml      # Sample email (1 asset, bearing issue)
     ├── sample_telegram_01.json  # Same as email 01, Telegram format
-    └── sample_telegram_02.json  # Typo test ("pompta P-201")
+    ├── sample_telegram_02.json  # Typo test ("pompta P-201")
+    ├── sample_email_01_en.eml      # English: pump leak + boiler noise
+    ├── sample_email_02_en.eml      # English: conveyor motor overheating
+    ├── sample_telegram_01_en.json  # English version of email 01
+    └── sample_telegram_02_en.json  # English typo test ("pmp P-201")
 ```

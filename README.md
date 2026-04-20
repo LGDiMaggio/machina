@@ -181,9 +181,10 @@ cp .env.example .env    # fill in your LLM key
 docker compose up       # sandbox mode by default
 ```
 
-A technician sends an email or Telegram message in Italian:
+A technician sends an email or Telegram message in their language:
 
-> *"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"*
+> *Italian:* `"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"`
+> *English:* `"pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"`
 
 The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
 

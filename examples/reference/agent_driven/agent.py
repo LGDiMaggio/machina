@@ -27,13 +27,21 @@ SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "sample_data"
 # The scenario: an operator reports a problem. The agent must figure out
 # what to do — look up the asset, check history, diagnose, search manuals,
 # verify spare parts, and propose (or create) a work order.
-SCENARIO = (
+SCENARIO_IT = (
     "La pompa P-201 mostra vibrazioni anomale a 8.5 mm/s, "
     "ben sopra la soglia di allarme di 7.0 mm/s. "
     "Cosa dobbiamo fare? Verifica lo storico manutenzione, "
     "cerca nel manuale la procedura corretta, "
     "controlla se abbiamo ricambi disponibili, "
     "e se necessario crea un ordine di lavoro predittivo."
+)
+SCENARIO_EN = (
+    "Pump P-201 shows abnormal vibrations at 8.5 mm/s, "
+    "well above the alarm threshold of 7.0 mm/s. "
+    "What should we do? Check the maintenance history, "
+    "look up the correct procedure in the manual, "
+    "verify if spare parts are available, "
+    "and if necessary create a predictive work order."
 )
 
 
@@ -87,9 +95,17 @@ def main() -> None:
         help="Disable sandbox mode — writes are actually executed",
     )
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--lang",
+        choices=["it", "en"],
+        default="it",
+        help="Scenario language: 'it' for Italian (default), 'en' for English",
+    )
     args = parser.parse_args()
 
     configure_logging(level="DEBUG" if args.verbose else "INFO")
+
+    scenario = SCENARIO_EN if args.lang == "en" else SCENARIO_IT
 
     sandbox = not args.live
 
@@ -107,13 +123,13 @@ def main() -> None:
     print(f"{'=' * 60}")
     print()
     print("  Scenario:")
-    print(f"  {SCENARIO}")
+    print(f"  {scenario}")
     print()
     print(f"{'=' * 60}")
     print("  The agent will now reason autonomously...")
     print(f"{'=' * 60}\n")
 
-    response = asyncio.run(run_scenario(agent, SCENARIO))
+    response = asyncio.run(run_scenario(agent, scenario))
 
     print(f"\n{'=' * 60}")
     print("  Agent Response:")
