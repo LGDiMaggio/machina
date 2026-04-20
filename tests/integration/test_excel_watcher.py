@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-import openpyxl
+import pytest
+
+openpyxl = pytest.importorskip("openpyxl")
 
 if TYPE_CHECKING:
     from pathlib import Path
-import pytest
 
 from machina.connectors.docs.excel import ExcelCsvConnector
 from machina.connectors.docs.excel_schema import (
