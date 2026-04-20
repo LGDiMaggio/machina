@@ -1,0 +1,25 @@
+# Machina configuration for Docker deployment
+# Environment variables override these defaults
+
+name: "Machina Agent"
+description: "Maintenance AI assistant (Docker deployment)"
+
+plant:
+  name: "Demo Plant"
+  location: "Docker Environment"
+
+connectors:
+  cmms:
+    type: generic_cmms
+    primary: true
+    settings:
+      data_dir: ""
+      url: "${MACHINA_CMMS_URL:-http://mock-cmms:9000}"
+
+sandbox: true
+
+mcp:
+  enable_vendor_tools: false
+
+llm:
+  provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"

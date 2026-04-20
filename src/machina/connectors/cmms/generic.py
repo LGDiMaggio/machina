@@ -11,18 +11,26 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
 import jmespath
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
+from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,
     BearerAuth,
     NoAuth,
 )
+from machina.connectors.cmms.generic_coercers import (
+    COERCER_REGISTRY as _YAML_COERCERS,
+)
+from machina.connectors.cmms.generic_coercers import resolve_path
 from machina.connectors.cmms.pagination import (
     CursorPagination,
     NoPagination,
@@ -131,36 +139,38 @@ class GenericCmmsConnector:
         ```
     """
 
-    _BASE_CAPABILITIES: ClassVar[list[str]] = [
-        "read_assets",
-        "read_work_orders",
-        "create_work_order",
-        "read_spare_parts",
-        "read_maintenance_history",
-    ]
+    _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_ASSETS,
+            Capability.READ_WORK_ORDERS,
+            Capability.CREATE_WORK_ORDER,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_HISTORY,
+        }
+    )
 
-    # Maps optional capability names to the endpoint config key that enables them.
-    _OPTIONAL_CAPABILITIES: ClassVar[dict[str, str]] = {
-        "get_work_order": "get_work_order",
-        "update_work_order": "update_work_order",
-        "close_work_order": "update_work_order",
-        "cancel_work_order": "update_work_order",
-        "read_maintenance_plans": "read_maintenance_plans",
+    # Maps optional capabilities to the endpoint config key that enables them.
+    _OPTIONAL_CAPABILITIES: ClassVar[dict[Capability, str]] = {
+        Capability.GET_WORK_ORDER: "get_work_order",
+        Capability.UPDATE_WORK_ORDER: "update_work_order",
+        Capability.CLOSE_WORK_ORDER: "update_work_order",
+        Capability.CANCEL_WORK_ORDER: "update_work_order",
+        Capability.READ_MAINTENANCE_PLANS: "read_maintenance_plans",
     }
 
     @property
-    def capabilities(self) -> list[str]:
+    def capabilities(self) -> frozenset[Capability]:
         """Return capabilities based on configuration.
 
         Base capabilities are always available. Optional capabilities
         are added when running in local mode (all supported) or when
         the corresponding endpoint is configured in REST mode.
         """
-        caps = list(self._BASE_CAPABILITIES)
+        caps = set(self._BASE_CAPABILITIES)
         for cap, endpoint_key in self._OPTIONAL_CAPABILITIES.items():
             if self._data_dir or endpoint_key in self._endpoints:
-                caps.append(cap)
-        return caps
+                caps.add(cap)
+        return frozenset(caps)
 
     def __init__(
         self,
@@ -172,6 +182,7 @@ class GenericCmmsConnector:
         auth: _AuthUnion | None = None,
         pagination: _PaginationUnion | None = None,
         endpoints: dict[str, dict[str, Any]] | None = None,
+        yaml_mapping: GenericCmmsYamlConfig | None = None,
     ) -> None:
         self.url = url
         self._api_key = api_key
@@ -179,6 +190,7 @@ class GenericCmmsConnector:
         self._schema_mapping = schema_mapping or {}
         self._connected = False
         self._endpoints = endpoints or {}
+        self._yaml_mapping = yaml_mapping
 
         # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
         if auth is not None:
@@ -283,6 +295,7 @@ class GenericCmmsConnector:
             return results
         return await self._rest_read_work_orders(asset_id=asset_id, status=status)
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order."""
         self._ensure_connected()
@@ -338,6 +351,7 @@ class GenericCmmsConnector:
             return None
         return await self._rest_get_work_order(work_order_id)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -373,11 +387,11 @@ class GenericCmmsConnector:
 
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)  # type: ignore[no-any-return]
 
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Read preventive-maintenance plans.
@@ -500,18 +514,20 @@ class GenericCmmsConnector:
     def _apply_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
         """Apply schema mapping to a single raw item dict.
 
-        Supports two mapping forms:
+        Supports three mapping forms:
 
-        1. **Flat rename (legacy)**: ``{"asset_id": "id"}`` renames top-level
+        1. **YAML mapper (v0.3+)**: ``yaml_mapping`` is set — uses the
+           declarative YAML schema with typed coercers and JSONPath-lite.
+        2. **Flat rename (legacy)**: ``{"asset_id": "id"}`` renames top-level
            keys. Any field not mentioned in the mapping is preserved with
            its original key.
-        2. **JMESPath extraction**: ``{"_fields": {"id": "equipment.id"}}``
+        3. **JMESPath extraction**: ``{"_fields": {"id": "equipment.id"}}``
            produces a new dict with only the listed fields, each extracted
            via a JMESPath expression. Missing paths are silently dropped.
-
-        Selection between the two modes is based on the presence of the
-        ``_fields`` sentinel key.
         """
+        if self._yaml_mapping is not None:
+            return self._apply_yaml_mapping(entity, data)
+
         mapping = self._schema_mapping.get(entity, {})
         if not mapping:
             return data
@@ -527,6 +543,31 @@ class GenericCmmsConnector:
             return result
         # Legacy flat rename mode
         return {mapping.get(k, k): v for k, v in data.items()}
+
+    _ENTITY_KEY_MAP: ClassVar[dict[str, str]] = {
+        "assets": "asset",
+        "work_orders": "work_order",
+        "spare_parts": "spare_part",
+        "maintenance_plans": "maintenance_plan",
+    }
+
+    def _apply_yaml_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Apply the YAML mapper to a single raw dict."""
+        assert self._yaml_mapping is not None
+        key = self._ENTITY_KEY_MAP.get(entity, entity)
+        entity_mapping = self._yaml_mapping.mapping.get(key)
+        if entity_mapping is None:
+            return data
+        return _yaml_map_row(entity_mapping, data)
+
+    def _yaml_reverse_map(self, entity: str, domain_data: dict[str, Any]) -> dict[str, Any]:
+        """Reverse-map domain fields to external API fields for writes."""
+        assert self._yaml_mapping is not None
+        key = self._ENTITY_KEY_MAP.get(entity, entity)
+        entity_mapping = self._yaml_mapping.mapping.get(key)
+        if entity_mapping is None or entity_mapping.reverse_fields is None:
+            return domain_data
+        return _yaml_reverse_row(entity_mapping, domain_data)
 
     # ------------------------------------------------------------------
     # Internal: REST API
@@ -613,11 +654,14 @@ class GenericCmmsConnector:
         """Submit a new work order to the REST API."""
         httpx = _require_httpx()
         headers = {**self._rest_headers(), "Content-Type": "application/json"}
+        payload = work_order.model_dump(mode="json")
+        if self._yaml_mapping is not None:
+            payload = self._yaml_reverse_map("work_order", payload)
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 self._rest_url("work_orders"),
                 headers=headers,
-                json=work_order.model_dump(mode="json"),
+                json=payload,
             )
             resp.raise_for_status()
         return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
@@ -815,3 +859,77 @@ def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
         tasks=data.get("tasks", []),
         active=data.get("active", True),
     )
+
+
+# ---------------------------------------------------------------------------
+# YAML mapper engine — declarative dict → entity mapping
+# ---------------------------------------------------------------------------
+
+
+def _yaml_map_row(
+    entity_mapping: Any,
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Map a raw API dict to a domain-field dict using a YAML EntityMapping."""
+    from machina.connectors.cmms.generic_schema import FieldSpec
+
+    result: dict[str, Any] = {}
+    for field_name, spec in entity_mapping.fields.items():
+        if isinstance(spec, dict):
+            # Nested metadata group
+            nested: dict[str, Any] = {}
+            for sub_key, sub_spec in spec.items():
+                if isinstance(sub_spec, FieldSpec):
+                    val = _yaml_coerce_field(sub_spec, raw)
+                    if val is not None:
+                        nested[sub_key] = val
+            result[field_name] = nested
+        elif isinstance(spec, FieldSpec):
+            val = _yaml_coerce_field(spec, raw)
+            if val is None and spec.required:
+                return {}  # skip this row
+            result[field_name] = val
+    return result
+
+
+def _yaml_coerce_field(spec: Any, raw: dict[str, Any]) -> Any:
+    """Resolve and coerce a single field from a raw dict."""
+    value = resolve_path(raw, spec.source)
+    if value is None:
+        return spec.default
+
+    if spec.coerce:
+        coercer = _YAML_COERCERS.get(spec.coerce)
+        if coercer is not None:
+            kwargs: dict[str, Any] = {}
+            if spec.enum_map:
+                kwargs["enum_map"] = spec.enum_map
+            if spec.default is not None:
+                kwargs["default"] = spec.default
+            if spec.pattern:
+                kwargs["pattern"] = spec.pattern
+            value = coercer(value, **kwargs)
+        elif spec.coerce == "enum_map" and spec.enum_map:
+            from machina.connectors.cmms.generic_coercers import coerce_enum_map
+
+            value = coerce_enum_map(value, enum_map=spec.enum_map, default=spec.default)
+
+    return value
+
+
+def _yaml_reverse_row(entity_mapping: Any, domain_data: dict[str, Any]) -> dict[str, Any]:
+    """Reverse-map domain fields to external API fields for a write payload."""
+    from machina.connectors.cmms.generic_schema import ReverseFieldSpec
+
+    result: dict[str, Any] = {}
+    assert entity_mapping.reverse_fields is not None
+    for domain_field, spec in entity_mapping.reverse_fields.items():
+        value = domain_data.get(domain_field)
+        if isinstance(spec, str):
+            result[spec] = value
+        elif isinstance(spec, ReverseFieldSpec):
+            if spec.reverse_enum_map and value is not None:
+                str_val = str(value)
+                value = spec.reverse_enum_map.get(str_val, value)
+            result[spec.target] = value
+    return result

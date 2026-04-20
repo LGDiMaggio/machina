@@ -24,6 +24,34 @@ class ConnectorTimeoutError(ConnectorError):
     """A connector operation timed out."""
 
 
+class ConnectorConfigError(ConnectorError):
+    """A connector's configuration is invalid or incomplete."""
+
+
+class ConnectorSchemaError(ConnectorError):
+    """A schema mapping does not match the external data source."""
+
+
+class ConnectorLockedError(ConnectorError):
+    """The target resource is locked by another process."""
+
+
+class ConnectorTransientError(ConnectorError):
+    """A transient error (deadlock, timeout) that may succeed on retry."""
+
+
+class ConnectorDriverError(ConnectorError):
+    """A required database driver is not installed on the system."""
+
+
+class ConnectorDependencyError(ConnectorError):
+    """A required Python package (extra) is not installed."""
+
+
+class SandboxViolationError(ConnectorError):
+    """A write operation was blocked because sandbox mode is active."""
+
+
 # --- Domain errors ---
 
 

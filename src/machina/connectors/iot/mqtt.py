@@ -23,6 +23,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
@@ -129,10 +130,9 @@ class MqttConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "subscribe_to_topics",
-        "publish_message",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.SUBSCRIBE_TO_TOPICS, Capability.PUBLISH_MESSAGE}
+    )
 
     def __init__(
         self,

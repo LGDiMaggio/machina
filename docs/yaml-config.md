@@ -160,7 +160,7 @@ arbitrary Python logic in YAML would be fragile and hard to debug.
 | **What you configure** | Connectors, LLM, channels, plant | Everything + workflows with guards, lambdas |
 | **Workflows** | Not supported | Full DSL ([examples 01-04](../examples/)) |
 | **Best for** | Standard deployments, Docker, ops teams | Complex agents, custom integrations |
-| **Example** | [06_yaml_config/](../examples/06_yaml_config/) | [quickstart/](../examples/quickstart/), [01-04](../examples/) |
+| **Example** | [yaml_config/](../examples/reference/yaml_config/) | [quickstart/](../examples/quickstart/), [alarm_to_workorder/](../examples/alarm_to_workorder/) |
 
 !!! note "Hybrid approach"
     You can combine both: configure connectors and LLM via YAML, then

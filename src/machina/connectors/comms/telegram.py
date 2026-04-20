@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
 
@@ -45,7 +46,9 @@ class TelegramConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = ["send_message", "receive_message"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.SEND_MESSAGE, Capability.RECEIVE_MESSAGE}
+    )
 
     def __init__(
         self,
@@ -209,7 +212,9 @@ class CliChannel:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = ["send_message", "receive_message"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.SEND_MESSAGE, Capability.RECEIVE_MESSAGE}
+    )
 
     def __init__(self, *, prompt: str = "You> ") -> None:
         self._prompt = prompt

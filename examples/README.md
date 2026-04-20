@@ -1,78 +1,44 @@
 # Machina Examples
 
-Build AI agents for industrial maintenance. Start here.
+Build AI agents for industrial maintenance. Two examples to get you from zero to automation.
 
-## Your First Agent in 13 Lines
-
-```python
-from machina import Agent, Plant
-from machina.connectors.cmms import GenericCmmsConnector
-from machina.connectors.comms.telegram import CliChannel
-from machina.connectors.docs import DocumentStoreConnector
-
-agent = Agent(
-    name="Maintenance Assistant",
-    plant=Plant(name="Demo Plant"),
-    connectors=[
-        GenericCmmsConnector(data_dir="sample_data/cmms"),
-        DocumentStoreConnector(paths=["sample_data/manuals"]),
-    ],
-    channels=[CliChannel()],
-    llm="ollama:llama3",
-)
-agent.run()
-```
+## 1. Ask Your Plant Data (2 minutes)
 
 ```bash
 pip install machina-ai[litellm,docs-rag]
 cd examples/quickstart && python agent.py
 ```
 
-## Learning Path
+The agent answers questions about equipment, procedures, spare parts, maintenance history -- grounded in real data via RAG. [Details &rarr;](quickstart/)
 
-```
-Start Here           Automate              Go Deep
-    |                   |                     |
-    v                   v                     v
-quickstart/  -->  01_alarm_response/  -->  02_predictive_pipeline/
-  (5 min)            (15 min)                (30 min)
+## 2. Automate: Alarm to Work Order (10 minutes)
 
-              03_cmms_portability/       04_custom_workflows/
-                  (10 min)                  (20 min)
+```bash
+cd examples/alarm_to_workorder && python agent.py
 ```
 
-## Examples
+A vibration alarm fires on pump P-201. The agent diagnoses the failure, checks spare parts, creates a work order, and notifies the team. No human in the loop. [Details &rarr;](alarm_to_workorder/)
 
-| Example | What you'll build | Key concept |
-|---------|-------------------|-------------|
-| [**quickstart/**](quickstart/) | Interactive Q&A agent over CMMS data and manuals | Agent + connectors + LLM in 13 lines |
-| [**01_alarm_response/**](01_alarm_response/) | Alarm triggers diagnosis, WO creation, team notification | Built-in workflow templates, sandbox mode |
-| [**02_predictive_pipeline/**](02_predictive_pipeline/) | 10-step autonomous pipeline: sensor to scheduled maintenance | Custom workflows, 3 LLM + 7 deterministic steps |
-| [**03_cmms_portability/**](03_cmms_portability/) | Same agent works across SAP PM, Maximo, UpKeep | Connector abstraction, domain model portability |
-| [**04_custom_workflows/**](04_custom_workflows/) | Spare part reorder + preventive scheduling workflows | Workflow DSL: triggers, guards, error policies |
-| [**05_multi_agent_team/**](05_multi_agent_team/) | Specialist agents collaborate on diagnostics | Multi-agent orchestration (v0.3) |
-| [**06_yaml_config/**](06_yaml_config/) | Agent configured entirely via YAML -- zero Python | Declarative config, `Agent.from_config()` |
-| [**07_agent_driven/**](07_agent_driven/) | Autonomous agent reasons and acts without workflows | Tool-based reasoning, no predefined steps |
+## 3. Deploy to Production (15 minutes)
 
-## Which Example is for Me?
+```bash
+cp -r templates/odl-generator-from-text my-agent
+cd my-agent && cp .env.example .env && docker compose up
+```
 
-**"I want to see it work"** --> [quickstart/](quickstart/)
+Clone-configure-deploy starter kit. Italian free-text messages become Work Orders. [Details &rarr;](../templates/odl-generator-from-text/)
 
-**"I need to automate a maintenance process"** --> [01_alarm_response/](01_alarm_response/)
+---
 
-**"I want full autonomous predictive maintenance"** --> [02_predictive_pipeline/](02_predictive_pipeline/)
+## More Examples
 
-**"I'm a system integrator deploying across multiple clients"** --> [03_cmms_portability/](03_cmms_portability/)
+Once you've run the above, explore specific patterns in [reference/](reference/):
 
-**"I want to build my own workflows"** --> [04_custom_workflows/](04_custom_workflows/)
-
-**"I want to configure agents via YAML, no Python"** --> [06_yaml_config/](06_yaml_config/)
-
-**"I want to see an agent reason and act autonomously"** --> [07_agent_driven/](07_agent_driven/)
-
-## Interactive Tour
-
-For a hands-on walkthrough in Jupyter, see [tour.ipynb](tour.ipynb) -- covers all the above in one notebook.
+- **Predictive pipeline** -- 10-step autonomous sensor-to-maintenance flow
+- **CMMS portability** -- Same agent on SAP PM, Maximo, UpKeep
+- **Custom workflows** -- Build any maintenance process as a workflow
+- **YAML config** -- Zero-Python agent configuration
+- **Agent-driven** -- Autonomous reasoning without predefined steps
 
 ## Sample Data
 
@@ -82,34 +48,19 @@ All examples share `sample_data/` -- a fictional manufacturing plant:
 - **5 work orders**: preventive + corrective maintenance
 - **6 spare parts**: with inventory and reorder points
 - **2 equipment manuals**: Grundfos pump, Atlas Copco compressor
-- **Sensor readings**: vibration + temperature time series for pump P-201
 
 ## Prerequisites
-
-### Install
 
 ```bash
 pip install machina-ai[litellm,docs-rag]
 ```
 
-- `litellm` — LLM provider abstraction (required for all examples)
-- `docs-rag` — document search with ChromaDB (used by all examples for manual search)
-
-### LLM Provider Setup
-
-Every example needs one LLM provider. Pick one:
+**LLM provider** (pick one):
 
 | Provider | Setup | Cost |
 |----------|-------|------|
-| **Ollama** | Install from [ollama.com](https://ollama.com), then `ollama pull llama3` | Free, runs locally |
-| **OpenAI** | `export OPENAI_API_KEY=sk-...` ([get key](https://platform.openai.com/api-keys)) | Pay-per-token |
-| **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` ([get key](https://console.anthropic.com/)) | Pay-per-token |
+| **Ollama** | [ollama.com](https://ollama.com), then `ollama pull llama3` | Free, local |
+| **OpenAI** | `export OPENAI_API_KEY=sk-...` | Pay-per-token |
+| **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` | Pay-per-token |
 
-All examples default to `ollama:llama3`. Override with `--llm`:
-
-```bash
-python agent.py                              # default: ollama:llama3
-python agent.py --llm openai:gpt-4o          # requires OPENAI_API_KEY
-python agent.py --llm anthropic:claude-sonnet-4-20250514  # requires ANTHROPIC_API_KEY
-python agent.py --llm ollama:mistral          # any Ollama model
-```
+All examples default to `ollama:llama3`. Override: `python agent.py --llm openai:gpt-4o`

@@ -8,29 +8,35 @@ domain entities.
 Authentication uses a *Session-Token* header (API key issued from the
 UpKeep web UI under **Account Settings → API Tokens**).
 
+The vendor payload ↔ Machina entity mapping lives as pure functions in
+:mod:`machina.connectors.cmms.mappers.upkeep` so it can be unit-tested
+without HTTP mocks.
+
 See also: https://developers.onupkeep.com/
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
+from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.retry import request_with_retry
-from machina.domain.asset import Asset, AssetType, Criticality
-from machina.domain.maintenance_plan import Interval, MaintenancePlan
-from machina.domain.spare_part import SparePart
 from machina.domain.work_order import (
-    Priority,
     WorkOrder,
     WorkOrderStatus,
     WorkOrderType,
 )
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+if TYPE_CHECKING:
+    from machina.domain.asset import Asset
+    from machina.domain.maintenance_plan import MaintenancePlan
+    from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
 
@@ -45,174 +51,6 @@ def _require_httpx() -> Any:
             "Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
-
-
-# ---------------------------------------------------------------------------
-# UpKeep → Machina entity mapping helpers
-# ---------------------------------------------------------------------------
-
-_UPKEEP_PRIORITY_MAP: dict[int, Priority] = {
-    # Per the UpKeep REST API v2, priority is a 0-indexed integer where
-    # 0 is the lowest and 3 is the highest. See:
-    # https://developers.onupkeep.com/#work-orders
-    0: Priority.LOW,
-    1: Priority.MEDIUM,
-    2: Priority.HIGH,
-    3: Priority.EMERGENCY,
-}
-
-_UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
-    "open": WorkOrderStatus.CREATED,
-    "in progress": WorkOrderStatus.IN_PROGRESS,
-    "on hold": WorkOrderStatus.ASSIGNED,
-    "complete": WorkOrderStatus.COMPLETED,
-}
-
-_REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
-    WorkOrderStatus.CREATED: "open",
-    WorkOrderStatus.ASSIGNED: "on hold",
-    WorkOrderStatus.IN_PROGRESS: "in progress",
-    WorkOrderStatus.COMPLETED: "complete",
-    WorkOrderStatus.CLOSED: "complete",  # UpKeep has no distinct closed state
-    WorkOrderStatus.CANCELLED: "on hold",  # UpKeep has no distinct cancelled state
-}
-
-_UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {
-    "Rotating Equipment": AssetType.ROTATING_EQUIPMENT,
-    "Static Equipment": AssetType.STATIC_EQUIPMENT,
-    "Instrument": AssetType.INSTRUMENT,
-    "Electrical": AssetType.ELECTRICAL,
-    "Piping": AssetType.PIPING,
-    "HVAC": AssetType.HVAC,
-    "Safety": AssetType.SAFETY,
-}
-
-
-def _parse_asset(data: dict[str, Any]) -> Asset:
-    """Convert an UpKeep asset JSON object to a Machina :class:`Asset`."""
-    category = str(data.get("category", ""))
-    return Asset(
-        id=str(data.get("id", "")),
-        name=str(data.get("name", "")),
-        type=_UPKEEP_CATEGORY_MAP.get(category, AssetType.ROTATING_EQUIPMENT),
-        location=str(data.get("location", "")),
-        manufacturer=str(data.get("make", "")),
-        model=str(data.get("model", "")),
-        serial_number=str(data.get("serialNumber", "")),
-        criticality=Criticality.C,
-        parent=data.get("parentAssetId"),
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "id",
-                "name",
-                "category",
-                "location",
-                "make",
-                "model",
-                "serialNumber",
-                "parentAssetId",
-            }
-        },
-    )
-
-
-def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
-    """Convert an UpKeep work-order JSON object to a :class:`WorkOrder`."""
-    raw_priority = data.get("priority", 1)
-    priority = _UPKEEP_PRIORITY_MAP.get(int(raw_priority), Priority.MEDIUM)
-    raw_status = str(data.get("status", "open")).lower()
-    status = _UPKEEP_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
-    wo_type = (
-        WorkOrderType.PREVENTIVE
-        if data.get("category") == "preventive"
-        else WorkOrderType.CORRECTIVE
-    )
-    created = data.get("createdAt", "")
-    updated = data.get("updatedAt", "")
-    now = datetime.now(tz=UTC)
-    return WorkOrder(
-        id=str(data.get("id", "")),
-        type=wo_type,
-        priority=priority,
-        status=status,
-        asset_id=str(data.get("assetId") or data.get("asset", "")),
-        description=str(data.get("title", "")),
-        assigned_to=data.get("assignedToId"),
-        created_at=_parse_datetime(created) if created else now,
-        updated_at=_parse_datetime(updated) if updated else now,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "id",
-                "priority",
-                "status",
-                "category",
-                "createdAt",
-                "updatedAt",
-                "assetId",
-                "asset",
-                "title",
-                "assignedToId",
-            }
-        },
-    )
-
-
-def _parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Convert an UpKeep part JSON object to a :class:`SparePart`.
-
-    Prefers the physical part identifier (``partNumber`` then ``barcode``)
-    as the SKU, falling back to UpKeep's internal record ``id`` only
-    when neither is provided.
-    """
-    sku = str(data.get("partNumber") or data.get("barcode") or data.get("id") or "")
-    return SparePart(
-        sku=sku,
-        name=str(data.get("name", "")),
-        stock_quantity=int(data.get("quantity", 0)),
-        unit_cost=float(data.get("cost", 0.0)),
-        warehouse_location=str(data.get("area", "")),
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "id",
-                "partNumber",
-                "barcode",
-                "name",
-                "quantity",
-                "cost",
-                "area",
-            }
-        },
-    )
-
-
-def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
-    """Convert an UpKeep preventive-maintenance JSON to a :class:`MaintenancePlan`."""
-    freq_days = int(data.get("frequencyDays", 0))
-    return MaintenancePlan(
-        id=str(data.get("id", "")),
-        asset_id=str(data.get("assetId") or ""),
-        name=str(data.get("title", "")),
-        interval=Interval(days=freq_days),
-        tasks=[str(t) for t in data.get("tasks", [])],
-        active=data.get("status", "active") == "active",
-    )
-
-
-def _parse_datetime(value: str) -> datetime:
-    """Parse an ISO-8601 date string into a timezone-aware datetime."""
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
 
 
 class UpKeepConnector:
@@ -235,14 +73,17 @@ class UpKeepConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "read_assets",
-        "read_work_orders",
-        "create_work_order",
-        "update_work_order",
-        "read_spare_parts",
-        "read_maintenance_plans",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_ASSETS,
+            Capability.READ_WORK_ORDERS,
+            Capability.GET_WORK_ORDER,
+            Capability.CREATE_WORK_ORDER,
+            Capability.UPDATE_WORK_ORDER,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_PLANS,
+        }
+    )
 
     _DEFAULT_URL: ClassVar[str] = "https://api.onupkeep.com"
     _PAGE_SIZE: ClassVar[int] = 100
@@ -312,7 +153,7 @@ class UpKeepConnector:
         """Return all assets from UpKeep."""
         self._ensure_connected()
         raw = await self._paginated_get("/api/v2/assets")
-        return [_parse_asset(item) for item in raw]
+        return [upkeep_mapper.parse_asset(item) for item in raw]
 
     async def get_asset(self, asset_id: str) -> Asset | None:
         """Look up a single asset by ID."""
@@ -331,7 +172,7 @@ class UpKeepConnector:
             raise ConnectorError(f"UpKeep GET asset failed: HTTP {resp.status_code}")
         body = resp.json()
         result = body.get("result", body)
-        return _parse_asset(result)
+        return upkeep_mapper.parse_asset(result)
 
     async def read_work_orders(
         self,
@@ -353,13 +194,13 @@ class UpKeepConnector:
             params["asset"] = asset_id
         if status:
             upkeep_status = (
-                _REVERSE_UPKEEP_STATUS.get(status, status.value)
+                upkeep_mapper.REVERSE_UPKEEP_STATUS.get(status, status.value)
                 if isinstance(status, WorkOrderStatus)
                 else status
             )
             params["status"] = upkeep_status
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
-        return [_parse_work_order(item) for item in raw]
+        return [upkeep_mapper.parse_work_order(item) for item in raw]
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single work order by ID."""
@@ -378,8 +219,9 @@ class UpKeepConnector:
             raise ConnectorError(f"UpKeep GET work order failed: HTTP {resp.status_code}")
         body = resp.json()
         result = body.get("result", body)
-        return _parse_work_order(result)
+        return upkeep_mapper.parse_work_order(result)
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new work order in UpKeep.
 
@@ -393,7 +235,7 @@ class UpKeepConnector:
         httpx = _require_httpx()
         payload = {
             "title": work_order.description,
-            "priority": _reverse_priority(work_order.priority),
+            "priority": upkeep_mapper.reverse_priority(work_order.priority),
             "assetId": work_order.asset_id,
             "category": (
                 "preventive" if work_order.type == WorkOrderType.PREVENTIVE else "reactive"
@@ -419,8 +261,9 @@ class UpKeepConnector:
             work_order_id=result.get("id"),
             asset_id=work_order.asset_id,
         )
-        return _parse_work_order(result)
+        return upkeep_mapper.parse_work_order(result)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -446,7 +289,7 @@ class UpKeepConnector:
         httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
-            payload["status"] = _reverse_status(status)
+            payload["status"] = upkeep_mapper.reverse_status(status)
         if assigned_to is not None:
             payload["assignedToId"] = assigned_to
         if description is not None:
@@ -476,13 +319,15 @@ class UpKeepConnector:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
         return updated
 
+    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED (maps to 'complete' in UpKeep)."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)  # type: ignore[no-any-return]
 
+    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED (maps to 'on hold' in UpKeep)."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_spare_parts(
         self,
@@ -504,7 +349,7 @@ class UpKeepConnector:
         """
         self._ensure_connected()
         raw = await self._paginated_get("/api/v2/parts")
-        parts = [_parse_spare_part(item) for item in raw]
+        parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:
             parts = [p for p in parts if p.sku == sku]
         return parts
@@ -513,7 +358,7 @@ class UpKeepConnector:
         """Read preventive-maintenance schedules from UpKeep."""
         self._ensure_connected()
         raw = await self._paginated_get("/api/v2/preventive-maintenance")
-        return [_parse_maintenance_plan(item) for item in raw]
+        return [upkeep_mapper.parse_maintenance_plan(item) for item in raw]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed work orders for an asset."""
@@ -577,23 +422,3 @@ class UpKeepConnector:
             total=len(all_items),
         )
         return all_items
-
-
-def _reverse_priority(priority: Priority) -> int:
-    """Map Machina priority back to UpKeep integer (0-indexed, 0-3).
-
-    UpKeep's REST API v2 uses a 0-indexed priority scale where 0 is the
-    lowest and 3 is the highest. See
-    https://developers.onupkeep.com/#work-orders.
-    """
-    return {
-        Priority.LOW: 0,
-        Priority.MEDIUM: 1,
-        Priority.HIGH: 2,
-        Priority.EMERGENCY: 3,
-    }.get(priority, 1)
-
-
-def _reverse_status(status: WorkOrderStatus) -> str:
-    """Map Machina work-order status to UpKeep status string."""
-    return _REVERSE_UPKEEP_STATUS.get(status, "open")

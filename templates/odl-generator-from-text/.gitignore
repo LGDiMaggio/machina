@@ -1,0 +1,6 @@
+.env
+traces-*.jsonl
+data/workorders.xlsx
+data/workorders.csv
+__pycache__/
+*.pyc

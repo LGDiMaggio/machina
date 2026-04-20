@@ -20,6 +20,7 @@ import structlog
 from machina.agent.entity_resolver import EntityResolver
 from machina.agent.prompts import build_context_message, build_system_prompt
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.capabilities import Capability
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
@@ -241,7 +242,7 @@ class Agent:
             logger.info("connector_ready", connector=name)
 
         # Auto-load assets from CMMS connectors
-        cmms_connectors = self._registry.find_by_capability("read_assets")
+        cmms_connectors = self._registry.find_by_capability(Capability.READ_ASSETS)
         for cname, conn in cmms_connectors:
             with self.tracer.trace("load_assets", connector=cname) as span:
                 assets = await conn.read_assets()  # type: ignore[attr-defined]
@@ -447,7 +448,7 @@ class Agent:
         tasks: list[Any] = []
         task_names: list[str] = []
 
-        wo_connectors = self._registry.find_by_capability("read_work_orders")
+        wo_connectors = self._registry.find_by_capability(Capability.READ_WORK_ORDERS)
         if wo_connectors:
             wo_cname, wo_conn = wo_connectors[0]
 
@@ -463,7 +464,7 @@ class Agent:
             tasks.append(_get_wos())
             task_names.append("work_orders")
 
-        sp_connectors = self._registry.find_by_capability("read_spare_parts")
+        sp_connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
         if sp_connectors:
             sp_cname, sp_conn = sp_connectors[0]
 
@@ -480,7 +481,7 @@ class Agent:
             task_names.append("spare_parts")
 
         # Document search
-        doc_connectors = self._registry.find_by_capability("search_documents")
+        doc_connectors = self._registry.find_by_capability(Capability.SEARCH_DOCUMENTS)
         if doc_connectors:
             doc_cname, doc_conn = doc_connectors[0]
 
@@ -647,7 +648,7 @@ class Agent:
             return self._tool_get_asset_details(args.get("asset_id", ""))
 
         if name == "read_work_orders":
-            connectors = self._registry.find_by_capability("read_work_orders")
+            connectors = self._registry.find_by_capability(Capability.READ_WORK_ORDERS)
             if connectors:
                 _, conn = connectors[0]
                 wos = await conn.read_work_orders(  # type: ignore[attr-defined]
@@ -661,7 +662,7 @@ class Agent:
             return await self._tool_create_work_order(args)
 
         if name == "search_documents":
-            connectors = self._registry.find_by_capability("search_documents")
+            connectors = self._registry.find_by_capability(Capability.SEARCH_DOCUMENTS)
             if connectors:
                 _, conn = connectors[0]
                 results = await conn.search(  # type: ignore[attr-defined]
@@ -674,7 +675,7 @@ class Agent:
             return {"error": "No document connector available"}
 
         if name == "check_spare_parts":
-            connectors = self._registry.find_by_capability("read_spare_parts")
+            connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
                 parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
@@ -746,7 +747,7 @@ class Agent:
 
         from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
-        connectors = self._registry.find_by_capability("create_work_order")
+        connectors = self._registry.find_by_capability(Capability.CREATE_WORK_ORDER)
         if not connectors:
             return {"error": "No CMMS connector available for creating work orders"}
 
@@ -858,17 +859,18 @@ class Agent:
 
     def _get_available_tools(self) -> list[dict[str, Any]]:
         """Return the tool definitions relevant to configured connectors."""
-        all_caps = set()
+        from machina.connectors.capabilities import Capability
+
+        all_caps: set[Capability] = set()
         for _, conn in self._registry.all().items():
             all_caps.update(conn.capabilities)
 
-        # Map capabilities to tools
-        cap_to_tool = {
-            "read_assets": ["search_assets", "get_asset_details"],
-            "read_work_orders": ["read_work_orders"],
-            "create_work_order": ["create_work_order"],
-            "search_documents": ["search_documents"],
-            "read_spare_parts": ["check_spare_parts"],
+        cap_to_tool: dict[Capability, list[str]] = {
+            Capability.READ_ASSETS: ["search_assets", "get_asset_details"],
+            Capability.READ_WORK_ORDERS: ["read_work_orders"],
+            Capability.CREATE_WORK_ORDER: ["create_work_order"],
+            Capability.SEARCH_DOCUMENTS: ["search_documents"],
+            Capability.READ_SPARE_PARTS: ["check_spare_parts"],
         }
 
         enabled_tool_names: set[str] = set()

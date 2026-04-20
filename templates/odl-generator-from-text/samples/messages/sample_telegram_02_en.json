@@ -1,0 +1,10 @@
+{
+  "update_id": 100004,
+  "message": {
+    "message_id": 4,
+    "from": {"id": 987654322, "is_bot": false, "first_name": "John", "last_name": "Miller"},
+    "chat": {"id": 987654322, "type": "private"},
+    "date": 1745151000,
+    "text": "pmp P-201 heavy vibrations"
+  }
+}

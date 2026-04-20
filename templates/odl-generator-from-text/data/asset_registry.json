@@ -1,0 +1,202 @@
+[
+  {
+    "id": "P-201",
+    "name": "Pompa Centrifuga — Circuito Raffreddamento A",
+    "type": "rotating_equipment",
+    "location": "Edificio A / Piano 1 / Campata 3",
+    "criticality": "A",
+    "manufacturer": "Grundfos",
+    "model": "CR 32-2",
+    "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROS-01"]
+  },
+  {
+    "id": "P-202",
+    "name": "Pompa Centrifuga — Circuito Raffreddamento B",
+    "type": "rotating_equipment",
+    "location": "Edificio A / Piano 1 / Campata 4",
+    "criticality": "A",
+    "manufacturer": "Grundfos",
+    "model": "CR 32-2",
+    "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01"]
+  },
+  {
+    "id": "P-203",
+    "name": "Pompa Dosatrice — Trattamento Acque",
+    "type": "rotating_equipment",
+    "location": "Edificio C / Piano 0 / Locale Trattamento",
+    "criticality": "B",
+    "manufacturer": "Prominent",
+    "model": "Sigma X",
+    "failure_modes": ["MEMB-FAIL-01", "VLV-STUCK-01"]
+  },
+  {
+    "id": "C-3",
+    "name": "Caldaia a Vapore — Produzione",
+    "type": "static_equipment",
+    "location": "Edificio B / Piano 0 / Centrale Termica",
+    "criticality": "A",
+    "manufacturer": "Viessmann",
+    "model": "Vitoplex 300",
+    "failure_modes": ["TUBE-FOUL-01", "BURN-DEGR-01", "VLV-STUCK-01"]
+  },
+  {
+    "id": "C-4",
+    "name": "Caldaia Acqua Calda — Riscaldamento",
+    "type": "static_equipment",
+    "location": "Edificio B / Piano 0 / Centrale Termica",
+    "criticality": "B",
+    "manufacturer": "Viessmann",
+    "model": "Vitocrossal 200",
+    "failure_modes": ["TUBE-FOUL-01", "SENS-DRFT-01"]
+  },
+  {
+    "id": "ME-15",
+    "name": "Motore Elettrico — Nastro Trasportatore Linea 3",
+    "type": "electrical",
+    "location": "Magazzino / Linea 3",
+    "criticality": "B",
+    "manufacturer": "ABB",
+    "model": "M3BP 160 MLA",
+    "failure_modes": ["BEAR-WEAR-01", "WIND-SHRT-01", "ALIG-FAIL-01"]
+  },
+  {
+    "id": "ME-16",
+    "name": "Motore Elettrico — Nastro Trasportatore Linea 4",
+    "type": "electrical",
+    "location": "Magazzino / Linea 4",
+    "criticality": "C",
+    "manufacturer": "ABB",
+    "model": "M3BP 132 SMC",
+    "failure_modes": ["BEAR-WEAR-01", "WIND-SHRT-01"]
+  },
+  {
+    "id": "CP-101",
+    "name": "Compressore Aria — Servizi Generali",
+    "type": "rotating_equipment",
+    "location": "Edificio D / Piano 0 / Sala Compressori",
+    "criticality": "A",
+    "manufacturer": "Atlas Copco",
+    "model": "GA 37+",
+    "failure_modes": ["BEAR-WEAR-01", "VLV-STUCK-01", "FILT-CLOG-01"]
+  },
+  {
+    "id": "CP-102",
+    "name": "Compressore Aria — Backup",
+    "type": "rotating_equipment",
+    "location": "Edificio D / Piano 0 / Sala Compressori",
+    "criticality": "B",
+    "manufacturer": "Atlas Copco",
+    "model": "GA 30",
+    "failure_modes": ["BEAR-WEAR-01", "VLV-STUCK-01"]
+  },
+  {
+    "id": "SC-501",
+    "name": "Scambiatore di Calore — Processo A",
+    "type": "static_equipment",
+    "location": "Edificio A / Piano 0 / Sala Processo",
+    "criticality": "A",
+    "manufacturer": "Alfa Laval",
+    "model": "M10-BFG",
+    "failure_modes": ["TUBE-FOUL-01", "GASK-LEAK-01"]
+  },
+  {
+    "id": "VE-301",
+    "name": "Ventilatore Estrattore — Cabina Verniciatura",
+    "type": "rotating_equipment",
+    "location": "Edificio E / Piano 1 / Cabina Vern.",
+    "criticality": "B",
+    "manufacturer": "Ziehl-Abegg",
+    "model": "GR 500",
+    "failure_modes": ["BEAR-WEAR-01", "BELT-WEAR-01"]
+  },
+  {
+    "id": "TR-401",
+    "name": "Trasformatore MT/BT — Cabina Elettrica",
+    "type": "electrical",
+    "location": "Cabina Elettrica Principale",
+    "criticality": "A",
+    "manufacturer": "ABB",
+    "model": "Distribution Transformer 1000kVA",
+    "failure_modes": ["OIL-LEAK-01", "WIND-SHRT-01", "OHE-01"]
+  },
+  {
+    "id": "PLC-01",
+    "name": "PLC Principale — Linea Produzione 1",
+    "type": "instrument",
+    "location": "Edificio A / Piano 1 / Quadro Automazione",
+    "criticality": "A",
+    "manufacturer": "Siemens",
+    "model": "S7-1500",
+    "failure_modes": ["COMM-FAIL-01", "PWR-FAIL-01"]
+  },
+  {
+    "id": "PLC-02",
+    "name": "PLC Secondario — Linea Produzione 2",
+    "type": "instrument",
+    "location": "Edificio A / Piano 1 / Quadro Automazione",
+    "criticality": "B",
+    "manufacturer": "Siemens",
+    "model": "S7-1200",
+    "failure_modes": ["COMM-FAIL-01"]
+  },
+  {
+    "id": "GRU-01",
+    "name": "Carroponte — Reparto Montaggio",
+    "type": "rotating_equipment",
+    "location": "Edificio F / Reparto Montaggio",
+    "criticality": "B",
+    "manufacturer": "Demag",
+    "model": "EKKE 5t",
+    "failure_modes": ["BEAR-WEAR-01", "WIRE-WEAR-01", "BRAKE-WEAR-01"]
+  },
+  {
+    "id": "CL-201",
+    "name": "Chiller — Raffreddamento Processo",
+    "type": "rotating_equipment",
+    "location": "Edificio A / Terrazzo / Unità Esterna",
+    "criticality": "A",
+    "manufacturer": "Carrier",
+    "model": "30XA 262",
+    "failure_modes": ["REFR-LEAK-01", "COMP-FAIL-01", "FILT-CLOG-01"]
+  },
+  {
+    "id": "FLT-301",
+    "name": "Filtro a Maniche — Aspirazione Polveri",
+    "type": "static_equipment",
+    "location": "Edificio E / Esterno",
+    "criticality": "B",
+    "manufacturer": "Donaldson",
+    "model": "Torit DFO 3-24",
+    "failure_modes": ["FILT-CLOG-01", "GASK-LEAK-01"]
+  },
+  {
+    "id": "SRB-01",
+    "name": "Serbatoio Accumulo — Acqua Demineralizzata",
+    "type": "static_equipment",
+    "location": "Edificio C / Piano 0 / Locale Trattamento",
+    "criticality": "C",
+    "manufacturer": "Inox Friuli",
+    "model": "V-5000L",
+    "failure_modes": ["CORR-01", "VLV-STUCK-01"]
+  },
+  {
+    "id": "UPS-01",
+    "name": "UPS — Sala Server",
+    "type": "electrical",
+    "location": "Edificio A / Piano 0 / Sala Server",
+    "criticality": "A",
+    "manufacturer": "Eaton",
+    "model": "93PM 30kW",
+    "failure_modes": ["BATT-DEGR-01", "PWR-FAIL-01"]
+  },
+  {
+    "id": "AGV-01",
+    "name": "AGV — Logistica Interna",
+    "type": "rotating_equipment",
+    "location": "Magazzino / Corsia Principale",
+    "criticality": "C",
+    "manufacturer": "SICK",
+    "model": "NAV350",
+    "failure_modes": ["BATT-DEGR-01", "SENS-DRFT-01", "COMM-FAIL-01"]
+  }
+]

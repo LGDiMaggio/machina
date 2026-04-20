@@ -51,18 +51,18 @@ def _collect_connector_capabilities() -> set[str]:
             if not inspect.isclass(obj):
                 continue
 
-            # Check for ClassVar list (direct attribute on the class dict)
+            # Check for ClassVar capabilities (list, tuple, set, or frozenset)
             raw_caps = obj.__dict__.get("capabilities")
-            if isinstance(raw_caps, (list, tuple)):
-                caps.update(raw_caps)
+            if isinstance(raw_caps, (list, tuple, set, frozenset)):
+                caps.update(str(c.value) if hasattr(c, "value") else str(c) for c in raw_caps)
 
             # Also check _BASE_CAPABILITIES for GenericCmmsConnector
             base_caps = obj.__dict__.get("_BASE_CAPABILITIES")
-            if isinstance(base_caps, (list, tuple)):
-                caps.update(base_caps)
+            if isinstance(base_caps, (list, tuple, set, frozenset)):
+                caps.update(str(c.value) if hasattr(c, "value") else str(c) for c in base_caps)
             optional_caps = obj.__dict__.get("_OPTIONAL_CAPABILITIES")
             if isinstance(optional_caps, dict):
-                caps.update(optional_caps.keys())
+                caps.update(str(k.value) if hasattr(k, "value") else str(k) for k in optional_caps)
     return caps
 
 

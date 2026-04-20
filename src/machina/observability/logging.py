@@ -7,6 +7,7 @@ and ``operation`` fields when bound to the logger context.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -71,7 +72,10 @@ def configure_logging(
         ],
     )
 
-    handler = logging.StreamHandler(sys.stdout)
+    # Route to stderr when running as MCP stdio server to avoid
+    # corrupting the JSON-RPC stream on stdout.
+    stream = sys.stderr if os.environ.get("MACHINA_MCP_STDIO") else sys.stdout
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
 
     root = logging.getLogger()

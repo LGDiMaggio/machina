@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-20
+
+### Added
+
+- **MCP Server** — expose Machina connectors via Model Context Protocol. Supports `stdio` (IDE integration) and `streamable-http` (multi-client deployment) transports. Tools are auto-registered from connector capabilities. Includes resources (asset details, work orders, failure taxonomy) and pre-built prompts (diagnosis, preventive planning, history summary).
+- **MCP Authentication** — static bearer token auth with per-token client identity tracking (`MACHINA_MCP_TOKENS_JSON`). Pluggable `TokenVerifier` protocol for Vault/AKV integration.
+- **Typed Capability enum** — `Capability` enum replaces `list[str]` for connector capabilities. Dual-accept registry preserves backward compatibility through v0.3.x.
+- **Excel/CSV Connector** (`ExcelCsvConnector`) — read/write maintenance data from `.xlsx` and `.csv` files with YAML schema mapping and file watcher support.
+- **SQL Connector** (`GenericSqlConnector`) — read from PostgreSQL, SQL Server, SQLite, DB2 with YAML table-to-entity mapping.
+- **GenericCmms YAML Mapper** — zero-Python entity mapping for any REST CMMS. Declarative field specs with coercers (`enum_map`, `regex_extract`, `datetime`), reverse mapping for writes, and pluggable coercer registry.
+- **ActionTracer v2** — `conversation_id` field groups traces by conversation. LLM cost tracking (`prompt_tokens`, `completion_tokens`, `usd_cost`, `model`). JSONL export with automatic secret redaction and summary truncation.
+- **Docker deployment** — multi-stage Dockerfile, docker-compose with Machina + ChromaDB + mock CMMS, `.env.example` with all configuration variables documented.
+- **systemd deployment** — production-ready `machina.service` unit with security hardening (`ProtectSystem=strict`, `NoNewPrivileges`, dedicated user/group).
+- **Starter-kit template** (`templates/odl-generator-from-text/`) — clone-configure-deploy package: Italian free-text message → asset resolution → Work Order creation. Dual substrate (Excel / REST CMMS). Email + Telegram channels. 20 PMI-Italia sample assets. Italian entity-resolver prompt with typo/abbreviation/synonym tolerance.
+- **Deployment documentation** — on-premise guide, Docker guide, uptime/resilience doc (16-combination behavior matrix), security doc (threat model for stdio/HTTP/DocumentStore/traces), scaling doc (why CPU autoscaling is wrong for LLM workloads), secrets management decision matrix.
+- **MCP documentation** — setup, tools reference, resources, prompts, auth configuration.
+- **Observability documentation** — action traces format, JSONL export, cost tracking and analysis.
+- **Connector documentation** — Excel/CSV, SQL, GenericCmms YAML mapper guides.
+- **Migration guide** — v0.2 → v0.3 checklist (5-minute upgrade path for custom connector authors).
+
+### Changed
+
+- Connector `capabilities` property type: `list[str]` → `frozenset[Capability]`. The old format is still accepted (dual-accept registry) but will be removed in v0.4.
+- `machina.mcp.MCPServer` stub replaced by a real MCP server implementation (FastMCP-based).
+- `mkdocs.yml` navigation expanded with MCP, Templates, Deployment, and Observability sections.
+- Top-level README updated with Starter Kit section.
+
+### Deprecated
+
+- `list[str]` capability format on connectors — migrate to `frozenset[Capability]` before v0.4.
+- `MACHINA_MCP_TOKENS` (comma-separated) — use `MACHINA_MCP_TOKENS_JSON` for per-token client identity.
+
+### Removed
+
+- `MCPServer` `NotImplementedError` stub — replaced by real implementation.
+
+### Deferred to v0.3.1
+
+- Kubernetes manifests, Helm charts, HPA configuration
+- Conversation replay API (`ActionTracer.for_conversation()`)
+- Alerting hooks (`ActionTracer.on_alert`)
+- Templates: technician-chatbot, predictive-workflow
+- MCP resource URI scheme promotion from pre-stable to stable
+- OAuth 2.1 authorization server for MCP
+- WhatsApp connector (pending Meta approval)
+- MaintainX dedicated connector (GenericCmms YAML covers the use case)
+
 ## [0.2.1] - 2026-04-15
 
 A focused consolidation release between v0.2.0 and v0.3. No new features; the goal was an honest, stable base ahead of the MCP server layer work in v0.3. No public API removed.
@@ -14,7 +61,7 @@ A focused consolidation release between v0.2.0 and v0.3. No new features; the go
 - **`docs/roadmap.md`** — what ships in v0.2.1 and what's planned for v0.3 (MCP server, `#31` channels/registry unification, MaintainX/Limble/Fiix, `AgentTeam`, anomaly detection, plugin system, WhatsApp/Teams).
 - **`docs/troubleshooting.md`** — short entries for the issues adopters hit most: LLM provider model strings, sandbox vs live mode, connector capability discovery, config-loader errors.
 - **Loud stub for `machina.mcp.MCPServer`** — instantiation raises `NotImplementedError` with a pointer to the roadmap. `import machina.mcp` continues to work, reserving the import path across the v0.2 → v0.3 jump.
-- **`EmailConnector` discoverability example** — `examples/01_alarm_response/agent.py` now imports `EmailConnector` and conditionally attaches it to the agent's channels when `MACHINA_SMTP_HOST` / `USER` / `PASSWORD` are set. Without the env vars, the example stays a zero-config CLI demo.
+- **`EmailConnector`** — available as a communication connector for workflow notification. See `docs/connectors/email.md` for setup.
 - **LiteLLM contract tests** (`tests/unit/test_llm_provider.py::TestLiteLLMModelStringContract`) — exercise the real `litellm.get_llm_provider` parser, pinning the `provider:model → provider/model` normalization introduced in `b48f649` and anchoring that the colon form keeps being rejected by LiteLLM.
 - **`tests/validate_examples.py` construct check** — now imports every runnable `examples/*/agent.py` so module-level `Agent(...)` construction actually runs. Catches the "imports fine but blows up at first call" class of regression that produced the post-v0.2.0 reactive-fix cadence.
 - **Per-module coverage floors in CI** (agent 88%, config 95%, llm 95%, observability 85%, workflows 90%). Floors sit ~5% below the measured baseline; any silent regression in a core module now trips CI.
@@ -38,7 +85,7 @@ A focused consolidation release between v0.2.0 and v0.3. No new features; the go
 
 ### Notes
 
-- A framework gap surfaced during consolidation: workflow notification steps resolve channels via the connector registry while `Agent(channels=[...])` lives on a separate list, and `sandbox=True` does not gate `channel.connect()`. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3. The `examples/01_alarm_response/README.md` documents the implication inline so adopters aren't surprised.
+- A framework gap surfaced during consolidation: workflow notification steps resolve channels via the connector registry while `Agent(channels=[...])` lives on a separate list, and `sandbox=True` does not gate `channel.connect()`. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3.
 
 ## [0.2.0] - 2026-04-11
 

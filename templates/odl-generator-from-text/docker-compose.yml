@@ -1,0 +1,43 @@
+services:
+  machina:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./data:/home/machina/app/data
+      - machina-traces:/home/machina/traces
+    depends_on:
+      mock-smtp:
+        condition: service_started
+    restart: unless-stopped
+
+  # MailHog — mock SMTP server with web UI for inspecting sent emails
+  mock-smtp:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI — open http://localhost:8025 to see sent emails
+      - "1143:1143"   # IMAP (if supported by image)
+    restart: unless-stopped
+
+  # ChromaDB — RAG vector store (optional, for document search)
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+    restart: unless-stopped
+
+  # Mock CMMS — only needed for generic_cmms_yaml substrate
+  # Uncomment if using MACHINA_SUBSTRATE=generic_cmms_yaml
+  # mock-cmms:
+  #   build: ../../deploy/docker/mock-cmms
+  #   ports:
+  #     - "9000:9000"
+  #   restart: unless-stopped
+
+volumes:
+  machina-traces:
+  chromadb-data:

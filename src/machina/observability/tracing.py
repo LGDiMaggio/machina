@@ -3,15 +3,30 @@
 Records every action the agent takes (connector calls, LLM requests,
 tool invocations) as structured trace entries.  Useful for debugging,
 compliance logging, and understanding agent reasoning.
+
+v0.3 additions: conversation_id, LLM token/cost fields, subscriber
+callbacks, and redacting_dump_json() for safe JSONL export.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+import structlog
 from pydantic import BaseModel, Field
+
+_logger = structlog.get_logger(__name__)
+
+_REDACT_PATTERNS = re.compile(
+    r"(token|password|secret|api_key|client_secret|authorization)",
+    re.IGNORECASE,
+)
 
 
 class TraceEntry(BaseModel):
@@ -29,6 +44,36 @@ class TraceEntry(BaseModel):
     error: str = Field(default="", description="Error message if action failed")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    # v0.3 — LLM cost tracking (OpenTelemetry-compatible naming)
+    conversation_id: str = Field(default="", description="Conversation/session identifier")
+    prompt_tokens: int = Field(default=0, description="Input tokens consumed")
+    completion_tokens: int = Field(default=0, description="Output tokens generated")
+    total_tokens: int = Field(default=0, description="Total tokens (prompt + completion)")
+    usd_cost: float = Field(default=0.0, description="Estimated USD cost of this action")
+    model: str = Field(default="", description="LLM model identifier")
+
+    def redacting_dump_json(self, *, max_summary_chars: int = 2000) -> str:
+        """Serialize to JSON with secret redaction and summary truncation.
+
+        Unlike ``model_dump_json()``, this method:
+        - Redacts metadata keys matching sensitive patterns
+        - Truncates ``input_summary`` and ``output_summary``
+        """
+        data = self.model_dump(mode="json")
+
+        for key in list(data.get("metadata", {})):
+            if _REDACT_PATTERNS.search(key):
+                data["metadata"][key] = "***REDACTED***"
+
+        for field in ("input_summary", "output_summary"):
+            val = data.get(field, "")
+            if len(val) > max_summary_chars:
+                data[field] = val[:max_summary_chars] + "...[truncated]"
+
+        import json
+
+        return json.dumps(data, default=str)
+
 
 class ActionTracer:
     """Records and stores agent action traces.
@@ -45,17 +90,31 @@ class ActionTracer:
     def __init__(self, *, max_entries: int = 1000) -> None:
         self._entries: list[TraceEntry] = []
         self._max_entries = max_entries
+        self._subscribers: list[Callable[[TraceEntry], Any]] = []
 
     @property
     def entries(self) -> list[TraceEntry]:
         """All recorded trace entries."""
         return list(self._entries)
 
+    def subscribe(self, callback: Callable[[TraceEntry], Any]) -> None:
+        """Register a callback invoked on every new entry."""
+        self._subscribers.append(callback)
+
     def record(self, entry: TraceEntry) -> None:
-        """Add a trace entry."""
+        """Add a trace entry and notify subscribers."""
         self._entries.append(entry)
         if len(self._entries) > self._max_entries:
             self._entries = self._entries[-self._max_entries :]
+        for cb in self._subscribers:
+            try:
+                cb(entry)
+            except Exception as exc:
+                _logger.warning(
+                    "trace_subscriber_failed",
+                    subscriber=getattr(cb, "__name__", repr(cb)),
+                    error=str(exc),
+                )
 
     def trace(
         self,
@@ -64,6 +123,7 @@ class ActionTracer:
         connector: str = "",
         asset_id: str = "",
         operation: str = "",
+        conversation_id: str = "",
         **metadata: Any,
     ) -> _TraceContext:
         """Context manager that records timing and outcome.
@@ -73,6 +133,7 @@ class ActionTracer:
             connector: Connector name involved.
             asset_id: Asset context.
             operation: Specific operation name.
+            conversation_id: Conversation/session identifier.
             **metadata: Extra metadata to attach.
 
         Returns:
@@ -84,6 +145,7 @@ class ActionTracer:
             connector=connector,
             asset_id=asset_id,
             operation=operation,
+            conversation_id=conversation_id,
             metadata=metadata,
         )
         return _TraceContext(self, entry)

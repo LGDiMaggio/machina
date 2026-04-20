@@ -1,0 +1,34 @@
+[Unit]
+Description=Machina AI Maintenance Agent (MCP Server)
+Documentation=https://machina-ai.readthedocs.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=machina
+Group=machina
+WorkingDirectory=/var/lib/machina
+
+EnvironmentFile=/etc/machina/machina.env
+
+ExecStart=/opt/machina-venv/bin/python -m machina.mcp \
+    --transport streamable-http \
+    --config /etc/machina/config.yaml
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+StandardOutput=append:/var/log/machina/machina.log
+StandardError=append:/var/log/machina/machina.err
+
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/machina /var/lib/machina
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

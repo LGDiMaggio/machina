@@ -73,6 +73,7 @@ class TestLLMProviderComplete:
             messages=[{"role": "user", "content": "test"}],
             temperature=0.5,
             max_tokens=1024,
+            timeout=120.0,
         )
 
     @pytest.mark.asyncio
@@ -185,6 +186,76 @@ class TestLLMProviderCompleteWithTools:
 # test was green and the bug still shipped). The tests below hit the real
 # litellm.get_llm_provider parser, which is pure string logic (no network),
 # so they stay fast and credential-free while anchoring the real contract.
+
+
+class TestEmitTrace:
+    """Test _emit_trace cost/token instrumentation."""
+
+    def test_emit_trace_records_entry(self) -> None:
+        from machina.observability.tracing import ActionTracer
+
+        tracer = ActionTracer(max_entries=10)
+        provider = LLMProvider(model="test-model", tracer=tracer)
+
+        mock_response = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50)
+        )
+        provider._emit_trace(mock_response, conversation_id="conv-1")
+
+        entries = tracer.entries
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.action == "llm_call"
+        assert entry.prompt_tokens == 100
+        assert entry.completion_tokens == 50
+        assert entry.total_tokens == 150
+        assert entry.conversation_id == "conv-1"
+        assert entry.model == "test-model"
+
+    def test_emit_trace_handles_missing_usage(self) -> None:
+        from machina.observability.tracing import ActionTracer
+
+        tracer = ActionTracer(max_entries=10)
+        provider = LLMProvider(model="test-model", tracer=tracer)
+
+        mock_response = SimpleNamespace()
+        provider._emit_trace(mock_response)
+
+        entries = tracer.entries
+        assert len(entries) == 1
+        assert entries[0].prompt_tokens == 0
+        assert entries[0].completion_tokens == 0
+
+    def test_emit_trace_noop_without_tracer(self) -> None:
+        provider = LLMProvider(model="test-model")
+        mock_response = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        )
+        provider._emit_trace(mock_response)
+
+    @pytest.mark.asyncio
+    async def test_complete_calls_emit_trace(self) -> None:
+        from machina.observability.tracing import ActionTracer
+
+        tracer = ActionTracer(max_entries=10)
+        provider = LLMProvider(model="test-model", tracer=tracer)
+
+        mock_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=25),
+        )
+        mock_acompletion = AsyncMock(return_value=mock_response)
+        fake_litellm = _make_fake_litellm(mock_acompletion)
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            await provider.complete(
+                messages=[{"role": "user", "content": "test"}],
+                conversation_id="conv-2",
+            )
+
+        entries = tracer.entries
+        assert len(entries) == 1
+        assert entries[0].prompt_tokens == 50
+        assert entries[0].conversation_id == "conv-2"
 
 
 class TestLiteLLMModelStringContract:

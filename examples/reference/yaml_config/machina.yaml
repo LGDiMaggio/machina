@@ -1,0 +1,36 @@
+# Machina Agent Configuration
+#
+# The same agent you build in Python can be configured entirely
+# via this YAML file.  Environment variables are resolved with
+# the ${VAR} syntax (e.g. ${OPENAI_API_KEY}).
+#
+# Usage:
+#   python agent.py                        # uses this file
+#   python agent.py --config other.yaml    # custom config
+
+name: "Maintenance Assistant"
+description: "AI agent configured entirely via YAML"
+
+plant:
+  name: "North Plant"
+  location: "Building A"
+
+connectors:
+  cmms:
+    type: generic_cmms
+    settings:
+      data_dir: "../../sample_data/cmms"
+  docs:
+    type: document_store
+    settings:
+      paths:
+        - "../../sample_data/manuals"
+
+channels:
+  - type: cli
+
+llm:
+  provider: "ollama:llama3"    # or "openai:gpt-4o", "anthropic:claude-sonnet-4-20250514"
+  temperature: 0.1
+
+sandbox: false

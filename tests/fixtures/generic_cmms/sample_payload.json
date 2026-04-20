@@ -1,0 +1,94 @@
+{
+  "items": [
+    {
+      "machine_code": "P-001",
+      "machine_name": "  Pompa centrifuga linea 1  ",
+      "category": "rot",
+      "criticality_class": "A",
+      "parent_machine_code": null,
+      "installed_at": "2019-03-15",
+      "mfg": {"name": "  Grundfos  ", "model": "CR 32-2"}
+    },
+    {
+      "machine_code": "C-001",
+      "machine_name": "Compressore aria 1",
+      "category": "rot",
+      "criticality_class": "B",
+      "parent_machine_code": null,
+      "installed_at": "2018-01-01",
+      "mfg": {"name": "Atlas Copco", "model": "GA 37+"}
+    },
+    {
+      "machine_code": "V-001",
+      "machine_name": "Valvola sicurezza caldaia",
+      "category": "sta",
+      "criticality_class": "A",
+      "parent_machine_code": null,
+      "installed_at": "2016-12-01",
+      "mfg": {"name": "Spirax Sarco", "model": "SV80"}
+    },
+    {
+      "machine_code": "M-001",
+      "machine_name": "Motore principale nastro",
+      "category": "rot",
+      "criticality_class": "A",
+      "parent_machine_code": "N-001",
+      "installed_at": "2017-07-10",
+      "mfg": {"name": "ABB", "model": "M3BP 200MLA"}
+    },
+    {
+      "machine_code": "SC-001",
+      "machine_name": "Scambiatore di calore",
+      "category": "sta",
+      "criticality_class": "B",
+      "parent_machine_code": null,
+      "installed_at": "2015-11-20",
+      "mfg": {"name": "Alfa Laval", "model": "M10-BFG"}
+    },
+    {
+      "machine_code": "SE-001",
+      "machine_name": "Sensore temperatura forno",
+      "category": "sta",
+      "criticality_class": "A",
+      "parent_machine_code": "FO-001",
+      "installed_at": "2021-08-01",
+      "mfg": {"name": "Endress+Hauser", "model": "TR10"}
+    },
+    {
+      "machine_code": "CL-001",
+      "machine_name": "Climatizzatore uffici",
+      "category": "rot",
+      "criticality_class": "C",
+      "parent_machine_code": null,
+      "installed_at": "2023-01-10",
+      "mfg": {"name": "Daikin", "model": "RXS50L"}
+    },
+    {
+      "machine_code": "N-001",
+      "machine_name": "Nastro trasportatore 1",
+      "category": "rot",
+      "criticality_class": "A",
+      "parent_machine_code": null,
+      "installed_at": "2020-04-22",
+      "mfg": {"name": "Rulmeca", "model": "Serie 138"}
+    },
+    {
+      "machine_code": "GE-001",
+      "machine_name": "Generatore emergenza",
+      "category": "rot",
+      "criticality_class": "A",
+      "parent_machine_code": null,
+      "installed_at": "2016-06-01",
+      "mfg": {"name": "Caterpillar", "model": "C15 PGAI"}
+    },
+    {
+      "machine_code": "FO-001",
+      "machine_name": "Forno industriale 1",
+      "category": "sta",
+      "criticality_class": "A",
+      "parent_machine_code": null,
+      "installed_at": "2018-09-01",
+      "mfg": {"name": "Nabertherm", "model": "N 500/85HA"}
+    }
+  ]
+}

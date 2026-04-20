@@ -1,0 +1,34 @@
+services:
+  machina:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/home/machina/config.yaml:ro
+      - machina-traces:/home/machina/traces
+    depends_on:
+      chromadb:
+        condition: service_started
+      mock-cmms:
+        condition: service_started
+
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+
+  mock-cmms:
+    build:
+      context: mock-cmms
+    ports:
+      - "9000:9000"
+
+volumes:
+  machina-traces:
+  chromadb-data:

@@ -22,6 +22,10 @@ Key SAP OData service groups consumed:
   (entity set and field names are configurable per SAP version; see
   :class:`SapPmConnector` constructor args).
 
+The vendor payload ↔ Machina entity mapping lives as pure functions in
+:mod:`machina.connectors.cmms.mappers.sap_pm` so it can be unit-tested
+without HTTP mocks.
+
 See also:
     https://api.sap.com/api/API_EQUIPMENT/overview
     https://api.sap.com/api/API_MAINTENANCEORDER/overview
@@ -30,24 +34,22 @@ See also:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
+from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.retry import request_with_retry
-from machina.domain.asset import Asset, AssetType, Criticality
-from machina.domain.maintenance_plan import Interval, MaintenancePlan
-from machina.domain.spare_part import SparePart
-from machina.domain.work_order import (
-    Priority,
-    WorkOrder,
-    WorkOrderStatus,
-    WorkOrderType,
-)
+from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+if TYPE_CHECKING:
+    from machina.domain.asset import Asset
+    from machina.domain.maintenance_plan import MaintenancePlan
+    from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
 
@@ -63,265 +65,6 @@ def _require_httpx() -> Any:
             "httpx is required for SapPmConnector. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
-
-
-# ---------------------------------------------------------------------------
-# SAP → Machina entity mapping helpers
-# ---------------------------------------------------------------------------
-
-_SAP_ORDER_TYPE_MAP: dict[str, WorkOrderType] = {
-    "PM01": WorkOrderType.CORRECTIVE,
-    "PM02": WorkOrderType.PREVENTIVE,
-    "PM03": WorkOrderType.PREDICTIVE,
-    "PM04": WorkOrderType.IMPROVEMENT,
-}
-
-_SAP_PRIORITY_MAP: dict[str, Priority] = {
-    "1": Priority.EMERGENCY,
-    "2": Priority.HIGH,
-    "3": Priority.MEDIUM,
-    "4": Priority.LOW,
-}
-
-_SAP_STATUS_MAP: dict[str, WorkOrderStatus] = {
-    "CRTD": WorkOrderStatus.CREATED,
-    "REL": WorkOrderStatus.ASSIGNED,
-    "PCNF": WorkOrderStatus.IN_PROGRESS,
-    "CNF": WorkOrderStatus.COMPLETED,
-    "TECO": WorkOrderStatus.CLOSED,
-    "CLSD": WorkOrderStatus.CLOSED,
-    "DLFL": WorkOrderStatus.CANCELLED,
-}
-
-_REVERSE_SAP_STATUS: dict[WorkOrderStatus, str] = {
-    WorkOrderStatus.CREATED: "CRTD",
-    WorkOrderStatus.ASSIGNED: "REL",
-    WorkOrderStatus.IN_PROGRESS: "PCNF",
-    WorkOrderStatus.COMPLETED: "CNF",
-    WorkOrderStatus.CLOSED: "TECO",
-    WorkOrderStatus.CANCELLED: "DLFL",
-}
-
-_SAP_EQUIP_CATEGORY_MAP: dict[str, AssetType] = {
-    "M": AssetType.ROTATING_EQUIPMENT,  # Machinery
-    "E": AssetType.ELECTRICAL,  # Electrical
-    "I": AssetType.INSTRUMENT,  # Instrumentation
-    "P": AssetType.PIPING,  # Piping
-    "H": AssetType.HVAC,  # HVAC
-    "S": AssetType.SAFETY,  # Safety
-}
-
-
-def _parse_asset(data: dict[str, Any]) -> Asset:
-    """Convert SAP Equipment OData entity to a Machina :class:`Asset`."""
-    cat = str(data.get("EquipmentCategory", ""))
-    return Asset(
-        id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        name=str(data.get("EquipmentName", data.get("Description", ""))),
-        type=_SAP_EQUIP_CATEGORY_MAP.get(cat, AssetType.ROTATING_EQUIPMENT),
-        location=str(data.get("FunctionalLocation", "")),
-        manufacturer=str(data.get("Manufacturer", data.get("ManufacturerPartNmbr", ""))),
-        model=str(data.get("ModelNumber", "")),
-        serial_number=str(data.get("SerialNumber", data.get("ManufacturerSerialNumber", ""))),
-        criticality=_sap_criticality(data.get("ABCIndicator", "")),
-        parent=data.get("SuperordinateEquipment") or None,
-        equipment_class_code=data.get("EquipmentClassCode") or None,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "Equipment",
-                "EquipmentNumber",
-                "EquipmentName",
-                "Description",
-                "EquipmentCategory",
-                "FunctionalLocation",
-                "Manufacturer",
-                "ManufacturerPartNmbr",
-                "ModelNumber",
-                "SerialNumber",
-                "ManufacturerSerialNumber",
-                "ABCIndicator",
-                "SuperordinateEquipment",
-                "EquipmentClassCode",
-            }
-        },
-    )
-
-
-def _sap_criticality(abc_indicator: Any) -> Criticality:
-    """Map SAP ABC indicator to Machina criticality."""
-    val = str(abc_indicator).upper().strip()
-    if val == "A":
-        return Criticality.A
-    if val == "B":
-        return Criticality.B
-    return Criticality.C
-
-
-def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
-    """Convert SAP MaintenanceOrder OData entity to a :class:`WorkOrder`."""
-    raw_type = str(data.get("MaintenanceOrderType", ""))
-    wo_type = _SAP_ORDER_TYPE_MAP.get(raw_type, WorkOrderType.CORRECTIVE)
-
-    raw_priority = str(data.get("MaintPriority", "3"))
-    priority = _SAP_PRIORITY_MAP.get(raw_priority, Priority.MEDIUM)
-
-    # SAP uses system status; try multiple fields
-    sys_status = str(data.get("MaintenanceOrderSystemStatus", data.get("SystemStatus", "")))
-    status = _map_sap_status(sys_status)
-
-    now = datetime.now(tz=UTC)
-    created = data.get("CreationDate", data.get("MaintOrdBasicStartDate", ""))
-    updated = data.get("LastChangeDateTime", data.get("MaintOrdBasicEndDate", ""))
-
-    return WorkOrder(
-        id=str(data.get("MaintenanceOrder", data.get("MaintenanceOrderNumber", ""))),
-        type=wo_type,
-        priority=priority,
-        status=status,
-        asset_id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        description=str(data.get("MaintenanceOrderDesc", data.get("Description", ""))),
-        assigned_to=data.get("MaintOrdPersonResponsible") or None,
-        failure_mode=data.get("MaintenanceActivityType") or None,
-        failure_cause=data.get("MaintenanceCause") or data.get("MaintNotifCause") or None,
-        created_at=_parse_sap_datetime(created) if created else now,
-        updated_at=_parse_sap_datetime(updated) if updated else now,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "MaintenanceOrder",
-                "MaintenanceOrderNumber",
-                "MaintenanceOrderType",
-                "MaintPriority",
-                "MaintenanceOrderSystemStatus",
-                "SystemStatus",
-                "Equipment",
-                "EquipmentNumber",
-                "MaintenanceOrderDesc",
-                "Description",
-                "MaintOrdPersonResponsible",
-                "MaintenanceActivityType",
-                "MaintenanceCause",
-                "MaintNotifCause",
-                "CreationDate",
-                "MaintOrdBasicStartDate",
-                "LastChangeDateTime",
-                "MaintOrdBasicEndDate",
-            }
-        },
-    )
-
-
-def _map_sap_status(sys_status: str) -> WorkOrderStatus:
-    """Map SAP system status string to :class:`WorkOrderStatus`.
-
-    SAP system status can be a compound string like ``"CRTD REL MANC"``.
-    We check for known tokens in priority order.
-    """
-    tokens = sys_status.upper().split()
-    # Check in reverse lifecycle order (most progressed wins)
-    for token in ("DLFL", "CLSD", "TECO", "CNF", "PCNF", "REL", "CRTD"):
-        if token in tokens:
-            return _SAP_STATUS_MAP[token]
-    # Fallback: try direct lookup of the full string
-    return _SAP_STATUS_MAP.get(sys_status, WorkOrderStatus.CREATED)
-
-
-def _parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Convert SAP material / BOM component data to a :class:`SparePart`."""
-    return SparePart(
-        sku=str(data.get("Material", data.get("MaterialNumber", ""))),
-        name=str(data.get("MaterialDescription", data.get("Description", ""))),
-        stock_quantity=int(data.get("AvailableQuantity", data.get("Quantity", 0))),
-        unit_cost=float(data.get("StandardPrice", data.get("Price", 0.0))),
-        warehouse_location=str(data.get("StorageLocation", data.get("Plant", ""))),
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "Material",
-                "MaterialNumber",
-                "MaterialDescription",
-                "Description",
-                "AvailableQuantity",
-                "Quantity",
-                "StandardPrice",
-                "Price",
-                "StorageLocation",
-                "Plant",
-            }
-        },
-    )
-
-
-def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
-    """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`."""
-    cycle_val = int(data.get("MaintenancePlanCycleValue", data.get("CycleValue", 0)))
-    cycle_unit = str(data.get("MaintenancePlanCycleUnit", data.get("CycleUnit", "DAY")))
-    interval = _sap_cycle_to_interval(cycle_val, cycle_unit)
-
-    return MaintenancePlan(
-        id=str(data.get("MaintenancePlan", data.get("MaintenancePlanNumber", ""))),
-        asset_id=str(data.get("Equipment", "")),
-        name=str(data.get("MaintenancePlanDesc", data.get("Description", ""))),
-        interval=interval,
-        active=str(data.get("MaintenancePlanStatus", "")).upper() != "INAC",
-    )
-
-
-def _sap_cycle_to_interval(value: int, unit: str) -> Interval:
-    """Map SAP cycle value + unit to a Machina :class:`Interval`."""
-    unit_upper = unit.upper().strip()
-    if unit_upper in ("DAY", "TAG"):
-        return Interval(days=value)
-    if unit_upper in ("WK", "WOC"):
-        return Interval(weeks=value)
-    if unit_upper in ("MON", "MON."):
-        return Interval(months=value)
-    if unit_upper in ("H", "STD"):
-        return Interval(hours=value)
-    # Default to days
-    return Interval(days=value)
-
-
-def _parse_sap_datetime(value: str) -> datetime:
-    """Parse SAP date/datetime strings into timezone-aware datetime.
-
-    Handles ISO-8601, SAP ``/Date(millis)/`` format, and plain
-    ``YYYY-MM-DD`` dates.
-    """
-    if not value:
-        return datetime.now(tz=UTC)
-    # SAP JSON /Date(1234567890000)/ format
-    if value.startswith("/Date("):
-        millis_str = value.replace("/Date(", "").replace(")/", "")
-        # Handle timezone offset: /Date(1234567890000+0000)/
-        if "+" in millis_str:
-            millis_str = millis_str.split("+")[0]
-        if "-" in millis_str and millis_str.index("-") > 0:
-            millis_str = millis_str.split("-")[0]
-        millis = int(millis_str)
-        return datetime.fromtimestamp(millis / 1000, tz=UTC)
-    # Standard ISO-8601
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt
-    except ValueError:
-        pass
-    # Plain date YYYY-MM-DD or YYYYMMDD
-    try:
-        if len(value) == 8 and value.isdigit():
-            return datetime.strptime(value, "%Y%m%d").replace(tzinfo=UTC)
-        return datetime.strptime(value[:10], "%Y-%m-%d").replace(tzinfo=UTC)
-    except ValueError:
-        return datetime.now(tz=UTC)
 
 
 class SapPmConnector:
@@ -371,14 +114,17 @@ class SapPmConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "read_assets",
-        "read_work_orders",
-        "create_work_order",
-        "update_work_order",
-        "read_spare_parts",
-        "read_maintenance_plans",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_ASSETS,
+            Capability.READ_WORK_ORDERS,
+            Capability.GET_WORK_ORDER,
+            Capability.CREATE_WORK_ORDER,
+            Capability.UPDATE_WORK_ORDER,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_PLANS,
+        }
+    )
 
     _PAGE_SIZE: ClassVar[int] = 100
 
@@ -461,7 +207,7 @@ class SapPmConnector:
         """Return all equipment master records from SAP PM."""
         self._ensure_connected()
         raw = await self._odata_get("API_EQUIPMENT", "Equipment")
-        return [_parse_asset(item) for item in raw]
+        return [sap_mapper.parse_asset(item) for item in raw]
 
     async def get_asset(self, asset_id: str) -> Asset | None:
         """Look up a single equipment record by number."""
@@ -472,7 +218,7 @@ class SapPmConnector:
             odata_filter=f"Equipment eq '{asset_id}'",
             top=1,
         )
-        return _parse_asset(raw[0]) if raw else None
+        return sap_mapper.parse_asset(raw[0]) if raw else None
 
     async def read_work_orders(
         self,
@@ -495,7 +241,7 @@ class SapPmConnector:
             filters.append(f"Equipment eq '{asset_id}'")
         if status:
             sap_status = (
-                _REVERSE_SAP_STATUS.get(status, status.value)
+                sap_mapper.REVERSE_SAP_STATUS.get(status, status.value)
                 if isinstance(status, WorkOrderStatus)
                 else status
             )
@@ -506,7 +252,7 @@ class SapPmConnector:
             "MaintenanceOrder",
             odata_filter=odata_filter,
         )
-        return [_parse_work_order(item) for item in raw]
+        return [sap_mapper.parse_work_order(item) for item in raw]
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single maintenance order by number."""
@@ -517,8 +263,9 @@ class SapPmConnector:
             odata_filter=f"MaintenanceOrder eq '{work_order_id}'",
             top=1,
         )
-        return _parse_work_order(raw[0]) if raw else None
+        return sap_mapper.parse_work_order(raw[0]) if raw else None
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Create a new maintenance order in SAP PM.
 
@@ -532,8 +279,8 @@ class SapPmConnector:
         payload: dict[str, Any] = {
             "MaintenanceOrderDesc": work_order.description,
             "Equipment": work_order.asset_id,
-            "MaintenanceOrderType": _reverse_order_type(work_order.type),
-            "MaintPriority": _reverse_priority(work_order.priority),
+            "MaintenanceOrderType": sap_mapper.reverse_order_type(work_order.type),
+            "MaintPriority": sap_mapper.reverse_priority(work_order.priority),
         }
         if work_order.assigned_to:
             payload["MaintOrdPersonResponsible"] = work_order.assigned_to
@@ -557,8 +304,9 @@ class SapPmConnector:
             work_order_id=result.get("MaintenanceOrder"),
             asset_id=work_order.asset_id,
         )
-        return _parse_work_order(result)
+        return sap_mapper.parse_work_order(result)
 
+    @sandbox_aware
     async def update_work_order(
         self,
         work_order_id: str,
@@ -583,7 +331,7 @@ class SapPmConnector:
         self._ensure_connected()
         payload: dict[str, Any] = {}
         if status is not None:
-            payload["MaintenanceOrderSystemStatus"] = _reverse_status(status)
+            payload["MaintenanceOrderSystemStatus"] = sap_mapper.reverse_status(status)
         if assigned_to is not None:
             payload["MaintOrdPersonResponsible"] = assigned_to
         if description is not None:
@@ -613,13 +361,15 @@ class SapPmConnector:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
         return updated
 
+    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)  # type: ignore[no-any-return]
 
+    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
-        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+        return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_spare_parts(
         self,
@@ -667,13 +417,13 @@ class SapPmConnector:
             self._bom_entity_set,
             odata_filter=odata_filter,
         )
-        return [_parse_spare_part(item) for item in raw]
+        return [sap_mapper.parse_spare_part(item) for item in raw]
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Read preventive-maintenance plans from SAP PM."""
         self._ensure_connected()
         raw = await self._odata_get("API_MAINTENANCEPLAN", "MaintenancePlan")
-        return [_parse_maintenance_plan(item) for item in raw]
+        return [sap_mapper.parse_maintenance_plan(item) for item in raw]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed maintenance orders for an asset."""
@@ -689,7 +439,7 @@ class SapPmConnector:
             "MaintenanceOrder",
             odata_filter=odata_filter,
         )
-        return [_parse_work_order(item) for item in raw]
+        return [sap_mapper.parse_work_order(item) for item in raw]
 
     # ------------------------------------------------------------------
     # Internal: OData REST helpers
@@ -839,33 +589,3 @@ class SapPmConnector:
             total=len(all_items),
         )
         return all_items
-
-
-# ---------------------------------------------------------------------------
-# Reverse mapping helpers (Machina → SAP)
-# ---------------------------------------------------------------------------
-
-
-def _reverse_priority(priority: Priority) -> str:
-    """Map Machina priority to SAP priority code."""
-    return {
-        Priority.EMERGENCY: "1",
-        Priority.HIGH: "2",
-        Priority.MEDIUM: "3",
-        Priority.LOW: "4",
-    }.get(priority, "3")
-
-
-def _reverse_order_type(wo_type: WorkOrderType) -> str:
-    """Map Machina work-order type to SAP order type."""
-    return {
-        WorkOrderType.CORRECTIVE: "PM01",
-        WorkOrderType.PREVENTIVE: "PM02",
-        WorkOrderType.PREDICTIVE: "PM03",
-        WorkOrderType.IMPROVEMENT: "PM04",
-    }.get(wo_type, "PM01")
-
-
-def _reverse_status(status: WorkOrderStatus) -> str:
-    """Map Machina work-order status to SAP system status code."""
-    return _REVERSE_SAP_STATUS.get(status, "CRTD")

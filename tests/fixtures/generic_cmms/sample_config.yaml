@@ -1,0 +1,71 @@
+mapping:
+  asset:
+    endpoint:
+      method: GET
+      path: "/api/v1/machines"
+    root: "items"
+    fields:
+      id:
+        source: machine_code
+      name:
+        source: machine_name
+        coerce: strip_whitespace
+      type:
+        source: category
+        coerce: enum_map
+        enum_map:
+          rot: rotating_equipment
+          sta: static_equipment
+        default: rotating_equipment
+      criticality:
+        source: criticality_class
+        coerce: enum_map
+        enum_map:
+          A: A
+          B: B
+          C: C
+      parent:
+        source: parent_machine_code
+        default: null
+      install_date:
+        source: installed_at
+        coerce: iso_date
+      metadata:
+        manufacturer:
+          source: "mfg.name"
+          coerce: strip_whitespace
+        model:
+          source: "mfg.model"
+  work_order:
+    endpoint:
+      method: GET
+      path: "/api/v1/workorders"
+    create_endpoint:
+      method: POST
+      path: "/api/v1/workorders"
+    fields:
+      id:
+        source: wo_id
+        required: true
+      asset_id:
+        source: machine_code
+        required: true
+      description:
+        source: descr
+      priority:
+        source: priority_code
+        coerce: enum_map
+        enum_map:
+          "1": high
+          "2": medium
+          "3": low
+        default: medium
+    reverse_fields:
+      description: "descr"
+      priority:
+        target: priority_code
+        reverse_enum_map:
+          high: "1"
+          medium: "2"
+          low: "3"
+      asset_id: "machine_code"

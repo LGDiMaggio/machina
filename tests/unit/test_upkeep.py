@@ -9,16 +9,25 @@ from __future__ import annotations
 
 import pytest
 
-from machina.connectors.cmms.upkeep import (
-    UpKeepConnector,
-    _parse_asset,
-    _parse_datetime,
-    _parse_maintenance_plan,
-    _parse_spare_part,
-    _parse_work_order,
-    _require_httpx,
-    _reverse_priority,
+from machina.connectors.cmms.mappers.upkeep import (
+    parse_asset as _parse_asset,
 )
+from machina.connectors.cmms.mappers.upkeep import (
+    parse_datetime as _parse_datetime,
+)
+from machina.connectors.cmms.mappers.upkeep import (
+    parse_maintenance_plan as _parse_maintenance_plan,
+)
+from machina.connectors.cmms.mappers.upkeep import (
+    parse_spare_part as _parse_spare_part,
+)
+from machina.connectors.cmms.mappers.upkeep import (
+    parse_work_order as _parse_work_order,
+)
+from machina.connectors.cmms.mappers.upkeep import (
+    reverse_priority as _reverse_priority,
+)
+from machina.connectors.cmms.upkeep import UpKeepConnector, _require_httpx
 from machina.domain.asset import Asset, AssetType
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart

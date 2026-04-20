@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 
 logger = structlog.get_logger()
 
@@ -34,10 +35,9 @@ class SimulatedSensorConnector:
         }
     """
 
-    capabilities: ClassVar[list[str]] = [
-        "get_related_readings",
-        "get_latest_reading",
-    ]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.GET_RELATED_READINGS, Capability.GET_LATEST_READING}
+    )
 
     def __init__(self, *, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)

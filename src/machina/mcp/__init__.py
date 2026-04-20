@@ -1,20 +1,31 @@
 """MCP Server layer — expose connectors as Model Context Protocol servers.
 
-Status: not implemented. Planned for **v0.3**.
+The v0.3 MCP server uses FastMCP to expose Machina connectors as
+MCP tools.  Build a server with :func:`build_server` and run it with
+:func:`serve`.
 
-The MCP layer will expose every Machina connector as a `Model Context Protocol
-<https://modelcontextprotocol.io/>`_ server, letting MCP-compatible clients
-(Claude Desktop, Cursor, Continue, …) call connector capabilities as tools
-without any agent code. See :mod:`machina.mcp.server` and ``docs/mcp-server.md``
-for the planned design.
-
-The ``machina.mcp`` namespace is reserved so that ``import machina.mcp`` keeps
-working across the v0.2 → v0.3 transition. Concrete symbols raise
-``NotImplementedError`` with a pointer to the roadmap until v0.3 lands.
+The legacy ``MCPServer`` placeholder is deprecated — accessing it
+emits a :class:`DeprecationWarning`.
 """
 
 from __future__ import annotations
 
-from machina.mcp.server import MCPServer
+import warnings
+from typing import Any
 
-__all__ = ["MCPServer"]
+from machina.mcp.server import build_server, serve
+
+__all__ = ["build_server", "serve"]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "MCPServer":
+        warnings.warn(
+            "MCPServer is deprecated and was removed in v0.3. "
+            "Use machina.mcp.build_server(config) instead. "
+            "See docs/migration/v0.2-to-v0.3.md for details.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise AttributeError("MCPServer was removed in v0.3. Use build_server(config) instead.")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

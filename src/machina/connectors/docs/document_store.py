@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -77,7 +78,9 @@ class DocumentStoreConnector:
         ```
     """
 
-    capabilities: ClassVar[list[str]] = ["search_documents", "retrieve_section"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.SEARCH_DOCUMENTS, Capability.RETRIEVE_SECTION}
+    )
 
     def __init__(
         self,
@@ -218,10 +221,12 @@ class DocumentStoreConnector:
 
     def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
         """Build a ChromaDB vector store from parsed documents."""
-        from langchain.text_splitter import (  # type: ignore[import-not-found]
+        from langchain.text_splitter import (  # type: ignore[import-not-found,unused-ignore]
             RecursiveCharacterTextSplitter,
         )
-        from langchain_community.vectorstores import Chroma  # type: ignore[import-not-found]
+        from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
+            Chroma,
+        )
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=self._chunk_size,
@@ -390,7 +395,7 @@ class DocumentStoreConnector:
     def _load_pdf(self, file_path: Path) -> dict[str, Any] | None:
         """Load a PDF file using LangChain's PDF loader, or skip if unavailable."""
         try:
-            from langchain_community.document_loaders import (  # type: ignore[import-not-found]
+            from langchain_community.document_loaders import (  # type: ignore[import-not-found,unused-ignore]
                 PyPDFLoader,
             )
 
@@ -404,6 +409,14 @@ class DocumentStoreConnector:
                 connector="DocumentStoreConnector",
                 file=str(file_path),
                 hint="Install machina-ai[docs-rag] for PDF support",
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "pdf_load_failed",
+                connector="DocumentStoreConnector",
+                file=str(file_path),
+                error=str(exc),
             )
             return None
 

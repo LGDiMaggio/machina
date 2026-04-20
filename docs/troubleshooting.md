@@ -34,7 +34,7 @@ Every `Agent` accepts a `sandbox: bool` argument and most examples default to `s
 Two known gaps to be aware of:
 
 - `Agent.start()` currently calls `connect()` on every configured channel unconditionally, regardless of `sandbox`. Connectors that talk to real services at connect-time (e.g. `EmailConnector` doing SMTP login) will attempt a live login even in sandbox mode. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3.
-- The workflow notification step resolves communication connectors via the registry, not the `channels` list (also [#31](https://github.com/LGDiMaggio/machina/issues/31)). See the `examples/01_alarm_response/README.md` for the implication.
+- The workflow notification step resolves communication connectors via the registry, not the `channels` list (also [#31](https://github.com/LGDiMaggio/machina/issues/31)). See `examples/alarm_to_workorder/README.md` for the implication.
 
 ## Connector capability discovery
 
@@ -66,7 +66,7 @@ Common causes:
 
 - The env var name uses the wrong prefix. Machina reads `MACHINA_*` variables; a `SMTP_HOST=...` setting is ignored, you need `MACHINA_SMTP_HOST=...`.
 - The YAML key and the Python key disagree. Both must be snake_case (`smtp_host`, not `smtpHost`).
-- A port env var is set to a non-numeric string (e.g. trailing whitespace). `examples/01_alarm_response/agent.py` validates `MACHINA_SMTP_PORT` and raises `SystemExit` with a clear message if it isn't an integer — mirror that pattern in your own wiring.
+- A port env var is set to a non-numeric string (e.g. trailing whitespace). Validate port env vars and raise `SystemExit` with a clear message if they aren't integers.
 
 ## Still stuck?
 

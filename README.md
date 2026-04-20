@@ -97,6 +97,33 @@ The agent resolves "pump P-201" to the actual asset, retrieves context from your
 
 Try it now: `cd examples/quickstart && python agent.py` -- [full quickstart guide](examples/quickstart/)
 
+### Now Make It Automate
+
+Add one line to register a workflow. The agent handles alarms end-to-end:
+
+```python
+from machina.workflows.builtins import alarm_to_workorder
+
+agent = Agent(
+    connectors=[cmms, docs],
+    workflows=[alarm_to_workorder],  # alarm → diagnosis → WO → notify
+    sandbox=True,
+)
+```
+
+```
+  Alarm: P-201 | vibration_velocity = 7.8 mm/s (threshold: 6.0)
+
+    [+] analyze_alarm      — Bearing wear (BEAR-WEAR-01), confidence: HIGH
+    [+] check_spare_parts  — SKF 6310-2RS in stock (4 units)
+    [+] create_work_order  — [LLM] Priority HIGH, est. 4 hours
+    [+] notify_technician  — [SANDBOX] Message logged
+
+  Result: SUCCESS (2.34s)
+```
+
+6 steps, only 2 use the LLM. The rest are deterministic -- fast, predictable, testable. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
+
 ### Or configure via YAML
 
 For knowledge-base agents (Q&A over CMMS data, manuals, spare parts), you can skip Python entirely and configure via YAML:
@@ -127,24 +154,39 @@ agent = Agent.from_config("machina.yaml")
 agent.run()
 ```
 
-YAML config is ideal for knowledge-base agents — technician Q&A, document search, asset lookup. For agents with automated workflows (alarm response, predictive pipelines), use Python — workflows need logic (guards, error policies, LLM reasoning steps) that YAML can't express. See the [YAML config guide](examples/06_yaml_config/) for details.
+YAML config is ideal for knowledge-base agents — technician Q&A, document search, asset lookup. For agents with automated workflows (alarm response, predictive pipelines), use Python — workflows need logic (guards, error policies, LLM reasoning steps) that YAML can't express. See the [YAML config guide](examples/reference/yaml_config/) for details.
 
 ## What You Can Build
 
-Every example is a complete, runnable agent. Start with quickstart, then pick what matches your use case:
+Two examples take you from zero to automation. Then deploy with the starter kit.
 
-| | Example | What your agent does |
-|-|---------|---------------------|
-| **Start here** | [quickstart/](examples/quickstart/) | Answers questions about equipment, procedures, spare parts, maintenance history |
-| **Automate** | [01_alarm_response/](examples/01_alarm_response/) | Alarm fires -- agent diagnoses the failure, checks parts, creates a work order, notifies the team via CLI (and optionally SMTP via `EmailConnector`) |
-| **Go autonomous** | [02_predictive_pipeline/](examples/02_predictive_pipeline/) | 10-step pipeline: sensor anomaly to diagnosed root cause to scheduled maintenance. 3 LLM steps, 7 deterministic |
-| **Stay portable** | [03_cmms_portability/](examples/03_cmms_portability/) | Same agent runs on SAP PM, IBM Maximo, UpKeep -- change one line, everything else stays identical |
-| **Build your own** | [04_custom_workflows/](examples/04_custom_workflows/) | Define any maintenance process as a workflow: spare part reorder, preventive scheduling, anything |
-| **Zero code** | [06_yaml_config/](examples/06_yaml_config/) | Configure agent entirely via YAML -- `Agent.from_config("machina.yaml")` |
-| **Think & act** | [07_agent_driven/](examples/07_agent_driven/) | Agent receives a complex scenario and autonomously decides which tools to use -- no predefined workflows |
-| **Collaborate** | [05_multi_agent_team/](examples/05_multi_agent_team/) | Specialist agents (diagnostics, inventory, scheduling) collaborate on complex scenarios -- *v0.3* |
+| Step | Example | What happens |
+|------|---------|--------------|
+| **1. Understand** | [quickstart/](examples/quickstart/) | Agent answers questions about equipment, procedures, spare parts, maintenance history |
+| **2. Automate** | [alarm_to_workorder/](examples/alarm_to_workorder/) | Alarm fires -- agent diagnoses failure, checks parts, creates work order, notifies team |
+| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Italian free-text messages become Work Orders. Docker, sandbox-first, production-ready |
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
+
+**More patterns** in [examples/reference/](examples/reference/): predictive pipelines, CMMS portability, custom workflows, YAML config, autonomous agents.
+
+## Starter Kit
+
+Ready to deploy? The **odl-generator-from-text** template is a complete, clone-configure-deploy package:
+
+```bash
+cp -r templates/odl-generator-from-text my-agent
+cd my-agent
+cp .env.example .env    # fill in your LLM key
+docker compose up       # sandbox mode by default
+```
+
+A technician sends an email or Telegram message in their language:
+
+> *Italian:* `"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"`
+> *English:* `"pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"`
+
+The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
 
 ## From Demo to Production
 
@@ -180,7 +222,7 @@ Building an AI maintenance agent today means writing custom connectors for SAP P
 Machina provides the missing vertical layer between general-purpose frameworks (LangChain, CrewAI) and the industrial maintenance world:
 
 - **Pre-built connectors** for CMMS, IoT sensors, communication platforms, and document stores
-- **Domain model aligned with ISO 14224** -- Asset, WorkOrder, FailureMode, SparePart, Alarm with hierarchies and validation
+- **Canonical maintenance domain model** -- Asset, WorkOrder, FailureMode, SparePart, Alarm with hierarchies and validation
 - **Domain-aware AI** -- agents that resolve equipment references, inject maintenance context, and ground answers in real data
 - **Rule-based + LLM intelligence** -- deterministic services (`FailureAnalyzer`, `WorkOrderFactory`, `MaintenanceScheduler`) work alongside the LLM, not instead of it
 - **Workflow engine** -- composable multi-step workflows with error policies, guard conditions, and sandbox mode
@@ -191,7 +233,7 @@ Machina provides the missing vertical layer between general-purpose frameworks (
 
 When a user asks *"What's wrong with pump P-201?"*, the agent:
 
-1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset with its ISO 14224 metadata, failure history, and criticality
+1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset with its domain metadata, failure history, and criticality
 2. **Gathers context** -- parallel async queries to all connectors: work orders from CMMS, readings from sensors, procedures from manuals (RAG)
 3. **Grounds the LLM** -- the retrieved context (real asset data, real inventory, real history) is injected into the prompt, so the LLM reasons with facts, not hallucinations
 4. **Takes action** -- workflows mix deterministic steps (rule-based diagnosis, spare part checks) with LLM reasoning (root cause synthesis, work order drafting)
@@ -273,8 +315,8 @@ The domain model is the backbone of Machina. Every connector normalizes external
 
 - **Portability** -- Switch CMMS backends, your agent logic doesn't change
 - **Deterministic logic where it counts** -- FailureAnalyzer, WorkOrderFactory, MaintenanceScheduler encode expertise as code, not LLM guesses
-- **LLM grounding** -- the LLM works with real, validated data (ISO 14224 codes, failure history, inventory levels), not hallucinated IDs
-- **Industry standard** -- failure modes and equipment classes follow ISO 14224
+- **LLM grounding** -- the LLM works with real, validated data (failure codes, maintenance history, inventory levels), not hallucinated IDs
+- **Industry-aligned taxonomy** -- failure modes and equipment classes follow established industrial standards
 
 ```python
 from machina.domain import Asset, AssetType, FailureMode

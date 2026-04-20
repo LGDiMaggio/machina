@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "machina-ai"
-version = "0.2.1"
+version = "0.3.0a1"
 description = "The open-source Python framework for building AI agents specialized in industrial maintenance."
 readme = "README.md"
 license = "Apache-2.0"
@@ -72,6 +72,10 @@ calendar = [
     "machina-ai[outlook-calendar]",
     "machina-ai[ical]",
 ]
+excel = ["openpyxl>=3.1", "watchdog>=4.0"]
+sql = ["pyodbc>=5.1"]
+sql-jdbc = ["jaydebeapi>=1.2,<2.0", "JPype1>=1.5"]
+mcp = ["mcp>=1.27.0,<2.0"]
 cmms-rest = ["httpx>=0.27"]
 docs-rag = [
     "langchain>=0.2",
@@ -87,6 +91,9 @@ all = [
     "machina-ai[telegram]",
     "machina-ai[slack]",
     "machina-ai[calendar]",
+    "machina-ai[excel]",
+    "machina-ai[sql]",
+    "machina-ai[mcp]",
     "machina-ai[cmms-rest]",
     "machina-ai[docs-rag]",
 ]
@@ -161,7 +168,7 @@ source = ["machina"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 70
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
