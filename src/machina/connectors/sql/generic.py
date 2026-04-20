@@ -95,7 +95,6 @@ def _row_to_dict(
     return result
 
 
-
 _ENTITY_BUILDERS: dict[str, Any] = {
     "Asset": _dict_to_asset,
     "WorkOrder": _dict_to_work_order,
