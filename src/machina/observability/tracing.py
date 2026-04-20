@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+import structlog
 from pydantic import BaseModel, Field
+
+_logger = structlog.get_logger(__name__)
 
 _REDACT_PATTERNS = re.compile(
     r"(token|password|secret|api_key|client_secret|authorization)",
@@ -104,10 +107,14 @@ class ActionTracer:
         if len(self._entries) > self._max_entries:
             self._entries = self._entries[-self._max_entries :]
         for cb in self._subscribers:
-            try:  # noqa: SIM105
+            try:
                 cb(entry)
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning(
+                    "trace_subscriber_failed",
+                    subscriber=getattr(cb, "__name__", repr(cb)),
+                    error=str(exc),
+                )
 
     def trace(
         self,

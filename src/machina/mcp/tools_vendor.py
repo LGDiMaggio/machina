@@ -50,6 +50,15 @@ async def sap_pm_raw_iw38_notification(
         notification_type: SAP notification type (default M2).
         description: Notification description text.
     """
+    from machina.connectors.base import get_sandbox_mode
+
+    if get_sandbox_mode():
+        logger.info("sandbox_write_blocked", operation="sap_pm_raw_iw38_notification")
+        return {
+            "description": f"[SANDBOX — no real write performed] {description}",
+            "metadata": {"sandbox": True},
+        }
+
     runtime = _runtime(ctx)
     conn = _find_connector_by_type(runtime, "sappm")
     if conn is None:
@@ -91,6 +100,15 @@ async def maximo_raw_attribute_update(
         resource_id: Resource identifier.
         attributes: Dictionary of attribute names to new values.
     """
+    from machina.connectors.base import get_sandbox_mode
+
+    if get_sandbox_mode():
+        logger.info("sandbox_write_blocked", operation="maximo_raw_attribute_update")
+        return {
+            "description": "[SANDBOX — no real write performed] Attribute update logged.",
+            "metadata": {"sandbox": True},
+        }
+
     runtime = _runtime(ctx)
     conn = _find_connector_by_type(runtime, "maximo")
     if conn is None:

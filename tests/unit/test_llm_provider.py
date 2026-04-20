@@ -73,6 +73,7 @@ class TestLLMProviderComplete:
             messages=[{"role": "user", "content": "test"}],
             temperature=0.5,
             max_tokens=1024,
+            timeout=120.0,
         )
 
     @pytest.mark.asyncio

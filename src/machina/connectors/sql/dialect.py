@@ -127,7 +127,23 @@ _DSN_PASSWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_URL_PASSWORD_RE = re.compile(
+    r"(://[^:]+:)([^@]+)(@)",
+)
+
+_URL_QUERY_PASSWORD_RE = re.compile(
+    r"([?&](?:password|pwd|passwd)=)([^&]+)",
+    re.IGNORECASE,
+)
+
 
 def redact_dsn(dsn: str) -> str:
-    """Replace password values in a DSN/connection string with ***."""
-    return _DSN_PASSWORD_RE.sub(r"\1***", dsn)
+    """Replace password values in a DSN/connection string with ***.
+
+    Handles ODBC-style (PWD=...; Password=...), URL authority
+    (user:password@host), and URL query params (?password=...).
+    """
+    result = _DSN_PASSWORD_RE.sub(r"\1***", dsn)
+    result = _URL_PASSWORD_RE.sub(r"\1***\3", result)
+    result = _URL_QUERY_PASSWORD_RE.sub(r"\1***", result)
+    return result

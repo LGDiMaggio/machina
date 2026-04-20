@@ -6,9 +6,12 @@ and columns to Machina domain entity fields.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 class FieldMapping(BaseModel):
@@ -44,6 +47,23 @@ class TableMapping(BaseModel):
         default=None,
         description="entity_field_name → column_name for INSERT",
     )
+
+    @field_validator("insert_table")
+    @classmethod
+    def _validate_insert_table(cls, v: str | None) -> str | None:
+        if v is not None and not _SQL_IDENTIFIER_RE.match(v):
+            msg = f"insert_table contains unsafe characters: {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def _validate_insert_columns(self) -> TableMapping:
+        if self.insert_columns:
+            for col in self.insert_columns.values():
+                if not _SQL_IDENTIFIER_RE.match(col):
+                    msg = f"insert_columns contains unsafe column name: {col!r}"
+                    raise ValueError(msg)
+        return self
 
 
 class SqlRetryConfig(BaseModel):

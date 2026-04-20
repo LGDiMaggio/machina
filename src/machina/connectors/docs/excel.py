@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
@@ -26,12 +26,9 @@ if TYPE_CHECKING:
         ExcelConnectorConfig,
         SheetSchema,
     )
-from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.asset import Asset
 from machina.domain.work_order import (
-    Priority,
     WorkOrder,
-    WorkOrderStatus,
-    WorkOrderType,
 )
 from machina.exceptions import (
     ConnectorConfigError,
@@ -245,17 +242,27 @@ def _rows_to_dicts(
             try:
                 coerced = _coerce_cell(cell_value, mapping)
             except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "broken_cell",
+                if mapping.required:
+                    logger.warning(
+                        "broken_cell",
+                        connector="ExcelCsvConnector",
+                        source=source,
+                        row_num=row_num,
+                        column=mapping.column,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    broken = True
+                    break
+                logger.debug(
+                    "optional_cell_coercion_failed",
                     connector="ExcelCsvConnector",
                     source=source,
                     row_num=row_num,
                     column=mapping.column,
-                    error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                broken = True
-                break
+                coerced = mapping.default
             if coerced is None and mapping.required:
                 logger.warning(
                     "missing_required_field",
@@ -273,37 +280,8 @@ def _rows_to_dicts(
     return results
 
 
-def _dict_to_asset(d: dict[str, Any]) -> Asset:
-    """Build an Asset from a coerced field dict."""
-    return Asset(
-        id=str(d.get("id", "")),
-        name=str(d.get("name", "")),
-        type=d.get("type", AssetType.ROTATING_EQUIPMENT),
-        location=str(d.get("location", "")),
-        manufacturer=str(d.get("manufacturer", "")),
-        model=str(d.get("model", "")),
-        serial_number=str(d.get("serial_number", "")),
-        install_date=d.get("install_date"),
-        criticality=d.get("criticality", Criticality.C),
-        parent=d.get("parent"),
-        metadata={k: v for k, v in d.items() if k not in Asset.model_fields},
-    )
-
-
-def _dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
-    """Build a WorkOrder from a coerced field dict."""
-    return WorkOrder(
-        id=str(d.get("id", "")),
-        type=d.get("type", WorkOrderType.CORRECTIVE),
-        priority=d.get("priority", Priority.MEDIUM),
-        status=d.get("status", WorkOrderStatus.CREATED),
-        asset_id=str(d.get("asset_id", "")),
-        description=str(d.get("description", "")),
-        assigned_to=d.get("assigned_to"),
-        estimated_duration_hours=d.get("estimated_duration_hours"),
-        metadata={k: v for k, v in d.items() if k not in WorkOrder.model_fields},
-    )
-
+from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 
 # ------------------------------------------------------------------
 # Write helpers
@@ -392,6 +370,7 @@ class ExcelCsvConnector:
         self._connected = False
         self._asset_cache: list[Asset] = []
         self._wo_cache: list[WorkOrder] = []
+        self._write_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -456,6 +435,7 @@ class ExcelCsvConnector:
     # Write operations
     # ------------------------------------------------------------------
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Append a new work order row to the spreadsheet."""
         schema = self._config.work_orders
@@ -467,7 +447,8 @@ class ExcelCsvConnector:
         row_data = self._work_order_to_row(work_order, schema)
         path = Path(schema.path)
 
-        await asyncio.to_thread(self._write_row, path, schema, row_data)
+        async with self._write_lock:
+            await asyncio.to_thread(self._write_row, path, schema, row_data)
         self._wo_cache.append(work_order)
         logger.info(
             "work_order_created",
@@ -477,13 +458,33 @@ class ExcelCsvConnector:
         )
         return work_order
 
+    @sandbox_aware
     async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
-        """Update a work order in the cache (full rewrite not supported — append-only)."""
+        """Update a work order in cache and persist to file if xlsx/csv.
+
+        Note: for xlsx files, a full rewrite is performed. For csv, only
+        the cache is updated (append-only format).
+        """
         for wo in self._wo_cache:
             if wo.id == work_order_id:
                 for key, value in updates.items():
                     if hasattr(wo, key):
                         setattr(wo, key, value)
+                schema = self._config.work_orders
+                if (
+                    schema
+                    and schema.write_mode
+                    and Path(schema.path).suffix.lower() in (".xlsx", ".xls")
+                ):
+                    async with self._write_lock:
+                        await asyncio.to_thread(self._rewrite_work_orders, schema)
+                else:
+                    logger.warning(
+                        "update_cache_only",
+                        connector="ExcelCsvConnector",
+                        work_order_id=work_order_id,
+                        hint="CSV updates are cache-only until next full rewrite",
+                    )
                 logger.info(
                     "work_order_updated",
                     connector="ExcelCsvConnector",
@@ -491,6 +492,21 @@ class ExcelCsvConnector:
                 )
                 return wo
         raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
+
+    def _rewrite_work_orders(self, schema: SheetSchema) -> None:
+        """Rewrite all work orders to the xlsx file from cache."""
+        openpyxl = _require_openpyxl()
+        path = Path(schema.path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = schema.sheet
+        ws.append([m.column for m in schema.columns])
+        for wo in self._wo_cache:
+            row_data = self._work_order_to_row(wo, schema)
+            row_values = [row_data.get(m.field) for m in schema.columns]
+            ws.append(row_values)
+        wb.save(str(path))
+        wb.close()
 
     # ------------------------------------------------------------------
     # Cache refresh (called by watcher)

@@ -95,14 +95,23 @@ def load_tokens_from_env() -> dict[str, str]:
     )
 
 
-def build_verifier(config: Any) -> StaticBearerTokenVerifier:
+_VERIFIER_ALLOWED_PREFIXES = ("machina.",)
+
+
+def build_verifier(config: Any) -> Any:
     """Build a token verifier from config or environment.
 
     If ``config.mcp.token_verifier_class`` is set, loads and instantiates
-    that class instead of the default static verifier.
+    that class instead of the default static verifier.  Only classes under
+    the ``machina.`` namespace are permitted to prevent arbitrary code load.
     """
     verifier_class_path = getattr(getattr(config, "mcp", None), "token_verifier_class", "")
     if verifier_class_path:
+        if not any(verifier_class_path.startswith(p) for p in _VERIFIER_ALLOWED_PREFIXES):
+            raise ConnectorError(
+                f"token_verifier_class must be under an allowed namespace "
+                f"({_VERIFIER_ALLOWED_PREFIXES}), got: {verifier_class_path!r}"
+            )
         from machina.runtime import _import_class
 
         cls = _import_class(verifier_class_path)

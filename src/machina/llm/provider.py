@@ -28,11 +28,13 @@ class LLMProvider:
         *,
         temperature: float = 0.1,
         max_tokens: int = 4096,
+        request_timeout: float = 120.0,
         tracer: ActionTracer | None = None,
     ) -> None:
         self.model = model.replace(":", "/", 1)
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.request_timeout = request_timeout
         self._tracer = tracer
 
     async def complete(
@@ -66,6 +68,7 @@ class LLMProvider:
             messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            timeout=self.request_timeout,
             **kwargs,
         )
         content = str(response.choices[0].message.content)
@@ -106,6 +109,7 @@ class LLMProvider:
             tools=tools,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            timeout=self.request_timeout,
             **kwargs,
         )
         message = response.choices[0].message

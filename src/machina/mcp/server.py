@@ -130,13 +130,31 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
 
 
 def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
-    """Gather the union of all capabilities from enabled connectors."""
-    from machina.runtime import MachinaRuntime
+    """Gather the union of all capabilities from enabled connectors.
 
-    runtime = MachinaRuntime.from_config(config)
+    Reads class-level capabilities where available. For connectors that
+    compute capabilities at instance level (e.g. GenericCmmsConnector),
+    falls back to instantiation.
+    """
+    from machina.runtime import _CONNECTOR_FACTORIES, _import_class
+
     all_caps: set[Capability] = set()
-    for _name, conn in runtime.connectors.items():
-        all_caps.update(conn.capabilities)
+    for _name, conn_cfg in config.connectors.items():
+        if not conn_cfg.enabled:
+            continue
+        factory_path = _CONNECTOR_FACTORIES.get(conn_cfg.type)
+        if factory_path is None:
+            continue
+        try:
+            connector_cls = _import_class(factory_path)
+            cls_caps = getattr(connector_cls, "capabilities", None)
+            if isinstance(cls_caps, frozenset):
+                all_caps.update(cls_caps)
+            else:
+                connector = connector_cls(**conn_cfg.settings)
+                all_caps.update(connector.capabilities)
+        except Exception:
+            continue
     return frozenset(all_caps)
 
 
@@ -208,7 +226,12 @@ async def health_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
 
     if auth_header.startswith("Bearer ") and hasattr(scope.get("app"), "_runtime_ref"):
         runtime = scope["app"]._runtime_ref
-        if runtime:
+        verifier = getattr(scope.get("app"), "_token_verifier", None)
+        token_value = auth_header[7:]
+        access_token = None
+        if verifier and token_value:
+            access_token = await verifier.verify_token(token_value)
+        if runtime and access_token is not None:
             body.update(
                 {
                     "connectors": list(runtime.connectors.keys()),

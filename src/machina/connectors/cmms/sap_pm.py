@@ -118,6 +118,7 @@ class SapPmConnector:
         {
             Capability.READ_ASSETS,
             Capability.READ_WORK_ORDERS,
+            Capability.GET_WORK_ORDER,
             Capability.CREATE_WORK_ORDER,
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,

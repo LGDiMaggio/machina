@@ -14,16 +14,13 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
 from machina.connectors.sql.drivers import connect_jdbc, connect_odbc
-from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.asset import Asset
 from machina.domain.work_order import (
-    Priority,
     WorkOrder,
-    WorkOrderStatus,
-    WorkOrderType,
 )
 from machina.exceptions import (
     ConnectorConfigError,
@@ -53,6 +50,13 @@ def _is_transient(exc: Exception) -> bool:
     """Check if a database exception is transient and retryable."""
     msg = str(exc)
     return any(code in msg for code in _TRANSIENT_ERRORS)
+
+
+def _jitter() -> float:
+    """Return a jitter multiplier in [0.5, 1.5) to decorrelate retries."""
+    import random
+
+    return 0.5 + random.random()
 
 
 def _coerce_value(raw: Any, mapping: FieldMapping, *, codepage: str = "cp037") -> Any:
@@ -91,37 +95,8 @@ def _row_to_dict(
     return result
 
 
-def _dict_to_asset(d: dict[str, Any]) -> Asset:
-    """Build an Asset from a coerced field dict."""
-    return Asset(
-        id=str(d.get("id", "")),
-        name=str(d.get("name", "")),
-        type=d.get("type", AssetType.ROTATING_EQUIPMENT),
-        location=str(d.get("location", "")),
-        manufacturer=str(d.get("manufacturer", "")),
-        model=str(d.get("model", "")),
-        serial_number=str(d.get("serial_number", "")),
-        install_date=d.get("install_date"),
-        criticality=d.get("criticality", Criticality.C),
-        parent=d.get("parent"),
-        metadata={k: v for k, v in d.items() if k not in Asset.model_fields},
-    )
-
-
-def _dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
-    """Build a WorkOrder from a coerced field dict."""
-    return WorkOrder(
-        id=str(d.get("id", "")),
-        type=d.get("type", WorkOrderType.CORRECTIVE),
-        priority=d.get("priority", Priority.MEDIUM),
-        status=d.get("status", WorkOrderStatus.CREATED),
-        asset_id=str(d.get("asset_id", "")),
-        description=str(d.get("description", "")),
-        assigned_to=d.get("assigned_to"),
-        estimated_duration_hours=d.get("estimated_duration_hours"),
-        metadata={k: v for k, v in d.items() if k not in WorkOrder.model_fields},
-    )
-
+from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 
 _ENTITY_BUILDERS: dict[str, Any] = {
     "Asset": _dict_to_asset,
@@ -233,6 +208,7 @@ class GenericSqlConnector:
     # Write operations
     # ------------------------------------------------------------------
 
+    @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Insert a new work order row into the database."""
         if Capability.CREATE_WORK_ORDER not in self._capabilities:
@@ -246,7 +222,7 @@ class GenericSqlConnector:
             raise ConnectorConfigError("No insert_table configured for WorkOrder mapping")
         if not mapping.insert_columns:
             raise ConnectorConfigError("No insert_columns configured for WorkOrder mapping")
-        await asyncio.to_thread(self._execute_insert, mapping, work_order.model_dump())
+        await self._execute_write(mapping, work_order.model_dump())
         logger.info(
             "work_order_created",
             connector="GenericSqlConnector",
@@ -322,9 +298,12 @@ class GenericSqlConnector:
                 return await asyncio.to_thread(self._read_sync, mapping)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
-                    backoff = min(
-                        retry_cfg.base_backoff * (2**attempt),
-                        retry_cfg.max_backoff,
+                    backoff = (
+                        min(
+                            retry_cfg.base_backoff * (2**attempt),
+                            retry_cfg.max_backoff,
+                        )
+                        * _jitter()
                     )
                     logger.warning(
                         "sql_transient_retry",
@@ -342,6 +321,39 @@ class GenericSqlConnector:
                     ) from exc
                 raise
         return []  # unreachable, satisfies mypy
+
+    async def _execute_write(self, mapping: TableMapping, data: dict[str, Any]) -> None:
+        """Execute a write operation with retry on transient errors."""
+        retry_cfg = self._config.retry
+
+        for attempt in range(retry_cfg.max_retries + 1):
+            try:
+                return await asyncio.to_thread(self._execute_insert, mapping, data)
+            except Exception as exc:
+                if _is_transient(exc) and attempt < retry_cfg.max_retries:
+                    backoff = (
+                        min(
+                            retry_cfg.base_backoff * (2**attempt),
+                            retry_cfg.max_backoff,
+                        )
+                        * _jitter()
+                    )
+                    logger.warning(
+                        "sql_transient_retry",
+                        connector="GenericSqlConnector",
+                        operation="insert",
+                        attempt=attempt + 1,
+                        max_retries=retry_cfg.max_retries,
+                        backoff=backoff,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                if _is_transient(exc):
+                    raise ConnectorTransientError(
+                        f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
+                    ) from exc
+                raise
 
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
         cursor = self._conn.cursor()

@@ -31,6 +31,10 @@ _CONNECTOR_FACTORIES: dict[str, str] = {
     "mqtt": "machina.connectors.iot.mqtt.MqttConnector",
     "document_store": "machina.connectors.docs.document_store.DocumentStoreConnector",
     "excel": "machina.connectors.docs.excel.ExcelCsvConnector",
+    "excel_csv": "machina.connectors.docs.excel.ExcelCsvConnector",
+    "sql": "machina.connectors.sql.generic.GenericSqlConnector",
+    "generic_sql": "machina.connectors.sql.generic.GenericSqlConnector",
+    "calendar": "machina.connectors.calendar.connector.CalendarConnector",
     "telegram": "machina.connectors.comms.telegram.TelegramConnector",
     "slack": "machina.connectors.comms.slack.SlackConnector",
     "email": "machina.connectors.comms.email.EmailConnector",
@@ -77,6 +81,7 @@ class MachinaRuntime:
             self._registry.register(name, conn)
         self.sandbox_mode = sandbox_mode
         self._primary_cmms_name = primary_cmms_name
+        self.failed_connectors: dict[str, str] = {}
 
     @classmethod
     def from_config(cls, config: MachinaConfig) -> MachinaRuntime:
@@ -107,7 +112,7 @@ class MachinaRuntime:
         primary_names = [
             name
             for name, cfg in config.connectors.items()
-            if cfg.enabled and getattr(cfg, "primary", False)
+            if cfg.enabled and getattr(cfg, "primary", False) and name in connectors
         ]
         if len(primary_names) > 1:
             raise ConnectorError(
@@ -122,17 +127,29 @@ class MachinaRuntime:
         )
 
     async def connect_all(self) -> None:
-        """Connect all registered connectors."""
+        """Connect all registered connectors.
+
+        Failed connectors are recorded in ``self.failed_connectors`` and
+        logged at ERROR level. The runtime continues with healthy connectors.
+        """
+        self.failed_connectors = {}
         for name, conn in self.connectors.items():
             try:
                 await conn.connect()
                 logger.info("runtime_connector_connected", connector=name)
             except Exception as exc:
+                self.failed_connectors[name] = str(exc)
                 logger.error(
                     "runtime_connector_failed",
                     connector=name,
                     error=str(exc),
                 )
+        if self.failed_connectors:
+            logger.warning(
+                "runtime_partial_startup",
+                failed=list(self.failed_connectors.keys()),
+                healthy=[n for n in self.connectors if n not in self.failed_connectors],
+            )
 
     async def disconnect_all(self) -> None:
         """Disconnect all registered connectors."""

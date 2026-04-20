@@ -89,14 +89,15 @@ class TestGetAsset:
         assert result["name"] == "Pump 1"
 
     @pytest.mark.asyncio
-    async def test_not_found_raises(self) -> None:
+    async def test_not_found_returns_error(self) -> None:
         from machina.mcp.tools import machina_get_asset
 
         conn = _mock_cmms()
         conn.get_asset = AsyncMock(return_value=None)
         runtime = MachinaRuntime(connectors={"cmms": conn})
-        with pytest.raises(AssetNotFoundError):
-            await machina_get_asset(_make_ctx(runtime), "X-999")
+        result = await machina_get_asset(_make_ctx(runtime), "X-999")
+        assert "error" in result
+        assert "X-999" in result["error"]
 
 
 class TestListWorkOrders:

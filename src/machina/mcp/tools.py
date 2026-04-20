@@ -74,7 +74,7 @@ async def machina_get_asset(ctx: Any, asset_id: str) -> dict[str, Any]:
     cmms = runtime.get_primary_cmms()
     asset = await cmms.get_asset(asset_id)
     if asset is None:
-        raise AssetNotFoundError(f"Asset {asset_id!r} not found")
+        return {"error": f"Asset {asset_id!r} not found"}
     return {
         "id": asset.id,
         "name": asset.name,
@@ -158,6 +158,7 @@ async def machina_create_work_order(
     description: str,
     priority: str = "medium",
     work_order_type: str = "corrective",
+    failure_mode: str = "",
 ) -> dict[str, Any]:
     """Create a new work order.
 
@@ -166,6 +167,7 @@ async def machina_create_work_order(
         description: Free-text description of the work.
         priority: Urgency level (emergency, high, medium, low).
         work_order_type: Type of maintenance (corrective, preventive, predictive, improvement).
+        failure_mode: Failure mode code from diagnosis (e.g. BEAR-WEAR-01).
     """
     from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
@@ -185,6 +187,7 @@ async def machina_create_work_order(
         priority=Priority(priority),
         asset_id=asset_id,
         description=description,
+        failure_mode=failure_mode or None,
     )
 
     try:
@@ -225,7 +228,7 @@ async def machina_update_work_order(
 
     Args:
         work_order_id: The work order to update.
-        status: New status value.
+        status: New status (created | assigned | in_progress | completed | closed | cancelled).
         assigned_to: New assignee.
         description: New description.
     """
@@ -236,7 +239,11 @@ async def machina_update_work_order(
 
     kwargs: dict[str, Any] = {}
     if status:
-        kwargs["status"] = WorkOrderStatus(status)
+        try:
+            kwargs["status"] = WorkOrderStatus(status)
+        except ValueError:
+            valid = ", ".join(s.value for s in WorkOrderStatus)
+            return {"error": f"Invalid status {status!r}. Valid values: {valid}"}
     if assigned_to:
         kwargs["assigned_to"] = assigned_to
     if description:
@@ -264,6 +271,130 @@ async def machina_update_work_order(
             "description": "[SANDBOX — no real write performed] Update request logged.",
             "metadata": {"sandbox": True},
         }
+
+
+async def machina_close_work_order(
+    ctx: Any,
+    work_order_id: str,
+) -> dict[str, Any]:
+    """Close a work order (terminal state — marks maintenance complete).
+
+    Args:
+        work_order_id: The work order to close.
+    """
+    runtime = _runtime(ctx)
+    cmms = runtime.get_primary_cmms()
+
+    try:
+        if hasattr(cmms, "close_work_order"):
+            result = await cmms.close_work_order(work_order_id)
+        else:
+            from machina.domain.work_order import WorkOrderStatus
+
+            result = await cmms.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)
+        return {
+            "id": result.id,
+            "status": result.status.value,
+            "asset_id": result.asset_id,
+        }
+    except SandboxViolationError:
+        logger.info(
+            "sandbox_write_blocked", operation="close_work_order", work_order_id=work_order_id
+        )
+        return {
+            "id": work_order_id,
+            "description": "[SANDBOX — no real write performed] Close request logged.",
+            "metadata": {"sandbox": True},
+        }
+
+
+async def machina_cancel_work_order(
+    ctx: Any,
+    work_order_id: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Cancel a work order (terminal state — work will not be performed).
+
+    Args:
+        work_order_id: The work order to cancel.
+        reason: Reason for cancellation.
+    """
+    runtime = _runtime(ctx)
+    cmms = runtime.get_primary_cmms()
+
+    try:
+        if hasattr(cmms, "cancel_work_order"):
+            result = await cmms.cancel_work_order(work_order_id)
+        else:
+            from machina.domain.work_order import WorkOrderStatus
+
+            result = await cmms.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)
+        return {
+            "id": result.id,
+            "status": result.status.value,
+            "asset_id": result.asset_id,
+        }
+    except SandboxViolationError:
+        logger.info(
+            "sandbox_write_blocked", operation="cancel_work_order", work_order_id=work_order_id
+        )
+        return {
+            "id": work_order_id,
+            "description": f"[SANDBOX — no real write performed] Cancel request logged. Reason: {reason}",
+            "metadata": {"sandbox": True},
+        }
+
+
+# ---------------------------------------------------------------------------
+# Read tools — maintenance history
+# ---------------------------------------------------------------------------
+
+
+async def machina_get_maintenance_history(
+    ctx: Any,
+    asset_id: str,
+) -> list[dict[str, Any]]:
+    """Get the maintenance history for an asset — past work orders and interventions.
+
+    Args:
+        asset_id: The asset identifier to look up history for.
+    """
+    runtime = _runtime(ctx)
+    cmms = runtime.get_primary_cmms()
+    try:
+        if hasattr(cmms, "read_maintenance_history"):
+            history = await cmms.read_maintenance_history(asset_id=asset_id)
+            return [
+                {
+                    "id": getattr(wo, "id", ""),
+                    "type": wo.type.value if hasattr(wo.type, "value") else str(wo.type),
+                    "priority": wo.priority.value
+                    if hasattr(wo.priority, "value")
+                    else str(wo.priority),
+                    "status": wo.status.value if hasattr(wo.status, "value") else str(wo.status),
+                    "asset_id": wo.asset_id,
+                    "description": wo.description,
+                    "failure_mode": getattr(wo, "failure_mode", None),
+                    "created_at": wo.created_at.isoformat() if hasattr(wo, "created_at") else "",
+                }
+                for wo in history
+            ]
+        work_orders = await cmms.read_work_orders(asset_id=asset_id)
+        return [
+            {
+                "id": wo.id,
+                "type": wo.type.value,
+                "priority": wo.priority.value,
+                "status": wo.status.value,
+                "asset_id": wo.asset_id,
+                "description": wo.description,
+                "failure_mode": getattr(wo, "failure_mode", None),
+                "created_at": wo.created_at.isoformat(),
+            }
+            for wo in work_orders
+        ]
+    except ConnectorError as exc:
+        return [{"error": str(exc)}]
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +530,47 @@ async def machina_get_alarms(
             }
             for a in alarms
         ]
-    return [{"info": "Alarm retrieval not supported by the configured IoT connector"}]
+    return [
+        {
+            "error": "Alarm retrieval requires an IoT connector that implements get_alarms(). "
+            "The configured connector only supports sensor readings."
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Communication tools
+# ---------------------------------------------------------------------------
+
+
+async def machina_send_message(
+    ctx: Any,
+    channel: str,
+    text: str,
+) -> dict[str, Any]:
+    """Send a notification message via a configured communication connector.
+
+    Args:
+        channel: Target channel (chat_id for Telegram, channel name for Slack, email address for Email).
+        text: Message text to send.
+    """
+    runtime = _runtime(ctx)
+    matches = runtime.find_by_capability(Capability.SEND_MESSAGE)
+    if not matches:
+        return {"error": "No communication connector configured (Telegram, Slack, or Email)"}
+    _, comms = matches[0]
+    try:
+        await comms.send_message(channel=channel, text=text)
+        return {"status": "sent", "channel": channel}
+    except SandboxViolationError:
+        logger.info("sandbox_write_blocked", operation="send_message", channel=channel)
+        return {
+            "status": "blocked",
+            "description": "[SANDBOX — no real message sent]",
+            "metadata": {"sandbox": True},
+        }
+    except ConnectorError as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +583,14 @@ CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
     Capability.GET_WORK_ORDER: [machina_get_work_order],
     Capability.CREATE_WORK_ORDER: [machina_create_work_order],
     Capability.UPDATE_WORK_ORDER: [machina_update_work_order],
+    Capability.CLOSE_WORK_ORDER: [machina_close_work_order],
+    Capability.CANCEL_WORK_ORDER: [machina_cancel_work_order],
     Capability.READ_SPARE_PARTS: [machina_list_spare_parts],
     Capability.READ_MAINTENANCE_PLANS: [machina_get_maintenance_plan],
+    Capability.READ_MAINTENANCE_HISTORY: [machina_get_maintenance_history],
     Capability.SEARCH_DOCUMENTS: [machina_search_manuals],
     Capability.GET_LATEST_READING: [machina_get_sensor_reading, machina_get_alarms],
+    Capability.SEND_MESSAGE: [machina_send_message],
 }
 
 

@@ -385,12 +385,10 @@ class GenericCmmsConnector:
             description=description,
         )
 
-    @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CLOSED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CLOSED)  # type: ignore[no-any-return]
 
-    @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
         """Transition a work order to CANCELLED status."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
@@ -546,10 +544,18 @@ class GenericCmmsConnector:
         # Legacy flat rename mode
         return {mapping.get(k, k): v for k, v in data.items()}
 
+    _ENTITY_KEY_MAP: ClassVar[dict[str, str]] = {
+        "assets": "asset",
+        "work_orders": "work_order",
+        "spare_parts": "spare_part",
+        "maintenance_plans": "maintenance_plan",
+    }
+
     def _apply_yaml_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
         """Apply the YAML mapper to a single raw dict."""
         assert self._yaml_mapping is not None
-        entity_mapping = self._yaml_mapping.mapping.get(entity)
+        key = self._ENTITY_KEY_MAP.get(entity, entity)
+        entity_mapping = self._yaml_mapping.mapping.get(key)
         if entity_mapping is None:
             return data
         return _yaml_map_row(entity_mapping, data)
@@ -557,7 +563,8 @@ class GenericCmmsConnector:
     def _yaml_reverse_map(self, entity: str, domain_data: dict[str, Any]) -> dict[str, Any]:
         """Reverse-map domain fields to external API fields for writes."""
         assert self._yaml_mapping is not None
-        entity_mapping = self._yaml_mapping.mapping.get(entity)
+        key = self._ENTITY_KEY_MAP.get(entity, entity)
+        entity_mapping = self._yaml_mapping.mapping.get(key)
         if entity_mapping is None or entity_mapping.reverse_fields is None:
             return domain_data
         return _yaml_reverse_row(entity_mapping, domain_data)

@@ -411,6 +411,14 @@ class DocumentStoreConnector:
                 hint="Install machina-ai[docs-rag] for PDF support",
             )
             return None
+        except Exception as exc:
+            logger.warning(
+                "pdf_load_failed",
+                connector="DocumentStoreConnector",
+                file=str(file_path),
+                error=str(exc),
+            )
+            return None
 
     def _load_docx(self, file_path: Path) -> dict[str, Any] | None:
         """Load a DOCX file using LangChain's DOCX loader, or skip."""
