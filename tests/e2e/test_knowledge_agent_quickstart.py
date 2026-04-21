@@ -93,8 +93,12 @@ class TestQuickstartAgent:
         agent = _build_agent()
         assert agent.name == "Quickstart Test Agent"
         assert len(agent._channels) == 1
-        registered = agent._registry.all()
-        assert len(registered) == 2
+        # Non-channel connectors only — channels are also in the registry now
+        # under keys prefixed with "channel_" (see issue #31).
+        non_channel = {
+            k: v for k, v in agent._registry.all().items() if not k.startswith("channel_")
+        }
+        assert len(non_channel) == 2
 
     @pytest.mark.asyncio
     async def test_build_agent_start_loads_sample_assets(self) -> None:
