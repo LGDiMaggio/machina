@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Unified `Agent.channels` with the connector registry** ([#31](https://github.com/LGDiMaggio/machina/issues/31)). Channels passed via `Agent(channels=[...])` are now registered into the `ConnectorRegistry`, so workflow steps dispatched via `channels.send_message` (e.g. `alarm_to_workorder.notify_technician`) correctly route through them. Previously only `connectors=[...]` was discoverable by capability-based dispatch, and channel-only agent configurations silently returned `{"sent": False, "error": "No communication connector available"}`. Channels passed to both `connectors=` and `channels=` as the same instance are deduplicated by identity.
+- **Sandbox now gates channel lifecycle** ([#31](https://github.com/LGDiMaggio/machina/issues/31)). With `sandbox=True`, `Agent.start()` and `Agent.stop()` skip `channel.connect()` / `channel.disconnect()`, so `EmailConnector` no longer performs real SMTP logins and other channels (Slack, Telegram) no longer open outbound sockets in sandbox mode.
+
 ## [0.3.0] - 2026-04-20
 
 ### Added

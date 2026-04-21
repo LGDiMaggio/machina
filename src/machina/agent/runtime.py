@@ -103,9 +103,23 @@ class Agent:
 
         # Connector registry
         self._registry = ConnectorRegistry()
+        _registered_ids: set[int] = set()
         for i, conn in enumerate(connectors or []):
             cname = getattr(conn, "__class__", type(conn)).__name__
             self._registry.register(f"{cname}_{i}", conn)
+            _registered_ids.add(id(conn))
+
+        # Channels are also registered so workflow steps that dispatch via
+        # ``find_by_capability`` (e.g. ``channels.send_message``) can reach
+        # comms connectors passed as ``channels=``. Dedup by identity: a
+        # connector passed to BOTH ``connectors=`` and ``channels=`` is
+        # registered once, not twice. See issue #31.
+        for i, chan in enumerate(self._channels):
+            if id(chan) in _registered_ids:
+                continue
+            cname = getattr(chan, "__class__", type(chan)).__name__
+            self._registry.register(f"channel_{cname}_{i}", chan)
+            _registered_ids.add(id(chan))
 
         # Entity resolver
         self._resolver = EntityResolver(self.plant)
@@ -236,7 +250,12 @@ class Agent:
 
     async def start(self) -> None:
         """Connect all connectors and load assets."""
+        channel_ids = {id(ch) for ch in self._channels}
         for name, conn in self._registry.all().items():
+            # Channels are connected below, with a sandbox guard. Skip them
+            # here to avoid double-connect now that they share the registry.
+            if id(conn) in channel_ids:
+                continue
             with self.tracer.trace("connector_connect", connector=name):
                 await conn.connect()
             logger.info("connector_ready", connector=name)
@@ -258,8 +277,14 @@ class Agent:
         # Auto-load failure modes and build domain services
         self._build_domain_services()
 
-        # Connect channels
+        # Connect channels. In sandbox mode we skip outbound I/O so
+        # channels like EmailConnector do not perform real SMTP logins.
+        # See issue #31.
         for channel in self._channels:
+            cname = getattr(channel, "__class__", type(channel)).__name__
+            if self.sandbox:
+                logger.info("sandbox_skip_channel_connect", channel=cname)
+                continue
             await channel.connect()
 
         logger.info(
@@ -309,9 +334,16 @@ class Agent:
 
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""
+        channel_ids = {id(ch) for ch in self._channels}
         for channel in self._channels:
+            cname = getattr(channel, "__class__", type(channel)).__name__
+            if self.sandbox:
+                logger.info("sandbox_skip_channel_disconnect", channel=cname)
+                continue
             await channel.disconnect()
         for _name, conn in self._registry.all().items():
+            if id(conn) in channel_ids:
+                continue
             await conn.disconnect()
         logger.info("agent_stopped", agent=self.name)
 

@@ -1,6 +1,10 @@
 # Roadmap
 
-## v0.2.1 (shipping now) — Consolidation
+## v0.3.1 (next patch) — Fixes
+
+- **Channel / connector-registry unification** ([#31](https://github.com/LGDiMaggio/machina/issues/31)). Channels passed as `Agent(channels=[...])` are now registered into the `ConnectorRegistry`, so workflow steps using `channels.send_message` (e.g. `alarm_to_workorder.notify_technician`) dispatch through them in live mode. `sandbox=True` now also gates `channel.connect()` / `channel.disconnect()` — no SMTP/Slack/Telegram logins in sandbox.
+
+## v0.2.1 — Consolidation
 
 A focused hardening release between v0.2.0 and v0.3. No new features; the goal was an honest, stable base with its loose ends tightened:
 
@@ -15,12 +19,11 @@ A focused hardening release between v0.2.0 and v0.3. No new features; the goal w
 Ordered by what moves adoption the most:
 
 1. **MCP server layer.** Expose every connector's declared capabilities as Model Context Protocol tools so Claude Desktop, Cursor, Continue, and any MCP-compatible client can talk to Machina connectors with no agent code. This is the biggest adoption multiplier on the roadmap and the reason `machina.mcp` has been reserved as a stable import path.
-2. **Unify `agent.channels` with the connector registry** ([#31](https://github.com/LGDiMaggio/machina/issues/31)). Today workflow steps that use `channels.send_message` (e.g. `alarm_to_workorder.notify_technician`) resolve the target via the connector registry, while channels passed as `Agent(channels=[...])` live in a separate list and are invisible to that lookup. Same issue tracks making `sandbox=True` gate `channel.connect()` so SMTP/Slack/… do not perform live logins in sandbox mode.
-3. **More CMMS connectors** — MaintainX, Limble, Fiix. Same `BaseConnector` / capability-declaration pattern as SAP PM, Maximo, UpKeep.
-4. **Multi-agent orchestration** (`AgentTeam`). Deferred to v0.3.1.
-5. **Anomaly detection & RUL estimation** on top of the IoT connector stream.
-6. **Plugin system** for community-contributed connectors without forking the core package.
-7. **`WhatsApp` and `Teams` communication connectors.**
+2. **More CMMS connectors** — MaintainX, Limble, Fiix. Same `BaseConnector` / capability-declaration pattern as SAP PM, Maximo, UpKeep.
+3. **Multi-agent orchestration** (`AgentTeam`). Deferred to v0.3.1.
+4. **Anomaly detection & RUL estimation** on top of the IoT connector stream.
+5. **Plugin system** for community-contributed connectors without forking the core package.
+6. **`WhatsApp` and `Teams` communication connectors.**
 
 ## What's deferred beyond v0.3
 

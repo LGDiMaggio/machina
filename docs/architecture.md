@@ -40,7 +40,10 @@ The entities are pydantic v2 models with validators: `Asset`, `WorkOrder`,
 
 The `Agent` class orchestrates everything. It owns a `Plant` (the asset registry),
 a `ConnectorRegistry` (the connectors it can talk to), an `LLMProvider`, an
-`EntityResolver`, and a list of communication channels. When a message comes in,
+`EntityResolver`, and a list of communication channels. Channels are also
+registered into the `ConnectorRegistry` so capability-based dispatch (e.g.
+workflow `channels.send_message` steps) reaches them alongside other connectors.
+When a message comes in,
 the runtime:
 
 1. Resolves named entities in the user's text against the plant registry

@@ -75,8 +75,13 @@ class TestFromConfig:
             },
         )
         agent = Agent.from_config(cfg_path)
-        # Only one connector should be registered (the enabled one)
-        assert len(agent._registry.all()) == 1
+        # Only one non-channel connector should be registered (the enabled one).
+        # Channels are also registered into the same registry under keys prefixed
+        # with "channel_" (see issue #31), so filter them out for this check.
+        non_channel = {
+            k: v for k, v in agent._registry.all().items() if not k.startswith("channel_")
+        }
+        assert len(non_channel) == 1
 
     def test_default_cli_channel_when_none_specified(self, tmp_path: Path) -> None:
         cfg_path = self._write_yaml(tmp_path, {"name": "No Channels"})
