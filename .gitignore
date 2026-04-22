@@ -2,17 +2,29 @@
 MACHINA_SPEC.md
 CLAUDE.md
 MACHINA_HEALTH_REPORT.md
-machina-medium-article-en.md
-machina-medium-article-it.md
-linkedin-post-en.md
+AGENTS.md
+GEMINI.md
 .claude/
+.context/
 .github/skills/
 
-# === Local planning artifacts — NEVER commit ===
+# === Social / publication drafts — NEVER commit ===
+linkedin-post*.md
+machina-medium*.md
+medium-*.md
+*-post-*.md
+
+# === Local planning / AI working artifacts — NEVER commit ===
 docs/plans/
 docs/brainstorms/
 docs/solutions/
 .compound-engineering/
+*.tmp.json
+*.tmp.md
+*_temp.py
+*_temp.md
+write_review_temp.*
+reliability.tmp.*
 
 # === Python ===
 __pycache__/

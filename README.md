@@ -309,6 +309,8 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 <details>
 <summary><strong>Domain Model</strong></summary>
 
+![Building Maintenance AI Agents: before and after Machina](docs/assets/domain-model-before-after.png)
+
 The domain model is the backbone of Machina. Every connector normalizes external data into domain entities, the agent reasons in domain terms, and LLM prompts are grounded in domain context.
 
 **Why this matters:**
