@@ -21,13 +21,27 @@ Pick one:
 ### Option B: OpenAI API
 
 ```bash
+# macOS / Linux
 export OPENAI_API_KEY=sk-...
+
+# Windows (PowerShell)
+$env:OPENAI_API_KEY = "sk-..."
+
+# Windows (CMD)
+set OPENAI_API_KEY=sk-...
 ```
 
 ### Option C: Anthropic API
 
 ```bash
+# macOS / Linux
 export ANTHROPIC_API_KEY=sk-ant-...
+
+# Windows (PowerShell)
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+
+# Windows (CMD)
+set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Any [LiteLLM-compatible provider](https://docs.litellm.ai/docs/providers) works.

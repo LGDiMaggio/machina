@@ -9,10 +9,11 @@ GEMINI.md
 .github/skills/
 
 # === Social / publication drafts — NEVER commit ===
-linkedin-post*.md
+linkedin-*.md
 machina-medium*.md
 medium-*.md
 *-post-*.md
+*-caption-*.md
 
 # === Local planning / AI working artifacts — NEVER commit ===
 docs/plans/
