@@ -370,7 +370,7 @@ class TestDocumentStoreRAG:
         # Mock search results
         mock_doc = MagicMock()
         mock_doc.page_content = "Pump P-201 maintenance guide"
-        mock_doc.metadata = {"source": "manual.txt", "page": 1}
+        mock_doc.metadata = {"source": "manual.txt", "page": 1, "chunk_id": "mock-c1"}
 
         mock_vectorstore = MagicMock()
         mock_vectorstore.similarity_search_with_score.return_value = [(mock_doc, 0.85)]
@@ -399,7 +399,8 @@ class TestDocumentStoreRAG:
         results = await conn.search("pump maintenance")
         assert len(results) == 1
         assert results[0].content == "Pump P-201 maintenance guide"
-        assert results[0].score == 0.85
+        # Hybrid mode returns an RRF-fused score, not the raw dense similarity.
+        assert results[0].score > 0
 
     @pytest.mark.asyncio
     async def test_rag_search_with_asset_filter(self, sample_docs_dir: Path) -> None:
@@ -411,7 +412,7 @@ class TestDocumentStoreRAG:
 
         mock_doc = MagicMock()
         mock_doc.page_content = "P-201 bearing specs"
-        mock_doc.metadata = {"source": "p201.txt", "page": 2}
+        mock_doc.metadata = {"source": "p201.txt", "page": 2, "chunk_id": "mock-c2"}
 
         mock_vectorstore = MagicMock()
         mock_vectorstore.similarity_search_with_score.return_value = [(mock_doc, 0.9)]
@@ -438,9 +439,10 @@ class TestDocumentStoreRAG:
 
         await conn.search("bearing", asset_id="P-201")
         # Verify pre-retrieval filter is passed via Chroma's ``filter=`` kwarg
-        # (replaces the previous post-filter substring hack).
+        # (replaces the previous post-filter substring hack). Hybrid mode
+        # over-fetches (top_k * 6) so RRF fusion has headroom.
         call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
-        assert call_kwargs[1].get("k") == 5
+        assert call_kwargs[1].get("k") == 30  # default top_k=5 * 6
         assert call_kwargs[1].get("filter") == {"asset_id": "P-201"}
 
     @pytest.mark.asyncio
@@ -488,10 +490,20 @@ class TestDocumentStoreRAG:
 
         mock_doc = MagicMock()
         mock_doc.page_content = "Pump P-201 procedure"
-        mock_doc.metadata = {"source": "p201.txt", "page": 1, "asset_id": "P-201"}
+        mock_doc.metadata = {
+            "source": "p201.txt",
+            "page": 1,
+            "asset_id": "P-201",
+            "chunk_id": "mock-p201",
+        }
         mock_doc_other = MagicMock()
         mock_doc_other.page_content = "Compressor manual"
-        mock_doc_other.metadata = {"source": "c1.txt", "page": 1, "asset_id": "COMP-301"}
+        mock_doc_other.metadata = {
+            "source": "c1.txt",
+            "page": 1,
+            "asset_id": "COMP-301",
+            "chunk_id": "mock-c301",
+        }
 
         mock_vectorstore = MagicMock()
         mock_vectorstore.similarity_search_with_score.side_effect = [
@@ -535,7 +547,12 @@ class TestDocumentStoreRAG:
 
         mock_doc = MagicMock()
         mock_doc.page_content = "Pump P-201 procedure"
-        mock_doc.metadata = {"source": "p201.txt", "page": 1, "asset_id": "P-201"}
+        mock_doc.metadata = {
+            "source": "p201.txt",
+            "page": 1,
+            "asset_id": "P-201",
+            "chunk_id": "mock-p201v",
+        }
 
         mock_vectorstore = MagicMock()
         mock_vectorstore.similarity_search_with_score.side_effect = [

@@ -120,6 +120,8 @@ class DocumentStoreConnector:
         # Populated after connect()
         self._chunks: list[DocumentChunk] = []
         self._vectorstore: Any = None
+        self._bm25_index: Any = None  # BM25Index when [docs-rag-hybrid] installed
+        self._chunk_by_id: dict[str, DocumentChunk] = {}
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -286,19 +288,19 @@ class DocumentStoreConnector:
                 metadatas.append(chroma_meta)
                 ids.append(chunk_id)
 
-                self._chunks.append(
-                    DocumentChunk(
-                        content=chunk_text,
-                        source=doc["source"],
-                        page=doc.get("page", 0),
-                        chunk_id=chunk_id,
-                        asset_id=doc_meta.asset_id,
-                        equipment_class_code=doc_meta.equipment_class_code,
-                        doc_type=doc_meta.doc_type,
-                        section_title=doc_meta.section_title,
-                        metadata=chroma_meta,
-                    )
+                new_chunk = DocumentChunk(
+                    content=chunk_text,
+                    source=doc["source"],
+                    page=doc.get("page", 0),
+                    chunk_id=chunk_id,
+                    asset_id=doc_meta.asset_id,
+                    equipment_class_code=doc_meta.equipment_class_code,
+                    doc_type=doc_meta.doc_type,
+                    section_title=doc_meta.section_title,
+                    metadata=chroma_meta,
                 )
+                self._chunks.append(new_chunk)
+                self._chunk_by_id[chunk_id] = new_chunk
 
         if texts:
             self._vectorstore = Chroma.from_texts(
@@ -307,6 +309,7 @@ class DocumentStoreConnector:
                 ids=ids,
                 collection_name=self._collection_name,
             )
+            self._bm25_index = _build_bm25_index(texts, metadatas, ids)
 
     def _rag_search(
         self,
@@ -315,12 +318,67 @@ class DocumentStoreConnector:
         top_k: int = 5,
         filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
-        """Search using the ChromaDB vector store."""
+        """Search using ChromaDB, optionally fused with BM25 via RRF.
+
+        When the ``[docs-rag-hybrid]`` extra is installed and a BM25
+        index was built at connect-time, this runs both retrievers in
+        parallel and fuses their rankings with Reciprocal Rank Fusion
+        before returning the top-K. Otherwise it falls back to pure
+        dense retrieval.
+        """
         if self._vectorstore is None:
             return []
 
+        # Fetch a wider top-K from each retriever when fusing so the
+        # winner of fusion isn't artificially capped by per-retriever
+        # truncation.
+        retrieve_k = top_k * 6 if self._bm25_index is not None else top_k
+        dense_pairs = self._dense_search(query, k=retrieve_k, filters=filters)
+        if self._bm25_index is None:
+            return [chunk for chunk, _ in dense_pairs][:top_k]
+
+        # Key chunks by chunk_id so RRF (which only sees ids) can be
+        # joined back to the actual DocumentChunk objects.
+        dense_ranking: list[tuple[str, float]] = [
+            (chunk.chunk_id, float(score)) for chunk, score in dense_pairs if chunk.chunk_id
+        ]
+        chunks_by_id: dict[str, DocumentChunk] = {
+            chunk.chunk_id: chunk for chunk, _ in dense_pairs if chunk.chunk_id
+        }
+
+        sparse_hits = self._bm25_index.search(query, k=retrieve_k, filters=filters)
+
+        # Resurrect chunks that only the sparse retriever surfaced.
+        for chunk_id, _ in sparse_hits:
+            if chunk_id not in chunks_by_id:
+                chunk = self._chunk_by_id.get(chunk_id)
+                if chunk is not None:
+                    chunks_by_id[chunk_id] = chunk
+
+        from machina.connectors.docs.hybrid import rrf_fuse
+
+        fused = rrf_fuse([dense_ranking, list(sparse_hits)])
+        out: list[DocumentChunk] = []
+        for chunk_id, fused_score in fused:
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            chunk.score = float(fused_score)
+            out.append(chunk)
+            if len(out) >= top_k:
+                break
+        return out
+
+    def _dense_search(
+        self,
+        query: str,
+        *,
+        k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[tuple[DocumentChunk, float]]:
+        """Run only the dense (Chroma) side and return ``(chunk, score)``."""
         where = _build_chroma_where(filters)
-        kwargs: dict[str, Any] = {"k": top_k}
+        kwargs: dict[str, Any] = {"k": k}
         if where is not None:
             kwargs["filter"] = where
 
@@ -338,26 +396,27 @@ class DocumentStoreConnector:
                 operation="similarity_search",
                 error=str(exc),
             )
-            results = self._vectorstore.similarity_search_with_score(query, k=top_k * 3)
+            results = self._vectorstore.similarity_search_with_score(query, k=k * 3)
             results = _post_filter_results(results, filters)
 
-        chunks = [
-            DocumentChunk(
-                content=doc.page_content,
-                source=doc.metadata.get("source", ""),
-                page=doc.metadata.get("page", 0),
-                score=float(score),
-                chunk_id=doc.metadata.get("chunk_id", ""),
-                asset_id=doc.metadata.get("asset_id", ""),
-                equipment_class_code=doc.metadata.get("equipment_class_code", ""),
-                doc_type=doc.metadata.get("doc_type", ""),
-                section_title=doc.metadata.get("section_title", ""),
-                metadata=doc.metadata,
+        return [
+            (
+                DocumentChunk(
+                    content=doc.page_content,
+                    source=doc.metadata.get("source", ""),
+                    page=doc.metadata.get("page", 0),
+                    score=float(score),
+                    chunk_id=doc.metadata.get("chunk_id", ""),
+                    asset_id=doc.metadata.get("asset_id", ""),
+                    equipment_class_code=doc.metadata.get("equipment_class_code", ""),
+                    doc_type=doc.metadata.get("doc_type", ""),
+                    section_title=doc.metadata.get("section_title", ""),
+                    metadata=doc.metadata,
+                ),
+                float(score),
             )
             for doc, score in results
         ]
-
-        return chunks[:top_k]
 
     # ------------------------------------------------------------------
     # Keyword fallback
@@ -552,6 +611,32 @@ class DocumentStoreConnector:
         if asset_id:
             merged.setdefault("asset_id", asset_id)
         return merged or None
+
+
+def _build_bm25_index(texts: list[str], metadatas: list[dict[str, Any]], ids: list[str]) -> Any:
+    """Build a sparse BM25 index alongside the dense Chroma collection.
+
+    Returns ``None`` when the ``[docs-rag-hybrid]`` extra is not
+    installed; callers degrade to dense-only retrieval in that case.
+    """
+    try:
+        from machina.connectors.docs.hybrid import BM25Index
+    except ImportError:  # pragma: no cover — hybrid.py has no heavy imports at module level
+        return None
+
+    index = BM25Index()
+    for chunk_id, text, meta in zip(ids, texts, metadatas, strict=True):
+        index.add(chunk_id, text, meta)
+    try:
+        index.build()
+    except ImportError:
+        logger.info(
+            "bm25_index_unavailable",
+            connector="DocumentStoreConnector",
+            hint="Install machina-ai[docs-rag-hybrid] for hybrid retrieval",
+        )
+        return None
+    return index
 
 
 def _make_chunk_id(*, source: str, page: int, section_title: str, index: int) -> str:

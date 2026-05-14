@@ -82,6 +82,7 @@ docs-rag = [
     "langchain-community>=0.2",
     "chromadb>=0.4",
 ]
+docs-rag-hybrid = ["rank_bm25>=0.2"]
 examples = ["python-dotenv>=1.0"]
 all = [
     "machina-ai[litellm]",
@@ -97,6 +98,7 @@ all = [
     "machina-ai[mcp]",
     "machina-ai[cmms-rest]",
     "machina-ai[docs-rag]",
+    "machina-ai[docs-rag-hybrid]",
     "machina-ai[examples]",
 ]
 dev = [
@@ -157,7 +159,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "asyncua.*", "aiomqtt.*", "jmespath.*", "slack_bolt.*", "google.*", "google_auth_oauthlib.*", "googleapiclient.*", "msal.*", "icalendar.*", "dateutil.*"]
+module = ["litellm.*", "asyncua.*", "aiomqtt.*", "jmespath.*", "slack_bolt.*", "google.*", "google_auth_oauthlib.*", "googleapiclient.*", "msal.*", "icalendar.*", "dateutil.*", "rank_bm25.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
