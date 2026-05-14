@@ -49,53 +49,60 @@ spare_part_reorder = Workflow(
         filter={"condition": "stock_below_reorder_point"},
     ),
     steps=[
-        Step("lookup_part",
-             action="cmms.read_spare_parts",
-             inputs={"part_id": "{trigger.part_id}"},
-             on_error=ErrorPolicy.STOP),
-
-        Step("check_dependencies",
-             action="cmms.read_assets",
-             inputs={"part_id": "{trigger.part_id}"},
-             on_error=ErrorPolicy.SKIP),
-
-        Step("verify_criticality",
-             action="domain.check_asset_criticality",
-             guard=GuardCondition(
-                 check=lambda ctx: bool(ctx.get("check_dependencies")),
-                 description="Skip if no dependent assets found",
-             ),
-             on_error=ErrorPolicy.SKIP),
-
+        Step(
+            "lookup_part",
+            action="cmms.read_spare_parts",
+            inputs={"part_id": "{trigger.part_id}"},
+            on_error=ErrorPolicy.STOP,
+        ),
+        Step(
+            "check_dependencies",
+            action="cmms.read_assets",
+            inputs={"part_id": "{trigger.part_id}"},
+            on_error=ErrorPolicy.SKIP,
+        ),
+        Step(
+            "verify_criticality",
+            action="domain.check_asset_criticality",
+            guard=GuardCondition(
+                check=lambda ctx: bool(ctx.get("check_dependencies")),
+                description="Skip if no dependent assets found",
+            ),
+            on_error=ErrorPolicy.SKIP,
+        ),
         # LLM decides: standard or expedited procurement?
-        Step("assess_urgency",
-             action="agent.reason",
-             prompt=(
-                 "Spare part {trigger.part_id} is below reorder point.\n"
-                 "Stock: {trigger.current_stock}, reorder: {trigger.reorder_point}\n"
-                 "Part: {lookup_part}\n"
-                 "Dependent assets: {check_dependencies}\n"
-                 "Criticality: {verify_criticality}\n\n"
-                 "Assess urgency. Standard or expedited? Recommend quantity."
-             ),
-             on_error=ErrorPolicy.SKIP),
-
+        Step(
+            "assess_urgency",
+            action="agent.reason",
+            prompt=(
+                "Spare part {trigger.part_id} is below reorder point.\n"
+                "Stock: {trigger.current_stock}, reorder: {trigger.reorder_point}\n"
+                "Part: {lookup_part}\n"
+                "Dependent assets: {check_dependencies}\n"
+                "Criticality: {verify_criticality}\n\n"
+                "Assess urgency. Standard or expedited? Recommend quantity."
+            ),
+            on_error=ErrorPolicy.SKIP,
+        ),
         # NOTE: requires an ERP connector (planned for v0.3+).
         # In sandbox mode this step is blocked automatically (is_write=True).
-        Step("place_order",
-             action="erp.create_purchase_order",
-             is_write=True,
-             on_error=ErrorPolicy.STOP),
-
-        Step("notify_warehouse",
-             action="channels.send_message",
-             template=(
-                 "Spare Part Reorder\n"
-                 "Part: {trigger.part_id} -- {lookup_part.name}\n"
-                 "Stock: {trigger.current_stock}\n"
-                 "Assessment: {assess_urgency}"
-             ),
-             on_error=ErrorPolicy.NOTIFY),
+        Step(
+            "place_order",
+            action="erp.create_purchase_order",
+            is_write=True,
+            on_error=ErrorPolicy.STOP,
+        ),
+        Step(
+            "notify_warehouse",
+            action="channels.send_message",
+            template=(
+                "Spare Part Reorder\n"
+                "Part: {trigger.part_id} -- {lookup_part.name}\n"
+                "Stock: {trigger.current_stock}\n"
+                "Assessment: {assess_urgency}"
+            ),
+            on_error=ErrorPolicy.NOTIFY,
+        ),
     ],
 )
 
@@ -113,42 +120,48 @@ preventive_scheduling = Workflow(
         filter={"cron": "0 6 * * MON"},
     ),
     steps=[
-        Step("scan_plans",
-             action="maintenance_scheduler.scan_due_plans",
-             inputs={"horizon_days": "14"},
-             on_error=ErrorPolicy.STOP),
-
+        Step(
+            "scan_plans",
+            action="maintenance_scheduler.scan_due_plans",
+            inputs={"horizon_days": "14"},
+            on_error=ErrorPolicy.STOP,
+        ),
         # LLM prioritizes by criticality and risk
-        Step("prioritize_work",
-             action="agent.reason",
-             prompt=(
-                 "Maintenance plans due within 14 days:\n"
-                 "{scan_plans}\n\n"
-                 "Prioritize by asset criticality and failure risk. "
-                 "Return a ranked list with scheduling order."
-             ),
-             on_error=ErrorPolicy.SKIP),
-
-        Step("create_work_orders",
-             action="work_order_factory.create_batch",
-             is_write=True,
-             on_error=ErrorPolicy.RETRY,
-             retries=3),
-
-        Step("notify_planners",
-             action="channels.send_message",
-             template=(
-                 "Weekly Preventive Plan\n"
-                 "Plans due: {scan_plans.count}\n"
-                 "Priority: {prioritize_work}\n"
-                 "WOs created: {create_work_orders.count}"
-             ),
-             on_error=ErrorPolicy.NOTIFY),
+        Step(
+            "prioritize_work",
+            action="agent.reason",
+            prompt=(
+                "Maintenance plans due within 14 days:\n"
+                "{scan_plans}\n\n"
+                "Prioritize by asset criticality and failure risk. "
+                "Return a ranked list with scheduling order."
+            ),
+            on_error=ErrorPolicy.SKIP,
+        ),
+        Step(
+            "create_work_orders",
+            action="work_order_factory.create_batch",
+            is_write=True,
+            on_error=ErrorPolicy.RETRY,
+            retries=3,
+        ),
+        Step(
+            "notify_planners",
+            action="channels.send_message",
+            template=(
+                "Weekly Preventive Plan\n"
+                "Plans due: {scan_plans.count}\n"
+                "Priority: {prioritize_work}\n"
+                "WOs created: {create_work_orders.count}"
+            ),
+            on_error=ErrorPolicy.NOTIFY,
+        ),
     ],
 )
 
 
 # ── The agent with both workflows ───────────────────────────────
+
 
 def build_agent(llm: str = "ollama:llama3", sandbox: bool = True) -> Agent:
     return Agent(
@@ -191,12 +204,15 @@ async def run_demo(llm: str, sandbox: bool) -> None:
 
     # Trigger spare part reorder
     print(f"  Triggering '{spare_part_reorder.name}'...")
-    result = await agent.trigger_workflow(spare_part_reorder.name, {
-        "part_id": "SKF-6310",
-        "current_stock": 1,
-        "reorder_point": 2,
-        "condition": "stock_below_reorder_point",
-    })
+    result = await agent.trigger_workflow(
+        spare_part_reorder.name,
+        {
+            "part_id": "SKF-6310",
+            "current_stock": 1,
+            "reorder_point": 2,
+            "condition": "stock_below_reorder_point",
+        },
+    )
 
     status = "SUCCESS" if result.success else "PARTIAL"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
@@ -210,21 +226,27 @@ async def run_demo(llm: str, sandbox: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Custom Workflow Agent")
-    parser.add_argument("--live", action="store_true", help="Execute writes")
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from _mode import add_mode_flags, resolve_sandbox
+
+    add_mode_flags(parser)
+
     args = parser.parse_args()
 
-    # Pre-flight: check sample data, LLM provider, and required extras
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
+
     check(llm=args.llm)
 
     if args.verbose:
         from machina.observability.logging import configure_logging
+
         configure_logging(level="DEBUG")
 
-    asyncio.run(run_demo(llm=args.llm, sandbox=not args.live))
+    sandbox = resolve_sandbox(args, default=True)
+    asyncio.run(run_demo(llm=args.llm, sandbox=sandbox))
 
 
 if __name__ == "__main__":

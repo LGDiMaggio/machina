@@ -93,12 +93,16 @@ async def run_alarm_demo(llm: str, sandbox: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Alarm Response Agent")
-    parser.add_argument("--live", action="store_true", help="Execute writes (default: sandbox)")
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _mode import add_mode_flags, resolve_sandbox
+
+    add_mode_flags(parser)
+
+    args = parser.parse_args()
+
     from _preflight import check
 
     check(llm=args.llm)
@@ -108,7 +112,8 @@ def main() -> None:
 
         configure_logging(level="DEBUG")
 
-    asyncio.run(run_alarm_demo(llm=args.llm, sandbox=not args.live))
+    sandbox = resolve_sandbox(args, default=True)
+    asyncio.run(run_alarm_demo(llm=args.llm, sandbox=sandbox))
 
 
 if __name__ == "__main__":

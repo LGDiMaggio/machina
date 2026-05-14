@@ -8,8 +8,8 @@ Autonomous end-to-end pipeline: sensor alarm triggers diagnosis, work order crea
 
 ```bash
 cd examples/reference/predictive_pipeline
-python agent.py
-python agent.py --sandbox           # log-only mode
+python agent.py                     # sandbox (default — writes are logged, not executed)
+python agent.py --live              # execute writes for real
 python agent.py --llm ollama:llama3
 ```
 

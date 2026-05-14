@@ -162,10 +162,11 @@ The agent resolves "the pump" to Asset P-201, retrieves context from your CMMS, 
 
 ## Try Sandbox Mode
 
-Want to test write operations safely? Sandbox mode logs every action without executing it:
+The quickstart runs in **live** mode by default (read-mostly Q&A is safe). Want to test write operations without touching anything? Use sandbox mode — every action is logged, none executed:
 
 ```bash
-python agent.py --sandbox
+python agent.py --sandbox    # log-only
+python agent.py --live       # execute writes (default)
 ```
 
 ```

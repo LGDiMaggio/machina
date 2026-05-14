@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Zero-code agent -- configure everything in YAML.
 
-    python agent.py                          # uses machina.yaml
-    python agent.py --config machina_openai.yaml
-    python agent.py --llm openai:gpt-4o     # override LLM from CLI
+python agent.py                          # uses machina.yaml
+python agent.py --config machina_openai.yaml
+python agent.py --llm openai:gpt-4o     # override LLM from CLI
 """
 
 from __future__ import annotations
@@ -37,12 +37,15 @@ def main() -> None:
         help="Path to machina.yaml config file",
     )
     parser.add_argument("--llm", default=None, help="Override LLM provider:model")
-    parser.add_argument("--sandbox", action="store_true", help="Enable sandbox mode")
     parser.add_argument("--verbose", action="store_true")
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from _mode import add_mode_flags
+
+    add_mode_flags(parser)
+
     args = parser.parse_args()
 
-    # Pre-flight: check sample data and LLM BEFORE building the agent
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
 
     llm = _resolve_llm(args.config, args.llm)
@@ -58,6 +61,8 @@ def main() -> None:
         agent._llm = LLMProvider(model=args.llm)
     if args.sandbox:
         agent.sandbox = True
+    elif args.live:
+        agent.sandbox = False
 
     if args.verbose:
         from machina.observability.logging import configure_logging

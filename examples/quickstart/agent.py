@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Your first maintenance agent — 13 lines of Python.
 
-    pip install machina-ai[litellm]
-    ollama pull llama3
-    python agent.py
+pip install machina-ai[litellm]
+ollama pull llama3
+python agent.py
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ agent = _build_agent()
 
 # -- Everything below is optional CLI convenience ----------------
 
+
 def main() -> None:
     import argparse
 
@@ -51,28 +52,37 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Machina Quickstart")
     parser.add_argument(
-        "--llm", default="ollama:llama3",
+        "--llm",
+        default="ollama:llama3",
         help="LLM provider:model (e.g. openai:gpt-4o, anthropic:claude-sonnet-4-20250514)",
     )
-    parser.add_argument("--sandbox", action="store_true", help="Enable sandbox mode (writes are logged, not executed)")
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _mode import add_mode_flags, resolve_sandbox
+
+    add_mode_flags(parser)
+
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
     configure_logging(level="DEBUG" if args.verbose else "INFO")
 
     # Pre-flight: check sample data, LLM provider, and required extras
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _preflight import check
+
     check(llm=args.llm, sample_dir=SAMPLE_DIR)
+
+    # Quickstart is read-mostly Q&A: default to LIVE so users can experiment freely.
+    sandbox = resolve_sandbox(args, default=False)
 
     # Build agent with CLI overrides
     global agent
-    agent = _build_agent(llm=args.llm, sandbox=args.sandbox)
+    agent = _build_agent(llm=args.llm, sandbox=sandbox)
 
-    mode = "SANDBOX" if args.sandbox else "LIVE"
-    print(f"\n{'='*60}")
+    mode = "SANDBOX" if sandbox else "LIVE"
+    print(f"\n{'=' * 60}")
     print(f"  Machina Quickstart  |  LLM: {args.llm}  |  Mode: {mode}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print()
     print("  Try asking:")
     print('    "What is the bearing replacement procedure for pump P-201?"')
@@ -81,7 +91,7 @@ def main() -> None:
     print('    "Create a work order for bearing replacement, priority HIGH"')
     print()
     print("  Type 'quit' or Ctrl+C to exit.")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     agent.run()
 

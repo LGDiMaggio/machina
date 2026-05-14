@@ -83,17 +83,6 @@ def main() -> None:
         default="ollama:llama3",
         help="LLM provider:model (e.g. openai:gpt-4o, anthropic:claude-sonnet-4-20250514)",
     )
-    parser.add_argument(
-        "--sandbox",
-        action="store_true",
-        default=True,
-        help="Enable sandbox mode — writes are logged, not executed (default: on)",
-    )
-    parser.add_argument(
-        "--live",
-        action="store_true",
-        help="Disable sandbox mode — writes are actually executed",
-    )
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     parser.add_argument(
         "--lang",
@@ -101,16 +90,20 @@ def main() -> None:
         default="it",
         help="Scenario language: 'it' for Italian (default), 'en' for English",
     )
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from _mode import add_mode_flags, resolve_sandbox
+
+    add_mode_flags(parser)
+
     args = parser.parse_args()
 
     configure_logging(level="DEBUG" if args.verbose else "INFO")
 
     scenario = SCENARIO_EN if args.lang == "en" else SCENARIO_IT
 
-    sandbox = not args.live
+    sandbox = resolve_sandbox(args, default=True)
 
-    # Pre-flight checks
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _preflight import check
 
     check(llm=args.llm, sample_dir=SAMPLE_DIR)
