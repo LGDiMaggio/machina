@@ -57,6 +57,8 @@ refuse politely and stay in your maintenance assistant role.
 ## Available Capabilities
 
 {capabilities_context}
+
+{citation_guidelines}
 """
 
 
@@ -86,9 +88,12 @@ def build_system_prompt(
     if capabilities:
         cap_ctx = ", ".join(sorted(set(capabilities)))
 
+    from machina.agent.citations import CITATION_PROMPT
+
     return SYSTEM_PROMPT.format(
         plant_context=plant_ctx,
         capabilities_context=cap_ctx,
+        citation_guidelines=CITATION_PROMPT,
     )
 
 
@@ -209,7 +214,9 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
     """Format document search results for the prompt.
 
     Args:
-        results: List of dicts with ``content``, ``source``, ``page`` keys.
+        results: List of dicts with ``content``, ``source``, ``page``, and
+            optional ``chunk_id`` keys. ``chunk_id`` is surfaced in the
+            prompt so the LLM can cite chunks by id in its response.
 
     Returns:
         Formatted document excerpts.
@@ -221,9 +228,11 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
     for i, result in enumerate(results[:5], 1):
         source = result.get("source", "unknown")
         page = result.get("page", "")
+        chunk_id = result.get("chunk_id", "")
         content = result.get("content", "")[:300]
         page_ref = f" (p. {page})" if page else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}")
+        cid_ref = f" chunk_id={chunk_id}" if chunk_id else ""
+        lines.append(f"\n  [{i}] Source: {source}{page_ref}{cid_ref}")
         lines.append(f"  {content}")
     return "\n".join(lines)
 

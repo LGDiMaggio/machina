@@ -17,10 +17,12 @@ if TYPE_CHECKING:
 
 import structlog
 
+from machina.agent.citations import parse_response
 from machina.agent.entity_resolver import EntityResolver
 from machina.agent.prompts import build_context_message, build_system_prompt
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.capabilities import Capability
+from machina.domain.citation import AgentResponse
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
@@ -143,6 +145,11 @@ class Agent:
 
         # Conversation history per chat
         self._histories: dict[str, list[dict[str, str]]] = {}
+
+        # Per-turn chunk registry (chat_id -> chunk_id -> {source, page, content}).
+        # Populated by _gather_context and the search_documents tool; consumed by
+        # citation parsing at the end of each turn.
+        self._turn_chunks: dict[str, dict[str, dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API — factory
@@ -348,9 +355,13 @@ class Agent:
         logger.info("agent_stopped", agent=self.name)
 
     async def handle_message(self, text: str, *, chat_id: str = "default") -> str:
-        """Process a user message and return the agent's response.
+        """Process a user message and return the agent's response text.
 
-        This is the main entry point for programmatic usage.
+        This is the main entry point for programmatic usage. The returned
+        string is the rendered answer with inline ``[source:page]``
+        markers preserved but the trailing ``<citations>`` block stripped.
+        Use :meth:`handle_message_full` to also access structured
+        :class:`Citation` objects.
 
         Args:
             text: The user's message.
@@ -358,6 +369,23 @@ class Agent:
 
         Returns:
             The agent's response text.
+
+        Raises:
+            LLMError: If the underlying LLM call fails.
+        """
+        response = await self.handle_message_full(text, chat_id=chat_id)
+        return response.text
+
+    async def handle_message_full(self, text: str, *, chat_id: str = "default") -> AgentResponse:
+        """Process a user message and return the structured agent response.
+
+        Args:
+            text: The user's message.
+            chat_id: Identifier for the conversation.
+
+        Returns:
+            An :class:`AgentResponse` with the rendered text and any
+            citations the agent emitted.
 
         Raises:
             LLMError: If the underlying LLM call fails.
@@ -380,18 +408,21 @@ class Agent:
             message_preview=text[:100],
         )
 
+        # Reset the per-turn chunk registry.
+        self._turn_chunks[chat_id] = {}
+
         # 1. Entity resolution
         resolved = self._resolver.resolve(text)
 
         # 2. Gather context from connectors
-        context_data = await self._gather_context(text, resolved)
+        context_data = await self._gather_context(text, resolved, chat_id=chat_id)
 
         # 3. Build messages
         messages = self._build_messages(text, chat_id, context_data)
 
         # 4. Call LLM (with tool-calling loop)
         try:
-            response = await self._llm_loop(messages, chat_id)
+            raw_response = await self._llm_loop(messages, chat_id)
         except Exception as exc:
             logger.error(
                 "llm_error",
@@ -400,17 +431,21 @@ class Agent:
             )
             raise LLMError(f"LLM call failed: {exc}") from exc
 
-        # 5. Update history
+        # 5. Parse citations against the per-turn chunk registry.
+        rendered, citations = parse_response(raw_response, self._turn_chunks.get(chat_id, {}))
+
+        # 6. Update history (use the rendered text without citation block).
         self._add_to_history(chat_id, "user", text)
-        self._add_to_history(chat_id, "assistant", response)
+        self._add_to_history(chat_id, "assistant", rendered)
 
         logger.info(
             "response_generated",
             agent=self.name,
             chat_id=chat_id,
-            response_length=len(response),
+            response_length=len(rendered),
+            citation_count=len(citations),
         )
-        return response
+        return AgentResponse(text=rendered, citations=citations)
 
     def run(self) -> None:
         """Start the agent with all channels (blocking, sync wrapper).
@@ -464,6 +499,8 @@ class Agent:
         self,
         text: str,
         resolved: list[Any],
+        *,
+        chat_id: str = "default",
     ) -> dict[str, Any]:
         """Gather context from connectors based on resolved entities."""
         context: dict[str, Any] = {
@@ -530,6 +567,7 @@ class Agent:
                             "content": r.content,
                             "source": r.source,
                             "page": r.page,
+                            "chunk_id": getattr(r, "chunk_id", ""),
                         }
                         for r in results
                     ]
@@ -550,7 +588,24 @@ class Agent:
                 else:
                     context[name] = result
 
+        # Register any retrieved document chunks against the per-turn registry
+        # so citation parsing can validate chunk_id references later.
+        self._register_document_results(chat_id, context.get("document_results") or [])
+
         return context
+
+    def _register_document_results(self, chat_id: str, results: list[dict[str, Any]]) -> None:
+        """Add retrieved chunks to the per-turn registry for citation parsing."""
+        registry = self._turn_chunks.setdefault(chat_id, {})
+        for r in results:
+            chunk_id = r.get("chunk_id") or ""
+            if not chunk_id:
+                continue
+            registry[chunk_id] = {
+                "source": r.get("source", ""),
+                "page": r.get("page", 0),
+                "content": r.get("content", ""),
+            }
 
     # ------------------------------------------------------------------
     # Internal: message building
@@ -701,9 +756,22 @@ class Agent:
                     args.get("query", ""),
                     asset_id=args.get("asset_id", ""),
                 )
-                return [
-                    {"content": r.content, "source": r.source, "page": r.page} for r in results
+                serialized = [
+                    {
+                        "content": r.content,
+                        "source": r.source,
+                        "page": r.page,
+                        "chunk_id": getattr(r, "chunk_id", ""),
+                    }
+                    for r in results
                 ]
+                # Register so citations can reference these chunks. The chat_id
+                # is not available at this layer; tool-call retrieved chunks
+                # are registered against every active chat to stay correct in
+                # the common single-chat case and harmless in multi-chat.
+                for chat_id in list(self._turn_chunks.keys()) or ["default"]:
+                    self._register_document_results(chat_id, serialized)
+                return serialized
             return {"error": "No document connector available"}
 
         if name == "check_spare_parts":
