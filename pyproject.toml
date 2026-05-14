@@ -82,6 +82,7 @@ docs-rag = [
     "langchain-community>=0.2",
     "chromadb>=0.4",
 ]
+examples = ["python-dotenv>=1.0"]
 all = [
     "machina-ai[litellm]",
     "machina-ai[sap]",
@@ -96,6 +97,7 @@ all = [
     "machina-ai[mcp]",
     "machina-ai[cmms-rest]",
     "machina-ai[docs-rag]",
+    "machina-ai[examples]",
 ]
 dev = [
     "pytest>=8.0",

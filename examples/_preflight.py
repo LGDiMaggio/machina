@@ -18,7 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-SAMPLE_DIR = Path(__file__).resolve().parent / "sample_data"
+from dotenv import load_dotenv
+
+EXAMPLES_DIR = Path(__file__).resolve().parent
+SAMPLE_DIR = EXAMPLES_DIR / "sample_data"
 
 
 def check(*, llm: str = "ollama:llama3", sample_dir: Path | None = None) -> None:
@@ -29,6 +32,8 @@ def check(*, llm: str = "ollama:llama3", sample_dir: Path | None = None) -> None
         sample_dir: Override for the sample data directory (defaults
             to ``examples/sample_data/``).
     """
+    load_dotenv(EXAMPLES_DIR / ".env")
+    load_dotenv()
     sample = sample_dir or SAMPLE_DIR
     _check_sample_data(sample)
     _check_llm(llm)
@@ -52,7 +57,10 @@ def _check_llm(llm: str) -> None:
             sys.exit(1)
         try:
             subprocess.run(
-                ["ollama", "list"], capture_output=True, timeout=5, check=False,
+                ["ollama", "list"],
+                capture_output=True,
+                timeout=5,
+                check=False,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             print("Error: Ollama is installed but does not seem to be running.")
@@ -63,12 +71,23 @@ def _check_llm(llm: str) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             print("Error: OPENAI_API_KEY environment variable is not set.")
             print("Get your API key from https://platform.openai.com/api-keys")
-            print("Then run:  export OPENAI_API_KEY=sk-...")
+            _print_env_var_hint("OPENAI_API_KEY", "sk-...")
             sys.exit(1)
 
     elif provider == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("Error: ANTHROPIC_API_KEY environment variable is not set.")
             print("Get your API key from https://console.anthropic.com/")
-            print("Then run:  export ANTHROPIC_API_KEY=sk-ant-...")
+            _print_env_var_hint("ANTHROPIC_API_KEY", "sk-ant-...")
             sys.exit(1)
+
+
+def _print_env_var_hint(var: str, example: str) -> None:
+    """Print the platform-appropriate command to set an environment variable."""
+    if sys.platform == "win32":
+        print("Then run (PowerShell):")
+        print(f'  $env:{var} = "{example}"')
+        print("Or (CMD):")
+        print(f"  set {var}={example}")
+    else:
+        print(f"Then run:  export {var}={example}")

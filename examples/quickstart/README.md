@@ -20,6 +20,15 @@ Pick one:
 
 ### Option B: OpenAI API
 
+Easiest: copy `examples/.env.example` to `examples/.env` and fill in the key.
+The preflight loads it automatically via `python-dotenv`.
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+Or set it as a shell env var for the current session:
+
 ```bash
 # macOS / Linux
 export OPENAI_API_KEY=sk-...
@@ -32,6 +41,14 @@ set OPENAI_API_KEY=sk-...
 ```
 
 ### Option C: Anthropic API
+
+Same `.env` approach:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Or as a shell env var:
 
 ```bash
 # macOS / Linux
@@ -49,7 +66,7 @@ Any [LiteLLM-compatible provider](https://docs.litellm.ai/docs/providers) works.
 ## Run It
 
 ```bash
-pip install machina-ai[litellm,docs-rag]
+pip install "machina-ai[litellm,docs-rag,examples]"
 cd examples/quickstart
 
 # With Ollama (default):

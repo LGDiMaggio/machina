@@ -70,6 +70,7 @@ htmlcov/
 # === Environment variables ===
 .env
 .env.*
+!.env.example
 
 # === Credentials & certificates ===
 *.pem
