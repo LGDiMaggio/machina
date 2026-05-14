@@ -538,9 +538,15 @@ class DocumentStoreConnector:
 
 
 def _make_chunk_id(*, source: str, page: int, section_title: str, index: int) -> str:
-    """Deterministic chunk identifier (stable across runs)."""
-    key = f"{source}|{section_title}|{page}|{index}"
-    return hashlib.md5(key.encode("utf-8")).hexdigest()
+    """Deterministic chunk identifier (stable across runs).
+
+    Fields are joined with NUL so ambiguous separators inside any field
+    (a ``|`` in a section title, a path component containing the joiner)
+    cannot produce colliding keys. ``usedforsecurity=False`` keeps the
+    hash usable on FIPS-restricted interpreters where MD5 is rejected.
+    """
+    key = "\x00".join((source, section_title, str(page), str(index)))
+    return hashlib.md5(key.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _build_chroma_where(filters: dict[str, Any] | None) -> dict[str, Any] | None:

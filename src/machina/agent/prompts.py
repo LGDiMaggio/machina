@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from machina.agent.citations import CITATION_PROMPT
+
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
     from machina.domain.alarm import Alarm
@@ -88,7 +90,6 @@ def build_system_prompt(
     if capabilities:
         cap_ctx = ", ".join(sorted(set(capabilities)))
 
-    from machina.agent.citations import CITATION_PROMPT
 
     return SYSTEM_PROMPT.format(
         plant_context=plant_ctx,

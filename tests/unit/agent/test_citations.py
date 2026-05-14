@@ -136,3 +136,32 @@ class TestParseResponse:
         _, cites = parse_response(text, _registry())
         assert len(cites) == 1
         assert cites[0].page == 0
+
+    def test_multiple_blocks_all_stripped_and_merged(self) -> None:
+        text = (
+            "First claim [a:1].\n"
+            "<citations>\nabc123 | manuals/pump.pdf | 42\n</citations>\n"
+            "Second claim [b:2].\n"
+            "<citations>\ndef456 | manuals/comp.md | 0\n</citations>"
+        )
+        rendered, cites = parse_response(text, _registry())
+        assert "<citations>" not in rendered
+        assert "[a:1]" in rendered
+        assert "[b:2]" in rendered
+        chunk_ids = {c.chunk_id for c in cites}
+        assert chunk_ids == {"abc123", "def456"}
+
+    def test_pipe_in_source_path_preserved(self) -> None:
+        registry = {
+            "abc123": {
+                "source": "manuals/Section 5 | Maintenance.pdf",
+                "page": 7,
+                "content": "...",
+            },
+        }
+        text = "Body.\n<citations>\nabc123 | manuals/Section 5 | Maintenance.pdf | 7\n</citations>"
+        _, cites = parse_response(text, registry)
+        assert len(cites) == 1
+        assert "Section 5" in cites[0].source
+        assert "Maintenance" in cites[0].source
+        assert cites[0].page == 7

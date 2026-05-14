@@ -112,7 +112,7 @@ class DocumentMetadata:
         if doc_type and doc_type not in _KNOWN_DOC_TYPES:
             logger.warning(
                 "unknown_doc_type",
-                component="DocumentMetadata",
+                operation="load_metadata",
                 doc_type=doc_type,
                 known=sorted(_KNOWN_DOC_TYPES),
             )
@@ -144,7 +144,7 @@ def _load_sidecar(path: Path) -> DocumentMetadata:
     except yaml.YAMLError as exc:
         logger.warning(
             "sidecar_parse_failed",
-            component="DocumentMetadata",
+            operation="load_metadata",
             sidecar=str(sidecar),
             error=str(exc),
         )
@@ -152,7 +152,7 @@ def _load_sidecar(path: Path) -> DocumentMetadata:
     if not isinstance(data, dict):
         logger.warning(
             "sidecar_not_a_mapping",
-            component="DocumentMetadata",
+            operation="load_metadata",
             sidecar=str(sidecar),
         )
         return DocumentMetadata()
@@ -178,7 +178,7 @@ def _load_frontmatter(path: Path) -> DocumentMetadata:
     except yaml.YAMLError as exc:
         logger.warning(
             "frontmatter_parse_failed",
-            component="DocumentMetadata",
+            operation="load_metadata",
             path=str(path),
             error=str(exc),
         )

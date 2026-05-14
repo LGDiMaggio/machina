@@ -64,13 +64,18 @@ def parse_response(
         original text with the ``<citations>`` block removed but inline
         ``[source:page]`` markers preserved.
     """
-    match = _CITATIONS_BLOCK_RE.search(text)
-    if not match:
-        return text.rstrip(), []
+    citations: list[Citation] = []
+    seen_ids: set[str] = set()
 
-    raw_block = match.group(1)
-    cleaned = (text[: match.start()] + text[match.end() :]).rstrip()
-    citations = _parse_block(raw_block, available_chunks)
+    def _consume(match: re.Match[str]) -> str:
+        for citation in _parse_block(match.group(1), available_chunks):
+            if citation.chunk_id in seen_ids:
+                continue
+            seen_ids.add(citation.chunk_id)
+            citations.append(citation)
+        return ""
+
+    cleaned = _CITATIONS_BLOCK_RE.sub(_consume, text).rstrip()
     return cleaned, citations
 
 
@@ -81,7 +86,23 @@ def _parse_block(raw_block: str, available_chunks: dict[str, dict[str, object]])
         entry = line.strip()
         if not entry or entry.startswith("#"):
             continue
-        parts = [p.strip() for p in entry.split("|")]
+        # Split on the first and last ``|`` only: chunk_id sits before the
+        # first delimiter, page after the last, and source is everything in
+        # between. This keeps pipe characters in source paths or section
+        # titles (e.g. ``Section 5 | Maintenance``) from truncating the
+        # source field.
+        first = entry.find("|")
+        last = entry.rfind("|")
+        if first == -1:
+            parts = [entry]
+        elif first == last:
+            parts = [entry[:first].strip(), entry[first + 1 :].strip()]
+        else:
+            parts = [
+                entry[:first].strip(),
+                entry[first + 1 : last].strip(),
+                entry[last + 1 :].strip(),
+            ]
         if not parts or not parts[0]:
             continue
         chunk_id = parts[0]
@@ -92,7 +113,7 @@ def _parse_block(raw_block: str, available_chunks: dict[str, dict[str, object]])
         if chunk_id not in available_chunks:
             logger.warning(
                 "citation_chunk_id_not_in_context",
-                component="agent.citations",
+                operation="parse_citations",
                 chunk_id=chunk_id,
             )
             continue

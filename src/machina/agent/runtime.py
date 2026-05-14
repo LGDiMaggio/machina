@@ -438,6 +438,10 @@ class Agent:
         self._add_to_history(chat_id, "user", text)
         self._add_to_history(chat_id, "assistant", rendered)
 
+        # Drop the per-turn registry once parsing is done so long-lived agents
+        # do not accumulate one slot per chat_id ever seen.
+        self._turn_chunks.pop(chat_id, None)
+
         logger.info(
             "response_generated",
             agent=self.name,
@@ -765,12 +769,14 @@ class Agent:
                     }
                     for r in results
                 ]
-                # Register so citations can reference these chunks. The chat_id
-                # is not available at this layer; tool-call retrieved chunks
-                # are registered against every active chat to stay correct in
-                # the common single-chat case and harmless in multi-chat.
-                for chat_id in list(self._turn_chunks.keys()) or ["default"]:
-                    self._register_document_results(chat_id, serialized)
+                # Tool-call retrieved chunks must reach citation parsing.
+                # The chat_id of the in-flight turn is not available at this
+                # layer, so we register against every active chat. This is a
+                # known correctness gap under concurrent multi-chat use and is
+                # tracked for follow-up; the proper fix threads chat_id through
+                # the LLM loop.
+                for active_chat_id in list(self._turn_chunks.keys()) or ["default"]:
+                    self._register_document_results(active_chat_id, serialized)
                 return serialized
             return {"error": "No document connector available"}
 
