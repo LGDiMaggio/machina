@@ -84,6 +84,7 @@ docs-rag = [
 ]
 docs-rag-hybrid = ["rank_bm25>=0.2"]
 docs-rag-rerank = ["sentence-transformers>=3.0"]
+docs-rag-parsing = ["docling>=2.0"]
 examples = ["python-dotenv>=1.0"]
 all = [
     "machina-ai[litellm]",
@@ -101,6 +102,7 @@ all = [
     "machina-ai[docs-rag]",
     "machina-ai[docs-rag-hybrid]",
     "machina-ai[docs-rag-rerank]",
+    "machina-ai[docs-rag-parsing]",
     "machina-ai[examples]",
 ]
 dev = [

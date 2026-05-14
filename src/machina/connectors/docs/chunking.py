@@ -26,6 +26,10 @@ import hashlib
 import re
 from dataclasses import dataclass
 from itertools import pairwise
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from machina.connectors.docs.parsing import ParsedDocument
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,6 +66,8 @@ class MatchChunk:
     index_in_section: int
     source: str = ""
     start_offset: int = 0
+    page: int = 0
+    atomic: bool = False
 
 
 # Markdown ATX heading: 1-6 '#' followed by space + title.
@@ -346,6 +352,104 @@ class SectionAwareSplitter:
                         start_offset=piece_offset,
                     )
                 )
+        return parents, matches
+
+    def split_structured(
+        self, parsed: ParsedDocument
+    ) -> tuple[list[ParentSection], list[MatchChunk]]:
+        """Produce parents+matches from a pre-parsed structured document.
+
+        Used when an upstream layout-aware parser (e.g. Docling) has
+        already identified section boundaries and tables, so heading
+        detection is unnecessary — and tables can stay atomic
+        (one parent + one match chunk, never split mid-row).
+
+        Args:
+            parsed: A :class:`~machina.connectors.docs.parsing.ParsedDocument`
+                from :class:`~machina.connectors.docs.parsing.LayoutAwareParser`.
+
+        Returns:
+            Same ``(parents, matches)`` shape as :meth:`split`. Each
+            section produces one parent + N match chunks; each table
+            produces one parent + exactly one atomic match.
+        """
+        source = parsed.source
+        parents: list[ParentSection] = []
+        matches: list[MatchChunk] = []
+
+        for section_idx, section in enumerate(parsed.sections):
+            body = section.text.strip()
+            if not body:
+                continue
+            parent_id = _section_id(source, section.title, section_idx)
+            title_offset = 0
+            full_text = body
+            if section.title:
+                prefix = f"{section.title}\n\n"
+                title_offset = len(prefix)
+                full_text = prefix + body
+            parents.append(
+                ParentSection(
+                    parent_id=parent_id,
+                    title=section.title,
+                    level=section.level,
+                    text=full_text,
+                    title_offset=title_offset,
+                )
+            )
+            pieces = _recursive_split(
+                body,
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap,
+            )
+            if not pieces:
+                pieces = [(body, 0)]
+            for i, (piece_text, piece_offset) in enumerate(pieces):
+                matches.append(
+                    MatchChunk(
+                        text=piece_text,
+                        parent_id=parent_id,
+                        section_title=section.title,
+                        section_level=section.level,
+                        index_in_section=i,
+                        source=source,
+                        start_offset=piece_offset,
+                        page=section.page_range[0],
+                    )
+                )
+
+        for table_idx, table in enumerate(parsed.tables):
+            text = table.text.strip()
+            if not text:
+                continue
+            title = table.caption or f"Table {table_idx + 1}"
+            parent_id = _section_id(source, f"__table__:{title}", table_idx)
+            parents.append(
+                ParentSection(
+                    parent_id=parent_id,
+                    title=title,
+                    level=0,
+                    text=text,
+                    title_offset=0,
+                )
+            )
+            # Tables are atomic — emit one match covering the entire
+            # rendered block so neither the recursive splitter nor the
+            # overlap pass can break the row layout.
+            matches.append(
+                MatchChunk(
+                    text=text,
+                    parent_id=parent_id,
+                    section_title=title,
+                    section_level=0,
+                    index_in_section=0,
+                    source=source,
+                    start_offset=0,
+                    page=table.page,
+                    atomic=True,
+                )
+            )
+
         return parents, matches
 
     def window_parent(self, parent: ParentSection, match: MatchChunk) -> str:

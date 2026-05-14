@@ -196,6 +196,89 @@ class TestOffsets:
         assert parent.text[absolute_pos : absolute_pos + len(m.text)] == m.text
 
 
+class TestStructuredSplit:
+    """split_structured consumes a pre-parsed ParsedDocument."""
+
+    def test_sections_become_parents_with_match_chunks(self) -> None:
+        from machina.connectors.docs.parsing import ParsedDocument, Section
+
+        parsed = ParsedDocument(
+            source="m.pdf",
+            sections=(
+                Section(
+                    title="Bearing Replacement",
+                    level=2,
+                    text="Step 1: Lock out. Step 2: Remove coupling. Step 3: Pull bearings.",
+                    page_range=(4, 5),
+                ),
+            ),
+        )
+        splitter = SectionAwareSplitter(chunk_size=200, chunk_overlap=0)
+        parents, matches = splitter.split_structured(parsed)
+
+        assert len(parents) == 1
+        assert parents[0].title == "Bearing Replacement"
+        assert parents[0].level == 2
+        assert "Step 1" in parents[0].text and "Step 3" in parents[0].text
+        # All matches point to this parent and carry the start page.
+        assert all(m.parent_id == parents[0].parent_id for m in matches)
+        assert all(m.page == 4 for m in matches)
+
+    def test_table_is_emitted_as_atomic_match(self) -> None:
+        from machina.connectors.docs.parsing import ParsedDocument, TableBlock
+
+        table_md = "| Fastener | Torque (Nm) |\n|---|---|\n| M10 | 45 |\n| M12 | 80 |"
+        parsed = ParsedDocument(
+            source="m.pdf",
+            tables=(TableBlock(text=table_md, page=4, caption="Torque Specs"),),
+        )
+        splitter = SectionAwareSplitter(chunk_size=20, chunk_overlap=0)  # tiny on purpose
+        parents, matches = splitter.split_structured(parsed)
+
+        # Exactly one parent + one match — the table must NEVER be split.
+        table_parents = [p for p in parents if p.title == "Torque Specs"]
+        assert len(table_parents) == 1
+        table_matches = [m for m in matches if m.parent_id == table_parents[0].parent_id]
+        assert len(table_matches) == 1
+        assert table_matches[0].atomic is True
+        assert "M10" in table_matches[0].text
+        assert "M12" in table_matches[0].text
+
+    def test_section_with_inline_table_keeps_table_atomic(self) -> None:
+        """Prose section + sibling table — splitter emits both, table not split."""
+        from machina.connectors.docs.parsing import (
+            ParsedDocument,
+            Section,
+            TableBlock,
+        )
+
+        parsed = ParsedDocument(
+            source="m.pdf",
+            sections=(
+                Section(
+                    title="Torque Specs",
+                    level=2,
+                    text="Refer to the table below for fastener torques.",
+                    page_range=(4, 4),
+                ),
+            ),
+            tables=(
+                TableBlock(
+                    text="| Fastener | Torque |\n|---|---|\n| M10 | 45 Nm |",
+                    page=4,
+                ),
+            ),
+        )
+        splitter = SectionAwareSplitter(chunk_size=200, chunk_overlap=0)
+        _parents, matches = splitter.split_structured(parsed)
+
+        prose = [m for m in matches if "table below" in m.text]
+        atomic = [m for m in matches if m.atomic]
+        assert prose, "prose match should exist"
+        assert len(atomic) == 1
+        assert "M10" in atomic[0].text
+
+
 class TestApiShape:
     def test_match_and_parent_dataclasses_exist(self) -> None:
         # Smoke test that the public dataclasses can be constructed.

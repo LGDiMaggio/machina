@@ -23,6 +23,7 @@ from machina.connectors.docs.chunking import (
     SectionAwareSplitter,
 )
 from machina.connectors.docs.metadata import DocumentMetadata, strip_frontmatter
+from machina.connectors.docs.parsing import LayoutAwareParser
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -138,6 +139,12 @@ class DocumentStoreConnector:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
+
+        # Layout-aware parser is constructed eagerly but the underlying
+        # Docling import stays lazy — when the [docs-rag-parsing] extra
+        # is absent the parser will return None on every parse() call
+        # and loaders fall back to PyPDFLoader / Docx2txtLoader.
+        self._parser = LayoutAwareParser()
 
         # Populated after connect()
         self._chunks: list[DocumentChunk] = []
@@ -308,13 +315,24 @@ class DocumentStoreConnector:
         out: list[tuple[str, str, dict[str, Any], DocumentChunk]] = []
         for doc in documents:
             doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
-            parents, matches = self._splitter.split(doc["content"], source=doc["source"])
+            parsed = doc.get("parsed")
+            if parsed is not None:
+                # Layout-aware parser already identified sections + tables;
+                # let the splitter consume that structured payload so
+                # tables stay atomic and headings come from the parser
+                # rather than regex heuristics.
+                parents, matches = self._splitter.split_structured(parsed)
+            else:
+                parents, matches = self._splitter.split(doc["content"], source=doc["source"])
             for parent in parents:
                 self._parent_by_id[parent.parent_id] = parent
             base_page = doc.get("page", 0)
             for i, match in enumerate(matches):
                 section_title = match.section_title or doc_meta.section_title
-                page = base_page or 0
+                # Structured path: every match carries the page it came
+                # from. Flat-text path: every match inherits the page of
+                # the source record (one record per page for PDFs).
+                page = match.page or base_page or 0
                 chunk_id = _make_chunk_id(
                     source=doc["source"],
                     page=page,
@@ -648,7 +666,25 @@ class DocumentStoreConnector:
         return []
 
     def _load_pdf(self, file_path: Path) -> list[dict[str, Any]]:
-        """Load a PDF file using LangChain's PDF loader, one record per page."""
+        """Load a PDF. Try the layout-aware parser first, fall back to PyPDFLoader.
+
+        When :class:`LayoutAwareParser` returns a structured document
+        (Docling is installed and conversion succeeded), emit a single
+        record carrying ``parsed`` so ``_iter_doc_chunks`` routes to
+        ``split_structured`` and tables stay atomic. Otherwise fall
+        back to the per-page PyPDFLoader path that preserves page
+        numbers in flat-text mode.
+        """
+        parsed = self._parser.parse(file_path)
+        if parsed is not None:
+            return [
+                {
+                    "content": "",  # ignored when ``parsed`` is present
+                    "source": str(file_path),
+                    "page": 0,
+                    "parsed": parsed,
+                }
+            ]
         try:
             from langchain_community.document_loaders import (  # type: ignore[import-not-found,unused-ignore]
                 PyPDFLoader,
@@ -684,12 +720,23 @@ class DocumentStoreConnector:
             return []
 
     def _load_docx(self, file_path: Path) -> list[dict[str, Any]]:
-        """Load a DOCX file using LangChain's DOCX loader.
+        """Load a DOCX file. Try layout-aware parser first, fall back to Docx2txtLoader.
 
-        Docx2txtLoader returns a single Document covering the whole
-        file (DOCX has no native page concept), so we always emit one
+        DOCX has no native page concept; the layout-aware path preserves
+        heading levels so :meth:`SectionAwareSplitter.split_structured`
+        produces well-bounded parents. The flat-text fallback emits one
         record with page=1.
         """
+        parsed = self._parser.parse(file_path)
+        if parsed is not None:
+            return [
+                {
+                    "content": "",  # ignored when ``parsed`` is present
+                    "source": str(file_path),
+                    "page": 0,
+                    "parsed": parsed,
+                }
+            ]
         try:
             from langchain_community.document_loaders import Docx2txtLoader
 
