@@ -710,7 +710,7 @@ class Agent:
                     "tool_call",
                     operation=func_name,
                 ) as tool_span:
-                    tool_result = await self._execute_tool(func_name, args)
+                    tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
                     tool_span.output_summary = str(tool_result)[:200]
 
                 messages.append(
@@ -728,8 +728,15 @@ class Agent:
         self,
         name: str,
         args: dict[str, Any],
+        *,
+        chat_id: str = "default",
     ) -> Any:
-        """Execute a tool call by dispatching to the appropriate connector."""
+        """Execute a tool call by dispatching to the appropriate connector.
+
+        ``chat_id`` scopes any side effects that touch per-turn state
+        (currently the citation chunk registry) so concurrent chats stay
+        isolated.
+        """
         logger.debug("executing_tool", tool=name, args=args)
 
         if name == "search_assets":
@@ -769,14 +776,10 @@ class Agent:
                     }
                     for r in results
                 ]
-                # Tool-call retrieved chunks must reach citation parsing.
-                # The chat_id of the in-flight turn is not available at this
-                # layer, so we register against every active chat. This is a
-                # known correctness gap under concurrent multi-chat use and is
-                # tracked for follow-up; the proper fix threads chat_id through
-                # the LLM loop.
-                for active_chat_id in list(self._turn_chunks.keys()) or ["default"]:
-                    self._register_document_results(active_chat_id, serialized)
+                # Register tool-retrieved chunks against the in-flight chat
+                # only, so concurrent chats do not see each other's chunks
+                # when citation parsing validates references later.
+                self._register_document_results(chat_id, serialized)
                 return serialized
             return {"error": "No document connector available"}
 

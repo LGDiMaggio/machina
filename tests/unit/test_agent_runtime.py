@@ -108,6 +108,7 @@ class _FakeDocConnector:
                 content="Pump P-201 bearing replacement procedure",
                 source="manual.txt",
                 page=1,
+                chunk_id="fake-chunk-1",
             )
         ]
 
@@ -529,6 +530,46 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("search_documents", {"query": "bearing"})
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_search_documents_registers_chunks_only_for_current_chat(self) -> None:
+        """Tool-call retrieved chunks must NOT leak across concurrent chats.
+
+        Two chats are active at once. A tool call for chat A must only
+        populate chat A's _turn_chunks registry, leaving chat B untouched.
+        """
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+
+        # Simulate two in-flight chats (as handle_message_full would).
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_chunks["chat-b"] = {}
+
+        # Tool call attributed to chat A.
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+        # Chat A receives the chunks; chat B stays empty.
+        assert agent._turn_chunks["chat-a"], "chat-a should have registered chunks"
+        assert agent._turn_chunks["chat-b"] == {}, "chat-b must not see chat-a chunks"
+
+    @pytest.mark.asyncio
+    async def test_search_documents_default_chat_id_when_not_threaded(self) -> None:
+        """Direct callers omitting chat_id register under 'default' only."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        agent._turn_chunks["other-chat"] = {}
+
+        await agent._execute_tool("search_documents", {"query": "bearing"})
+
+        assert "default" in agent._turn_chunks
+        assert agent._turn_chunks["default"], "default chat should have chunks"
+        assert agent._turn_chunks["other-chat"] == {}, "other-chat must stay clean"
 
     @pytest.mark.asyncio
     async def test_check_spare_parts_tool(self) -> None:
