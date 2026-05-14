@@ -18,7 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # python-dotenv is in the [examples] extra; absence is fine.
+    load_dotenv = None  # type: ignore[assignment]
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = EXAMPLES_DIR / "sample_data"
@@ -32,17 +35,22 @@ def check(*, llm: str = "ollama:llama3", sample_dir: Path | None = None) -> None
         sample_dir: Override for the sample data directory (defaults
             to ``examples/sample_data/``).
     """
-    load_dotenv(EXAMPLES_DIR / ".env")
-    load_dotenv()
+    if load_dotenv is not None:
+        load_dotenv(EXAMPLES_DIR / ".env")
     sample = sample_dir or SAMPLE_DIR
     _check_sample_data(sample)
     _check_llm(llm)
 
 
+def _err(*args: object) -> None:
+    """Print a preflight error line to stderr."""
+    print(*args, file=sys.stderr)
+
+
 def _check_sample_data(sample_dir: Path) -> None:
     if not sample_dir.exists():
-        print(f"Error: sample data not found at {sample_dir}")
-        print("Make sure you are running from the repo root or examples/ directory.")
+        _err(f"Error: sample data not found at {sample_dir}")
+        _err("Make sure you are running from the repo root or examples/ directory.")
         sys.exit(1)
 
 
@@ -51,9 +59,9 @@ def _check_llm(llm: str) -> None:
 
     if provider == "ollama":
         if not shutil.which("ollama"):
-            print("Error: Ollama is not installed.")
-            print("Install it from https://ollama.com, then run:")
-            print(f"  ollama pull {llm.split(':', 1)[1] if ':' in llm else 'llama3'}")
+            _err("Error: Ollama is not installed.")
+            _err("Install it from https://ollama.com, then run:")
+            _err(f"  ollama pull {llm.split(':', 1)[1] if ':' in llm else 'llama3'}")
             sys.exit(1)
         try:
             subprocess.run(
@@ -63,21 +71,21 @@ def _check_llm(llm: str) -> None:
                 check=False,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            print("Error: Ollama is installed but does not seem to be running.")
-            print("Start it with: ollama serve")
+            _err("Error: Ollama is installed but does not seem to be running.")
+            _err("Start it with: ollama serve")
             sys.exit(1)
 
     elif provider == "openai":
         if not os.environ.get("OPENAI_API_KEY"):
-            print("Error: OPENAI_API_KEY environment variable is not set.")
-            print("Get your API key from https://platform.openai.com/api-keys")
+            _err("Error: OPENAI_API_KEY environment variable is not set.")
+            _err("Get your API key from https://platform.openai.com/api-keys")
             _print_env_var_hint("OPENAI_API_KEY", "sk-...")
             sys.exit(1)
 
     elif provider == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("Error: ANTHROPIC_API_KEY environment variable is not set.")
-            print("Get your API key from https://console.anthropic.com/")
+            _err("Error: ANTHROPIC_API_KEY environment variable is not set.")
+            _err("Get your API key from https://console.anthropic.com/")
             _print_env_var_hint("ANTHROPIC_API_KEY", "sk-ant-...")
             sys.exit(1)
 
@@ -85,9 +93,9 @@ def _check_llm(llm: str) -> None:
 def _print_env_var_hint(var: str, example: str) -> None:
     """Print the platform-appropriate command to set an environment variable."""
     if sys.platform == "win32":
-        print("Then run (PowerShell):")
-        print(f'  $env:{var} = "{example}"')
-        print("Or (CMD):")
-        print(f"  set {var}={example}")
+        _err("Then run (PowerShell):")
+        _err(f'  $env:{var} = "{example}"')
+        _err("Or (CMD):")
+        _err(f"  set {var}={example}")
     else:
-        print(f"Then run:  export {var}={example}")
+        _err(f"Then run:  export {var}={example}")

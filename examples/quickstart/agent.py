@@ -38,7 +38,10 @@ def _build_agent(llm: str = "ollama:llama3", sandbox: bool = False) -> Agent:
 
 
 # ── The entire agent (13 lines) ────────────────────────────────
-agent = _build_agent()
+# The literal definition lives in `_build_agent` above — that is the
+# hero of this example. `main()` invokes it with CLI overrides; we
+# deliberately avoid building a module-level instance so that
+# `python agent.py --help` does not pay the connector construction cost.
 # ────────────────────────────────────────────────────────────────
 
 
@@ -60,7 +63,7 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _mode import add_mode_flags, resolve_sandbox
 
-    add_mode_flags(parser)
+    add_mode_flags(parser, default_sandbox=False)
 
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
@@ -76,7 +79,6 @@ def main() -> None:
     sandbox = resolve_sandbox(args, default=False)
 
     # Build agent with CLI overrides
-    global agent
     agent = _build_agent(llm=args.llm, sandbox=sandbox)
 
     mode = "SANDBOX" if sandbox else "LIVE"

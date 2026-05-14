@@ -51,7 +51,9 @@ def main() -> None:
     agent = Agent.from_config(args.config)
     agent.register_workflow(message_to_workorder)
 
-    # Resolution: --live wins, then --sandbox, then MACHINA_SANDBOX_MODE env (default: sandbox).
+    # Resolution: --live wins, then --sandbox, then MACHINA_SANDBOX_MODE env.
+    # The env var defaults to "true" so a fresh container starts in sandbox;
+    # setting MACHINA_SANDBOX_MODE=false makes LIVE the implicit default.
     if args.live:
         agent.sandbox = False
     elif args.sandbox or os.getenv("MACHINA_SANDBOX_MODE", "true").lower() == "true":

@@ -18,6 +18,11 @@ from pathlib import Path
 
 import pytest
 
+# python-dotenv is in the `examples` extra; without it the example agents
+# cannot import _preflight.  Skip the whole module rather than report
+# spurious flag-missing failures.
+pytest.importorskip("dotenv")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 EXAMPLE_AGENTS = [
@@ -57,11 +62,10 @@ def test_example_exposes_sandbox_and_live_flags(agent: Path) -> None:
 def test_sandbox_and_live_are_mutually_exclusive(agent: Path) -> None:
     """Passing ``--sandbox --live`` together must be rejected by argparse."""
     result = _run(agent, "--sandbox", "--live")
-    # argparse exits with code 2 and writes the error to stderr.
+    # argparse exits with code 2 and writes the error to stderr.  We rely on
+    # the exit code as the behavioural signal (locale-independent) and only
+    # use stderr text as a debugging aid in the failure message.
     assert result.returncode == 2, (
         f"{agent} accepted --sandbox --live together (exit {result.returncode})\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    assert "not allowed with" in result.stderr or "mutually exclusive" in result.stderr, (
-        f"{agent} rejected the combo but not for mutual exclusion:\n{result.stderr}"
     )

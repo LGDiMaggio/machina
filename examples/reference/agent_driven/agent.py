@@ -94,7 +94,7 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from _mode import add_mode_flags, resolve_sandbox
 
-    add_mode_flags(parser)
+    add_mode_flags(parser, default_sandbox=True)
 
     args = parser.parse_args()
 

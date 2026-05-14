@@ -40,8 +40,9 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from _mode import add_mode_flags
+    from _mode import add_mode_flags, resolve_sandbox
 
+    # YAML supplies the default mode; CLI flags override it.
     add_mode_flags(parser)
 
     args = parser.parse_args()
@@ -59,10 +60,7 @@ def main() -> None:
         from machina.llm.provider import LLMProvider
 
         agent._llm = LLMProvider(model=args.llm)
-    if args.sandbox:
-        agent.sandbox = True
-    elif args.live:
-        agent.sandbox = False
+    agent.sandbox = resolve_sandbox(args, default=agent.sandbox)
 
     if args.verbose:
         from machina.observability.logging import configure_logging
