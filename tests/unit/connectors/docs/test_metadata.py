@@ -43,6 +43,53 @@ class TestDocumentMetadata:
         assert meta.extra == {"vendor": "SKF"}
         assert meta.to_chroma_dict()["vendor"] == "SKF"
 
+    def test_to_chroma_dict_drops_reserved_extra_keys(self) -> None:
+        # ``source`` and ``page`` are populated by the loader; user-authored
+        # frontmatter must not be able to overwrite them.
+        meta = DocumentMetadata(
+            asset_id="P-201",
+            extra={"source": "hijacked.pdf", "page": 9999, "vendor": "SKF"},
+        )
+        out = meta.to_chroma_dict()
+        assert "source" not in out
+        assert "page" not in out
+        assert out["vendor"] == "SKF"
+
+    def test_to_chroma_dict_strips_newlines_and_caps_length(self) -> None:
+        long_value = "a" * 1000
+        meta = DocumentMetadata(extra={"notes": f"line1\nline2\x07\n{long_value}"})
+        out = meta.to_chroma_dict()
+        assert "\n" not in out["notes"]
+        assert "\x07" not in out["notes"]
+        assert len(out["notes"]) <= 256
+
+    def test_to_chroma_dict_drops_non_scalar_extras(self) -> None:
+        meta = DocumentMetadata(
+            extra={
+                "valid_str": "ok",
+                "valid_int": 42,
+                "valid_bool": True,
+                "bad_list": [1, 2, 3],
+                "bad_dict": {"nested": "value"},
+                "bad_none": None,
+            }
+        )
+        out = meta.to_chroma_dict()
+        assert out["valid_str"] == "ok"
+        assert out["valid_int"] == 42
+        assert out["valid_bool"] is True
+        assert "bad_list" not in out
+        assert "bad_dict" not in out
+        assert "bad_none" not in out
+
+    def test_to_chroma_dict_extra_cannot_override_explicit_field(self) -> None:
+        # If both ``asset_id`` and ``extra["asset_id"]`` are set somehow, the
+        # explicit field wins (the loader normally prevents this, but the
+        # contract should still hold defensively).
+        meta = DocumentMetadata(asset_id="P-201", extra={"asset_id": "HIJACK"})
+        out = meta.to_chroma_dict()
+        assert out["asset_id"] == "P-201"
+
 
 class TestFromPathSidecar:
     """Loading a sidecar .meta.yaml file next to a source."""

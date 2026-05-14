@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent
+from machina.agent.runtime import Agent, _format_response_for_channel
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
@@ -93,6 +94,9 @@ class _FakeDocConnector:
 
     capabilities: ClassVar[list[str]] = ["search_documents"]
 
+    def __init__(self) -> None:
+        self.last_call_kwargs: dict[str, Any] = {}
+
     async def connect(self) -> None:
         pass
 
@@ -103,6 +107,7 @@ class _FakeDocConnector:
         return True
 
     async def search(self, query: str, **kwargs: Any) -> list[DocumentChunk]:
+        self.last_call_kwargs = {"query": query, **kwargs}
         return [
             DocumentChunk(
                 content="Pump P-201 bearing replacement procedure",
@@ -558,6 +563,29 @@ class TestExecuteTool:
         assert agent._turn_chunks["chat-b"] == {}, "chat-b must not see chat-a chunks"
 
     @pytest.mark.asyncio
+    async def test_search_documents_forwards_filters_to_connector(self) -> None:
+        """LLM-supplied ``filters`` must reach the connector's search call."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        await agent._execute_tool(
+            "search_documents",
+            {"query": "bearing", "filters": {"doc_type": "procedure"}},
+        )
+        assert conn.last_call_kwargs.get("filters") == {"doc_type": "procedure"}
+
+    @pytest.mark.asyncio
+    async def test_search_documents_ignores_non_dict_filters(self) -> None:
+        """Malformed ``filters`` (string, list) must not be passed through."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        await agent._execute_tool(
+            "search_documents", {"query": "bearing", "filters": "not-a-dict"}
+        )
+        assert conn.last_call_kwargs.get("filters") is None
+
+    @pytest.mark.asyncio
     async def test_search_documents_default_chat_id_when_not_threaded(self) -> None:
         """Direct callers omitting chat_id register under 'default' only."""
         conn = _FakeDocConnector()
@@ -870,6 +898,28 @@ class TestLlmLoop:
         messages = [{"role": "user", "content": "test"}]
         result = await agent._llm_loop(messages, "chat1")
         assert result == ""
+
+
+class TestFormatResponseForChannel:
+    """Channel handler must surface citations alongside the rendered text."""
+
+    def test_no_citations_passthrough(self) -> None:
+        response = AgentResponse(text="Just an answer.")
+        assert _format_response_for_channel(response) == "Just an answer."
+
+    def test_citations_appended_as_sources_footer(self) -> None:
+        response = AgentResponse(
+            text="Replace bearing every 2000h [manuals/pump.pdf:42].",
+            citations=[
+                Citation(chunk_id="c1", source="manuals/pump.pdf", page=42),
+                Citation(chunk_id="c2", source="manuals/pump.pdf", page=43),
+            ],
+        )
+        out = _format_response_for_channel(response)
+        assert "[manuals/pump.pdf:42]" in out  # inline marker preserved
+        assert "— Sources:" in out
+        assert "manuals/pump.pdf:42" in out
+        assert "manuals/pump.pdf:43" in out
 
 
 class TestRunAsync:

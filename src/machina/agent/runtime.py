@@ -36,6 +36,20 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _format_response_for_channel(response: AgentResponse) -> str:
+    """Render an :class:`AgentResponse` for delivery on a channel.
+
+    Inline ``[source:page]`` markers are already in ``response.text``.
+    When citations are present, a compact ``Sources`` footer is appended
+    so the operator can trace the answer back to its origin in chat
+    surfaces that don't expose the structured field.
+    """
+    if not response.citations:
+        return response.text
+    sources = "\n".join(f"  • {c.inline_marker()}" for c in response.citations)
+    return f"{response.text}\n\n— Sources:\n{sources}"
+
+
 class Agent:
     """Maintenance AI agent that orchestrates reasoning and actions.
 
@@ -486,7 +500,8 @@ class Agent:
         channel = self._channels[0]
 
         async def _handler(msg: Any) -> str:
-            return await self.handle_message(msg.text, chat_id=msg.chat_id)
+            response = await self.handle_message_full(msg.text, chat_id=msg.chat_id)
+            return _format_response_for_channel(response)
 
         try:
             await channel.listen(_handler)
@@ -763,9 +778,12 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.SEARCH_DOCUMENTS)
             if connectors:
                 _, conn = connectors[0]
+                raw_filters = args.get("filters")
+                filters = raw_filters if isinstance(raw_filters, dict) else None
                 results = await conn.search(  # type: ignore[attr-defined]
                     args.get("query", ""),
                     asset_id=args.get("asset_id", ""),
+                    filters=filters,
                 )
                 serialized = [
                     {

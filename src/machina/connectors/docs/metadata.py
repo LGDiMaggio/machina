@@ -32,6 +32,14 @@ logger = structlog.get_logger(__name__)
 
 _KNOWN_DOC_TYPES = frozenset({"manual", "procedure", "datasheet", "troubleshooting", "other"})
 
+# Maximum length of a free-form metadata value when carried to the vector
+# store. Long strings are truncated; non-scalar values are dropped entirely.
+_MAX_METADATA_VALUE_LEN = 256
+
+# Reserved metadata keys — extra keys that collide with these are dropped
+# so user-authored frontmatter cannot overwrite system fields.
+_RESERVED_METADATA_KEYS = frozenset({"source", "page", "chunk_id", "content", "score"})
+
 # Asset IDs in PMI manuals typically look like P-201, COMP-301, M-12, V-007A.
 # We match an uppercase prefix (1-6 chars), a hyphen, and a digit-led suffix.
 _ASSET_ID_PATTERN = re.compile(r"\b([A-Z]{1,6})-(\d{1,5}[A-Z]?)(?![A-Za-z0-9])")
@@ -77,6 +85,15 @@ class DocumentMetadata:
 
         Chroma's ``where=`` clause cannot match on empty strings reliably,
         so empty fields are omitted from the output.
+
+        Free-form ``extra`` keys from sidecars / frontmatter are accepted
+        as filterable metadata but are sanitized first: non-scalar values
+        (lists, dicts, None) are dropped, strings are stripped of control
+        characters and capped at ``_MAX_METADATA_VALUE_LEN``, and keys
+        that collide with reserved system fields are rejected. This keeps
+        a typo or hostile sidecar from injecting newlines / overlong
+        payloads / system-field overrides into downstream consumers (the
+        vector store, prompt context, or operator-facing logs).
         """
         out: dict[str, Any] = {}
         if self.asset_id:
@@ -88,9 +105,12 @@ class DocumentMetadata:
         if self.section_title:
             out["section_title"] = self.section_title
         for key, value in self.extra.items():
-            if isinstance(value, str) and not value:
+            if key in _RESERVED_METADATA_KEYS or key in out:
                 continue
-            out[key] = value
+            sanitized = _sanitize_metadata_value(value)
+            if sanitized is None:
+                continue
+            out[key] = sanitized
         return out
 
     def merge(self, override: DocumentMetadata) -> DocumentMetadata:
@@ -210,3 +230,23 @@ def _infer_from_filename(path: Path) -> DocumentMetadata:
             break
 
     return DocumentMetadata(asset_id=asset_id, doc_type=doc_type)
+
+
+def _sanitize_metadata_value(value: Any) -> str | int | float | bool | None:
+    """Return a vector-store-safe scalar value, or ``None`` to drop the entry.
+
+    Strings are stripped of control characters and capped in length so a
+    typo or malicious sidecar can't smuggle newlines / overlong payloads
+    into downstream prompt context, log lines, or filter clauses. Numbers
+    and booleans pass through unchanged. Anything else (lists, dicts,
+    ``None``) is dropped.
+    """
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        cleaned = "".join(ch for ch in value if ch == " " or ch.isprintable())
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return None
+        return cleaned[:_MAX_METADATA_VALUE_LEN]
+    return None
