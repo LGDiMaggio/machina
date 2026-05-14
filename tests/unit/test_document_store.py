@@ -365,6 +365,40 @@ class TestDocumentChunk:
         assert chunk.asset_id == "P-201"
 
 
+class TestEmbedderConfig:
+    """Swappable embedder param (Unit 7)."""
+
+    def test_no_embedder_returns_none(self) -> None:
+        """Default constructor produces no custom embedding function."""
+        conn = DocumentStoreConnector()
+        assert conn._load_embedding_function() is None
+
+    def test_unloadable_embedder_falls_back_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bad embedder model name → None (caller uses Chroma's default)."""
+        import sys
+
+        fake_module = MagicMock()
+        fake_module.HuggingFaceEmbeddings = MagicMock(
+            side_effect=RuntimeError("model download failed")
+        )
+        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", fake_module)
+
+        conn = DocumentStoreConnector(embedder="some-nonexistent-model")
+        assert conn._load_embedding_function() is None
+
+    def test_embedder_wrapper_unavailable_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing langchain_community.embeddings → None."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", None)
+        conn = DocumentStoreConnector(embedder="BAAI/bge-m3")
+        assert conn._load_embedding_function() is None
+
+
 class TestMetadataFiltering:
     """Pre-retrieval filtering via the new metadata schema (Unit 1)."""
 

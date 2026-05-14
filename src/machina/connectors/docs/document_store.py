@@ -98,10 +98,25 @@ class DocumentStoreConnector:
         collection_name: Name for the ChromaDB collection.
         chunk_size: Target size for text chunks (in characters).
         chunk_overlap: Overlap between consecutive chunks.
+        reranker_model: Optional ``sentence-transformers`` cross-encoder
+            model name to rerank fused results (e.g.
+            ``"BAAI/bge-reranker-base"``). Requires the
+            ``[docs-rag-rerank]`` extra.
+        embedder: Optional ``sentence-transformers`` model name used to
+            embed chunks into Chroma. When set (e.g. ``"BAAI/bge-m3"``),
+            requires the ``[docs-rag-rerank]`` extra (which pulls in
+            ``sentence-transformers``). If the model fails to load —
+            extra absent, model not downloaded, GPU/CPU issue — the
+            connector silently falls back to Chroma's default embedder
+            so ingest does not crash.
 
     Example:
         ```python
-        docs = DocumentStoreConnector(paths=["manuals/", "procedures/"])
+        docs = DocumentStoreConnector(
+            paths=["manuals/", "procedures/"],
+            embedder="BAAI/bge-m3",
+            reranker_model="BAAI/bge-reranker-base",
+        )
         await docs.connect()
         results = await docs.search(
             "bearing replacement", filters={"asset_id": "P-201"}
@@ -123,12 +138,14 @@ class DocumentStoreConnector:
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
         reranker_model: str | None = None,
+        embedder: str | None = None,
     ) -> None:
         self._paths = [Path(p) for p in (paths or [])]
         self._collection_name = collection_name
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._reranker_model_name = reranker_model
+        self._embedder_model_name = embedder
         self._connected = False
         self._use_rag = False
 
@@ -381,13 +398,53 @@ class DocumentStoreConnector:
         texts = [text for _, text, _, _ in indexed]
         metadatas = [meta for _, _, meta, _ in indexed]
 
-        self._vectorstore = Chroma.from_texts(
-            texts=texts,
-            metadatas=metadatas,
-            ids=ids,
-            collection_name=self._collection_name,
-        )
+        from_texts_kwargs: dict[str, Any] = {
+            "texts": texts,
+            "metadatas": metadatas,
+            "ids": ids,
+            "collection_name": self._collection_name,
+        }
+        embedding = self._load_embedding_function()
+        if embedding is not None:
+            from_texts_kwargs["embedding"] = embedding
+
+        self._vectorstore = Chroma.from_texts(**from_texts_kwargs)
         self._bm25_index = _build_bm25_index(texts, metadatas, ids)
+
+    def _load_embedding_function(self) -> Any:
+        """Build a LangChain ``Embeddings`` wrapper around the configured model.
+
+        Returns ``None`` when no embedder is configured, when the
+        ``sentence-transformers`` extra is missing, or when the model
+        fails to load — Chroma then uses its default embedder so ingest
+        is never blocked by a misconfigured custom model.
+        """
+        model_name = self._embedder_model_name
+        if not model_name:
+            return None
+        try:
+            from langchain_community.embeddings import (  # type: ignore[import-not-found,unused-ignore]
+                HuggingFaceEmbeddings,
+            )
+        except ImportError:
+            logger.info(
+                "embedder_wrapper_unavailable",
+                connector="DocumentStoreConnector",
+                hint="Install machina-ai[docs-rag] for HuggingFace embedding wrappers",
+                requested_model=model_name,
+            )
+            return None
+        try:
+            return HuggingFaceEmbeddings(model_name=model_name)
+        except Exception as exc:
+            logger.warning(
+                "embedder_load_failed",
+                connector="DocumentStoreConnector",
+                requested_model=model_name,
+                error=str(exc),
+                hint="Falling back to Chroma's default embedder",
+            )
+            return None
 
     def _rag_search(
         self,
