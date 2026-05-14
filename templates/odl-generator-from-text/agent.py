@@ -32,7 +32,17 @@ def main() -> None:
         "--config",
         default=str(Path(__file__).resolve().parent / "config.yaml"),
     )
-    parser.add_argument("--sandbox", action="store_true")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Sandbox mode — writes are logged, not executed",
+    )
+    mode_group.add_argument(
+        "--live",
+        action="store_true",
+        help="Live mode — writes are executed (overrides MACHINA_SANDBOX_MODE)",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -41,7 +51,10 @@ def main() -> None:
     agent = Agent.from_config(args.config)
     agent.register_workflow(message_to_workorder)
 
-    if args.sandbox or os.getenv("MACHINA_SANDBOX_MODE", "true").lower() == "true":
+    # Resolution: --live wins, then --sandbox, then MACHINA_SANDBOX_MODE env (default: sandbox).
+    if args.live:
+        agent.sandbox = False
+    elif args.sandbox or os.getenv("MACHINA_SANDBOX_MODE", "true").lower() == "true":
         agent.sandbox = True
 
     mode = "SANDBOX" if agent.sandbox else "LIVE"
