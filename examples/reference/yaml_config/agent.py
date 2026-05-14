@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 
 _repo_root = Path(__file__).resolve().parent.parent.parent.parent
+_examples_dir = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
+sys.path.insert(0, str(_examples_dir))
+
+from _mode import add_mode_flags, resolve_sandbox  # noqa: E402
+from _preflight import check  # noqa: E402
 
 from machina import Agent
 
@@ -39,15 +44,9 @@ def main() -> None:
     parser.add_argument("--llm", default=None, help="Override LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from _mode import add_mode_flags, resolve_sandbox
-
     # YAML supplies the default mode; CLI flags override it.
     add_mode_flags(parser)
-
     args = parser.parse_args()
-
-    from _preflight import check
 
     llm = _resolve_llm(args.config, args.llm)
     check(llm=llm)

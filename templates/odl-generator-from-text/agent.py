@@ -26,6 +26,29 @@ from machina import Agent
 from machina.observability.logging import configure_logging
 
 
+def resolve_sandbox(
+    *,
+    sandbox_flag: bool,
+    live_flag: bool,
+    env_value: str | None,
+) -> bool:
+    """Compute sandbox mode for the template.
+
+    Precedence: ``--live`` wins, then ``--sandbox``, then
+    ``MACHINA_SANDBOX_MODE`` env var. The env var defaults to ``"true"``
+    (sandbox-on) when unset, so a fresh container starts in sandbox;
+    setting ``MACHINA_SANDBOX_MODE=false`` makes LIVE the implicit default.
+
+    Kept as a free function (not a method) so unit tests can pin the
+    precedence rule without instantiating an :class:`Agent`.
+    """
+    if live_flag:
+        return False
+    if sandbox_flag:
+        return True
+    return (env_value if env_value is not None else "true").lower() == "true"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OdL Generator from Text")
     parser.add_argument(
@@ -51,13 +74,11 @@ def main() -> None:
     agent = Agent.from_config(args.config)
     agent.register_workflow(message_to_workorder)
 
-    # Resolution: --live wins, then --sandbox, then MACHINA_SANDBOX_MODE env.
-    # The env var defaults to "true" so a fresh container starts in sandbox;
-    # setting MACHINA_SANDBOX_MODE=false makes LIVE the implicit default.
-    if args.live:
-        agent.sandbox = False
-    elif args.sandbox or os.getenv("MACHINA_SANDBOX_MODE", "true").lower() == "true":
-        agent.sandbox = True
+    agent.sandbox = resolve_sandbox(
+        sandbox_flag=args.sandbox,
+        live_flag=args.live,
+        env_value=os.getenv("MACHINA_SANDBOX_MODE"),
+    )
 
     mode = "SANDBOX" if agent.sandbox else "LIVE"
     print(f"\n{'=' * 60}")

@@ -17,7 +17,12 @@ import sys
 from pathlib import Path
 
 _repo_root = Path(__file__).resolve().parent.parent.parent
+_examples_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
+sys.path.insert(0, str(_examples_dir))
+
+from _mode import add_mode_flags, resolve_sandbox  # noqa: E402
+from _preflight import check  # noqa: E402
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
@@ -26,7 +31,7 @@ from machina.connectors.docs import DocumentStoreConnector
 from machina.domain import Alarm, Severity
 from machina.workflows.builtins import alarm_to_workorder
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+SAMPLE_DIR = _examples_dir / "sample_data"
 
 # ── The agent: one workflow registration line ───────────────────
 agent = Agent(
@@ -96,14 +101,8 @@ def main() -> None:
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from _mode import add_mode_flags, resolve_sandbox
-
     add_mode_flags(parser, default_sandbox=True)
-
     args = parser.parse_args()
-
-    from _preflight import check
 
     check(llm=args.llm)
 

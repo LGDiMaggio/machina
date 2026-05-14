@@ -12,14 +12,19 @@ import sys
 from pathlib import Path
 
 _repo_root = Path(__file__).resolve().parent.parent.parent
+_examples_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
+sys.path.insert(0, str(_examples_dir))
+
+from _mode import add_mode_flags, resolve_sandbox  # noqa: E402
+from _preflight import check  # noqa: E402
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
 from machina.connectors.comms.telegram import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+SAMPLE_DIR = _examples_dir / "sample_data"
 
 
 def _build_agent(llm: str = "ollama:llama3", sandbox: bool = False) -> Agent:
@@ -60,19 +65,11 @@ def main() -> None:
         help="LLM provider:model (e.g. openai:gpt-4o, anthropic:claude-sonnet-4-20250514)",
     )
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from _mode import add_mode_flags, resolve_sandbox
-
     add_mode_flags(parser, default_sandbox=False)
-
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
     configure_logging(level="DEBUG" if args.verbose else "INFO")
-
-    # Pre-flight: check sample data, LLM provider, and required extras
-    from _preflight import check
-
     check(llm=args.llm, sample_dir=SAMPLE_DIR)
 
     # Quickstart is read-mostly Q&A: default to LIVE so users can experiment freely.

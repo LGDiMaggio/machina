@@ -14,20 +14,23 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from pathlib import Path
-from typing import Any
 
 _repo_root = Path(__file__).resolve().parent.parent.parent.parent
+_examples_dir = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_repo_root / "src"))
+sys.path.insert(0, str(_examples_dir))
+
+from _mode import add_mode_flags, resolve_sandbox  # noqa: E402
+from _preflight import check  # noqa: E402
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
 from machina.connectors.comms.telegram import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
-SAMPLE_DIR = Path(__file__).resolve().parent.parent.parent / "sample_data"
+SAMPLE_DIR = _examples_dir / "sample_data"
 
 # ── Configuration for each CMMS backend ─────────────────────────
 #
@@ -91,7 +94,11 @@ BACKEND_CONFIGS = {
 }
 
 
-def build_agent(backend: str = "generic", llm: str = "ollama:llama3") -> Agent:
+def build_agent(
+    backend: str = "generic",
+    llm: str = "ollama:llama3",
+    sandbox: bool = True,
+) -> Agent:
     """Build agent -- show the selected backend config, run with GenericCmms."""
     cmms = GenericCmmsConnector(data_dir=SAMPLE_DIR / "cmms")
     docs = DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"])
@@ -102,17 +109,18 @@ def build_agent(backend: str = "generic", llm: str = "ollama:llama3") -> Agent:
         connectors=[cmms, docs],
         channels=[CliChannel()],
         llm=llm,
+        sandbox=sandbox,
     )
 
 
-async def run_demo(backend: str, llm: str) -> None:
+async def run_demo(backend: str, llm: str, sandbox: bool) -> None:
     """Ask the same question regardless of CMMS backend."""
     print(f"\n  Configuration for {backend}:\n")
     print(f"    {BACKEND_CONFIGS.get(backend, BACKEND_CONFIGS['generic'])}\n")
     if backend != "generic":
         print("  (Using GenericCmms with sample data for the demo)\n")
 
-    agent = build_agent(backend=backend, llm=llm)
+    agent = build_agent(backend=backend, llm=llm, sandbox=sandbox)
     await agent.start()
 
     question = "List all critical assets and tell me if any have open work orders."
@@ -137,27 +145,33 @@ async def run_demo(backend: str, llm: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CMMS Portability Demo")
-    parser.add_argument("--backend", choices=["generic", "sap", "maximo", "upkeep"],
-                        default="generic", help="CMMS backend to show")
+    parser.add_argument(
+        "--backend",
+        choices=["generic", "sap", "maximo", "upkeep"],
+        default="generic",
+        help="CMMS backend to show",
+    )
     parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--interactive", action="store_true", help="Interactive chat mode")
     parser.add_argument("--verbose", action="store_true")
+
+    add_mode_flags(parser, default_sandbox=True)
     args = parser.parse_args()
 
-    # Pre-flight: check sample data, LLM provider, and required extras
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from _preflight import check
     check(llm=args.llm)
 
     if args.verbose:
         from machina.observability.logging import configure_logging
+
         configure_logging(level="DEBUG")
 
+    sandbox = resolve_sandbox(args, default=True)
+
     if args.interactive:
-        agent = build_agent(backend=args.backend, llm=args.llm)
+        agent = build_agent(backend=args.backend, llm=args.llm, sandbox=sandbox)
         agent.run()
     else:
-        asyncio.run(run_demo(backend=args.backend, llm=args.llm))
+        asyncio.run(run_demo(backend=args.backend, llm=args.llm, sandbox=sandbox))
 
 
 if __name__ == "__main__":

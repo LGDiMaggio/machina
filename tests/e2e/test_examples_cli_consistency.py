@@ -25,15 +25,26 @@ pytest.importorskip("dotenv")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-EXAMPLE_AGENTS = [
-    REPO_ROOT / "examples" / "quickstart" / "agent.py",
-    REPO_ROOT / "examples" / "alarm_to_workorder" / "agent.py",
-    REPO_ROOT / "examples" / "reference" / "predictive_pipeline" / "agent.py",
-    REPO_ROOT / "examples" / "reference" / "custom_workflows" / "agent.py",
-    REPO_ROOT / "examples" / "reference" / "agent_driven" / "agent.py",
-    REPO_ROOT / "examples" / "reference" / "yaml_config" / "agent.py",
-    REPO_ROOT / "templates" / "odl-generator-from-text" / "agent.py",
-]
+
+def _discover_agents() -> list[Path]:
+    """Find every ``agent.py`` under ``examples/`` and ``templates/``.
+
+    Auto-discovery means a new example added in the future is covered
+    without manually editing this test — preventing the kind of silent
+    drift the test was created to prevent.
+    """
+    roots = [REPO_ROOT / "examples", REPO_ROOT / "templates"]
+    found: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        found.extend(p for p in root.rglob("agent.py") if "__pycache__" not in p.parts)
+    return sorted(found)
+
+
+EXAMPLE_AGENTS = _discover_agents()
+
+assert EXAMPLE_AGENTS, "No example agent.py files found — discovery glob is broken."
 
 
 def _run(agent: Path, *extra: str) -> subprocess.CompletedProcess[str]:
