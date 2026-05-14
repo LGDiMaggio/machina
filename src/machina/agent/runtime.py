@@ -425,36 +425,38 @@ class Agent:
         # Reset the per-turn chunk registry.
         self._turn_chunks[chat_id] = {}
 
-        # 1. Entity resolution
-        resolved = self._resolver.resolve(text)
-
-        # 2. Gather context from connectors
-        context_data = await self._gather_context(text, resolved, chat_id=chat_id)
-
-        # 3. Build messages
-        messages = self._build_messages(text, chat_id, context_data)
-
-        # 4. Call LLM (with tool-calling loop)
         try:
-            raw_response = await self._llm_loop(messages, chat_id)
-        except Exception as exc:
-            logger.error(
-                "llm_error",
-                agent=self.name,
-                error=str(exc),
-            )
-            raise LLMError(f"LLM call failed: {exc}") from exc
+            # 1. Entity resolution
+            resolved = self._resolver.resolve(text)
 
-        # 5. Parse citations against the per-turn chunk registry.
-        rendered, citations = parse_response(raw_response, self._turn_chunks.get(chat_id, {}))
+            # 2. Gather context from connectors
+            context_data = await self._gather_context(text, resolved, chat_id=chat_id)
 
-        # 6. Update history (use the rendered text without citation block).
-        self._add_to_history(chat_id, "user", text)
-        self._add_to_history(chat_id, "assistant", rendered)
+            # 3. Build messages
+            messages = self._build_messages(text, chat_id, context_data)
 
-        # Drop the per-turn registry once parsing is done so long-lived agents
-        # do not accumulate one slot per chat_id ever seen.
-        self._turn_chunks.pop(chat_id, None)
+            # 4. Call LLM (with tool-calling loop)
+            try:
+                raw_response = await self._llm_loop(messages, chat_id)
+            except Exception as exc:
+                logger.error(
+                    "llm_error",
+                    agent=self.name,
+                    error=str(exc),
+                )
+                raise LLMError(f"LLM call failed: {exc}") from exc
+
+            # 5. Parse citations against the per-turn chunk registry.
+            rendered, citations = parse_response(raw_response, self._turn_chunks.get(chat_id, {}))
+
+            # 6. Update history (use the rendered text without citation block).
+            self._add_to_history(chat_id, "user", text)
+            self._add_to_history(chat_id, "assistant", rendered)
+        finally:
+            # Always drop the per-turn registry — even on LLM errors — so a
+            # long-lived agent does not accumulate orphan slots from failed
+            # turns.
+            self._turn_chunks.pop(chat_id, None)
 
         logger.info(
             "response_generated",

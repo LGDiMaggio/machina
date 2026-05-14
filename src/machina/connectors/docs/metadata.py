@@ -237,11 +237,23 @@ def _sanitize_metadata_value(value: Any) -> str | int | float | bool | None:
 
     Strings are stripped of control characters and capped in length so a
     typo or malicious sidecar can't smuggle newlines / overlong payloads
-    into downstream prompt context, log lines, or filter clauses. Numbers
-    and booleans pass through unchanged. Anything else (lists, dicts,
+    into downstream prompt context, log lines, or filter clauses.
+    Integers, finite floats, and booleans pass through unchanged.
+    ``NaN`` / ``+inf`` / ``-inf`` are dropped because Chroma where-clause
+    handling for non-finite floats is inconsistent across versions and
+    silently corrupts filter behavior. Anything else (lists, dicts,
     ``None``) is dropped.
     """
-    if isinstance(value, (bool, int, float)):
+    import math
+
+    # bool is a subclass of int — match it first to keep True/False as-is.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
         return value
     if isinstance(value, str):
         cleaned = "".join(ch for ch in value if ch == " " or ch.isprintable())

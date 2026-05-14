@@ -58,20 +58,44 @@ class TestCrossEncoderRerank:
         # Lazy load is cached on the instance.
         assert cls.call_count == 1
 
-    def test_import_error_returns_unranked_candidates(self) -> None:
-        # sentence_transformers absent → graceful degrade.
-        rr = CrossEncoderReranker()
-        # Simulate import failure by ensuring sys.modules has no entry and
-        # the real package is not installed in the test env (we don't
-        # actually import it).
-        out = rr.rerank("q", [("a", "x"), ("b", "y")])
-        # Either the package is installed (returns sorted) or not (returns
-        # zero scores in original order). In both cases the chunks are
-        # preserved; we just verify length and ids.
-        assert len(out) == 2
-        assert {chunk_id for chunk_id, _ in out} == {"a", "b"}
+    def test_import_error_returns_none(self) -> None:
+        # sentence_transformers absent → graceful degrade returns None so
+        # the caller can preserve the upstream ranking and scores.
+        # Force import failure by injecting a sys.modules entry that
+        # raises on attribute access (skips the real package even if it
+        # happens to be installed in the dev env).
+        broken = MagicMock()
+        broken.CrossEncoder.side_effect = ImportError("simulated")
+        with patch.dict("sys.modules", {"sentence_transformers": None}):
+            rr = CrossEncoderReranker()
+            out = rr.rerank("q", [("a", "x"), ("b", "y")])
+        assert out is None
 
-    def test_predict_failure_returns_original_order_with_zero_scores(self) -> None:
+    def test_predict_returning_numpy_ndarray(self) -> None:
+        """Real CrossEncoder.predict returns numpy.ndarray; verify we handle it.
+
+        Skipped when numpy is not available (it ships with sentence-transformers
+        but is optional in the slim dev install).
+        """
+        import pytest
+
+        np = pytest.importorskip("numpy")
+        module = MagicMock()
+        instance = MagicMock()
+        instance.predict.return_value = np.array([0.1, 0.95, 0.4])
+        module.CrossEncoder = MagicMock(return_value=instance)
+        with patch.dict("sys.modules", {"sentence_transformers": module}):
+            rr = CrossEncoderReranker()
+            out = rr.rerank(
+                "q",
+                [("c1", "noise"), ("c2", "bearing replacement"), ("c3", "lube")],
+            )
+        assert out is not None
+        assert [chunk_id for chunk_id, _ in out] == ["c2", "c3", "c1"]
+        # Scores are plain floats after our cast, not numpy types.
+        assert all(isinstance(score, float) for _, score in out)
+
+    def test_predict_failure_returns_none(self) -> None:
         module = MagicMock()
         instance = MagicMock()
         instance.predict.side_effect = RuntimeError("OOM")
@@ -79,9 +103,7 @@ class TestCrossEncoderRerank:
         with patch.dict("sys.modules", {"sentence_transformers": module}):
             rr = CrossEncoderReranker()
             out = rr.rerank("q", [("a", "x"), ("b", "y")])
-        # Original order preserved; scores zeroed.
-        assert [chunk_id for chunk_id, _ in out] == ["a", "b"]
-        assert all(score == 0.0 for _, score in out)
+        assert out is None
 
     def test_load_failure_is_remembered(self) -> None:
         """After a load failure the model is not retried on each call."""

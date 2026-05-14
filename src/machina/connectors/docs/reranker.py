@@ -96,7 +96,7 @@ class CrossEncoderReranker:
         self,
         query: str,
         candidates: list[tuple[str, str]],
-    ) -> list[tuple[str, float]]:
+    ) -> list[tuple[str, float]] | None:
         """Score every ``(chunk_id, text)`` pair against ``query``.
 
         Args:
@@ -106,15 +106,16 @@ class CrossEncoderReranker:
 
         Returns:
             ``[(chunk_id, score)]`` sorted by relevance score
-            descending. When the model is unavailable or scoring fails,
-            returns the candidates in their original order with score
-            ``0.0`` so the caller can keep the upstream ranking.
+            descending. Returns ``None`` when the model is unavailable
+            or scoring fails so the caller can preserve the upstream
+            ordering and scores instead of overwriting them with a
+            zero sentinel.
         """
         if not candidates:
             return []
         model = self._load()
         if model is None:
-            return [(chunk_id, 0.0) for chunk_id, _ in candidates]
+            return None
 
         try:
             pairs = [(query, text) for _, text in candidates]
@@ -127,7 +128,7 @@ class CrossEncoderReranker:
                 candidate_count=len(candidates),
                 error=str(exc),
             )
-            return [(chunk_id, 0.0) for chunk_id, _ in candidates]
+            return None
 
         scored = [
             (chunk_id, float(score))

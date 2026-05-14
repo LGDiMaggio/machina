@@ -166,9 +166,17 @@ class DocumentStoreConnector:
         self._connected = True
 
     async def disconnect(self) -> None:
-        """Release resources."""
+        """Release resources.
+
+        All connect-time state must be cleared so a subsequent connect()
+        cannot serve chunks from the previous corpus or keep a stale
+        reranker handle.
+        """
         self._vectorstore = None
         self._chunks.clear()
+        self._chunk_by_id.clear()
+        self._bm25_index = None
+        self._reranker = None
         self._connected = False
         logger.info("disconnected", connector="DocumentStoreConnector")
 
@@ -397,15 +405,28 @@ class DocumentStoreConnector:
         *,
         top_k: int,
     ) -> list[DocumentChunk]:
-        """Reorder ``candidates`` with the cross-encoder and return top-K."""
+        """Reorder ``candidates`` with the cross-encoder and return top-K.
+
+        Candidates without a ``chunk_id`` are not handed to the reranker
+        (the source:page fallback used to collide for chunks sharing a
+        page when chunk_id was empty). They are appended after the
+        reranked block in their original order.
+        """
         if not candidates or self._reranker is None:
             return candidates[:top_k]
-        pairs = [
-            (chunk.chunk_id or f"{chunk.source}:{chunk.page}", chunk.content)
-            for chunk in candidates
-        ]
+
+        rerankable: list[DocumentChunk] = [c for c in candidates if c.chunk_id]
+        unrerankable: list[DocumentChunk] = [c for c in candidates if not c.chunk_id]
+        if not rerankable:
+            return candidates[:top_k]
+
+        pairs = [(chunk.chunk_id, chunk.content) for chunk in rerankable]
+        by_key = dict(zip([c.chunk_id for c in rerankable], rerankable, strict=True))
         scored = self._reranker.rerank(query, pairs)
-        by_key = {key: chunk for key, chunk in zip([p[0] for p in pairs], candidates, strict=True)}
+        if scored is None:
+            # Reranker unavailable or scoring failed — keep the upstream
+            # RRF order and scores instead of overwriting with zeros.
+            return candidates[:top_k]
         out: list[DocumentChunk] = []
         for key, score in scored:
             chunk = by_key.get(key)
@@ -415,6 +436,12 @@ class DocumentStoreConnector:
             out.append(chunk)
             if len(out) >= top_k:
                 break
+        # Append any chunks the reranker couldn't score (no chunk_id) in
+        # their original RRF order so they remain reachable.
+        for chunk in unrerankable:
+            if len(out) >= top_k:
+                break
+            out.append(chunk)
         return out
 
     def _dense_search(
@@ -483,19 +510,19 @@ class DocumentStoreConnector:
                     section_title=doc_meta.section_title,
                     index=i,
                 )
-                self._chunks.append(
-                    DocumentChunk(
-                        content=para,
-                        source=doc["source"],
-                        page=doc.get("page", 0) or i + 1,
-                        chunk_id=chunk_id,
-                        asset_id=doc_meta.asset_id,
-                        equipment_class_code=doc_meta.equipment_class_code,
-                        doc_type=doc_meta.doc_type,
-                        section_title=doc_meta.section_title,
-                        metadata={"source": doc["source"], **doc_meta.to_chroma_dict()},
-                    )
+                new_chunk = DocumentChunk(
+                    content=para,
+                    source=doc["source"],
+                    page=doc.get("page", 0) or i + 1,
+                    chunk_id=chunk_id,
+                    asset_id=doc_meta.asset_id,
+                    equipment_class_code=doc_meta.equipment_class_code,
+                    doc_type=doc_meta.doc_type,
+                    section_title=doc_meta.section_title,
+                    metadata={"source": doc["source"], **doc_meta.to_chroma_dict()},
                 )
+                self._chunks.append(new_chunk)
+                self._chunk_by_id[chunk_id] = new_chunk
 
     def _keyword_search(
         self,
@@ -682,6 +709,13 @@ def _build_bm25_index(texts: list[str], metadatas: list[dict[str, Any]], ids: li
             "bm25_index_unavailable",
             connector="DocumentStoreConnector",
             hint="Install machina-ai[docs-rag-hybrid] for hybrid retrieval",
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "bm25_index_build_failed",
+            connector="DocumentStoreConnector",
+            error=str(exc),
         )
         return None
     return index

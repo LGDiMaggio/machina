@@ -538,6 +538,101 @@ class TestDocumentStoreRAG:
         assert "P-201" in results[0].content
 
     @pytest.mark.asyncio
+    async def test_reranker_unavailable_preserves_rrf_order(self, sample_docs_dir: Path) -> None:
+        """Reranker that returns None must NOT overwrite RRF scores."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        doc_a = MagicMock()
+        doc_a.page_content = "Pump P-201 maintenance"
+        doc_a.metadata = {"source": "a.txt", "page": 1, "chunk_id": "c1"}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.return_value = [(doc_a, 0.9)]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        # Cross-encoder constructor raises → rerank returns None.
+        ce_module = MagicMock()
+        ce_module.CrossEncoder = MagicMock(side_effect=RuntimeError("model not cached"))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+                "sentence_transformers": ce_module,
+            },
+        ):
+            conn = DocumentStoreConnector(
+                paths=[sample_docs_dir],
+                reranker_model="mock-broken-reranker",
+            )
+            await conn.connect()
+            results = await conn.search("pump")
+
+        # Reranker failed silently → upstream RRF chunk surfaces with its
+        # fused score (positive, not the zero sentinel).
+        assert len(results) >= 1
+        assert results[0].chunk_id == "c1"
+        assert results[0].score > 0
+
+    @pytest.mark.asyncio
+    async def test_dense_only_when_bm25_extra_missing(self, sample_docs_dir: Path) -> None:
+        """When the docs-rag-hybrid extra is absent, fall back to dense-only."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        doc_a = MagicMock()
+        doc_a.page_content = "Pump bearing"
+        doc_a.metadata = {"source": "a.txt", "page": 1, "chunk_id": "c1"}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.return_value = [(doc_a, 0.9)]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        # Patch rank_bm25 to ImportError so BM25Index.build() degrades.
+        import sys as _sys
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+                "rank_bm25": None,
+            },
+        ):
+            # Drop the cached rank_bm25 import so the lazy load inside
+            # BM25Index.build re-tries the stub above.
+            _sys.modules.pop("rank_bm25", None)
+            _sys.modules["rank_bm25"] = None  # type: ignore[assignment]
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+            results = await conn.search("bearing")
+
+        # Dense-only path returns the chunk; BM25 index is None.
+        assert conn._bm25_index is None
+        assert len(results) == 1
+        assert results[0].chunk_id == "c1"
+
+    @pytest.mark.asyncio
     async def test_reranker_overrides_rrf_order(self, sample_docs_dir: Path) -> None:
         """When a reranker is configured, its scores win over the RRF order."""
         mock_splitter_cls = MagicMock()

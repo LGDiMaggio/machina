@@ -31,14 +31,17 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
-# Token pattern: keep digits, lowercase letters, hyphens, dots, and underscores
-# inside a single token. This is what preserves "skf 6310-2rs" as two tokens
-# rather than splitting "6310-2rs" on the hyphen.
-_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._\-]*")
+# Token pattern: a token starts with any Unicode letter or digit (``\w``
+# minus underscore), and continues with letters/digits/hyphens/dots/
+# underscores. ``\w`` is Unicode-aware by default in Python 3, so CJK,
+# Cyrillic, Arabic, Greek, etc. tokenize correctly. Inner punctuation
+# (dots, hyphens, underscores) is preserved so technical identifiers
+# like ``6310-2RS`` and ``2.1.0`` stay whole.
+_TOKEN_RE = re.compile(r"[^\W_][\w.\-]*", re.UNICODE)
 
 
 def tokenize(text: str) -> list[str]:
-    """Lowercase + alphanumeric-with-hyphen-and-dot tokenizer.
+    """Lowercase + alphanumeric-with-hyphen-and-dot Unicode tokenizer.
 
     Designed so technical identifiers survive intact:
 
@@ -47,6 +50,11 @@ def tokenize(text: str) -> list[str]:
 
     >>> tokenize("WO-2026-0087")
     ['wo-2026-0087']
+
+    Unicode-aware: non-ASCII scripts also tokenize.
+
+    >>> tokenize("Замена подшипника")  # Russian
+    ['замена', 'подшипника']
     """
     # Strip trailing dots, hyphens, and underscores so sentence punctuation
     # ("third.") does not stick to the token while inner punctuation
