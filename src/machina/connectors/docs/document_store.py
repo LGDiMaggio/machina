@@ -17,10 +17,20 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.capabilities import Capability
+from machina.connectors.docs.chunking import (
+    MatchChunk,
+    ParentSection,
+    SectionAwareSplitter,
+)
 from machina.connectors.docs.metadata import DocumentMetadata, strip_frontmatter
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
+
+
+# Over-fetch multiplier so parent dedup in _expand_to_parents can still
+# honour the caller's top_k after collapsing matches that share a parent.
+_PARENT_OVERFETCH_FACTOR = 6
 
 
 @dataclass
@@ -53,6 +63,8 @@ class DocumentChunk:
     page: int = 0
     score: float = 0.0
     chunk_id: str = ""
+    parent_id: str = ""
+    start_offset: int = 0
     asset_id: str = ""
     equipment_class_code: str = ""
     doc_type: str = ""
@@ -119,11 +131,20 @@ class DocumentStoreConnector:
         self._connected = False
         self._use_rag = False
 
+        # Splitter is retained so _expand_to_parents can call
+        # window_parent for oversized-section truncation using the
+        # splitter's max_parent_chars / parent_window contract.
+        self._splitter = SectionAwareSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
         # Populated after connect()
         self._chunks: list[DocumentChunk] = []
         self._vectorstore: Any = None
         self._bm25_index: Any = None  # BM25Index when [docs-rag-hybrid] installed
         self._chunk_by_id: dict[str, DocumentChunk] = {}
+        self._parent_by_id: dict[str, ParentSection] = {}
         self._reranker: Any = None  # CrossEncoderReranker when configured
 
     # ------------------------------------------------------------------
@@ -175,6 +196,7 @@ class DocumentStoreConnector:
         self._vectorstore = None
         self._chunks.clear()
         self._chunk_by_id.clear()
+        self._parent_by_id.clear()
         self._bm25_index = None
         self._reranker = None
         self._connected = False
@@ -225,9 +247,17 @@ class DocumentStoreConnector:
         """
         self._ensure_connected()
         effective = self._merge_filters(filters, asset_id)
+        # Over-fetch so parent dedup in _expand_to_parents can still
+        # honour the caller's top_k contract after collapsing matches
+        # that share a parent_id.
+        over_fetch = top_k * _PARENT_OVERFETCH_FACTOR
         if self._use_rag:
-            return await asyncio.to_thread(self._rag_search, query, top_k=top_k, filters=effective)
-        return self._keyword_search(query, top_k=top_k, filters=effective)
+            results = await asyncio.to_thread(
+                self._rag_search, query, top_k=over_fetch, filters=effective
+            )
+        else:
+            results = self._keyword_search(query, top_k=over_fetch, filters=effective)
+        return self._expand_to_parents(results, top_k=top_k)
 
     async def search_documents(
         self,
@@ -265,67 +295,81 @@ class DocumentStoreConnector:
     # RAG index (LangChain + ChromaDB)
     # ------------------------------------------------------------------
 
-    def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
-        """Build a ChromaDB vector store from parsed documents."""
-        from langchain.text_splitter import (  # type: ignore[import-not-found,unused-ignore]
-            RecursiveCharacterTextSplitter,
-        )
-        from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
-            Chroma,
-        )
+    def _iter_doc_chunks(
+        self, documents: list[dict[str, Any]]
+    ) -> list[tuple[str, str, dict[str, Any], DocumentChunk]]:
+        """Run the splitter over every document and produce indexable chunks.
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self._chunk_size,
-            chunk_overlap=self._chunk_overlap,
-        )
-
-        texts: list[str] = []
-        metadatas: list[dict[str, Any]] = []
-        ids: list[str] = []
-
+        Returns a list of ``(chunk_id, text, chroma_meta, DocumentChunk)``
+        tuples and populates ``self._parent_by_id`` / ``self._chunks`` /
+        ``self._chunk_by_id``. Shared by the RAG and keyword index
+        builders so both modes index against the same chunk shape.
+        """
+        out: list[tuple[str, str, dict[str, Any], DocumentChunk]] = []
         for doc in documents:
             doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
-            chunks = splitter.split_text(doc["content"])
-            for i, chunk_text in enumerate(chunks):
+            parents, matches = self._splitter.split(doc["content"], source=doc["source"])
+            for parent in parents:
+                self._parent_by_id[parent.parent_id] = parent
+            base_page = doc.get("page", 0)
+            for i, match in enumerate(matches):
+                section_title = match.section_title or doc_meta.section_title
+                page = base_page or 0
                 chunk_id = _make_chunk_id(
                     source=doc["source"],
-                    page=doc.get("page", 0),
-                    section_title=doc_meta.section_title,
+                    page=page,
+                    section_title=section_title,
                     index=i,
                 )
                 chroma_meta: dict[str, Any] = {
                     "source": doc["source"],
-                    "page": doc.get("page", 0),
+                    "page": page,
                     "chunk_id": chunk_id,
+                    "parent_id": match.parent_id,
+                    "start_offset": match.start_offset,
                 }
                 chroma_meta.update(doc_meta.to_chroma_dict())
-
-                texts.append(chunk_text)
-                metadatas.append(chroma_meta)
-                ids.append(chunk_id)
+                if section_title and "section_title" not in chroma_meta:
+                    chroma_meta["section_title"] = section_title
 
                 new_chunk = DocumentChunk(
-                    content=chunk_text,
+                    content=match.text,
                     source=doc["source"],
-                    page=doc.get("page", 0),
+                    page=page,
                     chunk_id=chunk_id,
+                    parent_id=match.parent_id,
+                    start_offset=match.start_offset,
                     asset_id=doc_meta.asset_id,
                     equipment_class_code=doc_meta.equipment_class_code,
                     doc_type=doc_meta.doc_type,
-                    section_title=doc_meta.section_title,
+                    section_title=section_title,
                     metadata=chroma_meta,
                 )
                 self._chunks.append(new_chunk)
                 self._chunk_by_id[chunk_id] = new_chunk
+                out.append((chunk_id, match.text, chroma_meta, new_chunk))
+        return out
 
-        if texts:
-            self._vectorstore = Chroma.from_texts(
-                texts=texts,
-                metadatas=metadatas,
-                ids=ids,
-                collection_name=self._collection_name,
-            )
-            self._bm25_index = _build_bm25_index(texts, metadatas, ids)
+    def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
+        """Build a ChromaDB vector store from parsed documents."""
+        from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
+            Chroma,
+        )
+
+        indexed = self._iter_doc_chunks(documents)
+        if not indexed:
+            return
+        ids = [chunk_id for chunk_id, _, _, _ in indexed]
+        texts = [text for _, text, _, _ in indexed]
+        metadatas = [meta for _, _, meta, _ in indexed]
+
+        self._vectorstore = Chroma.from_texts(
+            texts=texts,
+            metadatas=metadatas,
+            ids=ids,
+            collection_name=self._collection_name,
+        )
+        self._bm25_index = _build_bm25_index(texts, metadatas, ids)
 
     def _rag_search(
         self,
@@ -345,13 +389,17 @@ class DocumentStoreConnector:
         if self._vectorstore is None:
             return []
 
-        # Fetch a wider top-K from each retriever when fusing so the
-        # winner of fusion isn't artificially capped by per-retriever
-        # truncation.
-        retrieve_k = top_k * 6 if self._bm25_index is not None else top_k
+        # ``top_k`` here is already the over-fetched budget computed by
+        # search() (caller_top_k * _PARENT_OVERFETCH_FACTOR), which
+        # gives RRF fusion and parent dedup enough headroom without an
+        # additional inner multiplier.
+        retrieve_k = top_k
         dense_pairs = self._dense_search(query, k=retrieve_k, filters=filters)
         if self._bm25_index is None:
-            return [chunk for chunk, _ in dense_pairs][:top_k]
+            dense_chunks = [chunk for chunk, _ in dense_pairs]
+            if self._reranker is not None:
+                return self._apply_reranker(query, dense_chunks, top_k=top_k)
+            return dense_chunks[:top_k]
 
         # Key chunks by chunk_id so RRF (which only sees ids) can be
         # joined back to the actual DocumentChunk objects.
@@ -482,6 +530,8 @@ class DocumentStoreConnector:
                     page=doc.metadata.get("page", 0),
                     score=float(score),
                     chunk_id=doc.metadata.get("chunk_id", ""),
+                    parent_id=doc.metadata.get("parent_id", ""),
+                    start_offset=int(doc.metadata.get("start_offset", 0) or 0),
                     asset_id=doc.metadata.get("asset_id", ""),
                     equipment_class_code=doc.metadata.get("equipment_class_code", ""),
                     doc_type=doc.metadata.get("doc_type", ""),
@@ -499,30 +549,12 @@ class DocumentStoreConnector:
 
     def _build_keyword_index(self, documents: list[dict[str, Any]]) -> None:
         """Build in-memory keyword index (no dependencies needed)."""
-        for doc in documents:
-            doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
-            content = doc["content"]
-            paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-            for i, para in enumerate(paragraphs):
-                chunk_id = _make_chunk_id(
-                    source=doc["source"],
-                    page=doc.get("page", 0) or i + 1,
-                    section_title=doc_meta.section_title,
-                    index=i,
-                )
-                new_chunk = DocumentChunk(
-                    content=para,
-                    source=doc["source"],
-                    page=doc.get("page", 0) or i + 1,
-                    chunk_id=chunk_id,
-                    asset_id=doc_meta.asset_id,
-                    equipment_class_code=doc_meta.equipment_class_code,
-                    doc_type=doc_meta.doc_type,
-                    section_title=doc_meta.section_title,
-                    metadata={"source": doc["source"], **doc_meta.to_chroma_dict()},
-                )
-                self._chunks.append(new_chunk)
-                self._chunk_by_id[chunk_id] = new_chunk
+        # Shares the index-construction path with the RAG builder so
+        # both modes produce identically shaped chunks (parent_id,
+        # start_offset, section_title metadata). No vector store or
+        # BM25 sidecar is built — _keyword_search reads self._chunks
+        # directly.
+        self._iter_doc_chunks(documents)
 
     def _keyword_search(
         self,
@@ -553,6 +585,8 @@ class DocumentStoreConnector:
                 page=chunk.page,
                 score=round(score, 3),
                 chunk_id=chunk.chunk_id,
+                parent_id=chunk.parent_id,
+                start_offset=chunk.start_offset,
                 asset_id=chunk.asset_id,
                 equipment_class_code=chunk.equipment_class_code,
                 doc_type=chunk.doc_type,
@@ -567,56 +601,54 @@ class DocumentStoreConnector:
     # ------------------------------------------------------------------
 
     def _load_documents(self) -> list[dict[str, Any]]:
-        """Load documents from configured paths."""
+        """Load documents from configured paths.
+
+        Each loader returns one record per logical page. PDFs and DOCX
+        files yield one record per source page so chunks carry an
+        accurate ``page`` number; plain-text files yield a single
+        page-0 record.
+        """
         documents: list[dict[str, Any]] = []
         for path in self._paths:
             path = Path(path)
             if path.is_file():
-                doc = self._load_file(path)
-                if doc:
-                    documents.append(doc)
+                documents.extend(self._load_file(path))
             elif path.is_dir():
                 for file_path in sorted(path.rglob("*")):
                     if file_path.is_file():
                         # Skip sidecar files — they are metadata, not content.
                         if file_path.name.endswith(".meta.yaml"):
                             continue
-                        doc = self._load_file(file_path)
-                        if doc:
-                            documents.append(doc)
+                        documents.extend(self._load_file(file_path))
         return documents
 
-    def _load_file(self, file_path: Path) -> dict[str, Any] | None:
-        """Load a single file. Supports .txt, .md, .pdf (via LangChain)."""
+    def _load_file(self, file_path: Path) -> list[dict[str, Any]]:
+        """Load a single file. Returns one record per page (or one for text)."""
         suffix = file_path.suffix.lower()
         doc_metadata = DocumentMetadata.from_path(file_path)
 
         if suffix in (".txt", ".md"):
             raw = file_path.read_text(encoding="utf-8", errors="replace")
             content = strip_frontmatter(raw)
-            return {
-                "content": content,
-                "source": str(file_path),
-                "doc_metadata": doc_metadata,
-            }
+            return [
+                {
+                    "content": content,
+                    "source": str(file_path),
+                    "page": 0,
+                    "doc_metadata": doc_metadata,
+                }
+            ]
 
         if suffix == ".pdf":
-            loaded = self._load_pdf(file_path)
-            if loaded is not None:
-                loaded["doc_metadata"] = doc_metadata
-            return loaded
+            return [{**rec, "doc_metadata": doc_metadata} for rec in self._load_pdf(file_path)]
 
         if suffix in (".docx", ".doc"):
-            loaded = self._load_docx(file_path)
-            if loaded is not None:
-                loaded["doc_metadata"] = doc_metadata
-            return loaded
+            return [{**rec, "doc_metadata": doc_metadata} for rec in self._load_docx(file_path)]
 
-        # Unsupported file type — skip
-        return None
+        return []
 
-    def _load_pdf(self, file_path: Path) -> dict[str, Any] | None:
-        """Load a PDF file using LangChain's PDF loader, or skip if unavailable."""
+    def _load_pdf(self, file_path: Path) -> list[dict[str, Any]]:
+        """Load a PDF file using LangChain's PDF loader, one record per page."""
         try:
             from langchain_community.document_loaders import (  # type: ignore[import-not-found,unused-ignore]
                 PyPDFLoader,
@@ -624,8 +656,16 @@ class DocumentStoreConnector:
 
             loader = PyPDFLoader(str(file_path))
             pages = loader.load()
-            content = "\n\n".join(page.page_content for page in pages)
-            return {"content": content, "source": str(file_path)}
+            # PyPDFLoader sets metadata['page'] as a 0-based index;
+            # surface it 1-based to match the user-visible page number.
+            return [
+                {
+                    "content": page.page_content,
+                    "source": str(file_path),
+                    "page": int(page.metadata.get("page", i)) + 1,
+                }
+                for i, page in enumerate(pages)
+            ]
         except ImportError:
             logger.warning(
                 "pdf_loader_unavailable",
@@ -633,7 +673,7 @@ class DocumentStoreConnector:
                 file=str(file_path),
                 hint="Install machina-ai[docs-rag] for PDF support",
             )
-            return None
+            return []
         except Exception as exc:
             logger.warning(
                 "pdf_load_failed",
@@ -641,17 +681,28 @@ class DocumentStoreConnector:
                 file=str(file_path),
                 error=str(exc),
             )
-            return None
+            return []
 
-    def _load_docx(self, file_path: Path) -> dict[str, Any] | None:
-        """Load a DOCX file using LangChain's DOCX loader, or skip."""
+    def _load_docx(self, file_path: Path) -> list[dict[str, Any]]:
+        """Load a DOCX file using LangChain's DOCX loader.
+
+        Docx2txtLoader returns a single Document covering the whole
+        file (DOCX has no native page concept), so we always emit one
+        record with page=1.
+        """
         try:
             from langchain_community.document_loaders import Docx2txtLoader
 
             loader = Docx2txtLoader(str(file_path))
             pages = loader.load()
             content = "\n\n".join(page.page_content for page in pages)
-            return {"content": content, "source": str(file_path)}
+            return [
+                {
+                    "content": content,
+                    "source": str(file_path),
+                    "page": 1,
+                }
+            ]
         except ImportError:
             logger.warning(
                 "docx_loader_unavailable",
@@ -659,7 +710,7 @@ class DocumentStoreConnector:
                 file=str(file_path),
                 hint="Install machina-ai[docs-rag] for DOCX support",
             )
-            return None
+            return []
         except Exception as exc:
             logger.warning(
                 "docx_load_failed",
@@ -667,7 +718,7 @@ class DocumentStoreConnector:
                 file=str(file_path),
                 error=str(exc),
             )
-            return None
+            return []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -676,6 +727,78 @@ class DocumentStoreConnector:
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
+
+    def _expand_to_parents(
+        self, results: list[DocumentChunk], *, top_k: int
+    ) -> list[DocumentChunk]:
+        """Replace each match-chunk's ``content`` with its parent section.
+
+        Runs after ranking so embedding / BM25 / rerank operate on small
+        match-chunks but the LLM sees the full surrounding section.
+        Match-chunks that don't carry a ``parent_id`` (or whose parent
+        is no longer in the index — e.g. an orphan vector left in a
+        persistent Chroma collection from a previous corpus) are
+        returned unchanged. Oversized parents are windowed around the
+        match using its char offset (no fragile substring search).
+
+        Dedup-by-parent collapses adjacent winners that share a parent;
+        the caller pre-fetched ``top_k * _PARENT_OVERFETCH_FACTOR`` so
+        the final list still satisfies the caller's ``top_k`` after
+        collapse.
+        """
+        if not self._parent_by_id:
+            return results[:top_k]
+        seen_parents: set[str] = set()
+        expanded: list[DocumentChunk] = []
+        for chunk in results:
+            if len(expanded) >= top_k:
+                break
+            if not chunk.content.strip():
+                # Skip whitespace-only matches — they confuse the
+                # reranker and add no signal to the LLM.
+                continue
+            parent = self._parent_by_id.get(chunk.parent_id) if chunk.parent_id else None
+            if parent is None:
+                # Orphan match-chunk (no parent registered or persistent
+                # store stale). Return the raw chunk so the caller still
+                # gets a usable result.
+                expanded.append(chunk)
+                continue
+            if parent.parent_id in seen_parents:
+                continue
+            seen_parents.add(parent.parent_id)
+            text = self._splitter.window_parent(parent, _synthesize_match(chunk))
+            if len(text) < len(parent.text):
+                logger.warning(
+                    "parent_section_windowed",
+                    connector="DocumentStoreConnector",
+                    source=chunk.source,
+                    section_title=parent.title,
+                    parent_chars=len(parent.text),
+                    window_chars=len(text),
+                )
+            projected_meta = {
+                **chunk.metadata,
+                "section_title": parent.title or chunk.section_title,
+                "parent_id": parent.parent_id,
+            }
+            expanded.append(
+                DocumentChunk(
+                    content=text,
+                    source=chunk.source,
+                    page=chunk.page,
+                    score=chunk.score,
+                    chunk_id=chunk.chunk_id,
+                    parent_id=chunk.parent_id,
+                    start_offset=chunk.start_offset,
+                    asset_id=chunk.asset_id,
+                    equipment_class_code=chunk.equipment_class_code,
+                    doc_type=chunk.doc_type,
+                    section_title=parent.title or chunk.section_title,
+                    metadata=projected_meta,
+                )
+            )
+        return expanded
 
     @staticmethod
     def _merge_filters(filters: dict[str, Any] | None, asset_id: str) -> dict[str, Any] | None:
@@ -760,6 +883,23 @@ def _post_filter_results(
 
 def _doc_metadata_matches(meta: dict[str, Any], filters: dict[str, Any]) -> bool:
     return all(meta.get(key) == value for key, value in filters.items())
+
+
+def _synthesize_match(chunk: DocumentChunk) -> MatchChunk:
+    """Build a transient MatchChunk so window_parent can position the window.
+
+    The connector indexes the chunk's ``start_offset`` so the splitter
+    only needs that plus the match text to anchor a window.
+    """
+    return MatchChunk(
+        text=chunk.content,
+        parent_id=chunk.parent_id,
+        section_title=chunk.section_title,
+        section_level=0,
+        index_in_section=0,
+        source=chunk.source,
+        start_offset=chunk.start_offset,
+    )
 
 
 def _chunk_matches_filters(chunk: DocumentChunk, filters: dict[str, Any] | None) -> bool:

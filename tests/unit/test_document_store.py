@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,6 +51,26 @@ def sample_docs_dir(tmp_path: Path) -> Path:
 
 class TestDocumentStoreConnector:
     """Test DocumentStoreConnector in keyword fallback mode."""
+
+    @pytest.fixture(autouse=True)
+    def _force_keyword_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Force the connector into keyword fallback for this test class.
+
+        Without this fixture the test environment has ``langchain_community``
+        and ``chromadb`` installed, so RAG mode would activate. The keyword
+        tests are documenting fallback behavior, so we make ``Chroma``
+        unavailable on the connector module regardless of whether
+        ``langchain_community`` has already been imported by a previous
+        test (a plain ``sys.modules`` patch wouldn't catch that case).
+        """
+        import machina.connectors.docs.document_store as _ds_mod
+
+        def _build_rag_index_raises(self: Any, documents: list[Any]) -> None:
+            raise ImportError("forced keyword fallback for tests")
+
+        monkeypatch.setattr(
+            _ds_mod.DocumentStoreConnector, "_build_rag_index", _build_rag_index_raises
+        )
 
     @pytest.mark.asyncio
     async def test_connect_and_load(self, sample_docs_dir: Path) -> None:
@@ -208,6 +228,109 @@ class TestDocumentStoreConnector:
         assert health.details["chunk_count"] == 0
 
 
+class TestParentExpansion:
+    """End-to-end tests for the Unit 5 parent-expansion contract."""
+
+    @pytest.fixture(autouse=True)
+    def _force_keyword_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import machina.connectors.docs.document_store as _ds_mod
+
+        def _raise(self: Any, documents: list[Any]) -> None:
+            raise ImportError("forced keyword fallback")
+
+        monkeypatch.setattr(_ds_mod.DocumentStoreConnector, "_build_rag_index", _raise)
+
+    @pytest.mark.asyncio
+    async def test_query_for_one_step_returns_full_procedure(self, tmp_path: Path) -> None:
+        """Plan headline: query a single step → response includes the full procedure."""
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        (docs_dir / "P-201_pump.md").write_text(
+            "# Pump P-201 Manual\n\n"
+            "## Bearing Replacement Procedure\n\n"
+            "Step 1: Lock out / Tag out the motor.\n"
+            "Step 2: Remove coupling.\n"
+            "Step 3: Use bearing puller to remove old bearings.\n"
+            "Step 4: Heat new SKF 6310 bearings to 110 C.\n"
+            "Step 5: Slide bearings onto shaft.\n"
+        )
+
+        conn = DocumentStoreConnector(paths=[docs_dir], chunk_size=80, chunk_overlap=0)
+        await conn.connect()
+
+        results = await conn.search("bearing puller remove old bearings", top_k=3)
+
+        assert results, "expected at least one match"
+        top = results[0]
+        # All 5 steps must be in the returned content — that's the
+        # whole point of parent-document retrieval.
+        for step in ("Step 1", "Step 2", "Step 3", "Step 4", "Step 5"):
+            assert step in top.content, f"missing {step} in expanded content"
+
+    @pytest.mark.asyncio
+    async def test_dedup_preserves_top_k_via_overfetch(self, tmp_path: Path) -> None:
+        """Multiple matches sharing a parent should not collapse top_k to 1.
+
+        With over-fetch in search() and dedup-by-parent in
+        _expand_to_parents, the final list still satisfies the
+        caller's top_k when the corpus has enough distinct parents.
+        """
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        (docs_dir / "doc.md").write_text(
+            "# Section A\n\nbearing alpha alpha alpha.\n\n"
+            "# Section B\n\nbearing beta beta beta.\n\n"
+            "# Section C\n\nbearing gamma gamma gamma.\n"
+        )
+        conn = DocumentStoreConnector(paths=[docs_dir], chunk_size=40, chunk_overlap=0)
+        await conn.connect()
+        results = await conn.search("bearing", top_k=3)
+        # 3 distinct sections each contain "bearing" — should get 3 results
+        parent_ids = {r.parent_id for r in results if r.parent_id}
+        assert len(parent_ids) == 3, f"expected 3 distinct parents, got {parent_ids}"
+
+    @pytest.mark.asyncio
+    async def test_oversized_parent_is_windowed_around_match(self, tmp_path: Path) -> None:
+        """When parent exceeds max_parent_chars, _expand_to_parents windows around the match."""
+        # Use a very low max_parent_chars on the splitter to force the
+        # truncation path with a small fixture.
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        big_section = "ALPHA " * 200 + "TARGET_TOKEN_XYZ " + "OMEGA " * 200
+        (docs_dir / "big.md").write_text(f"# Big Section\n\n{big_section}\n")
+
+        conn = DocumentStoreConnector(paths=[docs_dir], chunk_size=80, chunk_overlap=0)
+        # Force the splitter to consider this section "oversized".
+        conn._splitter.max_parent_chars = 200
+        conn._splitter.parent_window = 200
+        await conn.connect()
+
+        results = await conn.search("TARGET_TOKEN_XYZ", top_k=1)
+        assert results, "expected a match"
+        text = results[0].content
+        assert "TARGET_TOKEN_XYZ" in text, "windowing should keep the match in-frame"
+        # Window must be smaller than the full parent body.
+        assert len(text) < 2000, f"expected windowed content, got {len(text)} chars"
+
+    @pytest.mark.asyncio
+    async def test_orphan_parent_id_returns_raw_match(self, tmp_path: Path) -> None:
+        """If parent_id is missing from the in-memory map (orphan), return the raw chunk."""
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        (docs_dir / "doc.md").write_text("# Section\n\nbearing replacement notes.\n")
+        conn = DocumentStoreConnector(paths=[docs_dir], chunk_size=60, chunk_overlap=0)
+        await conn.connect()
+
+        # Simulate a stale persistent vector by mutating chunk parent_id
+        # to one not in _parent_by_id; expansion should still return a
+        # result (using the raw match content).
+        for c in conn._chunks:
+            c.parent_id = "ORPHAN_NOT_IN_MAP"
+        results = await conn.search("bearing", top_k=1)
+        assert results, "orphan match should still surface"
+        assert "bearing" in results[0].content.lower()
+
+
 class TestDocumentChunk:
     """Test DocumentChunk data class."""
 
@@ -323,7 +446,22 @@ class TestMetadataFiltering:
 
 
 class TestDocumentStoreRAG:
-    """Test DocumentStoreConnector with mocked RAG dependencies."""
+    """Test DocumentStoreConnector with mocked RAG dependencies.
+
+    These tests verify the dense-retrieval contract (Chroma mocks). The
+    hybrid BM25 path is exercised separately in test_hybrid.py / via
+    integration tests on real corpora — disabling BM25 here keeps the
+    dense-mock assertions deterministic.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_bm25(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Force ``_build_bm25_index`` to return None so the dense path is
+        the only retriever — the dense mock then fully controls results.
+        """
+        import machina.connectors.docs.document_store as _ds_mod
+
+        monkeypatch.setattr(_ds_mod, "_build_bm25_index", lambda *a, **k: None)
 
     @pytest.mark.asyncio
     async def test_rag_mode_connect(self, sample_docs_dir: Path) -> None:
@@ -438,11 +576,12 @@ class TestDocumentStoreRAG:
             await conn.connect()
 
         await conn.search("bearing", asset_id="P-201")
-        # Verify pre-retrieval filter is passed via Chroma's ``filter=`` kwarg
-        # (replaces the previous post-filter substring hack). Hybrid mode
-        # over-fetches (top_k * 6) so RRF fusion has headroom.
+        # Verify pre-retrieval filter is passed via Chroma's ``filter=`` kwarg.
+        # search() over-fetches by _PARENT_OVERFETCH_FACTOR=6 so parent
+        # dedup in _expand_to_parents can still satisfy the caller's
+        # top_k contract after collapsing matches that share a parent.
         call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
-        assert call_kwargs[1].get("k") == 30  # default top_k=5 * 6
+        assert call_kwargs[1].get("k") == 30  # top_k=5 * over_fetch=6
         assert call_kwargs[1].get("filter") == {"asset_id": "P-201"}
 
     @pytest.mark.asyncio

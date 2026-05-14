@@ -90,7 +90,6 @@ def build_system_prompt(
     if capabilities:
         cap_ctx = ", ".join(sorted(set(capabilities)))
 
-
     return SYSTEM_PROMPT.format(
         plant_context=plant_ctx,
         capabilities_context=cap_ctx,
@@ -230,10 +229,16 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         source = result.get("source", "unknown")
         page = result.get("page", "")
         chunk_id = result.get("chunk_id", "")
-        content = result.get("content", "")[:300]
+        section_title = result.get("section_title", "")
+        # Pass the full chunk content. The retrieval layer already
+        # returns parent-section text bounded by the splitter's
+        # max_parent_chars; truncating again here would defeat
+        # parent-document retrieval (Unit 5).
+        content = result.get("content", "")
         page_ref = f" (p. {page})" if page else ""
+        section_ref = f" § {section_title}" if section_title else ""
         cid_ref = f" chunk_id={chunk_id}" if chunk_id else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}{cid_ref}")
+        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{cid_ref}")
         lines.append(f"  {content}")
     return "\n".join(lines)
 
