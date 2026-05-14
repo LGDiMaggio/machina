@@ -20,7 +20,7 @@ def sample_docs_dir(tmp_path: Path) -> Path:
     docs_dir = tmp_path / "manuals"
     docs_dir.mkdir()
 
-    (docs_dir / "pump_manual.txt").write_text(
+    (docs_dir / "P-201_pump_manual.txt").write_text(
         "Pump P-201 Bearing Replacement Procedure\n\n"
         "Step 1: Lock out / Tag out the motor.\n"
         "Step 2: Remove coupling.\n"
@@ -32,6 +32,11 @@ def sample_docs_dir(tmp_path: Path) -> Path:
     )
 
     (docs_dir / "compressor_manual.md").write_text(
+        "---\n"
+        "asset_id: COMP-301\n"
+        "doc_type: manual\n"
+        "equipment_class_code: CO\n"
+        "---\n"
         "# Air Compressor COMP-301 Manual\n\n"
         "## COMP-301 Filter Replacement\n\n"
         "Replace COMP-301 intake air filter every 2000 hours.\n"
@@ -221,6 +226,100 @@ class TestDocumentChunk:
         assert chunk.page == 0
         assert chunk.score == 0.0
         assert chunk.metadata == {}
+        assert chunk.chunk_id == ""
+        assert chunk.asset_id == ""
+        assert chunk.doc_type == ""
+
+    def test_optional_metadata_fields(self) -> None:
+        chunk = DocumentChunk(
+            "content",
+            chunk_id="abc123",
+            asset_id="P-201",
+            doc_type="manual",
+            section_title="Bearing Replacement",
+        )
+        assert chunk.chunk_id == "abc123"
+        assert chunk.asset_id == "P-201"
+
+
+class TestMetadataFiltering:
+    """Pre-retrieval filtering via the new metadata schema (Unit 1)."""
+
+    @pytest.mark.asyncio
+    async def test_chunks_carry_inferred_asset_id(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        # P-201 manual chunks should be tagged via filename inference,
+        # COMP-301 manual via frontmatter.
+        p201 = [c for c in conn._chunks if c.asset_id == "P-201"]
+        comp = [c for c in conn._chunks if c.asset_id == "COMP-301"]
+        assert len(p201) > 0
+        assert len(comp) > 0
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_excludes_other_assets(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("filter replacement", asset_id="COMP-301")
+        # No P-201 results when filter is COMP-301.
+        assert all(r.asset_id == "COMP-301" for r in results)
+        assert len(results) > 0
+
+    @pytest.mark.asyncio
+    async def test_filters_kwarg_with_doc_type(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("filter replacement", filters={"doc_type": "manual"})
+        # Both fixtures resolve to doc_type == "manual" (one via inference,
+        # one via frontmatter), so at least one result is expected.
+        assert len(results) > 0
+        assert all(r.doc_type == "manual" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_unknown_filter_value_returns_empty(self, sample_docs_dir: Path) -> None:
+        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn.connect()
+        results = await conn.search("anything", filters={"asset_id": "NOT-EXISTING"})
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_chunk_id_is_deterministic(self, sample_docs_dir: Path) -> None:
+        conn_a = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn_b = DocumentStoreConnector(paths=[sample_docs_dir])
+        await conn_a.connect()
+        await conn_b.connect()
+        ids_a = sorted(c.chunk_id for c in conn_a._chunks)
+        ids_b = sorted(c.chunk_id for c in conn_b._chunks)
+        assert ids_a == ids_b
+        # All ids non-empty
+        assert all(cid for cid in ids_a)
+
+    @pytest.mark.asyncio
+    async def test_sidecar_yaml_overrides_inference(self, tmp_path: Path) -> None:
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        # Filename suggests P-105, sidecar says P-999.
+        pdf = docs_dir / "P-105_notes.txt"
+        pdf.write_text("Inspection notes for the unit.\n", encoding="utf-8")
+        sidecar = docs_dir / "P-105_notes.txt.meta.yaml"
+        sidecar.write_text("asset_id: P-999\ndoc_type: procedure\n", encoding="utf-8")
+
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        assert all(c.asset_id == "P-999" for c in conn._chunks)
+        assert all(c.doc_type == "procedure" for c in conn._chunks)
+
+    @pytest.mark.asyncio
+    async def test_sidecar_files_not_indexed_as_content(self, tmp_path: Path) -> None:
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        (docs_dir / "guide.md").write_text("# Guide body\n", encoding="utf-8")
+        # Sidecar should be loaded as metadata, not indexed as a document.
+        (docs_dir / "guide.md.meta.yaml").write_text("asset_id: P-1\n", encoding="utf-8")
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        sources = {c.source for c in conn._chunks}
+        assert not any(s.endswith(".meta.yaml") for s in sources)
 
 
 class TestDocumentStoreRAG:
@@ -338,9 +437,11 @@ class TestDocumentStoreRAG:
             await conn.connect()
 
         await conn.search("bearing", asset_id="P-201")
-        # Verify search was called with extra k for post-filtering
+        # Verify pre-retrieval filter is passed via Chroma's ``filter=`` kwarg
+        # (replaces the previous post-filter substring hack).
         call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
-        assert call_kwargs[1].get("k") == 15  # top_k(5) * 3 for post-filter headroom
+        assert call_kwargs[1].get("k") == 5
+        assert call_kwargs[1].get("filter") == {"asset_id": "P-201"}
 
     @pytest.mark.asyncio
     async def test_rag_search_empty_vectorstore(self, tmp_path: Path) -> None:

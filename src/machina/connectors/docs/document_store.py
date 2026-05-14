@@ -17,6 +17,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.capabilities import Capability
+from machina.connectors.docs.metadata import DocumentMetadata, strip_frontmatter
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -31,7 +32,13 @@ class DocumentChunk:
         source: File path or document name.
         page: Page number (if available).
         score: Relevance score from the retriever.
-        metadata: Additional metadata from the document loader.
+        chunk_id: Deterministic identifier for this chunk.
+        asset_id: Domain asset id (e.g. ``"P-201"``) if known.
+        equipment_class_code: ISO 14224 Annex A code if known. Internal use.
+        doc_type: One of ``manual``, ``procedure``, ``datasheet``,
+            ``troubleshooting``, ``other``.
+        section_title: Title of the section this chunk belongs to.
+        metadata: Raw metadata bag from the underlying document loader.
 
     Example:
         ```python
@@ -45,6 +52,11 @@ class DocumentChunk:
     source: str = ""
     page: int = 0
     score: float = 0.0
+    chunk_id: str = ""
+    asset_id: str = ""
+    equipment_class_code: str = ""
+    doc_type: str = ""
+    section_title: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __repr__(self) -> str:
@@ -62,6 +74,12 @@ class DocumentStoreConnector:
     a simple in-memory keyword search so the quickstart works without
     heavy dependencies.
 
+    Each ingested file can carry structured metadata via a sidecar
+    ``<file>.meta.yaml`` or YAML frontmatter (for ``.md`` / ``.txt``).
+    Metadata fields (``asset_id``, ``equipment_class_code``, ``doc_type``,
+    ``section_title``) are indexed and can be used to filter the search
+    space *before* retrieval via the ``filters=`` kwarg.
+
     Args:
         paths: List of directories or files to ingest.
         collection_name: Name for the ChromaDB collection.
@@ -72,7 +90,9 @@ class DocumentStoreConnector:
         ```python
         docs = DocumentStoreConnector(paths=["manuals/", "procedures/"])
         await docs.connect()
-        results = await docs.search("pump P-201 bearing replacement")
+        results = await docs.search(
+            "bearing replacement", filters={"asset_id": "P-201"}
+        )
         for chunk in results:
             print(f"[{chunk.source} p.{chunk.page}] {chunk.content[:100]}")
         ```
@@ -168,21 +188,28 @@ class DocumentStoreConnector:
         *,
         top_k: int = 5,
         asset_id: str = "",
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Search documents for passages relevant to the query.
 
         Args:
             query: The search query.
             top_k: Maximum number of results to return.
-            asset_id: Optional asset ID to scope the search.
+            asset_id: Optional asset ID to scope the search. Shortcut for
+                ``filters={"asset_id": asset_id}``.
+            filters: Optional metadata filter applied **before** retrieval.
+                Supported keys: ``asset_id``, ``equipment_class_code``,
+                ``doc_type``, ``section_title``, plus any custom field
+                stored in chunk metadata.
 
         Returns:
             List of relevant document chunks, ranked by relevance.
         """
         self._ensure_connected()
+        effective = self._merge_filters(filters, asset_id)
         if self._use_rag:
-            return await asyncio.to_thread(self._rag_search, query, top_k=top_k, asset_id=asset_id)
-        return self._keyword_search(query, top_k=top_k, asset_id=asset_id)
+            return await asyncio.to_thread(self._rag_search, query, top_k=top_k, filters=effective)
+        return self._keyword_search(query, top_k=top_k, filters=effective)
 
     async def search_documents(
         self,
@@ -190,10 +217,11 @@ class DocumentStoreConnector:
         *,
         top_k: int = 5,
         asset_id: str = "",
+        filters: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[DocumentChunk]:
         """Alias for :meth:`search` matching the declared capability name."""
-        return await self.search(query, top_k=top_k, asset_id=asset_id)
+        return await self.search(query, top_k=top_k, asset_id=asset_id, filters=filters)
 
     async def retrieve_section(
         self,
@@ -238,17 +266,24 @@ class DocumentStoreConnector:
         ids: list[str] = []
 
         for doc in documents:
+            doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
             chunks = splitter.split_text(doc["content"])
             for i, chunk_text in enumerate(chunks):
-                chunk_id = hashlib.md5(
-                    f"{doc['source']}:{doc.get('page', 0)}:{i}".encode()
-                ).hexdigest()
-                texts.append(chunk_text)
-                meta = {
+                chunk_id = _make_chunk_id(
+                    source=doc["source"],
+                    page=doc.get("page", 0),
+                    section_title=doc_meta.section_title,
+                    index=i,
+                )
+                chroma_meta: dict[str, Any] = {
                     "source": doc["source"],
                     "page": doc.get("page", 0),
+                    "chunk_id": chunk_id,
                 }
-                metadatas.append(meta)
+                chroma_meta.update(doc_meta.to_chroma_dict())
+
+                texts.append(chunk_text)
+                metadatas.append(chroma_meta)
                 ids.append(chunk_id)
 
                 self._chunks.append(
@@ -256,7 +291,12 @@ class DocumentStoreConnector:
                         content=chunk_text,
                         source=doc["source"],
                         page=doc.get("page", 0),
-                        metadata=meta,
+                        chunk_id=chunk_id,
+                        asset_id=doc_meta.asset_id,
+                        equipment_class_code=doc_meta.equipment_class_code,
+                        doc_type=doc_meta.doc_type,
+                        section_title=doc_meta.section_title,
+                        metadata=chroma_meta,
                     )
                 )
 
@@ -273,16 +313,24 @@ class DocumentStoreConnector:
         query: str,
         *,
         top_k: int = 5,
-        asset_id: str = "",
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Search using the ChromaDB vector store."""
         if self._vectorstore is None:
             return []
 
-        results = self._vectorstore.similarity_search_with_score(
-            query,
-            k=top_k if not asset_id else top_k * 3,
-        )
+        where = _build_chroma_where(filters)
+        kwargs: dict[str, Any] = {"k": top_k}
+        if where is not None:
+            kwargs["filter"] = where
+
+        try:
+            results = self._vectorstore.similarity_search_with_score(query, **kwargs)
+        except TypeError:
+            # Older Chroma signatures may not accept ``filter=``. Fall back to
+            # post-filtering — preserves behavior for older installs.
+            results = self._vectorstore.similarity_search_with_score(query, k=top_k * 3)
+            results = _post_filter_results(results, filters)
 
         chunks = [
             DocumentChunk(
@@ -290,14 +338,15 @@ class DocumentStoreConnector:
                 source=doc.metadata.get("source", ""),
                 page=doc.metadata.get("page", 0),
                 score=float(score),
+                chunk_id=doc.metadata.get("chunk_id", ""),
+                asset_id=doc.metadata.get("asset_id", ""),
+                equipment_class_code=doc.metadata.get("equipment_class_code", ""),
+                doc_type=doc.metadata.get("doc_type", ""),
+                section_title=doc.metadata.get("section_title", ""),
                 metadata=doc.metadata,
             )
             for doc, score in results
         ]
-
-        # Post-filter by asset_id (substring match on source path)
-        if asset_id:
-            chunks = [c for c in chunks if asset_id.lower() in c.source.lower()]
 
         return chunks[:top_k]
 
@@ -308,16 +357,27 @@ class DocumentStoreConnector:
     def _build_keyword_index(self, documents: list[dict[str, Any]]) -> None:
         """Build in-memory keyword index (no dependencies needed)."""
         for doc in documents:
+            doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
             content = doc["content"]
-            # Simple chunking by paragraphs or fixed size
             paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
             for i, para in enumerate(paragraphs):
+                chunk_id = _make_chunk_id(
+                    source=doc["source"],
+                    page=doc.get("page", 0) or i + 1,
+                    section_title=doc_meta.section_title,
+                    index=i,
+                )
                 self._chunks.append(
                     DocumentChunk(
                         content=para,
                         source=doc["source"],
                         page=doc.get("page", 0) or i + 1,
-                        metadata={"source": doc["source"]},
+                        chunk_id=chunk_id,
+                        asset_id=doc_meta.asset_id,
+                        equipment_class_code=doc_meta.equipment_class_code,
+                        doc_type=doc_meta.doc_type,
+                        section_title=doc_meta.section_title,
+                        metadata={"source": doc["source"], **doc_meta.to_chroma_dict()},
                     )
                 )
 
@@ -326,14 +386,14 @@ class DocumentStoreConnector:
         query: str,
         *,
         top_k: int = 5,
-        asset_id: str = "",
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Simple keyword matching as RAG fallback."""
         query_terms = set(query.lower().split())
         scored: list[tuple[float, DocumentChunk]] = []
 
         for chunk in self._chunks:
-            if asset_id and asset_id.lower() not in chunk.content.lower():
+            if not _chunk_matches_filters(chunk, filters):
                 continue
             content_lower = chunk.content.lower()
             matches = sum(1 for term in query_terms if term in content_lower)
@@ -349,6 +409,11 @@ class DocumentStoreConnector:
                 source=chunk.source,
                 page=chunk.page,
                 score=round(score, 3),
+                chunk_id=chunk.chunk_id,
+                asset_id=chunk.asset_id,
+                equipment_class_code=chunk.equipment_class_code,
+                doc_type=chunk.doc_type,
+                section_title=chunk.section_title,
                 metadata=chunk.metadata,
             )
             for score, chunk in results
@@ -370,6 +435,9 @@ class DocumentStoreConnector:
             elif path.is_dir():
                 for file_path in sorted(path.rglob("*")):
                     if file_path.is_file():
+                        # Skip sidecar files — they are metadata, not content.
+                        if file_path.name.endswith(".meta.yaml"):
+                            continue
                         doc = self._load_file(file_path)
                         if doc:
                             documents.append(doc)
@@ -378,16 +446,28 @@ class DocumentStoreConnector:
     def _load_file(self, file_path: Path) -> dict[str, Any] | None:
         """Load a single file. Supports .txt, .md, .pdf (via LangChain)."""
         suffix = file_path.suffix.lower()
+        doc_metadata = DocumentMetadata.from_path(file_path)
 
         if suffix in (".txt", ".md"):
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-            return {"content": content, "source": str(file_path)}
+            raw = file_path.read_text(encoding="utf-8", errors="replace")
+            content = strip_frontmatter(raw)
+            return {
+                "content": content,
+                "source": str(file_path),
+                "doc_metadata": doc_metadata,
+            }
 
         if suffix == ".pdf":
-            return self._load_pdf(file_path)
+            loaded = self._load_pdf(file_path)
+            if loaded is not None:
+                loaded["doc_metadata"] = doc_metadata
+            return loaded
 
         if suffix in (".docx", ".doc"):
-            return self._load_docx(file_path)
+            loaded = self._load_docx(file_path)
+            if loaded is not None:
+                loaded["doc_metadata"] = doc_metadata
+            return loaded
 
         # Unsupported file type — skip
         return None
@@ -445,3 +525,71 @@ class DocumentStoreConnector:
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
+
+    @staticmethod
+    def _merge_filters(filters: dict[str, Any] | None, asset_id: str) -> dict[str, Any] | None:
+        """Combine the ``asset_id`` shortcut with an explicit ``filters`` dict."""
+        if not asset_id and not filters:
+            return None
+        merged: dict[str, Any] = dict(filters or {})
+        if asset_id:
+            merged.setdefault("asset_id", asset_id)
+        return merged or None
+
+
+def _make_chunk_id(*, source: str, page: int, section_title: str, index: int) -> str:
+    """Deterministic chunk identifier (stable across runs)."""
+    key = f"{source}|{section_title}|{page}|{index}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def _build_chroma_where(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate a flat filter dict into a Chroma ``where`` clause."""
+    if not filters:
+        return None
+    # Chroma expects ``{"field": value}`` for equality and
+    # ``{"$and": [...]}`` for multiple constraints.
+    if len(filters) == 1:
+        key, value = next(iter(filters.items()))
+        return {key: value}
+    return {"$and": [{key: value} for key, value in filters.items()]}
+
+
+def _post_filter_results(
+    results: list[tuple[Any, float]], filters: dict[str, Any] | None
+) -> list[tuple[Any, float]]:
+    """Fallback metadata filter when the vector store doesn't support ``where``."""
+    if not filters:
+        return results
+    out: list[tuple[Any, float]] = []
+    for doc, score in results:
+        if _doc_metadata_matches(doc.metadata, filters):
+            out.append((doc, score))
+    return out
+
+
+def _doc_metadata_matches(meta: dict[str, Any], filters: dict[str, Any]) -> bool:
+    return all(meta.get(key) == value for key, value in filters.items())
+
+
+def _chunk_matches_filters(chunk: DocumentChunk, filters: dict[str, Any] | None) -> bool:
+    """Whether ``chunk`` satisfies every key/value in ``filters``."""
+    if not filters:
+        return True
+    for key, value in filters.items():
+        if key == "asset_id":
+            if chunk.asset_id != value:
+                return False
+        elif key == "equipment_class_code":
+            if chunk.equipment_class_code != value:
+                return False
+        elif key == "doc_type":
+            if chunk.doc_type != value:
+                return False
+        elif key == "section_title":
+            if chunk.section_title != value:
+                return False
+        else:
+            if chunk.metadata.get(key) != value:
+                return False
+    return True
