@@ -326,9 +326,18 @@ class DocumentStoreConnector:
 
         try:
             results = self._vectorstore.similarity_search_with_score(query, **kwargs)
-        except TypeError:
-            # Older Chroma signatures may not accept ``filter=``. Fall back to
-            # post-filtering — preserves behavior for older installs.
+        except (TypeError, ValueError) as exc:
+            # Older Chroma signatures don't accept ``filter=`` (TypeError);
+            # newer ones reject malformed where-clauses with ValueError /
+            # InvalidArgumentError (a ValueError subclass). Both fall back
+            # to post-filtering so a single bad filter shape doesn't kill
+            # the whole search.
+            logger.warning(
+                "rag_filter_fallback",
+                connector="DocumentStoreConnector",
+                operation="similarity_search",
+                error=str(exc),
+            )
             results = self._vectorstore.similarity_search_with_score(query, k=top_k * 3)
             results = _post_filter_results(results, filters)
 
@@ -515,6 +524,14 @@ class DocumentStoreConnector:
                 connector="DocumentStoreConnector",
                 file=str(file_path),
                 hint="Install machina-ai[docs-rag] for DOCX support",
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "docx_load_failed",
+                connector="DocumentStoreConnector",
+                file=str(file_path),
+                error=str(exc),
             )
             return None
 

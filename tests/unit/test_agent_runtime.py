@@ -738,6 +738,87 @@ class TestHandleMessage:
             await agent.handle_message("test")
 
 
+class TestHandleMessageFullCitations:
+    """End-to-end: fake LLM emits citations → AgentResponse populated."""
+
+    @pytest.mark.asyncio
+    async def test_full_chain_populates_citations(self) -> None:
+        """LLM output with valid citations block → citations on AgentResponse."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()  # Returns chunk with chunk_id='fake-chunk-1'.
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Replace the bearing every 2000 hours [manual.txt:1].\n\n"
+            "<citations>\n"
+            "fake-chunk-1 | manual.txt | 1\n"
+            "</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Tell me about P-201 bearing")
+
+        # Citations populated from the per-turn registry.
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+        assert response.citations[0].source == "manual.txt"
+        assert response.citations[0].page == 1
+        # Inline marker preserved, citations block stripped.
+        assert "[manual.txt:1]" in response.text
+        assert "<citations>" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_handle_message_backcompat_strips_block(self) -> None:
+        """handle_message (str API) returns rendered text with block stripped."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Procedure [manual.txt:1].\n\n<citations>\nfake-chunk-1 | manual.txt | 1\n</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        text = await agent.handle_message("P-201 bearing")
+        assert isinstance(text, str)
+        assert "<citations>" not in text
+        assert "[manual.txt:1]" in text
+
+    @pytest.mark.asyncio
+    async def test_turn_chunks_cleared_after_handle(self) -> None:
+        """The per-chat registry slot must not persist across turns."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+        agent._llm = _FakeLLM("Hello.")  # type: ignore[assignment]
+        await agent.start()
+
+        await agent.handle_message_full("test", chat_id="chat-x")
+        assert "chat-x" not in agent._turn_chunks
+
+    @pytest.mark.asyncio
+    async def test_unknown_chunk_id_dropped(self) -> None:
+        """LLM citing a chunk_id that wasn't retrieved → silently dropped."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Body.\n<citations>\n"
+            "fake-chunk-1 | manual.txt | 1\n"
+            "ghost-chunk | fake-source | 99\n"
+            "</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201")
+        chunk_ids = {c.chunk_id for c in response.citations}
+        assert chunk_ids == {"fake-chunk-1"}  # ghost-chunk dropped
+
+
 class TestGatherContext:
     """Test _gather_context — retrieves data from connectors."""
 

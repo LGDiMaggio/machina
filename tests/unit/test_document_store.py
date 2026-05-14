@@ -477,3 +477,91 @@ class TestDocumentStoreRAG:
 
         results = await conn.search("anything")
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_rag_search_fallback_on_typeerror(self, sample_docs_dir: Path) -> None:
+        """Older Chroma without ``filter=`` raises TypeError → post-filter fallback."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        mock_doc = MagicMock()
+        mock_doc.page_content = "Pump P-201 procedure"
+        mock_doc.metadata = {"source": "p201.txt", "page": 1, "asset_id": "P-201"}
+        mock_doc_other = MagicMock()
+        mock_doc_other.page_content = "Compressor manual"
+        mock_doc_other.metadata = {"source": "c1.txt", "page": 1, "asset_id": "COMP-301"}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.side_effect = [
+            TypeError("filter is not a recognized argument"),
+            [(mock_doc, 0.9), (mock_doc_other, 0.8)],
+        ]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+            results = await conn.search("bearing", asset_id="P-201")
+
+        # First call (with filter=) raised TypeError → fallback used; the
+        # post-filter dropped the COMP-301 chunk.
+        assert mock_vectorstore.similarity_search_with_score.call_count == 2
+        assert len(results) == 1
+        assert "P-201" in results[0].content
+
+    @pytest.mark.asyncio
+    async def test_rag_search_fallback_on_valueerror(self, sample_docs_dir: Path) -> None:
+        """Modern Chroma rejects malformed where with ValueError → fallback."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        mock_doc = MagicMock()
+        mock_doc.page_content = "Pump P-201 procedure"
+        mock_doc.metadata = {"source": "p201.txt", "page": 1, "asset_id": "P-201"}
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.side_effect = [
+            ValueError("Expected where to have exactly one operator"),
+            [(mock_doc, 0.9)],
+        ]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+            results = await conn.search("bearing", asset_id="P-201")
+
+        assert mock_vectorstore.similarity_search_with_score.call_count == 2
+        assert len(results) == 1
