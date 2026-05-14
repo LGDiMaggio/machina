@@ -538,6 +538,76 @@ class TestDocumentStoreRAG:
         assert "P-201" in results[0].content
 
     @pytest.mark.asyncio
+    async def test_reranker_overrides_rrf_order(self, sample_docs_dir: Path) -> None:
+        """When a reranker is configured, its scores win over the RRF order."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter = MagicMock()
+        mock_splitter.split_text.side_effect = lambda text: [text[:100]]
+        mock_splitter_cls.return_value = mock_splitter
+
+        # Two candidates: dense puts c1 first; reranker says c2 wins.
+        doc_a = MagicMock()
+        doc_a.page_content = "Bearing replacement: lock out the motor first"
+        doc_a.metadata = {
+            "source": "a.txt",
+            "page": 1,
+            "asset_id": "P-201",
+            "chunk_id": "c1",
+        }
+        doc_b = MagicMock()
+        doc_b.page_content = "How to replace a bearing on pump P-201: full step-by-step"
+        doc_b.metadata = {
+            "source": "b.txt",
+            "page": 1,
+            "asset_id": "P-201",
+            "chunk_id": "c2",
+        }
+
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.return_value = [
+            (doc_a, 0.9),
+            (doc_b, 0.7),
+        ]
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+
+        # Mock CrossEncoder so c2 outscores c1.
+        ce_module = MagicMock()
+        ce_instance = MagicMock()
+        # Scores are returned in the same order as the pairs passed in.
+        # Pairs: [("c1", a-text), ("c2", b-text)] → scores [0.1, 0.95]
+        ce_instance.predict.return_value = [0.1, 0.95]
+        ce_module.CrossEncoder = MagicMock(return_value=ce_instance)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_community": MagicMock(),
+                "langchain_community.vectorstores": mock_vectorstores,
+                "sentence_transformers": ce_module,
+            },
+        ):
+            conn = DocumentStoreConnector(
+                paths=[sample_docs_dir],
+                reranker_model="mock-reranker",
+            )
+            await conn.connect()
+            results = await conn.search("how to replace a bearing")
+
+        assert len(results) == 2
+        # Reranker says c2 wins despite dense scoring c1 higher.
+        assert results[0].chunk_id == "c2"
+        assert results[1].chunk_id == "c1"
+        # Final score is the reranker score, not RRF.
+        assert results[0].score == 0.95
+
+    @pytest.mark.asyncio
     async def test_rag_search_fallback_on_valueerror(self, sample_docs_dir: Path) -> None:
         """Modern Chroma rejects malformed where with ValueError → fallback."""
         mock_splitter_cls = MagicMock()

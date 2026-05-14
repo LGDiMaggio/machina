@@ -109,11 +109,13 @@ class DocumentStoreConnector:
         collection_name: str = "machina_docs",
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
+        reranker_model: str | None = None,
     ) -> None:
         self._paths = [Path(p) for p in (paths or [])]
         self._collection_name = collection_name
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
+        self._reranker_model_name = reranker_model
         self._connected = False
         self._use_rag = False
 
@@ -122,6 +124,7 @@ class DocumentStoreConnector:
         self._vectorstore: Any = None
         self._bm25_index: Any = None  # BM25Index when [docs-rag-hybrid] installed
         self._chunk_by_id: dict[str, DocumentChunk] = {}
+        self._reranker: Any = None  # CrossEncoderReranker when configured
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -140,11 +143,16 @@ class DocumentStoreConnector:
         try:
             self._build_rag_index(documents)
             self._use_rag = True
+            if self._reranker_model_name:
+                from machina.connectors.docs.reranker import CrossEncoderReranker
+
+                self._reranker = CrossEncoderReranker(self._reranker_model_name)
             logger.info(
                 "connected",
                 connector="DocumentStoreConnector",
                 mode="rag",
                 document_count=len(documents),
+                reranker=bool(self._reranker_model_name),
             )
         except ImportError:
             self._build_keyword_index(documents)
@@ -359,11 +367,51 @@ class DocumentStoreConnector:
 
         fused = rrf_fuse([dense_ranking, list(sparse_hits)])
         out: list[DocumentChunk] = []
+        # When a reranker is configured, score the full fused candidate
+        # set with the cross-encoder and let its order win; otherwise the
+        # RRF order is returned as-is.
+        if self._reranker is not None:
+            fused_chunks: list[DocumentChunk] = []
+            for chunk_id, fused_score in fused:
+                chunk = chunks_by_id.get(chunk_id)
+                if chunk is None:
+                    continue
+                chunk.score = float(fused_score)
+                fused_chunks.append(chunk)
+            return self._apply_reranker(query, fused_chunks, top_k=top_k)
+
         for chunk_id, fused_score in fused:
             chunk = chunks_by_id.get(chunk_id)
             if chunk is None:
                 continue
             chunk.score = float(fused_score)
+            out.append(chunk)
+            if len(out) >= top_k:
+                break
+        return out
+
+    def _apply_reranker(
+        self,
+        query: str,
+        candidates: list[DocumentChunk],
+        *,
+        top_k: int,
+    ) -> list[DocumentChunk]:
+        """Reorder ``candidates`` with the cross-encoder and return top-K."""
+        if not candidates or self._reranker is None:
+            return candidates[:top_k]
+        pairs = [
+            (chunk.chunk_id or f"{chunk.source}:{chunk.page}", chunk.content)
+            for chunk in candidates
+        ]
+        scored = self._reranker.rerank(query, pairs)
+        by_key = {key: chunk for key, chunk in zip([p[0] for p in pairs], candidates, strict=True)}
+        out: list[DocumentChunk] = []
+        for key, score in scored:
+            chunk = by_key.get(key)
+            if chunk is None:
+                continue
+            chunk.score = float(score)
             out.append(chunk)
             if len(out) >= top_k:
                 break
