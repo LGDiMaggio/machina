@@ -28,8 +28,13 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
     from machina.connectors.docs.parsing import ParsedDocument
+
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -195,23 +200,32 @@ def _recursive_split(text: str, *, chunk_size: int, chunk_overlap: int) -> list[
             if len(chunk_text) <= chunk_size:
                 next_out.append((chunk_text, chunk_start))
                 continue
-            pieces = chunk_text.split(sep) if sep else list(chunk_text)
+            if not sep:
+                # Empty-separator fallback: char-by-char buf concat is
+                # O(N^2) for pathological inputs (one giant token). Slice
+                # by chunk_size directly — produces the same boundaries
+                # but in linear time and without an intermediate list of
+                # single-char strings.
+                for i in range(0, len(chunk_text), chunk_size):
+                    next_out.append((chunk_text[i : i + chunk_size], chunk_start + i))
+                continue
+            pieces = chunk_text.split(sep)
             buf = ""
             buf_offset = 0
             cursor = chunk_start
             for piece in pieces:
-                candidate = buf + (sep if buf and sep else "") + piece if sep else buf + piece
+                candidate = buf + (sep if buf else "") + piece
                 if len(candidate) <= chunk_size:
                     if not buf:
                         buf_offset = cursor
                     buf = candidate
-                    cursor += len(piece) + (len(sep) if sep else 0)
+                    cursor += len(piece) + len(sep)
                     continue
                 if buf:
                     next_out.append((buf, buf_offset))
                 buf = piece
                 buf_offset = cursor
-                cursor += len(piece) + (len(sep) if sep else 0)
+                cursor += len(piece) + len(sep)
             if buf:
                 next_out.append((buf, buf_offset))
         out = next_out
@@ -313,46 +327,90 @@ class SectionAwareSplitter:
         for heading, start, end in spans:
             section_text = "\n".join(lines[start:end]).strip()
             if not section_text:
-                continue
-            parent_id = _section_id(source, heading.title, heading.line_idx)
-            title_offset = 0
-            full_text = section_text
-            if heading.title:
-                # Include the title in the parent body so the LLM sees the
-                # context label that the chunk was nested under. The body
-                # starts at title_offset inside parent.text.
-                prefix = f"{heading.title}\n\n"
-                title_offset = len(prefix)
-                full_text = prefix + section_text
-            parents.append(
-                ParentSection(
-                    parent_id=parent_id,
-                    title=heading.title,
-                    level=heading.level,
-                    text=full_text,
-                    title_offset=title_offset,
-                )
-            )
-            pieces = _recursive_split(
-                section_text,
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
-            )
-            if not pieces:
-                pieces = [(section_text, 0)]
-            for i, (piece_text, piece_offset) in enumerate(pieces):
-                matches.append(
-                    MatchChunk(
-                        text=piece_text,
-                        parent_id=parent_id,
-                        section_title=heading.title,
-                        section_level=heading.level,
-                        index_in_section=i,
-                        source=source,
-                        start_offset=piece_offset,
+                # Heading with no body — either a real trailing
+                # section heading on the last line of the document, or
+                # (more commonly) a false positive from the numbered /
+                # ALL-CAPS heuristics. We skip rather than emitting a
+                # phantom parent, but log so the case is observable.
+                # Real trailing headings will typically be rare enough
+                # that section_title filters still work for the body
+                # they belonged to.
+                if heading.title:
+                    logger.debug(
+                        "empty_section_skipped",
+                        title=heading.title,
+                        level=heading.level,
+                        line=heading.line_idx,
                     )
-                )
+                continue
+            self._emit_section(
+                parents=parents,
+                matches=matches,
+                source=source,
+                section_id_key=heading.line_idx,
+                title=heading.title,
+                level=heading.level,
+                body=section_text,
+                page=0,
+            )
         return parents, matches
+
+    def _emit_section(
+        self,
+        *,
+        parents: list[ParentSection],
+        matches: list[MatchChunk],
+        source: str,
+        section_id_key: int,
+        title: str,
+        level: int,
+        body: str,
+        page: int,
+    ) -> None:
+        """Append one ParentSection + N MatchChunks for a single section body.
+
+        Shared by :meth:`split` and :meth:`split_structured` so both
+        paths emit identically-shaped parents/matches: title gets
+        prefixed into the parent text so the LLM sees the heading
+        context; the body is run through ``_recursive_split`` to
+        produce match chunks; ``title_offset`` locates the body start
+        inside the parent so :meth:`window_parent` can carve windows
+        around char offsets.
+        """
+        parent_id = _section_id(source, title, section_id_key)
+        title_offset = 0
+        full_text = body
+        if title:
+            prefix = f"{title}\n\n"
+            title_offset = len(prefix)
+            full_text = prefix + body
+        parents.append(
+            ParentSection(
+                parent_id=parent_id,
+                title=title,
+                level=level,
+                text=full_text,
+                title_offset=title_offset,
+            )
+        )
+        pieces = _recursive_split(
+            body, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
+        )
+        if not pieces:
+            pieces = [(body, 0)]
+        for i, (piece_text, piece_offset) in enumerate(pieces):
+            matches.append(
+                MatchChunk(
+                    text=piece_text,
+                    parent_id=parent_id,
+                    section_title=title,
+                    section_level=level,
+                    index_in_section=i,
+                    source=source,
+                    start_offset=piece_offset,
+                    page=page,
+                )
+            )
 
     def split_structured(
         self, parsed: ParsedDocument
@@ -381,42 +439,16 @@ class SectionAwareSplitter:
             body = section.text.strip()
             if not body:
                 continue
-            parent_id = _section_id(source, section.title, section_idx)
-            title_offset = 0
-            full_text = body
-            if section.title:
-                prefix = f"{section.title}\n\n"
-                title_offset = len(prefix)
-                full_text = prefix + body
-            parents.append(
-                ParentSection(
-                    parent_id=parent_id,
-                    title=section.title,
-                    level=section.level,
-                    text=full_text,
-                    title_offset=title_offset,
-                )
+            self._emit_section(
+                parents=parents,
+                matches=matches,
+                source=source,
+                section_id_key=section_idx,
+                title=section.title,
+                level=section.level,
+                body=body,
+                page=section.page_range[0],
             )
-            pieces = _recursive_split(
-                body,
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
-            )
-            if not pieces:
-                pieces = [(body, 0)]
-            for i, (piece_text, piece_offset) in enumerate(pieces):
-                matches.append(
-                    MatchChunk(
-                        text=piece_text,
-                        parent_id=parent_id,
-                        section_title=section.title,
-                        section_level=section.level,
-                        index_in_section=i,
-                        source=source,
-                        start_offset=piece_offset,
-                        page=section.page_range[0],
-                    )
-                )
 
         for table_idx, table in enumerate(parsed.tables):
             text = table.text.strip()

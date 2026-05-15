@@ -238,7 +238,8 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         page_ref = f" (p. {page})" if page else ""
         section_ref = f" § {section_title}" if section_title else ""
         cid_ref = f" chunk_id={chunk_id}" if chunk_id else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{cid_ref}")
+        table_tag = " [TABLE]" if result.get("is_table") else ""
+        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{cid_ref}{table_tag}")
         lines.append(f"  {content}")
     return "\n".join(lines)
 

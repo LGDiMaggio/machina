@@ -331,6 +331,110 @@ class TestParentExpansion:
         assert "bearing" in results[0].content.lower()
 
 
+class TestSectionTitleAndTableSurfacing:
+    """End-to-end: splitter-detected section_title and is_table flag reach
+    the LLM-facing prompt and the MCP tool result.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _force_keyword_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import machina.connectors.docs.document_store as _ds_mod
+
+        def _raise(self: Any, documents: list[Any]) -> None:
+            raise ImportError("forced keyword fallback")
+
+        monkeypatch.setattr(_ds_mod.DocumentStoreConnector, "_build_rag_index", _raise)
+
+    @pytest.mark.asyncio
+    async def test_section_title_reaches_prompt_formatter(self, tmp_path: Path) -> None:
+        """search() returns chunks carrying section_title, and format_document_results
+        renders it as ``§ <title>`` so the LLM sees it.
+        """
+        from machina.agent.prompts import format_document_results
+
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        (docs_dir / "doc.md").write_text(
+            "# Pump P-201 Manual\n\n"
+            "## Bearing Replacement Procedure\n\n"
+            "Step 1: Lock out the motor.\n"
+            "Step 2: Remove coupling.\n"
+        )
+
+        conn = DocumentStoreConnector(paths=[docs_dir], chunk_size=80, chunk_overlap=0)
+        await conn.connect()
+        # Query for a body term ("lock out" appears in Step 1) — keyword
+        # fallback ranks against match-chunk text, not the section title.
+        # The parent-expanded content returned to the caller will still
+        # carry the title since the splitter prefixes it.
+        results = await conn.search("lock out", top_k=1)
+        assert results, "expected a match"
+
+        # Project to the agent runtime's serializer shape.
+        serialized = [
+            {
+                "content": r.content,
+                "source": r.source,
+                "page": r.page,
+                "chunk_id": r.chunk_id,
+                "section_title": r.section_title,
+                "is_table": r.is_table,
+            }
+            for r in results
+        ]
+        rendered = format_document_results(serialized)
+        assert "§ Bearing Replacement Procedure" in rendered, rendered
+
+    @pytest.mark.asyncio
+    async def test_is_table_flag_surfaces_table_tag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When a Docling-parsed table is retrieved, format_document_results tags it [TABLE]."""
+        from machina.agent.prompts import format_document_results
+        from machina.connectors.docs.parsing import (
+            LayoutAwareParser,
+            ParsedDocument,
+            TableBlock,
+        )
+
+        docs_dir = tmp_path / "manuals"
+        docs_dir.mkdir()
+        pdf = docs_dir / "manual.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        parsed = ParsedDocument(
+            source=str(pdf),
+            tables=(
+                TableBlock(
+                    text="| Fastener | Torque (Nm) |\n|---|---|\n| M10 | 45 |",
+                    page=4,
+                    caption="Torque Specs",
+                ),
+            ),
+        )
+        monkeypatch.setattr(LayoutAwareParser, "parse", lambda self, file_path: parsed)
+
+        conn = DocumentStoreConnector(paths=[docs_dir])
+        await conn.connect()
+        results = await conn.search("M10 torque", top_k=1)
+        assert results, "expected table to be retrievable"
+        assert results[0].is_table is True
+
+        serialized = [
+            {
+                "content": r.content,
+                "source": r.source,
+                "page": r.page,
+                "chunk_id": r.chunk_id,
+                "section_title": r.section_title,
+                "is_table": r.is_table,
+            }
+            for r in results
+        ]
+        rendered = format_document_results(serialized)
+        assert "[TABLE]" in rendered, rendered
+
+
 class TestDocumentChunk:
     """Test DocumentChunk data class."""
 
@@ -397,6 +501,22 @@ class TestEmbedderConfig:
         monkeypatch.setitem(sys.modules, "langchain_community.embeddings", None)
         conn = DocumentStoreConnector(embedder="BAAI/bge-m3")
         assert conn._load_embedding_function() is None
+
+    def test_embedder_happy_path_threads_to_chroma(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Happy path: embedder configured + model loads → embedding= flows to Chroma.from_texts."""
+        import sys
+
+        fake_embedding = MagicMock(name="HFEmbeddings instance")
+        hf_ctor = MagicMock(return_value=fake_embedding)
+        fake_embeddings_module = MagicMock()
+        fake_embeddings_module.HuggingFaceEmbeddings = hf_ctor
+        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", fake_embeddings_module)
+
+        conn = DocumentStoreConnector(embedder="BAAI/bge-m3")
+        out = conn._load_embedding_function()
+
+        hf_ctor.assert_called_once_with(model_name="BAAI/bge-m3")
+        assert out is fake_embedding
 
 
 class TestMetadataFiltering:
@@ -610,12 +730,14 @@ class TestDocumentStoreRAG:
             await conn.connect()
 
         await conn.search("bearing", asset_id="P-201")
-        # Verify pre-retrieval filter is passed via Chroma's ``filter=`` kwarg.
-        # search() over-fetches by _PARENT_OVERFETCH_FACTOR=6 so parent
-        # dedup in _expand_to_parents can still satisfy the caller's
-        # top_k contract after collapsing matches that share a parent.
+        # Verify pre-retrieval filter is passed via Chroma's ``filter=``
+        # kwarg. search() over-fetches by _PARENT_OVERFETCH_FACTOR=6
+        # bounded by corpus size so parent dedup can still satisfy
+        # top_k after collapsing matches that share a parent. The
+        # sample corpus only produces 3 chunks; the over-fetch is
+        # capped at that.
         call_kwargs = mock_vectorstore.similarity_search_with_score.call_args
-        assert call_kwargs[1].get("k") == 30  # top_k=5 * over_fetch=6
+        assert call_kwargs[1].get("k") == len(conn._chunks)
         assert call_kwargs[1].get("filter") == {"asset_id": "P-201"}
 
     @pytest.mark.asyncio

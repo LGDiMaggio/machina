@@ -244,6 +244,41 @@ class TestConnectorIntegration:
         assert any("bearing" in r.content.lower() for r in results)
 
 
+class TestLabelClassificationContract:
+    """Pin the label-substring contract _classify_item depends on.
+
+    _classify_item uses ``"heading" in label`` / ``"table" in label`` /
+    ``"text" / "paragraph" / "list" / "caption" in label`` to classify
+    items from Docling's output. If Docling renames its labels in a
+    future release these tests will fail loudly instead of silently
+    degrading to one giant unnamed parent.
+    """
+
+    @pytest.mark.parametrize(
+        "label",
+        ["heading", "section_header", "title", "Heading", "TITLE"],
+    )
+    def test_heading_variants_classify_as_heading(self, label: str) -> None:
+        from machina.connectors.docs.parsing import _classify_item
+
+        item = _stub_item(label, "X")
+        assert _classify_item(item) == "heading"
+
+    @pytest.mark.parametrize("label", ["table", "Table", "data_table"])
+    def test_table_variants_classify_as_table(self, label: str) -> None:
+        from machina.connectors.docs.parsing import _classify_item
+
+        item = _stub_item(label, "X")
+        assert _classify_item(item) == "table"
+
+    @pytest.mark.parametrize("label", ["text", "paragraph", "list_item", "caption", "PARAGRAPH"])
+    def test_prose_variants_classify_as_text(self, label: str) -> None:
+        from machina.connectors.docs.parsing import _classify_item
+
+        item = _stub_item(label, "X")
+        assert _classify_item(item) == "text"
+
+
 class TestApiShape:
     def test_dataclasses_construct(self) -> None:
         sec = Section(title="t", level=2, text="body", page_range=(1, 3))

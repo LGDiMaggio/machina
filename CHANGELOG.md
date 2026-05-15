@@ -9,12 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Section-aware chunking + parent-document retrieval** (`SectionAwareSplitter`, `ParentSection`, `MatchChunk`). The splitter detects Markdown headings (fence-aware), numbered headings, and ALL-CAPS headings (the last two require blank-line context). Small match chunks feed embedding / BM25 / rerank; the LLM receives the full surrounding section so a multi-step procedure stays together. Oversized sections are windowed around the match using char offsets.
+- **Layout-aware PDF/DOCX parsing via Docling** (`LayoutAwareParser`, `ParsedDocument`, `Section`, `TableBlock`) behind `[docs-rag-parsing]` extra. Tables are emitted as atomic chunks (`DocumentChunk.is_table=True`) that retrieval never splits mid-row. Per-file failures fall back to `PyPDFLoader` / `Docx2txtLoader`. Surfaces a `[TABLE]` tag in `format_document_results` so the LLM treats table results as structured rows.
+- **Swappable embedder** via `embedder=` constructor param on `DocumentStoreConnector` (e.g. `"BAAI/bge-m3"` for multilingual technical content). Falls back to Chroma's default on any failure.
+- **`[docs-rag-pro]` aggregator extra** pulling `docs-rag + docs-rag-hybrid + docs-rag-rerank + docs-rag-parsing`. Now referenced by `[all]`.
+- **Connector documentation** at `docs/connectors/document-store.md` covering metadata schema, sidecar / frontmatter, extras, embedder configuration, citation contract, and failure-mode table.
 - **`examples` extra** in `pyproject.toml`, pulling in `python-dotenv`. The example preflight now loads `examples/.env` automatically so users can keep API keys in a local file instead of exporting shell variables every session. The import is wrapped in `try`/`except` so users on `machina-ai[litellm]` without the new extra are unaffected.
 - **Shared CLI helper** `examples/_mode.py` exposing `add_mode_flags()` and `resolve_sandbox()`. Every example agent and the `odl-generator-from-text` template now accept mutually exclusive `--sandbox` and `--live` flags. `--help` advertises which mode is the default (LIVE for `quickstart`, SANDBOX everywhere else).
 - **CLI consistency tests** (`tests/unit/test_examples_mode_helper.py`, `tests/unit/test_template_mode_parity.py`, `tests/e2e/test_examples_cli_consistency.py`). The e2e test auto-discovers every `agent.py` under `examples/` and `templates/`, so new examples are covered without manual registration.
 
 ### Changed
 
+- **`DocumentStoreConnector.search()` result semantics**: `DocumentChunk.content` now carries the full **parent section** (after dedup-by-parent), not the small match passage. The match passage is still what was embedded and ranked; only the surface returned to the caller (and the LLM) changed. Callers that previously assumed `content` was a short passage may need to adjust slicing logic. The chunk metadata still carries the deterministic `chunk_id` for citation purposes. New `DocumentChunk` fields: `parent_id`, `start_offset`, `is_table` (appended to preserve positional construction).
 - **`predictive_pipeline` default mode flipped from LIVE to SANDBOX** for safety. Pass `--live` to execute writes.
 - **`quickstart` keeps LIVE as the default** (Q&A is read-mostly), but the CLI now accepts `--live` and `--sandbox` symmetrically and the help text annotates which is the default.
 - **Documentation**: `examples/quickstart/README.md` now shows the `.env` workflow alongside `export` / `$env:` / `set` syntax for bash, PowerShell, and CMD. Install command updated to `pip install "machina-ai[litellm,docs-rag,examples]"`.

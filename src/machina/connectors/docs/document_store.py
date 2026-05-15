@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import structlog
 
@@ -33,13 +33,42 @@ logger = structlog.get_logger(__name__)
 # honour the caller's top_k after collapsing matches that share a parent.
 _PARENT_OVERFETCH_FACTOR = 6
 
+# Bump when the chroma_meta schema changes (e.g. when new chunk fields
+# are added that retrieval depends on). The connector appends this to
+# ``collection_name`` so a persistent v0.2 collection doesn't get
+# mixed with v0.3+ reads that expect ``parent_id`` / ``start_offset``
+# / ``is_table`` in metadata.
+_SCHEMA_VERSION = "v3"
+
+
+class _IndexedChunk(NamedTuple):
+    """Tuple returned by ``_iter_doc_chunks`` — one entry per indexed chunk.
+
+    Named so callers don't have to read by tuple position; both the RAG
+    index builder and the keyword builder iterate the same shape.
+    """
+
+    chunk_id: str
+    text: str
+    chroma_meta: dict[str, Any]
+    chunk: DocumentChunk
+
 
 @dataclass
 class DocumentChunk:
     """A retrieved passage from a document.
 
+    Since v0.3, ``content`` carries the **full parent section** after
+    parent-document retrieval rather than the small match passage that
+    was embedded. The match passage is still what the embedder /
+    BM25 / reranker scored — only the surface returned to the caller
+    expands to its parent so the LLM sees the full surrounding
+    context. Callers that previously sliced ``content`` for a short
+    passage should switch to keying on ``chunk_id`` instead.
+
     Args:
-        content: The text content of the passage.
+        content: Text content of the chunk — typically the full parent
+            section the matched passage was nested under.
         source: File path or document name.
         page: Page number (if available).
         score: Relevance score from the retriever.
@@ -50,6 +79,16 @@ class DocumentChunk:
             ``troubleshooting``, ``other``.
         section_title: Title of the section this chunk belongs to.
         metadata: Raw metadata bag from the underlying document loader.
+        parent_id: Identifier of the section this chunk's match was
+            extracted from. Joins back to a :class:`ParentSection`.
+        start_offset: Character offset of the match inside its parent
+            section body. Used for windowing oversized parents without
+            a fragile substring search.
+        is_table: ``True`` when this chunk represents an atomic table
+            block extracted by the layout-aware parser. Retrieval and
+            chunking never split it mid-row; the LLM prompt surfaces a
+            ``[TABLE]`` tag so the model treats the content as
+            structured rows / columns.
 
     Example:
         ```python
@@ -64,13 +103,16 @@ class DocumentChunk:
     page: int = 0
     score: float = 0.0
     chunk_id: str = ""
-    parent_id: str = ""
-    start_offset: int = 0
     asset_id: str = ""
     equipment_class_code: str = ""
     doc_type: str = ""
     section_title: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # New fields added in v0.3 — placed at the end so positional
+    # construction in user code keeps working unchanged.
+    parent_id: str = ""
+    start_offset: int = 0
+    is_table: bool = False
 
     def __repr__(self) -> str:
         preview = self.content[:60] + "..." if len(self.content) > 60 else self.content
@@ -141,7 +183,14 @@ class DocumentStoreConnector:
         embedder: str | None = None,
     ) -> None:
         self._paths = [Path(p) for p in (paths or [])]
-        self._collection_name = collection_name
+        # Append the schema sentinel so persistent collections don't
+        # outlive a metadata-schema change. Idempotent if the caller
+        # already passed a versioned name.
+        self._collection_name = (
+            collection_name
+            if collection_name.endswith(f"_{_SCHEMA_VERSION}")
+            else f"{collection_name}_{_SCHEMA_VERSION}"
+        )
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._reranker_model_name = reranker_model
@@ -177,6 +226,16 @@ class DocumentStoreConnector:
 
     async def connect(self) -> None:
         """Ingest documents and build the vector index."""
+        # Reset all index state up-front so a retry after a partial
+        # connect() failure doesn't double-count chunks or leak stale
+        # parents from a previous corpus.
+        self._chunks.clear()
+        self._chunk_by_id.clear()
+        self._parent_by_id.clear()
+        self._vectorstore = None
+        self._bm25_index = None
+        self._reranker = None
+
         documents = await asyncio.to_thread(self._load_documents)
         if not documents:
             logger.warning(
@@ -186,7 +245,10 @@ class DocumentStoreConnector:
             )
 
         try:
-            self._build_rag_index(documents)
+            # Docling parse + HF embedder load + Chroma index build are
+            # heavy synchronous work; offload to a worker thread so the
+            # event loop stays responsive during connect().
+            await asyncio.to_thread(self._build_rag_index, documents)
             self._use_rag = True
             if self._reranker_model_name:
                 from machina.connectors.docs.reranker import CrossEncoderReranker
@@ -200,7 +262,7 @@ class DocumentStoreConnector:
                 reranker=bool(self._reranker_model_name),
             )
         except ImportError:
-            self._build_keyword_index(documents)
+            await asyncio.to_thread(self._build_keyword_index, documents)
             self._use_rag = False
             logger.info(
                 "connected",
@@ -273,15 +335,32 @@ class DocumentStoreConnector:
         effective = self._merge_filters(filters, asset_id)
         # Over-fetch so parent dedup in _expand_to_parents can still
         # honour the caller's top_k contract after collapsing matches
-        # that share a parent_id.
-        over_fetch = top_k * _PARENT_OVERFETCH_FACTOR
+        # that share a parent_id. The ceiling is bounded by the corpus
+        # so a small corpus doesn't trigger an unbounded fetch — and
+        # we log when we still can't fill top_k after collapsing, so
+        # callers have a signal that the contract was short.
+        corpus_size = len(self._chunks) or top_k
+        over_fetch = min(
+            corpus_size,
+            max(top_k * _PARENT_OVERFETCH_FACTOR, top_k + 50),
+        )
         if self._use_rag:
             results = await asyncio.to_thread(
                 self._rag_search, query, top_k=over_fetch, filters=effective
             )
         else:
             results = self._keyword_search(query, top_k=over_fetch, filters=effective)
-        return self._expand_to_parents(results, top_k=top_k)
+        expanded = self._expand_to_parents(results, top_k=top_k)
+        if len(expanded) < top_k:
+            logger.info(
+                "search_top_k_short",
+                connector="DocumentStoreConnector",
+                requested=top_k,
+                returned=len(expanded),
+                candidates=len(results),
+                reason="parent_dedup_or_corpus_size",
+            )
+        return expanded
 
     async def search_documents(
         self,
@@ -319,17 +398,16 @@ class DocumentStoreConnector:
     # RAG index (LangChain + ChromaDB)
     # ------------------------------------------------------------------
 
-    def _iter_doc_chunks(
-        self, documents: list[dict[str, Any]]
-    ) -> list[tuple[str, str, dict[str, Any], DocumentChunk]]:
+    def _iter_doc_chunks(self, documents: list[dict[str, Any]]) -> list[_IndexedChunk]:
         """Run the splitter over every document and produce indexable chunks.
 
-        Returns a list of ``(chunk_id, text, chroma_meta, DocumentChunk)``
-        tuples and populates ``self._parent_by_id`` / ``self._chunks`` /
-        ``self._chunk_by_id``. Shared by the RAG and keyword index
-        builders so both modes index against the same chunk shape.
+        Returns a list of :class:`_IndexedChunk` named tuples and
+        populates ``self._parent_by_id`` / ``self._chunks`` /
+        ``self._chunk_by_id`` as a side effect. Shared by the RAG and
+        keyword index builders so both modes index against the same
+        chunk shape.
         """
-        out: list[tuple[str, str, dict[str, Any], DocumentChunk]] = []
+        out: list[_IndexedChunk] = []
         for doc in documents:
             doc_meta: DocumentMetadata = doc.get("doc_metadata") or DocumentMetadata()
             parsed = doc.get("parsed")
@@ -362,6 +440,7 @@ class DocumentStoreConnector:
                     "chunk_id": chunk_id,
                     "parent_id": match.parent_id,
                     "start_offset": match.start_offset,
+                    "is_table": match.atomic,
                 }
                 chroma_meta.update(doc_meta.to_chroma_dict())
                 if section_title and "section_title" not in chroma_meta:
@@ -374,6 +453,7 @@ class DocumentStoreConnector:
                     chunk_id=chunk_id,
                     parent_id=match.parent_id,
                     start_offset=match.start_offset,
+                    is_table=match.atomic,
                     asset_id=doc_meta.asset_id,
                     equipment_class_code=doc_meta.equipment_class_code,
                     doc_type=doc_meta.doc_type,
@@ -382,7 +462,14 @@ class DocumentStoreConnector:
                 )
                 self._chunks.append(new_chunk)
                 self._chunk_by_id[chunk_id] = new_chunk
-                out.append((chunk_id, match.text, chroma_meta, new_chunk))
+                out.append(
+                    _IndexedChunk(
+                        chunk_id=chunk_id,
+                        text=match.text,
+                        chroma_meta=chroma_meta,
+                        chunk=new_chunk,
+                    )
+                )
         return out
 
     def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
@@ -394,9 +481,9 @@ class DocumentStoreConnector:
         indexed = self._iter_doc_chunks(documents)
         if not indexed:
             return
-        ids = [chunk_id for chunk_id, _, _, _ in indexed]
-        texts = [text for _, text, _, _ in indexed]
-        metadatas = [meta for _, _, meta, _ in indexed]
+        ids = [item.chunk_id for item in indexed]
+        texts = [item.text for item in indexed]
+        metadatas = [item.chroma_meta for item in indexed]
 
         from_texts_kwargs: dict[str, Any] = {
             "texts": texts,
@@ -408,7 +495,13 @@ class DocumentStoreConnector:
         if embedding is not None:
             from_texts_kwargs["embedding"] = embedding
 
-        self._vectorstore = Chroma.from_texts(**from_texts_kwargs)
+        try:
+            self._vectorstore = Chroma.from_texts(**from_texts_kwargs)
+        except ImportError:
+            # Re-raise so connect() falls back to keyword mode.
+            raise
+        except Exception as exc:
+            raise ConnectorError(f"Chroma index build failed: {exc!r}") from exc
         self._bm25_index = _build_bm25_index(texts, metadatas, ids)
 
     def _load_embedding_function(self) -> Any:
@@ -545,7 +638,19 @@ class DocumentStoreConnector:
 
         pairs = [(chunk.chunk_id, chunk.content) for chunk in rerankable]
         by_key = dict(zip([c.chunk_id for c in rerankable], rerankable, strict=True))
-        scored = self._reranker.rerank(query, pairs)
+        try:
+            scored = self._reranker.rerank(query, pairs)
+        except Exception as exc:
+            # Reranker raised mid-query (CUDA OOM, torch dynamic shape,
+            # tokenizer error). Keep the RRF order rather than failing
+            # the whole search and log so the failure is observable.
+            logger.warning(
+                "reranker_failed",
+                connector="DocumentStoreConnector",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return candidates[:top_k]
         if scored is None:
             # Reranker unavailable or scoring failed — keep the upstream
             # RRF order and scores instead of overwriting with zeros.
@@ -594,8 +699,24 @@ class DocumentStoreConnector:
                 operation="similarity_search",
                 error=str(exc),
             )
-            results = self._vectorstore.similarity_search_with_score(query, k=k * 3)
+            try:
+                results = self._vectorstore.similarity_search_with_score(query, k=k * 3)
+            except Exception as inner_exc:
+                raise ConnectorError(f"Vector store search failed: {inner_exc!r}") from inner_exc
             results = _post_filter_results(results, filters)
+        except Exception as exc:
+            # Embedding-time failures (HF OSError, CUDA OOM, torch type errors,
+            # Chroma backend errors) bypass the filter-fallback path above.
+            # Wrap them as ConnectorError so the agent's error policy can
+            # apply retry / circuit-breaker semantics instead of crashing.
+            logger.warning(
+                "rag_search_failed",
+                connector="DocumentStoreConnector",
+                operation="similarity_search",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise ConnectorError(f"Vector store search failed: {exc!r}") from exc
 
         return [
             (
@@ -607,6 +728,7 @@ class DocumentStoreConnector:
                     chunk_id=doc.metadata.get("chunk_id", ""),
                     parent_id=doc.metadata.get("parent_id", ""),
                     start_offset=int(doc.metadata.get("start_offset", 0) or 0),
+                    is_table=bool(doc.metadata.get("is_table", False)),
                     asset_id=doc.metadata.get("asset_id", ""),
                     equipment_class_code=doc.metadata.get("equipment_class_code", ""),
                     doc_type=doc.metadata.get("doc_type", ""),
@@ -662,6 +784,7 @@ class DocumentStoreConnector:
                 chunk_id=chunk.chunk_id,
                 parent_id=chunk.parent_id,
                 start_offset=chunk.start_offset,
+                is_table=chunk.is_table,
                 asset_id=chunk.asset_id,
                 equipment_class_code=chunk.equipment_class_code,
                 doc_type=chunk.doc_type,
@@ -895,6 +1018,7 @@ class DocumentStoreConnector:
                     chunk_id=chunk.chunk_id,
                     parent_id=chunk.parent_id,
                     start_offset=chunk.start_offset,
+                    is_table=chunk.is_table,
                     asset_id=chunk.asset_id,
                     equipment_class_code=chunk.equipment_class_code,
                     doc_type=chunk.doc_type,

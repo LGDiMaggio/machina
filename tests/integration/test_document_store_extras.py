@@ -16,6 +16,7 @@ No agent runtime, no LLM — that wiring is exercised in
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 import pytest
@@ -77,7 +78,13 @@ async def test_hybrid_retrieval_with_metadata_filter_and_rerank(
         encoding="utf-8",
     )
 
-    conn = DocumentStoreConnector(paths=[docs_dir])
+    # Unique collection name so we don't share in-memory Chroma state
+    # with other tests in this process (Chroma reuses collections by
+    # name within the default ephemeral client).
+    conn = DocumentStoreConnector(
+        paths=[docs_dir],
+        collection_name=f"integ_{uuid.uuid4().hex[:8]}",
+    )
     await conn.connect()
 
     # Health-check confirms we landed on the RAG path, not the keyword
@@ -131,6 +138,7 @@ async def test_reranker_runs_on_top_of_hybrid_fusion(tmp_path: Path) -> None:
     conn = DocumentStoreConnector(
         paths=[docs_dir],
         reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        collection_name=f"integ_rerank_{uuid.uuid4().hex[:8]}",
     )
     await conn.connect()
     results = await conn.search("how do I replace a bearing", top_k=1)

@@ -484,6 +484,7 @@ async def machina_search_manuals(
             "score": getattr(r, "score", 0.0),
             "chunk_id": getattr(r, "chunk_id", ""),
             "section_title": getattr(r, "section_title", ""),
+            "is_table": getattr(r, "is_table", False),
         }
         for r in results
     ]

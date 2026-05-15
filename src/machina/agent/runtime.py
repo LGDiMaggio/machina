@@ -590,6 +590,7 @@ class Agent:
                             "page": r.page,
                             "chunk_id": getattr(r, "chunk_id", ""),
                             "section_title": getattr(r, "section_title", ""),
+                            "is_table": getattr(r, "is_table", False),
                         }
                         for r in results
                     ]
@@ -795,6 +796,7 @@ class Agent:
                         "page": r.page,
                         "chunk_id": getattr(r, "chunk_id", ""),
                         "section_title": getattr(r, "section_title", ""),
+                        "is_table": getattr(r, "is_table", False),
                     }
                     for r in results
                 ]
