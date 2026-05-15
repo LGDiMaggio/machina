@@ -214,6 +214,46 @@ class TestFilenameInference:
         assert meta.asset_id == ""
         assert meta.doc_type == ""
 
+    def test_lowercase_token_with_glued_digits_is_normalized(self, tmp_path: Path) -> None:
+        # Real-world filename pattern from examples/sample_data/manuals.
+        # Inference must recognize ``p201`` as an asset code and return
+        # canonical ``P-201`` so Chroma filters built from agent-extracted
+        # ``asset_id="P-201"`` actually match the indexed chunks.
+        source = tmp_path / "pump_p201_manual.md"
+        source.write_text("body", encoding="utf-8")
+        meta = DocumentMetadata.from_path(source)
+        assert meta.asset_id == "P-201"
+        assert meta.doc_type == "manual"
+
+    def test_lowercase_token_with_longer_prefix(self, tmp_path: Path) -> None:
+        source = tmp_path / "compressor_comp301_manual.md"
+        source.write_text("body", encoding="utf-8")
+        meta = DocumentMetadata.from_path(source)
+        assert meta.asset_id == "COMP-301"
+        assert meta.doc_type == "manual"
+
+    def test_no_separator_short_prefix(self, tmp_path: Path) -> None:
+        source = tmp_path / "P201.pdf"
+        source.write_bytes(b"%PDF")
+        meta = DocumentMetadata.from_path(source)
+        assert meta.asset_id == "P-201"
+
+    def test_word_token_without_digits_is_not_an_asset(self, tmp_path: Path) -> None:
+        # Guard against false positives — ``pump`` and ``manual`` are common
+        # words in maintenance filenames but contain no asset number.
+        source = tmp_path / "pump_manual.pdf"
+        source.write_bytes(b"%PDF")
+        meta = DocumentMetadata.from_path(source)
+        assert meta.asset_id == ""
+
+    def test_year_token_is_not_an_asset(self, tmp_path: Path) -> None:
+        # Pure digits without a letter prefix must not be treated as an
+        # asset code (years, version numbers, page counts).
+        source = tmp_path / "2024_report.pdf"
+        source.write_bytes(b"%PDF")
+        meta = DocumentMetadata.from_path(source)
+        assert meta.asset_id == ""
+
 
 class TestStripFrontmatter:
     """Helper used by the document loader to drop frontmatter from indexed text."""

@@ -40,9 +40,13 @@ _MAX_METADATA_VALUE_LEN = 256
 # so user-authored frontmatter cannot overwrite system fields.
 _RESERVED_METADATA_KEYS = frozenset({"source", "page", "chunk_id", "content", "score"})
 
-# Asset IDs in PMI manuals typically look like P-201, COMP-301, M-12, V-007A.
-# We match an uppercase prefix (1-6 chars), a hyphen, and a digit-led suffix.
-_ASSET_ID_PATTERN = re.compile(r"\b([A-Z]{1,6})-(\d{1,5}[A-Z]?)(?![A-Za-z0-9])")
+# Liberal asset-id matcher applied per-token to the filename stem: accepts
+# ``P-201``, ``p201``, ``comp_301`` and normalizes to canonical ``PREFIX-NUMBER``.
+_TOKEN_SEPARATOR = re.compile(r"[/_\s.]+")
+_ASSET_TOKEN_PATTERN = re.compile(r"^([A-Za-z]{1,6})-?(\d{1,5}[A-Za-z]?)$")
+# Strict matcher for parent-dir inference — liberal matching there
+# false-positives on incidental dir names like ``draft1`` / ``empty0``.
+_STRICT_ASSET_ID_PATTERN = re.compile(r"\b([A-Z]{1,6}-\d{1,5}[A-Z]?)(?![A-Za-z0-9])")
 
 _DOC_TYPE_KEYWORDS: dict[str, str] = {
     "manual": "manual",
@@ -216,11 +220,23 @@ def strip_frontmatter(text: str) -> str:
 
 def _infer_from_filename(path: Path) -> DocumentMetadata:
     """Best-effort metadata inference from filename and parent directory."""
-    haystack = f"{path.parent.name}/{path.stem}"
+    # Stem inference uses the liberal token pattern so real-world filenames
+    # like ``pump_p201_manual`` or ``COMP301.pdf`` produce canonical
+    # ``P-201`` / ``COMP-301``. Parent-dir inference uses the strict pattern
+    # to avoid false positives on incidental directory names.
     asset_id = ""
-    match = _ASSET_ID_PATTERN.search(haystack)
-    if match:
-        asset_id = match.group(0)
+    for token in _TOKEN_SEPARATOR.split(path.stem):
+        if not token:
+            continue
+        match = _ASSET_TOKEN_PATTERN.match(token)
+        if match:
+            asset_id = f"{match.group(1).upper()}-{match.group(2).upper()}"
+            break
+    if not asset_id:
+        strict = _STRICT_ASSET_ID_PATTERN.search(path.parent.name)
+        if strict:
+            asset_id = strict.group(1)
+    haystack = f"{path.parent.name}/{path.stem}"
 
     doc_type = ""
     haystack_lower = haystack.lower()
