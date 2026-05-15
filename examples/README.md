@@ -5,7 +5,8 @@ Build AI agents for industrial maintenance. Two examples to get you from zero to
 ## 1. Ask Your Plant Data (2 minutes)
 
 ```bash
-pip install machina-ai[litellm,docs-rag]
+git clone https://github.com/LGDiMaggio/machina.git
+cd machina && pip install -e ".[litellm,docs-rag,examples]"
 cd examples/quickstart && python agent.py
 ```
 
@@ -51,8 +52,12 @@ All examples share `sample_data/` -- a fictional manufacturing plant:
 
 ## Prerequisites
 
+The examples and `sample_data/` are only in the repo (not in the published wheel), so clone first:
+
 ```bash
-pip install machina-ai[litellm,docs-rag]
+git clone https://github.com/LGDiMaggio/machina.git
+cd machina
+pip install -e ".[litellm,docs-rag,examples]"
 ```
 
 **LLM provider** (pick one):

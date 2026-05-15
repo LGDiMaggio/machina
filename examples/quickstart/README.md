@@ -65,8 +65,12 @@ Any [LiteLLM-compatible provider](https://docs.litellm.ai/docs/providers) works.
 
 ## Run It
 
+The examples live in the repo (not in the published wheel), so clone first:
+
 ```bash
-pip install "machina-ai[litellm,docs-rag,examples]"
+git clone https://github.com/LGDiMaggio/machina.git
+cd machina
+pip install -e ".[litellm,docs-rag,examples]"
 cd examples/quickstart
 
 # With Ollama (default):

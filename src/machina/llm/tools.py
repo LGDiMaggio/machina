@@ -126,7 +126,8 @@ SEARCH_DOCUMENTS_TOOL = make_tool(
     name="search_documents",
     description=(
         "Search maintenance manuals, procedures, and technical documents using "
-        "semantic search. Returns relevant passages with source references."
+        "semantic search. Returns relevant passages with source references and "
+        "chunk_id values you must cite when grounding claims."
     ),
     parameters={
         "type": "object",
@@ -138,6 +139,18 @@ SEARCH_DOCUMENTS_TOOL = make_tool(
             "asset_id": {
                 "type": "string",
                 "description": "Optionally scope search to documents related to a specific asset.",
+            },
+            "filters": {
+                "type": "object",
+                "description": (
+                    "Optional metadata filters applied before retrieval. "
+                    "Known keys: 'asset_id', 'doc_type' "
+                    "('manual'|'procedure'|'datasheet'|'troubleshooting'|'other'), "
+                    "'equipment_class_code', 'section_title'. "
+                    "Use only when you have a specific value — guessing leads to "
+                    "empty results."
+                ),
+                "additionalProperties": {"type": "string"},
             },
         },
         "required": ["query"],
