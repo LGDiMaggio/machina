@@ -4,8 +4,9 @@ Configure an agent entirely in YAML -- zero Python needed for basic setups.
 
 ## Run It
 
+From the cloned repo (see [examples/README.md](../../README.md#prerequisites) for install):
+
 ```bash
-pip install machina-ai[litellm,docs-rag]
 cd examples/reference/yaml_config
 
 # Default (Ollama):
