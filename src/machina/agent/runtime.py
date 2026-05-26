@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.entity_resolver import EntityResolver
-from machina.agent.prompts import build_context_message, build_system_prompt
+from machina.agent.prompts import _safe_source, build_context_message, build_system_prompt
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.capabilities import Capability
 from machina.domain.plant import Plant
@@ -525,10 +525,12 @@ class Agent:
                     operation="search_documents",
                 ):
                     results = await _conn.search(text, asset_id=asset.id)
+                    # Sanitise source at the LLM boundary so absolute file
+                    # paths never reach the prompt context.  See _safe_source.
                     return [
                         {
                             "content": r.content,
-                            "source": r.source,
+                            "source": _safe_source(r.source),
                             "page": r.page,
                         }
                         for r in results
@@ -701,8 +703,11 @@ class Agent:
                     args.get("query", ""),
                     asset_id=args.get("asset_id", ""),
                 )
+                # Sanitise source at the LLM boundary — the tool result is
+                # serialised straight into the conversation history.
                 return [
-                    {"content": r.content, "source": r.source, "page": r.page} for r in results
+                    {"content": r.content, "source": _safe_source(r.source), "page": r.page}
+                    for r in results
                 ]
             return {"error": "No document connector available"}
 
