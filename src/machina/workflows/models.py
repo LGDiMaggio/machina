@@ -6,13 +6,27 @@ multi-step maintenance workflows.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from machina._compat import StrEnum
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = structlog.get_logger(__name__)
+
+# Sentinel returned by ``WorkflowContext._lookup`` when a placeholder
+# references a name that is neither a trigger field nor a recorded step
+# output.  Distinguishing "key absent" from "key present with value
+# None" is essential — a step that legitimately returned ``None`` must
+# not be confused with an unrun / skipped step.
+_UNRESOLVED: Any = object()
+
+_PLACEHOLDER_RE = re.compile(r"\{([^}]+)\}")
 
 
 # ------------------------------------------------------------------
@@ -160,7 +174,7 @@ class Step:
     retries: int = 0
     guard: GuardCondition | None = None
     timeout_seconds: float | None = None
-    inputs: dict[str, str] = field(default_factory=dict)
+    inputs: dict[str, Any] = field(default_factory=dict)
     is_write: bool | None = None
 
 
@@ -330,43 +344,71 @@ class WorkflowContext:
 
     # -- template resolution ----------------------------------------
 
+    def _lookup(self, expr: str) -> Any:
+        """Resolve a placeholder expression against trigger + step outputs.
+
+        Returns the raw value when found, or the :data:`_UNRESOLVED`
+        sentinel when the referenced name is absent.  Distinguishing
+        "absent" from "present with value ``None``" is the whole point —
+        a step that legitimately returned ``None`` is a different
+        situation from an unrun / skipped step, and downstream code
+        must be able to tell the two apart.
+
+        Supports ``trigger``, ``trigger.field``, ``step_name`` and
+        ``step_name.field`` expressions.  Field access works on dicts
+        (via key) and on objects (via attribute).
+        """
+        parts = expr.split(".", 1)
+        root = parts[0]
+
+        if root == "trigger":
+            if len(parts) == 1:
+                return self._trigger
+            field_name = parts[1]
+            if field_name in self._trigger:
+                return self._trigger[field_name]
+            return _UNRESOLVED
+
+        if root not in self._steps:
+            return _UNRESOLVED
+        value = self._steps[root]
+
+        if len(parts) == 1:
+            return value
+
+        # Nested access: dict key or attribute.
+        field_name = parts[1]
+        if isinstance(value, dict):
+            if field_name in value:
+                return value[field_name]
+            return _UNRESOLVED
+        if hasattr(value, field_name):
+            return getattr(value, field_name)
+        return _UNRESOLVED
+
     def resolve(self, template: str) -> str:
-        """Interpolate ``{key}`` placeholders in *template*.
+        """Interpolate ``{key}`` placeholders in *template*, returning a string.
 
         Supported patterns:
 
         * ``{trigger.field}`` — value from the trigger event.
-        * ``{step_name}`` — full output of a prior step (str-ified).
+        * ``{step_name}`` — full output of a prior step (str-coerced).
         * ``{step_name.field}`` — nested field access (dict or object).
 
-        Unknown placeholders are left as-is.
+        Unresolved placeholders are left as-is so the missing
+        substitution is visible in the rendered string, and a structured
+        warning is logged at the call site.
         """
-        import re
 
         def _replacer(match: re.Match[str]) -> str:
             expr = match.group(1)
-            parts = expr.split(".", 1)
-            root = parts[0]
+            value = self._lookup(expr)
+            if value is _UNRESOLVED:
+                logger.warning("template_unresolved", expression=expr)
+                return match.group(0)
+            return str(value)
 
-            if root == "trigger":
-                if len(parts) == 1:
-                    return str(self._trigger)
-                return str(self._trigger.get(parts[1], match.group(0)))
-
-            value = self._steps.get(root)
-            if value is None:
-                return match.group(0)  # leave unresolved
-
-            if len(parts) == 1:
-                return str(value)
-
-            # nested access: dict key or attribute
-            field_name = parts[1]
-            if isinstance(value, dict):
-                return str(value.get(field_name, match.group(0)))
-            return str(getattr(value, field_name, match.group(0)))
-
-        return re.sub(r"\{([^}]+)\}", _replacer, template)
+        return _PLACEHOLDER_RE.sub(_replacer, template)
 
     def resolve_input_value(self, template: Any) -> Any:
         """Resolve a step-input value, preserving raw object types.
@@ -383,38 +425,31 @@ class WorkflowContext:
         result is a fully interpolated string — matching the existing
         behaviour for prompt and template fields.
 
+        When the referenced placeholder is absent (the step was
+        skipped, never ran, or the field does not exist), this method
+        returns ``None`` rather than the literal template string.  An
+        explicit ``None`` is far safer than a silent str-coercion of
+        ``"{generate_work_order}"`` into a downstream kwarg; it lets
+        connectors fail loudly with a clear type error instead of
+        receiving a meaningless string.  A structured warning is logged
+        with the unresolved expression so the failure is observable.
+
         Non-string values are returned as-is so callers that already
         pass raw objects in ``Step.inputs`` are not surprised.
         """
         if not isinstance(template, str):
             return template
 
-        import re
-
-        match = re.fullmatch(r"\{([^}]+)\}", template)
+        match = _PLACEHOLDER_RE.fullmatch(template)
         if match is None:
             return self.resolve(template)
 
         expr = match.group(1)
-        parts = expr.split(".", 1)
-        root = parts[0]
-
-        if root == "trigger":
-            if len(parts) == 1:
-                return self._trigger
-            return self._trigger.get(parts[1], template)
-
-        value = self._steps.get(root)
-        if value is None:
-            return template  # leave unresolved, same convention as resolve()
-
-        if len(parts) == 1:
-            return value
-
-        field_name = parts[1]
-        if isinstance(value, dict):
-            return value.get(field_name, template)
-        return getattr(value, field_name, template)
+        value = self._lookup(expr)
+        if value is _UNRESOLVED:
+            logger.warning("input_unresolved", expression=expr)
+            return None
+        return value
 
 
 __all__ = [
