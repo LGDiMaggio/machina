@@ -572,6 +572,7 @@ class Agent:
             plant_name=self.plant.name,
             asset_count=len(self.plant.assets),
             capabilities=all_caps,
+            workflows=list(self._workflows.keys()),
         )
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]

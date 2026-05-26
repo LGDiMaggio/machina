@@ -591,6 +591,24 @@ CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
     Capability.SEARCH_DOCUMENTS: [machina_search_manuals],
     Capability.GET_LATEST_READING: [machina_get_sensor_reading, machina_get_alarms],
     Capability.SEND_MESSAGE: [machina_send_message],
+    # ---- Capabilities declared but intentionally unmapped --------------
+    # The Capability enum is the shared vocabulary between connector
+    # implementations and MCP tool registration.  A few capabilities
+    # exist on the connector side without a paired MCP tool yet; map
+    # them to an empty list to make the gap visible to a reader (rather
+    # than silently absent) and to nudge contributors towards adding
+    # the missing tools rather than re-declaring the capability.
+    #
+    # * Calendar (READ_CALENDAR_EVENTS / CREATE_CALENDAR_EVENT /
+    #   DELETE_CALENDAR_EVENT) — CalendarConnector is implemented and
+    #   has docs/connectors/calendar.md narrative coverage, but the
+    #   ``machina_*_calendar_*`` MCP tools are not yet written.  A
+    #   deployment that wires CalendarConnector through MCP will see
+    #   zero calendar tools surface; pair the tools with the connector
+    #   before relying on the capability via MCP.
+    Capability.READ_CALENDAR_EVENTS: [],
+    Capability.CREATE_CALENDAR_EVENT: [],
+    Capability.DELETE_CALENDAR_EVENT: [],
 }
 
 
