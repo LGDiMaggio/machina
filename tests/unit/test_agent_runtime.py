@@ -1035,3 +1035,52 @@ class TestAgentWorkflows:
         agent.sandbox = True
         assert agent.sandbox is True
         assert agent._engine.sandbox is True
+
+    def test_sandbox_init_sets_connector_contextvar(self) -> None:
+        """``Agent(sandbox=True)`` updates the ``_sandbox_mode`` contextvar.
+
+        Otherwise the ``@sandbox_aware`` decorator on custom connector
+        write methods (e.g. ``cmms.dispatch_field_team`` — names that
+        don't match the engine's keyword heuristic) would bypass the
+        sandbox gate even when the agent is in sandbox mode.
+        """
+        from machina.connectors.base import get_sandbox_mode
+
+        Agent(sandbox=True)
+        assert get_sandbox_mode() is True
+
+    def test_sandbox_setter_updates_connector_contextvar(self) -> None:
+        """The setter propagates to the contextvar, not only the engine."""
+        from machina.connectors.base import get_sandbox_mode
+
+        agent = Agent(sandbox=False)
+        assert get_sandbox_mode() is False
+        agent.sandbox = True
+        assert get_sandbox_mode() is True
+        agent.sandbox = False
+        assert get_sandbox_mode() is False
+
+    def test_system_prompt_in_sandbox_mode_announces_simulation(self) -> None:
+        """The LLM must know it is in sandbox so it doesn't claim real writes."""
+        from machina.agent.prompts import build_system_prompt
+
+        prompt = build_system_prompt(sandbox=True)
+        assert "SANDBOX mode is active" in prompt
+        assert "no real data is modified" in prompt.lower() or "simulated" in prompt.lower()
+
+    def test_system_prompt_in_live_mode_announces_real_consequences(self) -> None:
+        from machina.agent.prompts import build_system_prompt
+
+        prompt = build_system_prompt(sandbox=False)
+        assert "LIVE mode is active" in prompt
+        assert "real" in prompt.lower()
+
+    def test_build_domain_services_reapplies_sandbox_to_engine(self) -> None:
+        """``_build_domain_services`` re-applies ``self._sandbox`` so a rebuilt
+        engine cannot silently drift below the canonical Agent value.
+        """
+        agent = Agent(sandbox=True)
+        # Simulate the engine being replaced (e.g. by a test fixture).
+        agent._engine.sandbox = False
+        agent._build_domain_services()
+        assert agent._engine.sandbox is True

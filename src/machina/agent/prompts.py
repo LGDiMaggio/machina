@@ -54,6 +54,10 @@ directory structures, database schemas, or system architecture. When citing \
 a source document, use only the document name (e.g. ``pump_p201_manual.md``) \
 — never include the directory it lives in or any path prefix.
 
+## Execution Mode
+
+{mode_context}
+
 ## Plant Context
 
 {plant_context}
@@ -63,19 +67,39 @@ a source document, use only the document name (e.g. ``pump_p201_manual.md``) \
 {capabilities_context}
 """
 
+_SANDBOX_MODE_NOTICE = (
+    "**SANDBOX mode is active.**  Write operations (create work order, "
+    "update record, send notification) are intercepted and logged but "
+    "**no real data is modified** in any external system.  When asked "
+    "to perform a write, you should still produce the planned action "
+    "and inform the user that the operation will be simulated, never "
+    "claim a real record was created or a real message was sent."
+)
+
+_LIVE_MODE_NOTICE = (
+    "**LIVE mode is active.**  Write operations execute against the "
+    "real CMMS, channels, and external systems.  Be deliberate: every "
+    "create / update / delete you propose will have real consequences."
+)
+
 
 def build_system_prompt(
     *,
     plant_name: str = "",
     asset_count: int = 0,
     capabilities: list[str] | None = None,
+    sandbox: bool = False,
 ) -> str:
-    """Build the system prompt with plant and capability context.
+    """Build the system prompt with plant, capability, and mode context.
 
     Args:
         plant_name: Name of the plant.
         asset_count: Number of assets in the registry.
         capabilities: List of available connector capabilities.
+        sandbox: Whether the agent is running in sandbox mode.  When
+            ``True`` the prompt tells the LLM that writes are simulated
+            so it can frame its responses honestly instead of claiming
+            real records were created.
 
     Returns:
         The formatted system prompt string.
@@ -90,9 +114,12 @@ def build_system_prompt(
     if capabilities:
         cap_ctx = ", ".join(sorted(set(capabilities)))
 
+    mode_ctx = _SANDBOX_MODE_NOTICE if sandbox else _LIVE_MODE_NOTICE
+
     return SYSTEM_PROMPT.format(
         plant_context=plant_ctx,
         capabilities_context=cap_ctx,
+        mode_context=mode_ctx,
     )
 
 

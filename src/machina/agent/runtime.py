@@ -19,7 +19,7 @@ import structlog
 
 from machina.agent.entity_resolver import EntityResolver
 from machina.agent.prompts import build_context_message, build_system_prompt, safe_source
-from machina.connectors.base import ConnectorRegistry
+from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
@@ -127,9 +127,13 @@ class Agent:
         # Action tracer
         self.tracer = ActionTracer()
 
-        # Sandbox mode — stored on the instance and propagated to the
-        # workflow engine via the ``sandbox`` property setter below.
+        # Sandbox mode — stored on the instance, propagated to the
+        # workflow engine via the ``sandbox`` property setter below, and
+        # mirrored into the ``connectors.base._sandbox_mode`` contextvar
+        # so ``@sandbox_aware`` connector methods see the same value as
+        # the engine's heuristic gate.
         self._sandbox = sandbox
+        set_sandbox_mode(sandbox)
 
         # Workflow engine
         self._workflows: dict[str, Workflow] = {}
@@ -160,16 +164,29 @@ class Agent:
 
     @sandbox.setter
     def sandbox(self, value: bool) -> None:
-        """Toggle sandbox mode and propagate to the workflow engine.
+        """Toggle sandbox mode atomically across every enforcement layer.
 
-        Without this propagation, mutating ``agent.sandbox`` after the
-        ``Agent`` was constructed (as the example scripts do when
-        ``--live`` is passed) would leave the engine's snapshot of the
-        flag stuck on its construction-time value — the banner says
-        ``Mode: LIVE`` but the workflow still runs in sandbox.
+        Guarantees that the workflow engine's heuristic gate and the
+        connector-level ``@sandbox_aware`` decorator both see the new
+        value on the next call.  Three pieces of state are updated in
+        one place so they cannot drift:
+
+        * ``self._sandbox`` — the canonical value read by ``Agent``
+          itself in the ``if self.sandbox`` branches.
+        * ``self._engine.sandbox`` — the workflow engine's snapshot.
+          Without this, a mutation after construction would leave the
+          engine running in its construction-time mode (the original
+          ``--live``-ignored bug).
+        * ``connectors.base._sandbox_mode`` contextvar — the variable
+          the ``@sandbox_aware`` decorator on connector methods checks.
+          Without this update, a custom connector write action whose
+          name does not match the engine's keyword heuristic (e.g.
+          ``cmms.dispatch_field_team``) would bypass both engine and
+          decorator and execute against the real system.
         """
         self._sandbox = value
         self._engine.sandbox = value
+        set_sandbox_mode(value)
 
     # ------------------------------------------------------------------
     # Public API — factory
@@ -351,6 +368,12 @@ class Agent:
             "maintenance_scheduler": scheduler,
             "domain": asset_service,
         }
+
+        # Defence against ``_engine`` being replaced or rebuilt after
+        # construction (e.g. by tests, subclasses, or future hot-reload
+        # logic).  Re-apply the canonical sandbox value so the engine's
+        # snapshot cannot drift from ``self._sandbox``.
+        self._engine.sandbox = self._sandbox
 
         if all_failure_modes:
             logger.info(
@@ -601,6 +624,7 @@ class Agent:
             plant_name=self.plant.name,
             asset_count=len(self.plant.assets),
             capabilities=all_caps,
+            sandbox=self._sandbox,
         )
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
