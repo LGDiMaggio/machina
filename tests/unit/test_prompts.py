@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.prompts import (
+    _safe_source,
     build_context_message,
     build_system_prompt,
     format_alarms_context,
@@ -12,6 +15,7 @@ from machina.agent.prompts import (
     format_resolved_entities,
     format_spare_parts_context,
     format_work_orders_context,
+    safe_source,
 )
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -242,3 +246,127 @@ class TestBuildContextMessage:
             document_results=[],
         )
         assert "P-201" in text
+
+
+# ---------------------------------------------------------------------------
+# Path-leak sanitisation (regression for report-luigi U1)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeSource:
+    """The ``safe_source`` helper itself."""
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            # Filesystem paths -> basename
+            (r"C:\Users\tedib\Desktop\manuals\manual.md", "manual.md"),
+            (r"d:\data\report.pdf", "report.pdf"),
+            ("/home/me/manuals/pump_p201_manual.md", "pump_p201_manual.md"),
+            ("manuals/pump.md", "pump.md"),
+            ("/file.txt", "file.txt"),  # POSIX root: last_sep == 0
+            # Already-safe inputs pass through
+            ("manual.md", "manual.md"),
+            ("chunk_42", "chunk_42"),
+            ("", ""),
+            # Remote URLs are server-side identifiers — safe to expose
+            ("https://example.com/path/to/doc.pdf", "https://example.com/path/to/doc.pdf"),
+            ("http://example.com/x.pdf", "http://example.com/x.pdf"),
+            ("s3://bucket/key/file.pdf", "s3://bucket/key/file.pdf"),
+            ("gs://bucket/file.pdf", "gs://bucket/file.pdf"),
+            ("ftp://example.com/x.pdf", "ftp://example.com/x.pdf"),
+            # Local-by-protocol URIs are stripped of scheme then sanitised.
+            ("file:///C:/Users/tedib/manuals/secret.md", "secret.md"),
+            ("file:///home/me/manuals/secret.md", "secret.md"),
+            ("scp://user@host/var/lib/secret.md", "secret.md"),
+            ("smb://server/share/secret.md", "secret.md"),
+            ("jar:///opt/jars/lib.jar", "lib.jar"),
+            # Drive-relative Windows path (no separator) — strip the drive prefix
+            ("C:filename.md", "filename.md"),
+        ],
+    )
+    def test_safe_source_table(self, source: str, expected: str) -> None:
+        assert safe_source(source) == expected
+
+    def test_trailing_separator_returns_placeholder(self) -> None:
+        """Trailing-separator paths previously yielded an empty basename.
+
+        Empty ``Source:`` citations are worse than losing specificity —
+        privacy is the priority, so we collapse to a generic placeholder.
+        """
+        assert safe_source("/home/me/") == "<document>"
+        assert safe_source(r"C:\Users\foo\bar\\") == "<document>"
+
+    def test_json_embedded_path_returns_placeholder(self) -> None:
+        """JSON-shaped sources must not leak adjacent fields via rfind."""
+        raw = '{"path": "/home/me/manuals/secret.md", "owner": "me"}'
+        out = safe_source(raw)
+        assert out == "<document>"
+        assert "owner" not in out
+        assert "/home/me" not in out
+
+    def test_posix_repr_returns_placeholder(self) -> None:
+        """Python ``repr(PosixPath(...))`` shapes must not leak quote suffixes."""
+        out = safe_source("PosixPath('/home/me/manuals/secret.md')")
+        assert out == "<document>"
+        assert "secret.md')" not in out
+
+    def test_bracket_or_brace_inputs_return_placeholder(self) -> None:
+        """Other structured-string shapes also collapse to a placeholder."""
+        assert safe_source("[/var/data/file.md]") == "<document>"
+        assert safe_source("(quoted: /etc/secret.conf)") == "<document>"
+
+    def test_private_alias_still_resolves_to_same_function(self) -> None:
+        """The ``_safe_source`` private alias remains for backwards compatibility."""
+        assert _safe_source is safe_source
+
+
+class TestFormatDocumentResultsSanitization:
+    """The user-facing context formatter must strip directory components."""
+
+    def test_windows_path_replaced_with_basename(self) -> None:
+        results = [
+            {
+                "content": "Step 1: Remove the bearing",
+                "source": r"C:\Users\tedib\Desktop\Scuola\manuals\pump_p201_manual.md",
+                "page": 5,
+            },
+        ]
+        text = format_document_results(results)
+        assert "pump_p201_manual.md" in text
+        assert "C:\\Users" not in text
+        assert "tedib" not in text
+
+    def test_posix_path_replaced_with_basename(self) -> None:
+        results = [
+            {"content": "Inspect the gasket", "source": "/home/me/manuals/pump.md", "page": 12},
+        ]
+        text = format_document_results(results)
+        assert "pump.md" in text
+        assert "/home/me/manuals" not in text
+
+    def test_file_uri_replaced_with_basename(self) -> None:
+        results = [
+            {
+                "content": "x",
+                "source": "file:///C:/Users/tedib/Desktop/secret.md",
+                "page": 1,
+            },
+        ]
+        text = format_document_results(results)
+        assert "secret.md" in text
+        assert "file://" not in text
+        assert "C:/Users" not in text
+
+
+class TestSystemPromptFirewall:
+    """The system prompt must explicitly forbid path / system disclosure."""
+
+    def test_path_disclosure_clause_present(self) -> None:
+        # Stable substring asserting the firewall rule exists.  If the
+        # clause is reworded, update this assertion deliberately —
+        # silent removal must be visible in the diff.
+        assert "absolute file paths" in build_system_prompt()
+
+    def test_clause_explicitly_calls_out_directory(self) -> None:
+        assert "director" in build_system_prompt().lower()

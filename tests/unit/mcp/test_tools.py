@@ -289,6 +289,53 @@ class TestSearchManuals:
         assert len(result) == 1
         assert result[0]["source"] == "manual.pdf"
 
+    @pytest.mark.asyncio
+    async def test_strips_absolute_paths_at_mcp_boundary(self) -> None:
+        """The MCP path must apply ``safe_source`` — same contract as the agent path.
+
+        Regression for the post-U1 review finding that
+        ``machina_search_manuals`` shipped raw ``DocumentChunk.source``
+        values, leaking absolute filesystem paths to every MCP client
+        (Claude Desktop, Cursor, third-party consumers) despite the
+        agent-path leak being closed.
+        """
+        from machina.mcp.tools import machina_search_manuals
+
+        leaky_chunks = [
+            MagicMock(
+                source=r"C:\Users\tedib\Desktop\manuals\pump.md",
+                page=5,
+                content="x",
+                score=0.9,
+            ),
+            MagicMock(
+                source="/home/me/manuals/safety.md",
+                page=2,
+                content="y",
+                score=0.8,
+            ),
+            MagicMock(
+                source="file:///C:/Users/tedib/secret.md",
+                page=1,
+                content="z",
+                score=0.7,
+            ),
+        ]
+        doc_conn = MagicMock()
+        doc_conn.capabilities = frozenset({Capability.SEARCH_DOCUMENTS})
+        doc_conn.search_documents = AsyncMock(return_value=leaky_chunks)
+        runtime = MachinaRuntime(connectors={"docs": doc_conn})
+
+        result = await machina_search_manuals(_make_ctx(runtime), query="x")
+
+        sources = [r["source"] for r in result]
+        assert sources == ["pump.md", "safety.md", "secret.md"]
+        for r in result:
+            assert "C:\\Users" not in r["source"]
+            assert "/home/me" not in r["source"]
+            assert "tedib" not in r["source"]
+            assert "file://" not in r["source"]
+
 
 class TestGetSensorReading:
     @pytest.mark.asyncio

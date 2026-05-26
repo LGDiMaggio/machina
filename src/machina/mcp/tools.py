@@ -462,15 +462,23 @@ async def machina_search_manuals(
         query: The search query.
         top_k: Maximum number of results.
     """
+    from machina.agent.prompts import safe_source
+
     runtime = _runtime(ctx)
     matches = runtime.find_by_capability(Capability.SEARCH_DOCUMENTS)
     if not matches:
         return [{"error": "No document store connector configured"}]
     _, doc_store = matches[0]
     results = await doc_store.search_documents(query, top_k=top_k)
+    # Sanitise source at the MCP boundary — the result flows back to
+    # an MCP client (Claude Desktop, Cursor, third-party MCP consumer)
+    # which has no signal that the raw source could be an absolute
+    # filesystem path.  This mirrors the agent-path sanitisation in
+    # ``Agent._gather_context`` and ``Agent._execute_tool`` so the two
+    # consumer paths leak no host filesystem detail.
     return [
         {
-            "source": getattr(r, "source", ""),
+            "source": safe_source(getattr(r, "source", "")),
             "page": getattr(r, "page", 0),
             "content": getattr(r, "content", str(r)),
             "score": getattr(r, "score", 0.0),

@@ -61,7 +61,10 @@ alarm_to_workorder = Workflow(
             description="Create a work order with auto-populated fields",
             inputs={
                 "asset_id": "{trigger.asset_id}",
-                "failure_mode": "{analyze_alarm}",
+                # `analyze_alarm` returns a DiagnosisResult; .primary_code
+                # extracts the top-ranked failure mode as a plain str —
+                # what `WorkOrder.failure_mode: str | None` expects.
+                "failure_mode": "{analyze_alarm.primary_code}",
                 "description": (
                     "Auto-generated from alarm {trigger.alarm_id} on {trigger.asset_id}. "
                     "Diagnosis: {analyze_alarm}"

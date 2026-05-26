@@ -1084,3 +1084,65 @@ class TestAgentWorkflows:
         agent._engine.sandbox = False
         agent._build_domain_services()
         assert agent._engine.sandbox is True
+
+
+# ---------------------------------------------------------------------------
+# Path-leak sanitisation at the runtime boundary (regression for report-luigi U1)
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeContextPayloadSanitization:
+    """End-to-end: the ``search_documents`` tool result strips paths."""
+
+    @pytest.mark.asyncio
+    async def test_search_documents_tool_strips_absolute_paths(self) -> None:
+        """The tool result fed back to the LLM must contain basenames only."""
+        from machina.connectors.capabilities import Capability
+
+        # Mock document connector that returns chunks with absolute paths,
+        # file URIs, and one bypass shape (file://) that earlier passed
+        # through unsanitised.
+        leaky_chunks = [
+            DocumentChunk(
+                content="Remove the four bolts on the bearing housing.",
+                source=r"C:\Users\tedib\Desktop\manuals\pump_p201_manual.md",
+                page=5,
+            ),
+            DocumentChunk(
+                content="Apply LOTO before opening the casing.",
+                source="/home/me/manuals/safety.md",
+                page=2,
+            ),
+            DocumentChunk(
+                content="Bypass attempt via file URI.",
+                source="file:///C:/Users/tedib/secret.md",
+                page=1,
+            ),
+        ]
+        mock_conn = MagicMock()
+        mock_conn.capabilities = frozenset({Capability.SEARCH_DOCUMENTS})
+        mock_conn.search = AsyncMock(return_value=leaky_chunks)
+        mock_conn.connect = AsyncMock()
+        mock_conn.disconnect = AsyncMock()
+
+        agent = Agent(
+            name="test",
+            connectors=[mock_conn],
+            channels=[],
+            llm="openai:gpt-4o",  # never actually called in this test
+        )
+
+        result: list[dict[str, Any]] = await agent._execute_tool(
+            "search_documents",
+            {"query": "bearing replacement"},
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 3
+        sources = [r["source"] for r in result]
+        assert sources == ["pump_p201_manual.md", "safety.md", "secret.md"]
+        for r in result:
+            assert "C:\\Users" not in r["source"]
+            assert "/home/me" not in r["source"]
+            assert "tedib" not in r["source"]
+            assert "file://" not in r["source"]
