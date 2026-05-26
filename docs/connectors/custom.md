@@ -375,3 +375,27 @@ REST mocking or VCR for recorded responses.
 ::: machina.connectors.cmms.pagination.PageNumberPagination
 
 ::: machina.connectors.cmms.pagination.CursorPagination
+
+### Document store
+
+The `DocumentStoreConnector` exposes the RAG pipeline (chunk ingestion,
+hybrid retrieval, reranking) to the agent.  `DocumentChunk` is the
+public shape returned by `search()` — agents consume its `content`,
+`source`, and `page` fields when building citations.  See
+[Security → Source-Path Sanitisation](../deployment/security.md) for
+the boundary that strips host filesystem paths from `source` before
+the LLM sees them.
+
+::: machina.connectors.docs.document_store.DocumentStoreConnector
+
+::: machina.connectors.docs.document_store.DocumentChunk
+
+### Channel protocols
+
+Any custom communication channel (a Slack alternative, a custom webhook
+receiver, an SMS bridge) must accept an `IncomingMessage` value when the
+agent invokes the registered handler.  Agents type-annotate against this
+shape; documenting it here makes the contract explicit for third-party
+channel authors.
+
+::: machina.connectors.comms.types.IncomingMessage

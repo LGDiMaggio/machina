@@ -91,16 +91,10 @@ _ALLOWLIST: dict[str, str] = {
     "machina.domain.calendar.ShiftPattern": "Narrative coverage in connectors/calendar.md is sufficient.",
     # ---- Connectors / channels with narrative-only coverage ---------------
     # These have dedicated docs/connectors/*.md pages; surfacing the class
-    # via ::: would duplicate without adding signal.  Wave B of the
-    # report-luigi review revisits whether SimulatedSensorConnector,
-    # DocumentStoreConnector, DocumentChunk, and IncomingMessage should be
-    # promoted to API ref — for now they sit here with explicit rationale.
-    "machina.connectors.iot.simulated.SimulatedSensorConnector": "Demo / prototyping connector; narrative coverage planned in docs/connectors/iot-simulated.md.",
+    # via ::: would duplicate without adding signal.
+    "machina.connectors.iot.simulated.SimulatedSensorConnector": "Reference example used by examples/reference/predictive_pipeline; not a production connector and intentionally kept out of API ref to avoid recommending it as a runtime choice.",
     "machina.connectors.comms.telegram.TelegramConnector": "Covered by quickstart and examples; narrative pattern, not API ref.",
     "machina.connectors.comms.telegram.CliChannel": "Covered by quickstart and examples; narrative pattern, not API ref.",
-    "machina.connectors.comms.types.IncomingMessage": "Channel protocol type; documented inline in docs/api/agent.md channel section.",
-    "machina.connectors.docs.document_store.DocumentChunk": "Search result data shape; surface is connectors/custom.md + RAG narrative.",
-    "machina.connectors.docs.document_store.DocumentStoreConnector": "Covered by connectors/custom.md RAG section narrative.",
     "machina.connectors.docs.excel.ExcelCsvConnector": "Covered by connectors/excel.md narrative.",
     "machina.connectors.sql.generic.GenericSqlConnector": "Covered by connectors/sql.md narrative.",
     # ---- Other internals ---------------------------------------------------
