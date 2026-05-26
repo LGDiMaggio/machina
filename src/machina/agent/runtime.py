@@ -19,8 +19,8 @@ import structlog
 
 from machina.agent.citations import parse_response
 from machina.agent.entity_resolver import EntityResolver
-from machina.agent.prompts import build_context_message, build_system_prompt
-from machina.connectors.base import ConnectorRegistry
+from machina.agent.prompts import build_context_message, build_system_prompt, safe_source
+from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.domain.citation import AgentResponse
 from machina.domain.plant import Plant
@@ -143,8 +143,13 @@ class Agent:
         # Action tracer
         self.tracer = ActionTracer()
 
-        # Sandbox mode
-        self.sandbox = sandbox
+        # Sandbox mode — stored on the instance, propagated to the
+        # workflow engine via the ``sandbox`` property setter below, and
+        # mirrored into the ``connectors.base._sandbox_mode`` contextvar
+        # so ``@sandbox_aware`` connector methods see the same value as
+        # the engine's heuristic gate.
+        self._sandbox = sandbox
+        set_sandbox_mode(sandbox)
 
         # Workflow engine
         self._workflows: dict[str, Workflow] = {}
@@ -164,6 +169,45 @@ class Agent:
         # Populated by _gather_context and the search_documents tool; consumed by
         # citation parsing at the end of each turn.
         self._turn_chunks: dict[str, dict[str, dict[str, Any]]] = {}
+
+    # ------------------------------------------------------------------
+    # Sandbox mode — single mutation point, propagates to the engine
+    # ------------------------------------------------------------------
+
+    @property
+    def sandbox(self) -> bool:
+        """Whether write actions are intercepted (``True``) or executed.
+
+        Read this attribute through normal access — no behaviour change
+        for existing call sites that branch on ``if self.sandbox``.
+        """
+        return self._sandbox
+
+    @sandbox.setter
+    def sandbox(self, value: bool) -> None:
+        """Toggle sandbox mode atomically across every enforcement layer.
+
+        Guarantees that the workflow engine's heuristic gate and the
+        connector-level ``@sandbox_aware`` decorator both see the new
+        value on the next call.  Three pieces of state are updated in
+        one place so they cannot drift:
+
+        * ``self._sandbox`` — the canonical value read by ``Agent``
+          itself in the ``if self.sandbox`` branches.
+        * ``self._engine.sandbox`` — the workflow engine's snapshot.
+          Without this, a mutation after construction would leave the
+          engine running in its construction-time mode (the original
+          ``--live``-ignored bug).
+        * ``connectors.base._sandbox_mode`` contextvar — the variable
+          the ``@sandbox_aware`` decorator on connector methods checks.
+          Without this update, a custom connector write action whose
+          name does not match the engine's keyword heuristic (e.g.
+          ``cmms.dispatch_field_team``) would bypass both engine and
+          decorator and execute against the real system.
+        """
+        self._sandbox = value
+        self._engine.sandbox = value
+        set_sandbox_mode(value)
 
     # ------------------------------------------------------------------
     # Public API — factory
@@ -345,6 +389,12 @@ class Agent:
             "maintenance_scheduler": scheduler,
             "domain": asset_service,
         }
+
+        # Defence against ``_engine`` being replaced or rebuilt after
+        # construction (e.g. by tests, subclasses, or future hot-reload
+        # logic).  Re-apply the canonical sandbox value so the engine's
+        # snapshot cannot drift from ``self._sandbox``.
+        self._engine.sandbox = self._sandbox
 
         if all_failure_modes:
             logger.info(
@@ -583,10 +633,12 @@ class Agent:
                     operation="search_documents",
                 ):
                     results = await _conn.search(text, asset_id=asset.id)
+                    # Sanitise source at the LLM boundary so absolute file
+                    # paths never reach the prompt context.  See safe_source.
                     return [
                         {
                             "content": r.content,
-                            "source": r.source,
+                            "source": safe_source(r.source),
                             "page": r.page,
                             "chunk_id": getattr(r, "chunk_id", ""),
                             "section_title": getattr(r, "section_title", ""),
@@ -650,6 +702,7 @@ class Agent:
             plant_name=self.plant.name,
             asset_count=len(self.plant.assets),
             capabilities=all_caps,
+            sandbox=self._sandbox,
         )
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
@@ -789,10 +842,14 @@ class Agent:
                     asset_id=args.get("asset_id", ""),
                     filters=filters,
                 )
+                # Sanitise source at the LLM boundary — the tool result is
+                # serialised straight into the conversation history.  The
+                # citation fields (chunk_id / section_title / is_table) come
+                # from the v0.3 RAG upgrade and feed citation validation.
                 serialized = [
                     {
                         "content": r.content,
-                        "source": r.source,
+                        "source": safe_source(r.source),
                         "page": r.page,
                         "chunk_id": getattr(r, "chunk_id", ""),
                         "section_title": getattr(r, "section_title", ""),

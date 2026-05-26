@@ -3,15 +3,40 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
+from machina.connectors.base import set_sandbox_mode
 from machina.domain.alarm import Alarm, Severity
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import FailureImpact, Priority, WorkOrder, WorkOrderType
+
+
+@pytest.fixture(autouse=True)
+def _reset_sandbox_mode() -> Iterator[None]:
+    """Reset the global sandbox contextvar to ``False`` around every test.
+
+    The ``Agent`` constructor and ``Agent.sandbox`` setter call
+    ``set_sandbox_mode`` so that the connector-level ``@sandbox_aware``
+    decorator sees the same value as the workflow engine.  That is the
+    correct production behaviour but it leaks across tests, because
+    ``contextvars`` are process-wide unless run in an isolated Context.
+    This fixture pins the contextvar to ``False`` before each test and
+    restores it after, so tests that assert on the default state stay
+    deterministic regardless of execution order.
+    """
+    set_sandbox_mode(False)
+    try:
+        yield
+    finally:
+        set_sandbox_mode(False)
 
 
 @pytest.fixture
