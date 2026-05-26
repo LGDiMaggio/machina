@@ -390,6 +390,14 @@ the LLM sees them.
 
 ::: machina.connectors.docs.document_store.DocumentChunk
 
+`DocumentMetadata` defines the metadata schema attached to ingested
+documents and consumed by pre-retrieval filtering (`asset_id`,
+`doc_type`, `equipment_class_code`, `section_title`).  See
+[connectors/document-store.md](document-store.md) for the sidecar /
+frontmatter ingestion paths.
+
+::: machina.connectors.docs.metadata.DocumentMetadata
+
 ### Channel protocols
 
 Any custom communication channel (a Slack alternative, a custom webhook

@@ -68,6 +68,7 @@ nav:
       - Slack: connectors/slack.md
       - Email: connectors/email.md
       - Calendar: connectors/calendar.md
+      - Document Store: connectors/document-store.md
   - YAML Configuration: yaml-config.md
   - MCP Server:
       - Overview: mcp-server.md

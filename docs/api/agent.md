@@ -33,3 +33,11 @@ Thin wrapper around LiteLLM exposing `complete()` and `complete_with_tools()`. C
 Enum identifying what a connector can do. Used by `ConnectorRegistry.find_by_capability(...)` for capability-based dispatch (the agent and workflow engine both rely on this to discover available actions at runtime).
 
 ::: machina.connectors.capabilities.Capability
+
+## Citations
+
+When the agent answers a question from retrieved documents it returns a structured `AgentResponse` carrying inline citations alongside the prose answer. Each `Citation` references a `chunk_id` produced by `DocumentStoreConnector.search()` so callers can audit which exact passage drove the answer.
+
+::: machina.domain.citation.AgentResponse
+
+::: machina.domain.citation.Citation

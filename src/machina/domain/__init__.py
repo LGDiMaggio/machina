@@ -3,6 +3,7 @@
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.calendar import CalendarEvent, EventType, PlannedDowntime, ShiftPattern
+from machina.domain.citation import AgentResponse, Citation
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.plant import Plant
@@ -16,10 +17,12 @@ from machina.domain.work_order import (
 )
 
 __all__ = [
+    "AgentResponse",
     "Alarm",
     "Asset",
     "AssetType",
     "CalendarEvent",
+    "Citation",
     "Criticality",
     "EventType",
     "FailureImpact",

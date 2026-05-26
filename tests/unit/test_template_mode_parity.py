@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "examples"))
 sys.path.insert(0, str(REPO_ROOT / "templates" / "odl-generator-from-text"))
 
 from _mode import add_mode_flags  # noqa: E402
-from _mode import resolve_sandbox as resolve_examples
+from _mode import resolve_sandbox as resolve_examples  # noqa: E402
 from agent import resolve_sandbox as resolve_template  # noqa: E402
 
 

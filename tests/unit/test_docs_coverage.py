@@ -100,6 +100,24 @@ _ALLOWLIST: dict[str, str] = {
     # ---- Other internals ---------------------------------------------------
     "machina.domain.services.asset_service.AssetService": "Internal helper; no public API contract.",
     "machina.mcp.auth.StaticBearerTokenVerifier": "Implementation detail; surface is mcp/auth.md narrative.",
+    # ---- v0.3 RAG pipeline internals --------------------------------------
+    # The DocumentStoreConnector composes section-aware chunking, hybrid
+    # (BM25 + dense) retrieval, optional cross-encoder reranking, and
+    # layout-aware PDF/DOCX parsing.  These helper classes are configuration
+    # points consumers reach through DocumentStoreConnector constructor
+    # arguments rather than instantiating directly; narrative coverage lives
+    # in connectors/document-store.md.  If a class graduates to a top-level
+    # public hook (e.g. a swappable reranker plugin contract), move it out
+    # of this section and add a ``:::`` directive on the corresponding page.
+    "machina.connectors.docs.chunking.SectionAwareSplitter": "RAG-pipeline internal; surface is connectors/document-store.md narrative.",
+    "machina.connectors.docs.chunking.ParentSection": "RAG-pipeline dataclass; surface is connectors/document-store.md narrative.",
+    "machina.connectors.docs.chunking.MatchChunk": "RAG-pipeline dataclass; surface is connectors/document-store.md narrative.",
+    "machina.connectors.docs.hybrid.BM25Index": "Hybrid-retrieval index built internally; surface is connectors/document-store.md.",
+    "machina.connectors.docs.reranker.CrossEncoderReranker": "Optional reranker selected via DocumentStoreConnector constructor; surface is connectors/document-store.md.",
+    "machina.connectors.docs.parsing.LayoutAwareParser": "Docling-backed parser used internally by ingestion; surface is connectors/document-store.md.",
+    "machina.connectors.docs.parsing.ParsedDocument": "Parser output dataclass consumed by chunking; surface is connectors/document-store.md.",
+    "machina.connectors.docs.parsing.Section": "Parser output dataclass consumed by chunking; surface is connectors/document-store.md.",
+    "machina.connectors.docs.parsing.TableBlock": "Parser output dataclass consumed by chunking; surface is connectors/document-store.md.",
 }
 
 
