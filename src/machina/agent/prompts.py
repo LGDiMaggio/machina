@@ -209,18 +209,54 @@ def format_resolved_entities(entities: list[ResolvedEntity]) -> str:
     return "\n".join(lines)
 
 
-def _safe_source(source: str) -> str:
+# Remote URL schemes whose source identifiers are server-side and contain
+# no host filesystem information — safe to expose to the LLM as-is.
+# Anything else with a ``://`` (``file://``, ``scp://``, ``smb://``,
+# ``jar://`` and friends) has its scheme stripped and is then sanitised
+# as a regular filesystem path.
+_REMOTE_URL_SCHEMES: tuple[str, ...] = (
+    "http://",
+    "https://",
+    "s3://",
+    "gs://",
+    "ftp://",
+    "ftps://",
+)
+
+# Characters that should never appear in a clean filesystem path.  If a
+# source string contains any of them, basename-by-rfind would leak the
+# adjacent metadata (e.g. quote suffixes, JSON neighbours).  In that
+# case the source is not a clean path — surface a generic placeholder.
+_NON_PATH_CHARS: frozenset[str] = frozenset("\"'{}[]()")
+
+# Placeholder emitted when a source string is path-bearing but cannot be
+# safely reduced to a citation-quality identifier (trailing separator,
+# embedded JSON/repr, etc.).  Citation specificity is lost in that edge
+# case — preserving privacy is the priority.
+_OPAQUE_SOURCE_PLACEHOLDER = "<document>"
+
+
+def safe_source(source: str) -> str:
     """Return a path-leak-safe form of a document source string.
 
     Strips directory components from filesystem paths so absolute paths
     like ``C:\\Users\\foo\\bar\\manual.md`` or ``/home/me/manuals/pump.md``
     become just ``manual.md`` / ``pump.md`` before reaching the LLM
-    context.  Non-path strings (doc IDs, URLs) pass through unchanged so
-    that future loaders emitting opaque identifiers are not mangled.
+    context.  Remote URL identifiers (``http(s)``, ``s3``, ``gs``,
+    ``ftp(s)``) pass through unchanged — their identifiers are
+    server-side and reveal nothing about the host filesystem.
+    Local-by-protocol schemes (``file://``, ``scp://``, ``smb://``,
+    ``jar://`` and so on) are stripped of their scheme and then
+    sanitised as paths.  Source strings that contain quotes, braces,
+    or brackets are not clean paths (they are likely JSON or ``repr()``
+    output of a path-bearing object); these collapse to a generic
+    placeholder because the rfind-based basename would otherwise leak
+    adjacent metadata.
 
-    Applied at every boundary where a ``DocumentChunk.source`` flows into
-    an LLM-visible payload (prompt context, tool result).  The raw value
-    on the chunk itself is preserved for non-LLM consumers (logs, traces).
+    Applied at every boundary where a ``DocumentChunk.source`` flows
+    into an LLM-visible payload (prompt context, tool result, MCP tool
+    result).  The raw value on the chunk itself is preserved for
+    non-LLM consumers (logs, traces, audit trails).
 
     Args:
         source: The raw source string from a document chunk.
@@ -230,16 +266,46 @@ def _safe_source(source: str) -> str:
     """
     if not source:
         return source
-    # URLs pass through untouched.
-    if "://" in source:
+
+    # Server-side URL identifiers reveal no host filesystem detail.
+    if source.startswith(_REMOTE_URL_SCHEMES):
         return source
+
+    # Local-by-protocol or unknown-scheme URIs — strip the scheme and
+    # re-sanitise the path component as if it had been emitted directly.
+    if "://" in source:
+        source = source.split("://", 1)[1]
+
+    # Quoted / JSON / repr inputs are never clean paths.  Refuse to
+    # "basename" them because rfind would leak adjacent metadata
+    # (e.g. ``'secret.md", "owner": "me"}'``).
+    if any(c in _NON_PATH_CHARS for c in source):
+        return _OPAQUE_SOURCE_PLACEHOLDER
+
     has_sep = "/" in source or "\\" in source
     has_drive = len(source) >= 2 and source[1] == ":" and source[0].isalpha()
     if not (has_sep or has_drive):
         return source
-    # Manual basename handles both POSIX and Windows separators uniformly.
+
+    # Manual basename handles both POSIX and Windows separators.
     last_sep = max(source.rfind("/"), source.rfind("\\"))
-    return source[last_sep + 1 :] if last_sep >= 0 else source
+    if last_sep >= 0:
+        basename = source[last_sep + 1 :]
+        # Trailing-separator paths (``/home/me/``) yield an empty
+        # basename — fall back to the placeholder rather than emitting
+        # an empty ``Source:`` citation.
+        return basename if basename else _OPAQUE_SOURCE_PLACEHOLDER
+
+    # Windows drive-relative path with no separator (``C:filename.md``).
+    if has_drive:
+        return source[2:] or _OPAQUE_SOURCE_PLACEHOLDER
+
+    return source
+
+
+# Backwards-compatible alias for callers still using the private name.
+# Remove in a future cleanup once external imports are updated.
+_safe_source = safe_source
 
 
 def format_document_results(results: list[dict[str, Any]]) -> str:
@@ -258,7 +324,7 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
     for i, result in enumerate(results[:5], 1):
         # Defence-in-depth: sanitise here too in case an upstream caller
         # forgot to.  Idempotent for already-sanitised values.
-        source = _safe_source(result.get("source", "unknown"))
+        source = safe_source(result.get("source", "unknown"))
         page = result.get("page", "")
         content = result.get("content", "")[:300]
         page_ref = f" (p. {page})" if page else ""
