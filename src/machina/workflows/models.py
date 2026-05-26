@@ -284,8 +284,18 @@ class WorkflowContext:
     """Mutable bag of data passed through a workflow execution.
 
     Stores the trigger event and the output of every completed step,
-    keyed by step name.  Supports ``{step_name}`` and
-    ``{step_name.field}`` template interpolation via :meth:`resolve`.
+    keyed by step name.  Two template-resolution methods are provided:
+
+    * :meth:`resolve` — interpolate ``{step_name}`` and
+      ``{step_name.field}`` placeholders into a string.  Used for
+      free-text fields like :attr:`Step.prompt` and
+      :attr:`Step.template` where the result must be a string.
+    * :meth:`resolve_input_value` — like :meth:`resolve`, but when the
+      entire template is a single ``{key}`` placeholder, return the
+      referenced raw value (object, dict, list) instead of its ``str``
+      repr.  Used by the engine for :attr:`Step.inputs`, so workflow
+      steps can pass complex outputs (e.g. a ``WorkOrder`` instance
+      from a factory) downstream without coercion.
     """
 
     def __init__(self, trigger_event: dict[str, Any] | None = None) -> None:
