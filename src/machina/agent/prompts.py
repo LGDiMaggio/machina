@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from machina.agent.citations import CITATION_PROMPT
+
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
     from machina.domain.alarm import Alarm
@@ -65,6 +67,8 @@ a source document, use only the document name (e.g. ``pump_p201_manual.md``) \
 ## Available Capabilities
 
 {capabilities_context}
+
+{citation_guidelines}
 """
 
 _SANDBOX_MODE_NOTICE = (
@@ -120,6 +124,7 @@ def build_system_prompt(
         plant_context=plant_ctx,
         capabilities_context=cap_ctx,
         mode_context=mode_ctx,
+        citation_guidelines=CITATION_PROMPT,
     )
 
 
@@ -339,7 +344,9 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
     """Format document search results for the prompt.
 
     Args:
-        results: List of dicts with ``content``, ``source``, ``page`` keys.
+        results: List of dicts with ``content``, ``source``, ``page``, and
+            optional ``chunk_id`` keys. ``chunk_id`` is surfaced in the
+            prompt so the LLM can cite chunks by id in its response.
 
     Returns:
         Formatted document excerpts.
@@ -353,9 +360,18 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         # forgot to.  Idempotent for already-sanitised values.
         source = safe_source(result.get("source", "unknown"))
         page = result.get("page", "")
-        content = result.get("content", "")[:300]
+        chunk_id = result.get("chunk_id", "")
+        section_title = result.get("section_title", "")
+        # Pass the full chunk content. The retrieval layer already
+        # returns parent-section text bounded by the splitter's
+        # max_parent_chars; truncating again here would defeat
+        # parent-document retrieval (Unit 5).
+        content = result.get("content", "")
         page_ref = f" (p. {page})" if page else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}")
+        section_ref = f" § {section_title}" if section_title else ""
+        cid_ref = f" chunk_id={chunk_id}" if chunk_id else ""
+        table_tag = " [TABLE]" if result.get("is_table") else ""
+        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{cid_ref}{table_tag}")
         lines.append(f"  {content}")
     return "\n".join(lines)
 

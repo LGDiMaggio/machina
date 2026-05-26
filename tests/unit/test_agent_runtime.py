@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent
+from machina.agent.runtime import Agent, _format_response_for_channel
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
@@ -93,6 +94,9 @@ class _FakeDocConnector:
 
     capabilities: ClassVar[list[str]] = ["search_documents"]
 
+    def __init__(self) -> None:
+        self.last_call_kwargs: dict[str, Any] = {}
+
     async def connect(self) -> None:
         pass
 
@@ -103,11 +107,13 @@ class _FakeDocConnector:
         return True
 
     async def search(self, query: str, **kwargs: Any) -> list[DocumentChunk]:
+        self.last_call_kwargs = {"query": query, **kwargs}
         return [
             DocumentChunk(
                 content="Pump P-201 bearing replacement procedure",
                 source="manual.txt",
                 page=1,
+                chunk_id="fake-chunk-1",
             )
         ]
 
@@ -531,6 +537,69 @@ class TestExecuteTool:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_search_documents_registers_chunks_only_for_current_chat(self) -> None:
+        """Tool-call retrieved chunks must NOT leak across concurrent chats.
+
+        Two chats are active at once. A tool call for chat A must only
+        populate chat A's _turn_chunks registry, leaving chat B untouched.
+        """
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+
+        # Simulate two in-flight chats (as handle_message_full would).
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_chunks["chat-b"] = {}
+
+        # Tool call attributed to chat A.
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+        # Chat A receives the chunks; chat B stays empty.
+        assert agent._turn_chunks["chat-a"], "chat-a should have registered chunks"
+        assert agent._turn_chunks["chat-b"] == {}, "chat-b must not see chat-a chunks"
+
+    @pytest.mark.asyncio
+    async def test_search_documents_forwards_filters_to_connector(self) -> None:
+        """LLM-supplied ``filters`` must reach the connector's search call."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        await agent._execute_tool(
+            "search_documents",
+            {"query": "bearing", "filters": {"doc_type": "procedure"}},
+        )
+        assert conn.last_call_kwargs.get("filters") == {"doc_type": "procedure"}
+
+    @pytest.mark.asyncio
+    async def test_search_documents_ignores_non_dict_filters(self) -> None:
+        """Malformed ``filters`` (string, list) must not be passed through."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        await agent._execute_tool(
+            "search_documents", {"query": "bearing", "filters": "not-a-dict"}
+        )
+        assert conn.last_call_kwargs.get("filters") is None
+
+    @pytest.mark.asyncio
+    async def test_search_documents_default_chat_id_when_not_threaded(self) -> None:
+        """Direct callers omitting chat_id register under 'default' only."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        agent._turn_chunks["other-chat"] = {}
+
+        await agent._execute_tool("search_documents", {"query": "bearing"})
+
+        assert "default" in agent._turn_chunks
+        assert agent._turn_chunks["default"], "default chat should have chunks"
+        assert agent._turn_chunks["other-chat"] == {}, "other-chat must stay clean"
+
+    @pytest.mark.asyncio
     async def test_check_spare_parts_tool(self) -> None:
         conn = _FakeSparePartsConnector()
         agent = Agent(connectors=[conn])
@@ -667,6 +736,87 @@ class TestHandleMessage:
         agent._llm = _FakeLLMRaises()  # type: ignore[assignment]
         with pytest.raises(LLMError, match="LLM call failed"):
             await agent.handle_message("test")
+
+
+class TestHandleMessageFullCitations:
+    """End-to-end: fake LLM emits citations → AgentResponse populated."""
+
+    @pytest.mark.asyncio
+    async def test_full_chain_populates_citations(self) -> None:
+        """LLM output with valid citations block → citations on AgentResponse."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()  # Returns chunk with chunk_id='fake-chunk-1'.
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Replace the bearing every 2000 hours [manual.txt:1].\n\n"
+            "<citations>\n"
+            "fake-chunk-1 | manual.txt | 1\n"
+            "</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Tell me about P-201 bearing")
+
+        # Citations populated from the per-turn registry.
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+        assert response.citations[0].source == "manual.txt"
+        assert response.citations[0].page == 1
+        # Inline marker preserved, citations block stripped.
+        assert "[manual.txt:1]" in response.text
+        assert "<citations>" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_handle_message_backcompat_strips_block(self) -> None:
+        """handle_message (str API) returns rendered text with block stripped."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Procedure [manual.txt:1].\n\n<citations>\nfake-chunk-1 | manual.txt | 1\n</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        text = await agent.handle_message("P-201 bearing")
+        assert isinstance(text, str)
+        assert "<citations>" not in text
+        assert "[manual.txt:1]" in text
+
+    @pytest.mark.asyncio
+    async def test_turn_chunks_cleared_after_handle(self) -> None:
+        """The per-chat registry slot must not persist across turns."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+        agent._llm = _FakeLLM("Hello.")  # type: ignore[assignment]
+        await agent.start()
+
+        await agent.handle_message_full("test", chat_id="chat-x")
+        assert "chat-x" not in agent._turn_chunks
+
+    @pytest.mark.asyncio
+    async def test_unknown_chunk_id_dropped(self) -> None:
+        """LLM citing a chunk_id that wasn't retrieved → silently dropped."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = (
+            "Body.\n<citations>\n"
+            "fake-chunk-1 | manual.txt | 1\n"
+            "ghost-chunk | fake-source | 99\n"
+            "</citations>"
+        )
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201")
+        chunk_ids = {c.chunk_id for c in response.citations}
+        assert chunk_ids == {"fake-chunk-1"}  # ghost-chunk dropped
 
 
 class TestGatherContext:
@@ -829,6 +979,28 @@ class TestLlmLoop:
         messages = [{"role": "user", "content": "test"}]
         result = await agent._llm_loop(messages, "chat1")
         assert result == ""
+
+
+class TestFormatResponseForChannel:
+    """Channel handler must surface citations alongside the rendered text."""
+
+    def test_no_citations_passthrough(self) -> None:
+        response = AgentResponse(text="Just an answer.")
+        assert _format_response_for_channel(response) == "Just an answer."
+
+    def test_citations_appended_as_sources_footer(self) -> None:
+        response = AgentResponse(
+            text="Replace bearing every 2000h [manuals/pump.pdf:42].",
+            citations=[
+                Citation(chunk_id="c1", source="manuals/pump.pdf", page=42),
+                Citation(chunk_id="c2", source="manuals/pump.pdf", page=43),
+            ],
+        )
+        out = _format_response_for_channel(response)
+        assert "[manuals/pump.pdf:42]" in out  # inline marker preserved
+        assert "— Sources:" in out
+        assert "manuals/pump.pdf:42" in out
+        assert "manuals/pump.pdf:43" in out
 
 
 class TestRunAsync:

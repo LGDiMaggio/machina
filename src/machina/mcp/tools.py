@@ -455,12 +455,18 @@ async def machina_search_manuals(
     ctx: Any,
     query: str,
     top_k: int = 5,
+    asset_id: str = "",
+    filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Search maintenance manuals and technical documentation.
 
     Args:
         query: The search query.
         top_k: Maximum number of results.
+        asset_id: Optional asset ID to scope the search.
+        filters: Optional metadata filters applied pre-retrieval. Known
+            keys: ``asset_id``, ``doc_type``, ``equipment_class_code``,
+            ``section_title``.
     """
     from machina.agent.prompts import safe_source
 
@@ -469,7 +475,9 @@ async def machina_search_manuals(
     if not matches:
         return [{"error": "No document store connector configured"}]
     _, doc_store = matches[0]
-    results = await doc_store.search_documents(query, top_k=top_k)
+    results = await doc_store.search_documents(
+        query, top_k=top_k, asset_id=asset_id, filters=filters
+    )
     # Sanitise source at the MCP boundary — the result flows back to
     # an MCP client (Claude Desktop, Cursor, third-party MCP consumer)
     # which has no signal that the raw source could be an absolute
@@ -482,6 +490,9 @@ async def machina_search_manuals(
             "page": getattr(r, "page", 0),
             "content": getattr(r, "content", str(r)),
             "score": getattr(r, "score", 0.0),
+            "chunk_id": getattr(r, "chunk_id", ""),
+            "section_title": getattr(r, "section_title", ""),
+            "is_table": getattr(r, "is_table", False),
         }
         for r in results
     ]
