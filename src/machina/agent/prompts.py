@@ -68,6 +68,10 @@ a source document, use only the document name (e.g. ``pump_p201_manual.md``) \
 
 {capabilities_context}
 
+## Registered Workflows
+
+{workflows_context}
+
 {citation_guidelines}
 """
 
@@ -92,14 +96,18 @@ def build_system_prompt(
     plant_name: str = "",
     asset_count: int = 0,
     capabilities: list[str] | None = None,
+    workflows: list[str] | None = None,
     sandbox: bool = False,
 ) -> str:
-    """Build the system prompt with plant, capability, and mode context.
+    """Build the system prompt with plant, capability, workflow, and mode context.
 
     Args:
         plant_name: Name of the plant.
         asset_count: Number of assets in the registry.
         capabilities: List of available connector capabilities.
+        workflows: List of registered workflow names.  Surfaces the
+            valid choices for the ``execute_workflow`` tool so the LLM
+            does not have to guess from the tool description's example.
         sandbox: Whether the agent is running in sandbox mode.  When
             ``True`` the prompt tells the LLM that writes are simulated
             so it can frame its responses honestly instead of claiming
@@ -118,11 +126,21 @@ def build_system_prompt(
     if capabilities:
         cap_ctx = ", ".join(sorted(set(capabilities)))
 
+    if workflows:
+        wf_lines = [
+            "Call ``execute_workflow(workflow_name=...)`` with one of:",
+            *[f"  - {name}" for name in sorted(set(workflows))],
+        ]
+        wf_ctx = "\n".join(wf_lines)
+    else:
+        wf_ctx = "None registered."
+
     mode_ctx = _SANDBOX_MODE_NOTICE if sandbox else _LIVE_MODE_NOTICE
 
     return SYSTEM_PROMPT.format(
         plant_context=plant_ctx,
         capabilities_context=cap_ctx,
+        workflows_context=wf_ctx,
         mode_context=mode_ctx,
         citation_guidelines=CITATION_PROMPT,
     )

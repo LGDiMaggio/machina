@@ -89,10 +89,17 @@ nav:
   - Observability:
       - Action Traces: observability/traces.md
       - Cost Tracking: observability/cost.md
+  - API Reference:
+      - Agent: api/agent.md
+      - Workflows: api/workflows.md
+      - Observability: api/observability.md
+      - Runtime (MCP / Headless): api/runtime.md
+      - Exceptions: api/exceptions.md
   - Migration:
       - v0.2 to v0.3: migration/v0.2-to-v0.3.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md
+  - Changelog: changelog.md
 
 markdown_extensions:
   - admonition
@@ -105,6 +112,10 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+      check_paths: true
   - pymdownx.tabbed:
       alternate_style: true

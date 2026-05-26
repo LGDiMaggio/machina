@@ -18,7 +18,7 @@ configured connectors. If a connector declares `READ_ASSETS`, the
 | `machina_get_maintenance_plan` | `READ_MAINTENANCE_PLANS` | Get maintenance plans for an asset |
 | `machina_search_manuals` | `SEARCH_DOCUMENTS` | Search equipment manuals and documentation (RAG) |
 | `machina_get_sensor_reading` | `GET_LATEST_READING` | Get the latest sensor reading for an asset |
-| `machina_get_alarms` | `SUBSCRIBE_TO_NODES` | Get active alarms |
+| `machina_get_alarms` | `GET_LATEST_READING` | Get active alarms |
 
 ### Write Tools
 

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class Citation(BaseModel):
     """A pointer from an answer back to its source chunk.
 
-    Args:
+    Attributes:
         chunk_id: Deterministic identifier of the source chunk (matches
             :attr:`DocumentChunk.chunk_id`).
         source: Source file path or document name.
@@ -45,7 +45,7 @@ class Citation(BaseModel):
 class AgentResponse(BaseModel):
     """Structured agent output carrying text and grounded citations.
 
-    Args:
+    Attributes:
         text: The rendered answer (with inline citation markers preserved
             but the trailing ``<citations>`` block stripped).
         citations: List of source citations, one per chunk the agent

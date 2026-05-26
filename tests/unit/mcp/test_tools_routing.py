@@ -52,11 +52,37 @@ class TestAutoRegistration:
 
 
 class TestCapabilityToToolMap:
-    def test_all_capabilities_have_tools(self) -> None:
+    def test_capability_mappings_are_lists(self) -> None:
+        """Every CAPABILITY_TO_TOOL entry maps to a list (possibly empty).
+
+        An empty list is a deliberate gap marker: the capability is part
+        of the framework's vocabulary (a connector implements it) but has
+        no MCP tool surface yet. See ``test_known_unmapped_capabilities_are_intentional``.
+        """
         from machina.mcp.tools import CAPABILITY_TO_TOOL
 
         for cap, tools in CAPABILITY_TO_TOOL.items():
-            assert len(tools) >= 1, f"Capability {cap} has no tools"
+            assert isinstance(tools, list), f"Capability {cap} mapping must be a list"
+
+    def test_known_unmapped_capabilities_are_intentional(self) -> None:
+        """Calendar capabilities are the documented unmapped set today.
+
+        If a new empty-list mapping is added without a matching entry
+        here, the test fails and forces the contributor to record the
+        intent (or to actually implement the tool).
+        """
+        from machina.mcp.tools import CAPABILITY_TO_TOOL
+
+        known_gaps = {
+            Capability.READ_CALENDAR_EVENTS,
+            Capability.CREATE_CALENDAR_EVENT,
+            Capability.DELETE_CALENDAR_EVENT,
+        }
+        empty = {cap for cap, tools in CAPABILITY_TO_TOOL.items() if not tools}
+        assert empty == known_gaps, (
+            f"Unmapped capabilities changed; expected {known_gaps}, got {empty}. "
+            "Either implement the missing tools or update this assertion."
+        )
 
     def test_dedup_across_capabilities(self) -> None:
         from machina.mcp.tools import get_tools_for_capabilities
