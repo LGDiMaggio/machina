@@ -127,8 +127,9 @@ class Agent:
         # Action tracer
         self.tracer = ActionTracer()
 
-        # Sandbox mode
-        self.sandbox = sandbox
+        # Sandbox mode — stored on the instance and propagated to the
+        # workflow engine via the ``sandbox`` property setter below.
+        self._sandbox = sandbox
 
         # Workflow engine
         self._workflows: dict[str, Workflow] = {}
@@ -143,6 +144,32 @@ class Agent:
 
         # Conversation history per chat
         self._histories: dict[str, list[dict[str, str]]] = {}
+
+    # ------------------------------------------------------------------
+    # Sandbox mode — single mutation point, propagates to the engine
+    # ------------------------------------------------------------------
+
+    @property
+    def sandbox(self) -> bool:
+        """Whether write actions are intercepted (``True``) or executed.
+
+        Read this attribute through normal access — no behaviour change
+        for existing call sites that branch on ``if self.sandbox``.
+        """
+        return self._sandbox
+
+    @sandbox.setter
+    def sandbox(self, value: bool) -> None:
+        """Toggle sandbox mode and propagate to the workflow engine.
+
+        Without this propagation, mutating ``agent.sandbox`` after the
+        ``Agent`` was constructed (as the example scripts do when
+        ``--live`` is passed) would leave the engine's snapshot of the
+        flag stuck on its construction-time value — the banner says
+        ``Mode: LIVE`` but the workflow still runs in sandbox.
+        """
+        self._sandbox = value
+        self._engine.sandbox = value
 
     # ------------------------------------------------------------------
     # Public API — factory

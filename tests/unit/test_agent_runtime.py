@@ -1007,3 +1007,31 @@ class TestAgentWorkflows:
     def test_sandbox_default_false(self) -> None:
         agent = Agent()
         assert agent.sandbox is False
+
+    def test_sandbox_setter_propagates_true_to_engine(self) -> None:
+        """Mutating ``agent.sandbox = True`` must update the engine.
+
+        Regression for the --live propagation defect (report Luigi):
+        the engine was constructed with a snapshot of sandbox at init
+        time and never saw subsequent mutations on the Agent.
+        """
+        agent = Agent(sandbox=False)
+        assert agent._engine.sandbox is False
+        agent.sandbox = True
+        assert agent.sandbox is True
+        assert agent._engine.sandbox is True
+
+    def test_sandbox_setter_propagates_false_to_engine(self) -> None:
+        """Mutating ``agent.sandbox = False`` (the --live path) must update the engine."""
+        agent = Agent(sandbox=True)
+        assert agent._engine.sandbox is True
+        agent.sandbox = False
+        assert agent.sandbox is False
+        assert agent._engine.sandbox is False
+
+    def test_sandbox_setter_idempotent(self) -> None:
+        """Setting sandbox to its current value is a no-op."""
+        agent = Agent(sandbox=True)
+        agent.sandbox = True
+        assert agent.sandbox is True
+        assert agent._engine.sandbox is True
