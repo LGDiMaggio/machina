@@ -59,6 +59,14 @@ alarm_to_workorder = Workflow(
             "generate_work_order",
             action="work_order_factory.create",
             description="Create a work order with auto-populated fields",
+            inputs={
+                "asset_id": "{trigger.asset_id}",
+                "failure_mode": "{analyze_alarm}",
+                "description": (
+                    "Auto-generated from alarm {trigger.alarm_id} on {trigger.asset_id}. "
+                    "Diagnosis: {analyze_alarm}"
+                ),
+            },
             on_error=ErrorPolicy.STOP,
         ),
         Step(
@@ -77,6 +85,7 @@ alarm_to_workorder = Workflow(
             "submit_work_order",
             action="cmms.create_work_order",
             description="Submit the confirmed work order to the CMMS",
+            inputs={"work_order": "{generate_work_order}"},
             on_error=ErrorPolicy.STOP,
         ),
     ],

@@ -364,6 +364,49 @@ class TestWorkflowContext:
         result = ctx.resolve("{trigger.asset_id} -> {s1}")
         assert result == "P-201 -> val1"
 
+    # -- resolve_input_value: preserves raw object types ---------------
+
+    def test_resolve_input_value_single_placeholder_returns_raw_dict(self) -> None:
+        """A bare ``{step}`` template must return the raw dict, not its str repr."""
+        ctx = WorkflowContext()
+        diagnosis = {"failure_mode": "BEAR-WEAR", "confidence": "high"}
+        ctx.set_step_output("analyze_alarm", diagnosis)
+        result = ctx.resolve_input_value("{analyze_alarm}")
+        assert result is diagnosis  # identity preserved, not stringified
+
+    def test_resolve_input_value_single_placeholder_returns_raw_object(self) -> None:
+        """Custom object outputs flow through without coercion."""
+
+        class _WO:
+            def __init__(self, wid: str) -> None:
+                self.id = wid
+
+        ctx = WorkflowContext()
+        wo = _WO("WO-123")
+        ctx.set_step_output("generate_work_order", wo)
+        result = ctx.resolve_input_value("{generate_work_order}")
+        assert result is wo
+
+    def test_resolve_input_value_template_with_surrounding_text_str_interpolates(self) -> None:
+        """Text + placeholder still produces a fully interpolated string."""
+        ctx = WorkflowContext()
+        ctx.set_step_output("diagnose", {"code": "BEAR-WEAR"})
+        result = ctx.resolve_input_value("Diagnosis: {diagnose.code}")
+        assert result == "Diagnosis: BEAR-WEAR"
+
+    def test_resolve_input_value_trigger_passthrough(self) -> None:
+        ctx = WorkflowContext({"asset_id": "P-201", "value": 7.8})
+        assert ctx.resolve_input_value("{trigger.value}") == 7.8
+
+    def test_resolve_input_value_unknown_step_left_as_is(self) -> None:
+        ctx = WorkflowContext()
+        assert ctx.resolve_input_value("{missing}") == "{missing}"
+
+    def test_resolve_input_value_non_string_returned_as_is(self) -> None:
+        ctx = WorkflowContext()
+        assert ctx.resolve_input_value(42) == 42
+        assert ctx.resolve_input_value(None) is None
+
 
 class TestBuiltinAlarmToWorkorder:
     """Test the built-in alarm_to_workorder template loads correctly."""

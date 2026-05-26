@@ -35,13 +35,20 @@ class _FakeDiagnoseService:
 
 
 class _FakeWoFactory:
-    """Stub for work_order_factory domain service."""
+    """Stub for work_order_factory domain service.
+
+    Records the kwargs from the most recent ``create`` call so tests
+    can assert that the workflow actually wired ``Step.inputs`` through
+    instead of calling with an empty payload.
+    """
 
     def __init__(self) -> None:
         self.call_count = 0
+        self.last_kwargs: dict[str, Any] = {}
 
     def create(self, **kwargs: Any) -> dict[str, Any]:
         self.call_count += 1
+        self.last_kwargs = kwargs
         return {"id": "WO-001", "status": "draft", "asset_id": "P-201"}
 
 
@@ -56,6 +63,7 @@ class _FakeCmmsConnector:
 
     def __init__(self) -> None:
         self.created_work_orders: list[dict[str, Any]] = []
+        self.last_create_kwargs: dict[str, Any] = {}
 
     async def connect(self) -> None:
         pass
@@ -73,6 +81,9 @@ class _FakeCmmsConnector:
         return [{"sku": "SKF-6310", "available": True, "stock": 3}]
 
     async def create_work_order(self, **kwargs: Any) -> dict[str, Any]:
+        # Record kwargs so tests can assert the workflow wired the
+        # factory output through, not an empty payload.
+        self.last_create_kwargs = kwargs
         wo = {"id": "WO-SUBMIT-001", "status": "submitted"}
         self.created_work_orders.append(wo)
         return wo
@@ -162,6 +173,61 @@ class TestAlarmToWorkorderWorkflow:
         # All steps succeeded
         for sr in result.step_results:
             assert sr.success is True, f"Step {sr.step_name} failed: {sr.error}"
+
+    @pytest.mark.asyncio
+    async def test_generate_work_order_receives_upstream_inputs(self) -> None:
+        """generate_work_order must consume trigger and diagnosis, not fire blanks.
+
+        Regression for the empty-inputs defect (report Luigi): the step
+        previously had no ``inputs={...}`` declaration and the factory was
+        called with no kwargs.
+        """
+        diagnose = _FakeDiagnoseService(
+            result={"failure_mode": "BEAR-WEAR-01", "confidence": "high"},
+        )
+        wo_factory = _FakeWoFactory()
+        engine, _cmms, _comms = self._build_engine(diagnose=diagnose, wo_factory=wo_factory)
+        trigger = {
+            "asset_id": "P-201",
+            "alarm_id": "ALM-2026-0412-001",
+            "severity": "warning",
+        }
+
+        await engine.execute(alarm_to_workorder, trigger)
+
+        assert wo_factory.call_count == 1
+        assert wo_factory.last_kwargs, "factory called with empty kwargs — inputs not wired"
+        assert wo_factory.last_kwargs.get("asset_id") == "P-201"
+        # failure_mode comes from {analyze_alarm} — raw dict passthrough.
+        assert wo_factory.last_kwargs.get("failure_mode") == diagnose._result
+        # description is text-with-placeholders, so it interpolates to a string.
+        description = wo_factory.last_kwargs.get("description", "")
+        assert "ALM-2026-0412-001" in description
+        assert "P-201" in description
+
+    @pytest.mark.asyncio
+    async def test_submit_work_order_receives_factory_output(self) -> None:
+        """submit_work_order must pass the WorkOrder produced by generate_work_order.
+
+        Regression for the empty-inputs defect: the step previously had
+        no ``inputs={...}`` declaration, so cmms.create_work_order was
+        called with no kwargs in live mode (and inputs={} in sandbox logs).
+        """
+        wo_factory = _FakeWoFactory()
+        engine, cmms, _comms = self._build_engine(wo_factory=wo_factory)
+        trigger = {"asset_id": "P-201", "severity": "warning"}
+
+        await engine.execute(alarm_to_workorder, trigger)
+
+        assert cmms.last_create_kwargs, "create_work_order called with empty kwargs"
+        # The factory's create() returned a dict; that dict must flow
+        # through unchanged (resolve_input_value preserves raw types).
+        work_order_arg = cmms.last_create_kwargs.get("work_order")
+        assert work_order_arg == {
+            "id": "WO-001",
+            "status": "draft",
+            "asset_id": "P-201",
+        }
 
     @pytest.mark.asyncio
     async def test_notification_template_resolved(self) -> None:

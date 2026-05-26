@@ -358,6 +358,54 @@ class WorkflowContext:
 
         return re.sub(r"\{([^}]+)\}", _replacer, template)
 
+    def resolve_input_value(self, template: Any) -> Any:
+        """Resolve a step-input value, preserving raw object types.
+
+        When *template* is a string whose entire value is a single
+        ``{key}`` placeholder, return the referenced raw value (object,
+        dict, list, …) rather than its ``str`` repr.  This lets steps
+        pass complex outputs downstream — e.g. a ``WorkOrder`` produced
+        by ``work_order_factory.create`` can flow into
+        ``cmms.create_work_order(work_order=…)`` without coercion.
+
+        For templates with text surrounding the placeholder (or
+        multiple placeholders), fall back to :meth:`resolve` so the
+        result is a fully interpolated string — matching the existing
+        behaviour for prompt and template fields.
+
+        Non-string values are returned as-is so callers that already
+        pass raw objects in ``Step.inputs`` are not surprised.
+        """
+        if not isinstance(template, str):
+            return template
+
+        import re
+
+        match = re.fullmatch(r"\{([^}]+)\}", template)
+        if match is None:
+            return self.resolve(template)
+
+        expr = match.group(1)
+        parts = expr.split(".", 1)
+        root = parts[0]
+
+        if root == "trigger":
+            if len(parts) == 1:
+                return self._trigger
+            return self._trigger.get(parts[1], template)
+
+        value = self._steps.get(root)
+        if value is None:
+            return template  # leave unresolved, same convention as resolve()
+
+        if len(parts) == 1:
+            return value
+
+        field_name = parts[1]
+        if isinstance(value, dict):
+            return value.get(field_name, template)
+        return getattr(value, field_name, template)
+
 
 __all__ = [
     "ErrorPolicy",

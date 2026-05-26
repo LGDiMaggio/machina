@@ -346,7 +346,7 @@ class WorkflowEngine:
         resolved = context.resolve(step.template or step.prompt)
 
         # Resolve recipient from step inputs or trigger context
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
         channel = resolved_inputs.get("channel", "")
         if not channel:
             channel = context.trigger.get("channel", "")
@@ -383,7 +383,7 @@ class WorkflowEngine:
             raise WorkflowError(f"Step '{step.name}': service '{service_name}' not registered")
 
         # Resolve inputs from template variables
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
@@ -414,7 +414,7 @@ class WorkflowEngine:
         capability = parts[1] if len(parts) > 1 else step.action
 
         # Resolve inputs
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
