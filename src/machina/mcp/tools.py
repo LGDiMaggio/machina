@@ -468,6 +468,8 @@ async def machina_search_manuals(
             keys: ``asset_id``, ``doc_type``, ``equipment_class_code``,
             ``section_title``.
     """
+    from machina.agent.prompts import safe_source
+
     runtime = _runtime(ctx)
     matches = runtime.find_by_capability(Capability.SEARCH_DOCUMENTS)
     if not matches:
@@ -476,9 +478,15 @@ async def machina_search_manuals(
     results = await doc_store.search_documents(
         query, top_k=top_k, asset_id=asset_id, filters=filters
     )
+    # Sanitise source at the MCP boundary — the result flows back to
+    # an MCP client (Claude Desktop, Cursor, third-party MCP consumer)
+    # which has no signal that the raw source could be an absolute
+    # filesystem path.  This mirrors the agent-path sanitisation in
+    # ``Agent._gather_context`` and ``Agent._execute_tool`` so the two
+    # consumer paths leak no host filesystem detail.
     return [
         {
-            "source": getattr(r, "source", ""),
+            "source": safe_source(getattr(r, "source", "")),
             "page": getattr(r, "page", 0),
             "content": getattr(r, "content", str(r)),
             "score": getattr(r, "score", 0.0),

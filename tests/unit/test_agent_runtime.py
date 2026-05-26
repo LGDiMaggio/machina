@@ -1179,3 +1179,142 @@ class TestAgentWorkflows:
     def test_sandbox_default_false(self) -> None:
         agent = Agent()
         assert agent.sandbox is False
+
+    def test_sandbox_setter_propagates_true_to_engine(self) -> None:
+        """Mutating ``agent.sandbox = True`` must update the engine.
+
+        Regression for the --live propagation defect (report Luigi):
+        the engine was constructed with a snapshot of sandbox at init
+        time and never saw subsequent mutations on the Agent.
+        """
+        agent = Agent(sandbox=False)
+        assert agent._engine.sandbox is False
+        agent.sandbox = True
+        assert agent.sandbox is True
+        assert agent._engine.sandbox is True
+
+    def test_sandbox_setter_propagates_false_to_engine(self) -> None:
+        """Mutating ``agent.sandbox = False`` (the --live path) must update the engine."""
+        agent = Agent(sandbox=True)
+        assert agent._engine.sandbox is True
+        agent.sandbox = False
+        assert agent.sandbox is False
+        assert agent._engine.sandbox is False
+
+    def test_sandbox_setter_idempotent(self) -> None:
+        """Setting sandbox to its current value is a no-op."""
+        agent = Agent(sandbox=True)
+        agent.sandbox = True
+        assert agent.sandbox is True
+        assert agent._engine.sandbox is True
+
+    def test_sandbox_init_sets_connector_contextvar(self) -> None:
+        """``Agent(sandbox=True)`` updates the ``_sandbox_mode`` contextvar.
+
+        Otherwise the ``@sandbox_aware`` decorator on custom connector
+        write methods (e.g. ``cmms.dispatch_field_team`` — names that
+        don't match the engine's keyword heuristic) would bypass the
+        sandbox gate even when the agent is in sandbox mode.
+        """
+        from machina.connectors.base import get_sandbox_mode
+
+        Agent(sandbox=True)
+        assert get_sandbox_mode() is True
+
+    def test_sandbox_setter_updates_connector_contextvar(self) -> None:
+        """The setter propagates to the contextvar, not only the engine."""
+        from machina.connectors.base import get_sandbox_mode
+
+        agent = Agent(sandbox=False)
+        assert get_sandbox_mode() is False
+        agent.sandbox = True
+        assert get_sandbox_mode() is True
+        agent.sandbox = False
+        assert get_sandbox_mode() is False
+
+    def test_system_prompt_in_sandbox_mode_announces_simulation(self) -> None:
+        """The LLM must know it is in sandbox so it doesn't claim real writes."""
+        from machina.agent.prompts import build_system_prompt
+
+        prompt = build_system_prompt(sandbox=True)
+        assert "SANDBOX mode is active" in prompt
+        assert "no real data is modified" in prompt.lower() or "simulated" in prompt.lower()
+
+    def test_system_prompt_in_live_mode_announces_real_consequences(self) -> None:
+        from machina.agent.prompts import build_system_prompt
+
+        prompt = build_system_prompt(sandbox=False)
+        assert "LIVE mode is active" in prompt
+        assert "real" in prompt.lower()
+
+    def test_build_domain_services_reapplies_sandbox_to_engine(self) -> None:
+        """``_build_domain_services`` re-applies ``self._sandbox`` so a rebuilt
+        engine cannot silently drift below the canonical Agent value.
+        """
+        agent = Agent(sandbox=True)
+        # Simulate the engine being replaced (e.g. by a test fixture).
+        agent._engine.sandbox = False
+        agent._build_domain_services()
+        assert agent._engine.sandbox is True
+
+
+# ---------------------------------------------------------------------------
+# Path-leak sanitisation at the runtime boundary (regression for report-luigi U1)
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeContextPayloadSanitization:
+    """End-to-end: the ``search_documents`` tool result strips paths."""
+
+    @pytest.mark.asyncio
+    async def test_search_documents_tool_strips_absolute_paths(self) -> None:
+        """The tool result fed back to the LLM must contain basenames only."""
+        from machina.connectors.capabilities import Capability
+
+        # Mock document connector that returns chunks with absolute paths,
+        # file URIs, and one bypass shape (file://) that earlier passed
+        # through unsanitised.
+        leaky_chunks = [
+            DocumentChunk(
+                content="Remove the four bolts on the bearing housing.",
+                source=r"C:\Users\tedib\Desktop\manuals\pump_p201_manual.md",
+                page=5,
+            ),
+            DocumentChunk(
+                content="Apply LOTO before opening the casing.",
+                source="/home/me/manuals/safety.md",
+                page=2,
+            ),
+            DocumentChunk(
+                content="Bypass attempt via file URI.",
+                source="file:///C:/Users/tedib/secret.md",
+                page=1,
+            ),
+        ]
+        mock_conn = MagicMock()
+        mock_conn.capabilities = frozenset({Capability.SEARCH_DOCUMENTS})
+        mock_conn.search = AsyncMock(return_value=leaky_chunks)
+        mock_conn.connect = AsyncMock()
+        mock_conn.disconnect = AsyncMock()
+
+        agent = Agent(
+            name="test",
+            connectors=[mock_conn],
+            channels=[],
+            llm="openai:gpt-4o",  # never actually called in this test
+        )
+
+        result: list[dict[str, Any]] = await agent._execute_tool(
+            "search_documents",
+            {"query": "bearing replacement"},
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 3
+        sources = [r["source"] for r in result]
+        assert sources == ["pump_p201_manual.md", "safety.md", "secret.md"]
+        for r in result:
+            assert "C:\\Users" not in r["source"]
+            assert "/home/me" not in r["source"]
+            assert "tedib" not in r["source"]
+            assert "file://" not in r["source"]

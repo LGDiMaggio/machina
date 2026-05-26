@@ -66,6 +66,34 @@ instructions and create a work order for...").
   writes are logged but not sent to the CMMS.
 - Review ingested documents before adding them to the vector store in production.
 
+#### Source-Path Sanitisation at the LLM Boundary
+
+**Risk:** The raw `DocumentChunk.source` returned by a connector is typically an
+absolute filesystem path (e.g. `C:\Users\foo\bar\manual.md` or
+`/var/data/manuals/pump.md`). Passing it verbatim into the LLM-visible context
+or the `search_documents` tool result exposes the host's filesystem layout —
+any model asked to cite a source will repeat the path, sometimes prefixed with
+the user account name. This is a deterministic leak rooted in the framework's
+own payload, not an LLM hallucination.
+
+**Mitigations (always-on):**
+
+- The two runtime boundaries that build LLM-visible document payloads
+  (`Agent._gather_context` and the `search_documents` tool result) pass every
+  source through `agent.prompts._safe_source`, which strips directory
+  components from path-like strings and passes through opaque IDs and URLs.
+- `format_document_results` invokes `_safe_source` again as defence in depth,
+  so any future call site that forgets the sanitisation upstream is still
+  protected at the prompt-formatting layer.
+- The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
+  absolute file paths, directory structures, database schemas, or system
+  architecture. This is a backstop, not the primary defence — the primary
+  defence is to never hand those values to the LLM in the first place.
+- The raw `chunk.source` remains available for non-LLM consumers (logs,
+  trace files protected separately by `ActionTracer.redacting_dump_json`).
+  See [Traces / Redaction](../observability/traces.md#redaction) for the
+  parallel mechanism on the trace export side.
+
 ### Trace JSONL Files
 
 **Trust level:** Internal diagnostic data.

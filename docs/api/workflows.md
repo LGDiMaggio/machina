@@ -53,3 +53,9 @@ The mutable bag of data threaded through one workflow execution. Stores the trig
 ### `StepResult`
 
 ::: machina.workflows.models.StepResult
+
+### `DiagnosisResult`
+
+Wrapper returned by `FailureAnalyzer.diagnose(...)` when invoked through a workflow step. Iterable and indexable like a list, but exposes `primary` / `primary_code` / `codes` accessors so downstream steps (e.g. `work_order_factory.create`) can pluck the top-ranked failure mode without writing list-comprehension boilerplate inside templates.
+
+::: machina.domain.services.failure_analyzer.DiagnosisResult

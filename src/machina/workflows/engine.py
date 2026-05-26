@@ -29,6 +29,32 @@ from machina.workflows.models import (
 logger = structlog.get_logger(__name__)
 
 
+def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build the placeholder payload returned by intercepted write steps.
+
+    The shape — ``{"__sandbox__": True, "action": ..., "inputs": ...}``
+    — is the *only* signal downstream steps and guards have that an
+    upstream write was simulated rather than executed.  Downstream
+    code should treat ``__sandbox__`` as a stable marker key:
+
+    >>> if isinstance(value, dict) and value.get("__sandbox__"):
+    ...     # this step's output is a placeholder, not a real result
+    ...     ...
+
+    The legacy ``sandbox`` key is preserved as an alias for backwards
+    compatibility with workflows that already inspect it; the
+    ``__sandbox__`` form is preferred because the dunder prefix
+    visibly distinguishes the marker from real domain keys (some
+    real CMMS responses include a literal ``sandbox`` field).
+    """
+    return {
+        "__sandbox__": True,
+        "sandbox": True,  # legacy alias
+        "action": action,
+        "inputs": resolved_inputs,
+    }
+
+
 class WorkflowEngine:
     """Executes :class:`Workflow` definitions step by step.
 
@@ -346,7 +372,7 @@ class WorkflowEngine:
         resolved = context.resolve(step.template or step.prompt)
 
         # Resolve recipient from step inputs or trigger context
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
         channel = resolved_inputs.get("channel", "")
         if not channel:
             channel = context.trigger.get("channel", "")
@@ -383,7 +409,7 @@ class WorkflowEngine:
             raise WorkflowError(f"Step '{step.name}': service '{service_name}' not registered")
 
         # Resolve inputs from template variables
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
@@ -392,7 +418,7 @@ class WorkflowEngine:
                 action=step.action,
                 inputs=resolved_inputs,
             )
-            return {"sandbox": True, "action": step.action, "inputs": resolved_inputs}
+            return _sandbox_placeholder(step.action, resolved_inputs)
 
         method = getattr(service, method_name, None)
         if method is None:
@@ -414,7 +440,7 @@ class WorkflowEngine:
         capability = parts[1] if len(parts) > 1 else step.action
 
         # Resolve inputs
-        resolved_inputs = {k: context.resolve(v) for k, v in step.inputs.items()}
+        resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
 
         if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
@@ -423,7 +449,7 @@ class WorkflowEngine:
                 action=step.action,
                 inputs=resolved_inputs,
             )
-            return {"sandbox": True, "action": step.action, "inputs": resolved_inputs}
+            return _sandbox_placeholder(step.action, resolved_inputs)
 
         connectors = self._registry.find_by_capability(capability)
         if not connectors:

@@ -364,6 +364,97 @@ class TestWorkflowContext:
         result = ctx.resolve("{trigger.asset_id} -> {s1}")
         assert result == "P-201 -> val1"
 
+    # -- resolve_input_value: preserves raw object types ---------------
+
+    def test_resolve_input_value_single_placeholder_returns_raw_dict(self) -> None:
+        """A bare ``{step}`` template must return the raw dict, not its str repr."""
+        ctx = WorkflowContext()
+        diagnosis = {"failure_mode": "BEAR-WEAR", "confidence": "high"}
+        ctx.set_step_output("analyze_alarm", diagnosis)
+        result = ctx.resolve_input_value("{analyze_alarm}")
+        assert result is diagnosis  # identity preserved, not stringified
+
+    def test_resolve_input_value_single_placeholder_returns_raw_object(self) -> None:
+        """Custom object outputs flow through without coercion."""
+
+        class _WO:
+            def __init__(self, wid: str) -> None:
+                self.id = wid
+
+        ctx = WorkflowContext()
+        wo = _WO("WO-123")
+        ctx.set_step_output("generate_work_order", wo)
+        result = ctx.resolve_input_value("{generate_work_order}")
+        assert result is wo
+
+    def test_resolve_input_value_template_with_surrounding_text_str_interpolates(self) -> None:
+        """Text + placeholder still produces a fully interpolated string."""
+        ctx = WorkflowContext()
+        ctx.set_step_output("diagnose", {"code": "BEAR-WEAR"})
+        result = ctx.resolve_input_value("Diagnosis: {diagnose.code}")
+        assert result == "Diagnosis: BEAR-WEAR"
+
+    def test_resolve_input_value_trigger_passthrough(self) -> None:
+        ctx = WorkflowContext({"asset_id": "P-201", "value": 7.8})
+        assert ctx.resolve_input_value("{trigger.value}") == 7.8
+
+    def test_resolve_input_value_unknown_step_returns_none(self) -> None:
+        """An unrun / skipped step reference resolves to None.
+
+        Previously the literal template string was returned, which then
+        silently flowed into downstream connector kwargs and broke far
+        from the cause.  Returning None lets connectors raise a clear
+        TypeError instead of a meaningless string-typed call.
+        """
+        ctx = WorkflowContext()
+        assert ctx.resolve_input_value("{missing}") is None
+
+    def test_resolve_input_value_step_returned_none_distinguished_from_missing(self) -> None:
+        """A step that legitimately returned None must yield None, not a literal."""
+        ctx = WorkflowContext()
+        ctx.set_step_output("did_run_returned_none", None)
+        assert ctx.resolve_input_value("{did_run_returned_none}") is None
+
+    def test_resolve_input_value_unknown_trigger_field_returns_none(self) -> None:
+        ctx = WorkflowContext({"asset_id": "P-201"})
+        assert ctx.resolve_input_value("{trigger.missing}") is None
+
+    def test_resolve_input_value_unknown_step_field_returns_none(self) -> None:
+        ctx = WorkflowContext()
+        ctx.set_step_output("diagnose", {"code": "BEAR-WEAR"})
+        assert ctx.resolve_input_value("{diagnose.missing}") is None
+
+    def test_resolve_input_value_attribute_access_on_object(self) -> None:
+        """Single-placeholder dotted access on a non-dict object returns the attribute."""
+
+        class _WO:
+            def __init__(self) -> None:
+                self.id = "WO-42"
+
+        ctx = WorkflowContext()
+        ctx.set_step_output("gen", _WO())
+        assert ctx.resolve_input_value("{gen.id}") == "WO-42"
+
+    def test_resolve_input_value_trigger_whole_dict(self) -> None:
+        ctx = WorkflowContext({"asset_id": "P-201", "severity": "warning"})
+        out = ctx.resolve_input_value("{trigger}")
+        assert out == {"asset_id": "P-201", "severity": "warning"}
+
+    def test_resolve_unknown_placeholder_still_leaves_literal(self) -> None:
+        """``resolve()`` keeps the historical literal-preservation behaviour.
+
+        ``resolve_input_value`` returns None; ``resolve`` leaves the
+        literal so a missing substitution is visible in the rendered
+        template string (useful for debugging prompts / messages).
+        """
+        ctx = WorkflowContext()
+        assert ctx.resolve("Hello {missing}") == "Hello {missing}"
+
+    def test_resolve_input_value_non_string_returned_as_is(self) -> None:
+        ctx = WorkflowContext()
+        assert ctx.resolve_input_value(42) == 42
+        assert ctx.resolve_input_value(None) is None
+
 
 class TestBuiltinAlarmToWorkorder:
     """Test the built-in alarm_to_workorder template loads correctly."""

@@ -23,25 +23,50 @@ from machina.workflows.models import ErrorPolicy
 
 
 class _FakeDiagnoseService:
-    """Stub for failure_analyzer domain service."""
+    """Stub for failure_analyzer domain service.
 
-    def __init__(self, result: dict[str, Any] | None = None) -> None:
-        self._result = result or {"failure_mode": "bearing_wear", "confidence": "high"}
+    Returns a ``DiagnosisResult`` so the ``{analyze_alarm.primary_code}``
+    template in the built-in workflow resolves to the same plain ``str``
+    shape it would receive in production from
+    :class:`machina.domain.services.failure_analyzer.FailureAnalyzer`.
+    """
+
+    def __init__(self, result: Any | None = None) -> None:
+        from machina.domain.services.failure_analyzer import DiagnosisResult
+
+        if result is None:
+            result = DiagnosisResult(
+                matches=[
+                    {
+                        "code": "BEAR-WEAR-01",
+                        "name": "bearing_wear",
+                        "confidence": "high",
+                    }
+                ]
+            )
+        self._result = result
         self.call_count = 0
 
-    def diagnose(self, **kwargs: Any) -> dict[str, Any]:
+    def diagnose(self, **kwargs: Any) -> Any:
         self.call_count += 1
         return self._result
 
 
 class _FakeWoFactory:
-    """Stub for work_order_factory domain service."""
+    """Stub for work_order_factory domain service.
+
+    Records the kwargs from the most recent ``create`` call so tests
+    can assert that the workflow actually wired ``Step.inputs`` through
+    instead of calling with an empty payload.
+    """
 
     def __init__(self) -> None:
         self.call_count = 0
+        self.last_kwargs: dict[str, Any] = {}
 
     def create(self, **kwargs: Any) -> dict[str, Any]:
         self.call_count += 1
+        self.last_kwargs = kwargs
         return {"id": "WO-001", "status": "draft", "asset_id": "P-201"}
 
 
@@ -56,6 +81,7 @@ class _FakeCmmsConnector:
 
     def __init__(self) -> None:
         self.created_work_orders: list[dict[str, Any]] = []
+        self.last_create_kwargs: dict[str, Any] = {}
 
     async def connect(self) -> None:
         pass
@@ -73,6 +99,9 @@ class _FakeCmmsConnector:
         return [{"sku": "SKF-6310", "available": True, "stock": 3}]
 
     async def create_work_order(self, **kwargs: Any) -> dict[str, Any]:
+        # Record kwargs so tests can assert the workflow wired the
+        # factory output through, not an empty payload.
+        self.last_create_kwargs = kwargs
         wo = {"id": "WO-SUBMIT-001", "status": "submitted"}
         self.created_work_orders.append(wo)
         return wo
@@ -164,6 +193,80 @@ class TestAlarmToWorkorderWorkflow:
             assert sr.success is True, f"Step {sr.step_name} failed: {sr.error}"
 
     @pytest.mark.asyncio
+    async def test_generate_work_order_receives_upstream_inputs(self) -> None:
+        """generate_work_order must consume trigger and diagnosis, not fire blanks.
+
+        Regression for the empty-inputs defect (report Luigi): the step
+        previously had no ``inputs={...}`` declaration and the factory was
+        called with no kwargs.  The workflow now extracts
+        ``{analyze_alarm.primary_code}`` so ``failure_mode`` is a ``str``
+        compatible with the production ``WorkOrder.failure_mode`` field.
+        """
+        from machina.domain.services.failure_analyzer import DiagnosisResult
+
+        diagnose = _FakeDiagnoseService(
+            result=DiagnosisResult(
+                matches=[
+                    {
+                        "code": "BEAR-WEAR-01",
+                        "name": "Bearing Wear",
+                        "confidence": "high",
+                    },
+                    {
+                        "code": "SEAL-LEAK-01",
+                        "name": "Seal Leakage",
+                        "confidence": "medium",
+                    },
+                ]
+            ),
+        )
+        wo_factory = _FakeWoFactory()
+        engine, _cmms, _comms = self._build_engine(diagnose=diagnose, wo_factory=wo_factory)
+        trigger = {
+            "asset_id": "P-201",
+            "alarm_id": "ALM-2026-0412-001",
+            "severity": "warning",
+        }
+
+        await engine.execute(alarm_to_workorder, trigger)
+
+        assert wo_factory.call_count == 1
+        assert wo_factory.last_kwargs, "factory called with empty kwargs — inputs not wired"
+        assert wo_factory.last_kwargs.get("asset_id") == "P-201"
+        # failure_mode resolves to .primary_code — the top-ranked code as str.
+        assert wo_factory.last_kwargs.get("failure_mode") == "BEAR-WEAR-01"
+        # description is text-with-placeholders, so it interpolates to a string;
+        # the full DiagnosisResult str() is appended for context.
+        description = wo_factory.last_kwargs.get("description", "")
+        assert "ALM-2026-0412-001" in description
+        assert "P-201" in description
+        assert "BEAR-WEAR-01" in description
+
+    @pytest.mark.asyncio
+    async def test_submit_work_order_receives_factory_output(self) -> None:
+        """submit_work_order must pass the WorkOrder produced by generate_work_order.
+
+        Regression for the empty-inputs defect: the step previously had
+        no ``inputs={...}`` declaration, so cmms.create_work_order was
+        called with no kwargs in live mode (and inputs={} in sandbox logs).
+        """
+        wo_factory = _FakeWoFactory()
+        engine, cmms, _comms = self._build_engine(wo_factory=wo_factory)
+        trigger = {"asset_id": "P-201", "severity": "warning"}
+
+        await engine.execute(alarm_to_workorder, trigger)
+
+        assert cmms.last_create_kwargs, "create_work_order called with empty kwargs"
+        # The factory's create() returned a dict; that dict must flow
+        # through unchanged (resolve_input_value preserves raw types).
+        work_order_arg = cmms.last_create_kwargs.get("work_order")
+        assert work_order_arg == {
+            "id": "WO-001",
+            "status": "draft",
+            "asset_id": "P-201",
+        }
+
+    @pytest.mark.asyncio
     async def test_notification_template_resolved(self) -> None:
         """The notify_technician step resolves template variables."""
         engine, _cmms, comms = self._build_engine()
@@ -175,8 +278,8 @@ class TestAlarmToWorkorderWorkflow:
         msg = comms.messages_sent[0]
         # Template should have resolved {trigger.asset_id}
         assert "P-201" in msg
-        # Template should have resolved {analyze_alarm} (diagnosis output)
-        assert "bearing_wear" in msg
+        # Template should have resolved {analyze_alarm} (DiagnosisResult str())
+        assert "BEAR-WEAR-01" in msg
 
     @pytest.mark.asyncio
     async def test_diagnosis_failure_stops_workflow(self) -> None:
@@ -253,6 +356,112 @@ class TestAlarmToWorkorderWorkflow:
             "notify_technician",
             "submit_work_order",
         ]
+
+
+class TestAlarmToWorkorderLiveIntegration:
+    """End-to-end against the *real* domain services + a real CMMS connector.
+
+    The smoke test in the report-luigi fix branch exposed two type
+    contracts the unit-level test fakes hid:
+
+    * ``FailureAnalyzer.diagnose`` returns a ``DiagnosisResult`` of
+      ranked failure-mode dicts; the workflow now extracts
+      ``{analyze_alarm.primary_code}`` so ``WorkOrder.failure_mode``
+      receives a ``str``.
+    * ``WorkOrder.id`` is validated non-empty; ``WorkOrderFactory.create``
+      auto-generates an id when none is supplied.
+
+    This live integration test fails fast if either contract slips.
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_run_produces_valid_work_order(self) -> None:
+        from machina.domain.failure_mode import FailureMode
+        from machina.domain.services.failure_analyzer import FailureAnalyzer
+        from machina.domain.services.work_order_factory import WorkOrderFactory
+        from machina.domain.work_order import WorkOrder  # noqa: TC001
+
+        # Real FailureAnalyzer with a real FailureMode whose indicators
+        # match the trigger parameter.
+        bearing_wear = FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear",
+            mechanism="fatigue",
+            category="mechanical",
+            detection_methods=["vibration_analysis"],
+            typical_indicators=["vibration_velocity_mm_s"],
+            recommended_actions=["replace_bearing"],
+            iso_14224_code="VIB",
+        )
+        analyzer = FailureAnalyzer(failure_modes=[bearing_wear])
+
+        # Real WorkOrderFactory — auto-id, real pydantic validation.
+        factory = WorkOrderFactory()
+
+        # Simple CMMS stub that exercises the production
+        # ``create_work_order(work_order: WorkOrder)`` signature.
+        captured_work_orders: list[WorkOrder] = []
+
+        class _CmmsLike:
+            capabilities: ClassVar[list[str]] = [
+                "get_asset_history",
+                "check_spare_parts",
+                "create_work_order",
+            ]
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def health_check(self) -> bool:
+                return True
+
+            async def get_asset_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+                return []
+
+            async def check_spare_parts(self, **kwargs: Any) -> list[dict[str, Any]]:
+                return []
+
+            async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
+                captured_work_orders.append(work_order)
+                return work_order
+
+        registry = ConnectorRegistry()
+        registry.register("cmms", _CmmsLike())
+        registry.register("comms", _FakeCommsConnector())
+
+        engine = WorkflowEngine(
+            registry=registry,
+            tracer=ActionTracer(),
+            services={"failure_analyzer": analyzer, "work_order_factory": factory},
+            sandbox=False,  # live!
+        )
+
+        result = await engine.execute(
+            alarm_to_workorder,
+            {
+                "asset_id": "P-201",
+                "alarm_id": "ALM-LIVE-001",
+                "parameter": "vibration_velocity_mm_s",
+                "value": 7.8,
+                "severity": "warning",
+            },
+        )
+
+        assert result.success, (
+            "Live-mode workflow failed — check that DiagnosisResult.primary_code "
+            "flows into WorkOrder.failure_mode as a str, and that the factory "
+            "auto-generates a non-empty WorkOrder.id."
+        )
+        assert len(captured_work_orders) == 1
+        wo = captured_work_orders[0]
+        # Real pydantic validation accepted these — that IS the contract.
+        assert wo.asset_id == "P-201"
+        assert wo.failure_mode == "BEAR-WEAR-01"
+        assert wo.id.startswith("WO-AUTO-")
+        assert wo.id != ""
 
     @pytest.mark.asyncio
     async def test_error_policies_correct(self) -> None:
