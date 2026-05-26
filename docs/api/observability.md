@@ -2,7 +2,7 @@
 
 Every action the agent takes — LLM calls, tool invocations, connector queries, workflow steps — is recorded as a structured [`TraceEntry`](#traceentry) on the agent's [`ActionTracer`](#actiontracer). Traces can be inspected programmatically or exported to JSONL files via the [`JSONLExporter`](#jsonlexporter).
 
-For narrative coverage of trace shape, cost tracking, and operational use see [Action Traces](../observability/traces.md) and [Cost Tracking](../observability/cost.md). For the parallel mechanism that protects LLM-visible payloads from filesystem leaks see [Security → Source-Path Sanitisation](../deployment/security.md#source-path-sanitisation-at-the-llm-boundary).
+For narrative coverage of trace shape, cost tracking, and operational use see [Action Traces](../observability/traces.md) and [Cost Tracking](../observability/cost.md). For the parallel mechanism that protects LLM-visible payloads from filesystem leaks see [Security](../deployment/security.md).
 
 ## `ActionTracer`
 
