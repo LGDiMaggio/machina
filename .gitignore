@@ -16,6 +16,7 @@ medium-*.md
 *-caption-*.md
 
 # === Local planning / AI working artifacts — NEVER commit ===
+STRATEGY.md
 docs/plans/
 docs/brainstorms/
 docs/solutions/
