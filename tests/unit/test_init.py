@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
+from typing import TYPE_CHECKING, NoReturn
+
 import machina
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class TestPublicAPI:
@@ -11,6 +18,25 @@ class TestPublicAPI:
     def test_version_is_set(self) -> None:
         assert isinstance(machina.__version__, str)
         assert machina.__version__ != ""
+
+    def test_version_matches_installed_metadata(self) -> None:
+        assert machina.__version__ == importlib.metadata.version("machina-ai")
+
+    def test_version_falls_back_when_package_not_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When distribution metadata is absent, __version__ uses the sentinel fallback."""
+
+        def _raise_not_found(_name: str) -> NoReturn:
+            raise importlib.metadata.PackageNotFoundError
+
+        monkeypatch.setattr(importlib.metadata, "version", _raise_not_found)
+        try:
+            importlib.reload(machina)
+            assert machina.__version__ == "0.0.0+unknown"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(machina)
 
     def test_all_domain_entities_exported(self) -> None:
         expected_names = [

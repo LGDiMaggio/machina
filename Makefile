@@ -32,7 +32,7 @@ clean:
 	rm -rf dist/ build/ *.egg-info .pytest_cache .mypy_cache htmlcov .coverage site/
 	find . -type d -name __pycache__ -exec rm -rf {} +
 
-## release VERSION=x.y.z  — bump version, update changelog date, commit, tag, push
+## release VERSION=x.y.z  — bump pyproject.toml version, update changelog date, commit, tag, push
 release:
 ifndef VERSION
 	$(error VERSION is not set. Usage: make release VERSION=x.y.z)

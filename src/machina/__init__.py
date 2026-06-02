@@ -14,7 +14,7 @@ from machina.workflows import Step, Workflow, WorkflowEngine
 
 try:
     __version__ = version("machina-ai")
-except PackageNotFoundError:  # pragma: no cover - package metadata unavailable (not installed)
+except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
