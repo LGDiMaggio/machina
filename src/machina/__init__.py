@@ -1,5 +1,7 @@
 """Machina — The open-source Python framework for AI agents in industrial maintenance."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from machina.agent.runtime import Agent
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -10,7 +12,10 @@ from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.workflows import Step, Workflow, WorkflowEngine
 
-__version__ = "0.2.0"
+try:
+    __version__ = version("machina-ai")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "Agent",
