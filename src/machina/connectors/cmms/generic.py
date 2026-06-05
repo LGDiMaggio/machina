@@ -297,10 +297,28 @@ class GenericCmmsConnector:
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Create a new work order."""
+        """Create a new work order.
+
+        In local mode the operation is idempotent on the work-order ID:
+        re-creating a WO whose ID already exists returns the existing
+        record rather than appending a duplicate. New work orders are
+        persisted back to ``work_orders.json`` so changes survive process
+        restarts (skipped when an inbound ``schema_mapping`` is configured;
+        see :meth:`_persist_work_orders`).
+        """
         self._ensure_connected()
         if self._data_dir:
+            existing = next((wo for wo in self._work_orders if wo.id == work_order.id), None)
+            if existing is not None:
+                logger.info(
+                    "work_order_create_idempotent_hit",
+                    connector="GenericCmmsConnector",
+                    work_order_id=work_order.id,
+                    asset_id=work_order.asset_id,
+                )
+                return existing
             self._work_orders.append(work_order)
+            await self._persist_work_orders()
             logger.info(
                 "work_order_created",
                 connector="GenericCmmsConnector",
@@ -372,12 +390,14 @@ class GenericCmmsConnector:
         """
         self._ensure_connected()
         if self._data_dir:
-            return self._local_update_work_order(
+            updated = self._local_update_work_order(
                 work_order_id,
                 status=status,
                 assigned_to=assigned_to,
                 description=description,
             )
+            await self._persist_work_orders()
+            return updated
         return await self._rest_update_work_order(
             work_order_id,
             status=status,
@@ -437,6 +457,38 @@ class GenericCmmsConnector:
                 )
                 return wo
         raise ConnectorError(f"Work order {work_order_id} not found")
+
+    async def _persist_work_orders(self) -> None:
+        """Write the in-memory work orders back to ``work_orders.json``.
+
+        Local mode is the demo / offline data source: without write-back,
+        ``create_work_order`` and ``update_work_order`` only mutate the
+        in-memory list and changes vanish when the process exits — the
+        "LIVE mode doesn't change the files" surprise.
+
+        Persistence is skipped when an inbound ``schema_mapping`` /
+        ``yaml_mapping`` is configured: the on-disk file is then in the
+        external CMMS shape, and writing the domain shape (``model_dump``)
+        back would not round-trip through :meth:`_apply_mapping` on the
+        next load. Native-format local files (the quickstart case) write
+        back faithfully.
+        """
+        if self._data_dir is None:
+            return
+        if self._schema_mapping or self._yaml_mapping is not None:
+            logger.debug(
+                "local_persist_skipped_mapping",
+                connector="GenericCmmsConnector",
+                file="work_orders.json",
+            )
+            return
+        path = self._data_dir / "work_orders.json"
+        payload = [wo.model_dump(mode="json") for wo in self._work_orders]
+        await asyncio.to_thread(
+            path.write_text,
+            json.dumps(payload, indent=2, default=str),
+            encoding="utf-8",
+        )
 
     # ------------------------------------------------------------------
     # Internal: local data loading
@@ -810,15 +862,24 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
 
 def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Parse a dict into a WorkOrder."""
+    # ``data.get(key)`` (not ``key in data``) so an explicit ``null`` — which
+    # ``model_dump`` writes for every optional field during local-mode
+    # persistence — is treated like a missing field instead of being passed
+    # to an enum constructor (``FailureImpact(None)`` would raise).
     return WorkOrder(
         id=str(data.get("id", "")),
-        type=WorkOrderType(data["type"]) if "type" in data else WorkOrderType.CORRECTIVE,
-        priority=Priority(data["priority"]) if "priority" in data else Priority.MEDIUM,
+        type=WorkOrderType(data["type"]) if data.get("type") else WorkOrderType.CORRECTIVE,
+        priority=Priority(data["priority"]) if data.get("priority") else Priority.MEDIUM,
+        # status / assigned_to are read so lifecycle changes round-trip through
+        # local-mode persistence (write-back of work_orders.json). Absent in
+        # legacy files, defaulting to CREATED — the pre-existing behaviour.
+        status=WorkOrderStatus(data["status"]) if data.get("status") else WorkOrderStatus.CREATED,
         asset_id=str(data.get("asset_id", "")),
         description=str(data.get("description", "")),
         failure_mode=data.get("failure_mode"),
+        assigned_to=data.get("assigned_to"),
         failure_impact=(
-            FailureImpact(data["failure_impact"]) if "failure_impact" in data else None
+            FailureImpact(data["failure_impact"]) if data.get("failure_impact") else None
         ),
         failure_cause=data.get("failure_cause"),
     )

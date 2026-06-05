@@ -9,6 +9,7 @@ prompts, and executes tool calls.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -943,12 +944,27 @@ class Agent:
             return {"error": "No CMMS connector available for creating work orders"}
 
         _, conn = connectors[0]
+        wo_type = args.get("type", "corrective")
+        priority = args.get("priority", "medium")
+        asset_id = args.get("asset_id", "")
+        description = args.get("description", "")
+        # Derive a deterministic, content-based ID so that a model which
+        # re-requests this tool inside the LLM loop (common with weak local
+        # models) collapses to a single work order instead of creating one
+        # per call. The old ``id(args) % 10000`` scheme used the memory
+        # address of a per-call dict — non-deterministic, dedup-proof, and
+        # prone to cross-turn collisions when CPython reused addresses.
+        digest = (
+            hashlib.sha256(f"{asset_id}|{wo_type}|{priority}|{description}".encode())
+            .hexdigest()[:8]
+            .upper()
+        )
         wo = WorkOrder(
-            id=f"WO-AUTO-{id(args) % 10000:04d}",
-            type=WorkOrderType(args.get("type", "corrective")),
-            priority=Priority(args.get("priority", "medium")),
-            asset_id=args.get("asset_id", ""),
-            description=args.get("description", ""),
+            id=f"WO-AUTO-{digest}",
+            type=WorkOrderType(wo_type),
+            priority=Priority(priority),
+            asset_id=asset_id,
+            description=description,
         )
         created = await conn.create_work_order(wo)  # type: ignore[attr-defined]
         logger.info(

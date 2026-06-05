@@ -515,6 +515,31 @@ class TestExecuteTool:
         assert result["asset_id"] == "P-201"
 
     @pytest.mark.asyncio
+    async def test_create_work_order_deterministic_id(self) -> None:
+        """Identical create requests yield a stable, content-derived ID.
+
+        Regression: the old scheme used ``id(args) % 10000`` which gave a
+        different ID on every call, so a model that re-requested the tool
+        inside the agent loop produced duplicate work orders with distinct
+        IDs (see the quickstart triple-create report). Fresh ``dict``
+        instances mimic ``json.loads`` returning a new object per tool call.
+        """
+        conn = _FakeCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLM()  # type: ignore[assignment]
+        await agent.start()
+        args = {
+            "asset_id": "P-201",
+            "type": "corrective",
+            "priority": "high",
+            "description": "Replace bearing",
+        }
+        first = await agent._execute_tool("create_work_order", dict(args))
+        second = await agent._execute_tool("create_work_order", dict(args))
+        assert first["id"].startswith("WO-AUTO-")
+        assert first["id"] == second["id"]
+
+    @pytest.mark.asyncio
     async def test_create_work_order_no_connector(self) -> None:
         agent = Agent()
         result = await agent._execute_tool("create_work_order", {"asset_id": "P-201"})
