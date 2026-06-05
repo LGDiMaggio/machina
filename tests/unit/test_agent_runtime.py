@@ -723,6 +723,61 @@ class TestHistory:
         assert len(agent._histories["chat1"]) == 4
 
 
+class _FakeLLMDoubleCreate:
+    """Fake LLM that requests create_work_order twice (two loop iterations)
+    with identical args, then returns text — mimics a weak model re-issuing a
+    write inside the tool-calling loop."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Work order created."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        if self._call_count <= 2:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._call_count:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Work order created.", "tool_calls": None}
+
+
+class _CountingCreateWoConnector(_FakeCreateWoConnector):
+    """Records how many times create_work_order actually executes."""
+
+    def __init__(self) -> None:
+        self.create_calls = 0
+
+    async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
+        self.create_calls += 1
+        return work_order
+
+
+class TestLoopIdempotency:
+    """A re-requested side-effecting tool must not execute twice in one turn."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_create_suppressed_in_loop(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message("crea un work order per P-201, sostituire cuscinetto")
+        # The model asked twice with identical args; the side effect ran once.
+        assert conn.create_calls == 1
+
+
 class TestHandleMessage:
     """Test handle_message — full pipeline."""
 

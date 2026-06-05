@@ -9,7 +9,6 @@ prompts, and executes tool calls.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +34,11 @@ if TYPE_CHECKING:
     from machina.workflows.models import Workflow, WorkflowResult
 
 logger = structlog.get_logger(__name__)
+
+# Tools whose execution mutates external state. These are memoised per turn in
+# the LLM loop so a model that re-requests the same write does not trigger the
+# side effect twice. Read-only tools are intentionally excluded.
+_SIDE_EFFECTING_TOOLS: frozenset[str] = frozenset({"create_work_order", "execute_workflow"})
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -746,6 +750,13 @@ class Agent:
         """Call the LLM, execute tool calls, and return final response."""
         tools = self._get_available_tools()
 
+        # Per-turn memo of side-effecting tool calls (keyed by name + args).
+        # If the model re-requests the same write across loop iterations — the
+        # mechanism behind the duplicate-work-order report — we reuse the first
+        # result instead of executing the side effect again. Read-only tools
+        # are never memoised; they may legitimately be re-issued.
+        executed_side_effects: dict[str, Any] = {}
+
         for _iteration in range(max_iterations):
             with self.tracer.trace(
                 "llm_call",
@@ -780,11 +791,25 @@ class Agent:
                 except (json.JSONDecodeError, AttributeError):
                     args = {}
 
+                memo_key: str | None = None
+                if func_name in _SIDE_EFFECTING_TOOLS:
+                    memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+
                 with self.tracer.trace(
                     "tool_call",
                     operation=func_name,
                 ) as tool_span:
-                    tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
+                    if memo_key is not None and memo_key in executed_side_effects:
+                        tool_result = executed_side_effects[memo_key]
+                        logger.info(
+                            "duplicate_tool_call_suppressed",
+                            agent=self.name,
+                            tool=func_name,
+                        )
+                    else:
+                        tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
+                        if memo_key is not None:
+                            executed_side_effects[memo_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
 
                 messages.append(
@@ -937,6 +962,7 @@ class Agent:
             )
             return {"sandbox": True, "action": "create_work_order", "args": args}
 
+        from machina.domain.services.work_order_factory import auto_work_order_id
         from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
         connectors = self._registry.find_by_capability(Capability.CREATE_WORK_ORDER)
@@ -948,19 +974,13 @@ class Agent:
         priority = args.get("priority", "medium")
         asset_id = args.get("asset_id", "")
         description = args.get("description", "")
-        # Derive a deterministic, content-based ID so that a model which
-        # re-requests this tool inside the LLM loop (common with weak local
-        # models) collapses to a single work order instead of creating one
-        # per call. The old ``id(args) % 10000`` scheme used the memory
-        # address of a per-call dict — non-deterministic, dedup-proof, and
-        # prone to cross-turn collisions when CPython reused addresses.
-        digest = (
-            hashlib.sha256(f"{asset_id}|{wo_type}|{priority}|{description}".encode())
-            .hexdigest()[:8]
-            .upper()
-        )
+        # Deterministic, content-based ID (shared with WorkOrderFactory) so a
+        # model that re-requests this tool inside the LLM loop collapses to a
+        # single work order instead of creating one per call. The old
+        # ``id(args) % 10000`` scheme used the memory address of a per-call
+        # dict — non-deterministic, dedup-proof, prone to cross-turn collisions.
         wo = WorkOrder(
-            id=f"WO-AUTO-{digest}",
+            id=auto_work_order_id(asset_id, wo_type, priority, description),
             type=WorkOrderType(wo_type),
             priority=Priority(priority),
             asset_id=asset_id,

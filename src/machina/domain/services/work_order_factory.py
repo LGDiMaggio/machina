@@ -6,21 +6,39 @@ spare parts, and estimated durations based on domain knowledge.
 
 from __future__ import annotations
 
-import uuid
+import hashlib
 from typing import Any
 
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
 
-def _auto_work_order_id() -> str:
-    """Generate a workflow-friendly Work Order id.
+def auto_work_order_id(
+    asset_id: str = "",
+    type: WorkOrderType | str = WorkOrderType.CORRECTIVE,
+    priority: Priority | str = Priority.MEDIUM,
+    description: str = "",
+) -> str:
+    """Deterministic content-derived Work Order id (``WO-AUTO-<sha8>``).
 
-    Used when the caller does not supply an ``id``.  ``WorkOrder.id``
-    is required (non-empty) by pydantic validation, so a factory call
-    with no id would raise ``ValidationError`` — the live-mode
-    failure observed during the ``alarm_to_workorder`` regression.
+    ``WorkOrder.id`` is required (non-empty) by pydantic validation, so a
+    caller with no id needs one generated. We derive it from the work
+    order's content rather than a random uuid so that repeated creation of
+    the *same* logical work order — an alarm fired twice, a re-run
+    workflow, or a model that re-requests the create tool inside the agent
+    loop — collapses to a single id the CMMS can dedup, instead of minting
+    a fresh id each time and accumulating duplicates.
+
+    ``type``/``priority`` accept either the enum or its string value;
+    ``StrEnum`` formats to its value, so the agent runtime (which passes
+    raw strings) and the factory (which passes enums) produce identical
+    ids for equivalent content.
     """
-    return f"WO-AUTO-{uuid.uuid4().hex[:8].upper()}"
+    digest = (
+        hashlib.sha256(f"{asset_id}|{type}|{priority}|{description}".encode())
+        .hexdigest()[:8]
+        .upper()
+    )
+    return f"WO-AUTO-{digest}"
 
 
 class WorkOrderFactory:
@@ -57,7 +75,7 @@ class WorkOrderFactory:
             A new ``WorkOrder`` instance.
         """
         return WorkOrder(
-            id=id or _auto_work_order_id(),
+            id=id or auto_work_order_id(asset_id, type, priority, description),
             type=type,
             priority=priority,
             asset_id=asset_id,
