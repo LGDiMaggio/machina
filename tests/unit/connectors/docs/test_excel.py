@@ -518,6 +518,44 @@ class TestCsvSupport:
         assert "WO-001" in content
         assert "P-001" in content
 
+    @pytest.mark.asyncio
+    async def test_update_csv_persists_to_disk(self, tmp_path: Path) -> None:
+        """A CSV-backed update must be written to disk, not just the cache —
+        otherwise the change is lost on restart (the cache-only bug)."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="old"
+            )
+        )
+        await conn.update_work_order("WO-001", {"description": "new description"})
+
+        # The on-disk file reflects the update (no duplicate row).
+        content = csv_file.read_text(encoding="utf-8-sig")
+        assert "new description" in content
+        assert "old" not in content
+        assert content.count("WO-001") == 1
+
+        # A fresh connector reloads the updated value.
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert len(reloaded) == 1
+        assert reloaded[0].description == "new description"
+
 
 class TestRefresh:
     @pytest.mark.asyncio

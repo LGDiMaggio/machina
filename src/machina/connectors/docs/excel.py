@@ -468,19 +468,17 @@ class ExcelCsvConnector:
                     if hasattr(wo, key):
                         setattr(wo, key, value)
                 schema = self._config.work_orders
-                if (
-                    schema
-                    and schema.write_mode
-                    and Path(schema.path).suffix.lower() in (".xlsx", ".xls")
-                ):
+                if schema and schema.write_mode:
+                    # Full rewrite from cache for both xlsx and csv so the
+                    # change is durable, not cache-only (lost on restart).
                     async with self._write_lock:
                         await asyncio.to_thread(self._rewrite_work_orders, schema)
                 else:
                     logger.warning(
-                        "update_cache_only",
+                        "update_not_persisted",
                         connector="ExcelCsvConnector",
                         work_order_id=work_order_id,
-                        hint="CSV updates are cache-only until next full rewrite",
+                        hint="no write_mode configured — update kept in cache only",
                     )
                 logger.info(
                     "work_order_updated",
@@ -491,9 +489,16 @@ class ExcelCsvConnector:
         raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
 
     def _rewrite_work_orders(self, schema: SheetSchema) -> None:
+        """Rewrite all work orders from cache, dispatching by file format."""
+        path = Path(schema.path)
+        if path.suffix.lower() == ".csv":
+            self._rewrite_csv(path, schema)
+        else:
+            self._rewrite_xlsx(path, schema)
+
+    def _rewrite_xlsx(self, path: Path, schema: SheetSchema) -> None:
         """Rewrite all work orders to the xlsx file from cache."""
         openpyxl = _require_openpyxl()
-        path = Path(schema.path)
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = schema.sheet
@@ -504,6 +509,16 @@ class ExcelCsvConnector:
             ws.append(row_values)
         wb.save(str(path))
         wb.close()
+
+    def _rewrite_csv(self, path: Path, schema: SheetSchema) -> None:
+        """Rewrite all work orders to the CSV file from cache (header + rows)."""
+        columns = [m.column for m in schema.columns]
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            for wo in self._wo_cache:
+                row_data = self._work_order_to_row(wo, schema)
+                writer.writerow({m.column: row_data.get(m.field, "") for m in schema.columns})
 
     # ------------------------------------------------------------------
     # Cache refresh (called by watcher)

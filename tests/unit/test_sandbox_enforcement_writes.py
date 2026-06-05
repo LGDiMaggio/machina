@@ -70,6 +70,16 @@ class TestOutboundWritesBlockedInSandbox:
         with pytest.raises(SandboxViolationError):
             await CalendarConnector.delete_event(MagicMock(), event_id="evt-1")
 
+    @pytest.mark.asyncio
+    async def test_sql_update_work_order_blocked(self) -> None:
+        """SQL update_work_order must be sandbox-gated like create_work_order —
+        the decorator fires before the body, so the asymmetry that left it
+        unguarded cannot resurface."""
+        from machina.connectors.sql.generic import GenericSqlConnector
+
+        with pytest.raises(SandboxViolationError):
+            await GenericSqlConnector.update_work_order(MagicMock(), "WO-1", {})
+
 
 class TestCliChannelStillWorksInSandbox:
     """The CLI channel only prints to stdout — it must NOT be sandbox-gated,
