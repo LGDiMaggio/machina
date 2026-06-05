@@ -515,6 +515,31 @@ class TestExecuteTool:
         assert result["asset_id"] == "P-201"
 
     @pytest.mark.asyncio
+    async def test_create_work_order_deterministic_id(self) -> None:
+        """Identical create requests yield a stable, content-derived ID.
+
+        Regression: the old scheme used ``id(args) % 10000`` which gave a
+        different ID on every call, so a model that re-requested the tool
+        inside the agent loop produced duplicate work orders with distinct
+        IDs (see the quickstart triple-create report). Fresh ``dict``
+        instances mimic ``json.loads`` returning a new object per tool call.
+        """
+        conn = _FakeCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLM()  # type: ignore[assignment]
+        await agent.start()
+        args = {
+            "asset_id": "P-201",
+            "type": "corrective",
+            "priority": "high",
+            "description": "Replace bearing",
+        }
+        first = await agent._execute_tool("create_work_order", dict(args))
+        second = await agent._execute_tool("create_work_order", dict(args))
+        assert first["id"].startswith("WO-AUTO-")
+        assert first["id"] == second["id"]
+
+    @pytest.mark.asyncio
     async def test_create_work_order_no_connector(self) -> None:
         agent = Agent()
         result = await agent._execute_tool("create_work_order", {"asset_id": "P-201"})
@@ -696,6 +721,129 @@ class TestHistory:
             agent._add_to_history("chat1", "user", f"msg {i}")
         # Max history is 2, so *2 = 4 messages kept
         assert len(agent._histories["chat1"]) == 4
+
+
+class _FakeLLMDoubleCreate:
+    """Fake LLM that requests create_work_order twice (two loop iterations)
+    with identical args, then returns text — mimics a weak model re-issuing a
+    write inside the tool-calling loop."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Work order created."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        if self._call_count <= 2:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._call_count:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Work order created.", "tool_calls": None}
+
+
+class _CountingCreateWoConnector(_FakeCreateWoConnector):
+    """Records how many times create_work_order actually executes."""
+
+    def __init__(self) -> None:
+        self.create_calls = 0
+
+    async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
+        self.create_calls += 1
+        return work_order
+
+
+class _FakeLLMTwoDistinctCreates:
+    """Requests create_work_order for two DIFFERENT assets, then returns text."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        assets = {1: "P-201", 2: "P-202"}
+        if self._call_count in assets:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": assets[self._call_count], "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._call_count:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Done.", "tool_calls": None}
+
+
+class TestLoopIdempotency:
+    """A re-requested side-effecting tool must not execute twice in one turn."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_create_suppressed_in_loop(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message("crea un work order per P-201, sostituire cuscinetto")
+        # The model asked twice with identical args; the side effect ran once.
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_args_not_suppressed(self) -> None:
+        """The memo must not over-suppress: distinct args run distinct writes."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoDistinctCreates()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message("crea due work order")
+        assert conn.create_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_error_result_not_memoised(self) -> None:
+        """A failed side effect must not suppress a legitimate retry in-turn."""
+        agent = Agent()
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        calls = {"n": 0}
+
+        async def fake_exec(name: str, args: dict[str, Any], *, chat_id: str = "default") -> Any:
+            calls["n"] += 1
+            return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
+
+        agent._execute_tool = fake_exec  # type: ignore[assignment]
+        await agent.handle_message("crea un work order per P-201")
+        # First call errored (not memoised) → second identical request re-runs.
+        assert calls["n"] == 2
+
+
+class TestMutatingToolsRegistry:
+    """The per-turn memo guard is sourced from the canonical tool registry."""
+
+    def test_mutating_tools_are_real_builtins(self) -> None:
+        from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
+
+        names = {t["function"]["name"] for t in BUILTIN_TOOLS}
+        assert names >= MUTATING_TOOLS, "MUTATING_TOOLS names must exist in BUILTIN_TOOLS"
+
+    def test_known_write_tools_classified(self) -> None:
+        from machina.agent.runtime import _SIDE_EFFECTING_TOOLS
+
+        assert "create_work_order" in _SIDE_EFFECTING_TOOLS
+        assert "execute_workflow" in _SIDE_EFFECTING_TOOLS
 
 
 class TestHandleMessage:

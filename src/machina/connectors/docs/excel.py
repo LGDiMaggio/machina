@@ -149,6 +149,44 @@ _TYPE_COERCERS: dict[str, Any] = {
 }
 
 
+# Leading characters a spreadsheet (Excel/LibreOffice) interprets as the start
+# of a formula. A cell value beginning with one of these is a CSV/formula-
+# injection vector when the exported file is opened in a spreadsheet app.
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@")
+
+
+def _guard_formula(value: str) -> str:
+    """Neutralize a leading formula trigger by prefixing an apostrophe.
+
+    The apostrophe makes spreadsheets treat the cell as text (and stops
+    openpyxl from storing it as a real formula). Reversed by
+    :func:`_strip_formula_guard` on read so values round-trip unchanged.
+
+    A value that *already* starts with an apostrophe followed by a trigger
+    (or another apostrophe) is also escaped with an extra leading apostrophe,
+    so the strip on read is unambiguous and the pair is a true inverse — a
+    legitimate ``"'=approved"`` is not corrupted into ``"=approved"``.
+    """
+    head = value[:1]
+    if head in _FORMULA_PREFIXES:
+        return "'" + value
+    if head == "'" and value[1:2] in (*_FORMULA_PREFIXES, "'"):
+        return "'" + value
+    return value
+
+
+def _strip_formula_guard(value: str) -> str:
+    """Reverse :func:`_guard_formula` so guarded values read back intact.
+
+    Strips exactly one leading apostrophe when it is followed by a formula
+    trigger or another apostrophe — the only shapes :func:`_guard_formula`
+    ever produces — leaving genuine values like ``"'note"`` untouched.
+    """
+    if value[:1] == "'" and value[1:2] in (*_FORMULA_PREFIXES, "'"):
+        return value[1:]
+    return value
+
+
 def _coerce_cell(value: Any, mapping: ColumnMapping) -> Any:
     """Coerce a single cell value according to its column mapping."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
@@ -156,8 +194,12 @@ def _coerce_cell(value: Any, mapping: ColumnMapping) -> Any:
             return None  # caller detects and flags the row
         return mapping.default
     if mapping.coerce and mapping.coerce in COERCER_REGISTRY:
-        return COERCER_REGISTRY[mapping.coerce](value)
-    return _TYPE_COERCERS.get(mapping.type, str)(value)
+        result = COERCER_REGISTRY[mapping.coerce](value)
+    else:
+        result = _TYPE_COERCERS.get(mapping.type, str)(value)
+    if isinstance(result, str):
+        result = _strip_formula_guard(result)
+    return result
 
 
 def _require_openpyxl() -> Any:
@@ -457,30 +499,34 @@ class ExcelCsvConnector:
 
     @sandbox_aware
     async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
-        """Update a work order in cache and persist to file if xlsx/csv.
+        """Update a work order in cache and persist to file.
 
-        Note: for xlsx files, a full rewrite is performed. For csv, only
-        the cache is updated (append-only format).
+        When ``write_mode`` is configured, a full rewrite from cache is
+        performed for both xlsx and csv files, so the change is durable
+        across restarts. When no ``write_mode`` is set, the update is kept
+        in cache only.
         """
         for wo in self._wo_cache:
             if wo.id == work_order_id:
-                for key, value in updates.items():
-                    if hasattr(wo, key):
-                        setattr(wo, key, value)
                 schema = self._config.work_orders
-                if (
-                    schema
-                    and schema.write_mode
-                    and Path(schema.path).suffix.lower() in (".xlsx", ".xls")
-                ):
-                    async with self._write_lock:
+                # Serialise the cache mutation together with the rewrite under
+                # the write lock: the rewrite reads the whole cache from a worker
+                # thread, so a concurrent update mutating the cache must not
+                # interleave with it.
+                async with self._write_lock:
+                    for key, value in updates.items():
+                        if hasattr(wo, key):
+                            setattr(wo, key, value)
+                    if schema and schema.write_mode:
+                        # Full rewrite from cache for both xlsx and csv so the
+                        # change is durable, not cache-only (lost on restart).
                         await asyncio.to_thread(self._rewrite_work_orders, schema)
-                else:
+                if not (schema and schema.write_mode):
                     logger.warning(
-                        "update_cache_only",
+                        "update_not_persisted",
                         connector="ExcelCsvConnector",
                         work_order_id=work_order_id,
-                        hint="CSV updates are cache-only until next full rewrite",
+                        hint="no write_mode configured — update kept in cache only",
                     )
                 logger.info(
                     "work_order_updated",
@@ -491,19 +537,58 @@ class ExcelCsvConnector:
         raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
 
     def _rewrite_work_orders(self, schema: SheetSchema) -> None:
-        """Rewrite all work orders to the xlsx file from cache."""
-        openpyxl = _require_openpyxl()
+        """Rewrite all work orders from cache, dispatching by file format."""
         path = Path(schema.path)
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = schema.sheet
-        ws.append([m.column for m in schema.columns])
-        for wo in self._wo_cache:
-            row_data = self._work_order_to_row(wo, schema)
-            row_values = [row_data.get(m.field) for m in schema.columns]
-            ws.append(row_values)
-        wb.save(str(path))
-        wb.close()
+        if path.suffix.lower() == ".csv":
+            self._rewrite_csv(path, schema)
+        else:
+            self._rewrite_xlsx(path, schema)
+
+    def _rewrite_xlsx(self, path: Path, schema: SheetSchema) -> None:
+        """Rewrite all work orders to the xlsx file from cache.
+
+        Writes to a temp sibling then atomically replaces the target, so a
+        crash or error mid-write cannot truncate the existing file.
+        """
+        openpyxl = _require_openpyxl()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = schema.sheet
+            ws.append([m.column for m in schema.columns])
+            for wo in self._wo_cache:
+                row_data = self._work_order_to_row(wo, schema)
+                row_values = [row_data.get(m.field) for m in schema.columns]
+                ws.append(row_values)
+            wb.save(str(tmp))
+            wb.close()
+            tmp.replace(path)
+        except Exception:
+            # Don't leave a partial/orphaned temp file behind on failure.
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def _rewrite_csv(self, path: Path, schema: SheetSchema) -> None:
+        """Rewrite all work orders to the CSV file from cache (header + rows).
+
+        Writes to a temp sibling then atomically replaces the target, so a
+        crash or error mid-write cannot truncate the existing file.
+        """
+        columns = [m.column for m in schema.columns]
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with tmp.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                for wo in self._wo_cache:
+                    row_data = self._work_order_to_row(wo, schema)
+                    writer.writerow({m.column: row_data.get(m.field, "") for m in schema.columns})
+            tmp.replace(path)
+        except Exception:
+            # Don't leave a partial/orphaned temp file behind on failure.
+            tmp.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------
     # Cache refresh (called by watcher)
@@ -580,5 +665,7 @@ class ExcelCsvConnector:
                 value = value.isoformat()
             elif isinstance(value, StrEnum):
                 value = value.value
+            if isinstance(value, str):
+                value = _guard_formula(value)
             row[mapping.field] = value
         return row

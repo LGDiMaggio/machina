@@ -48,6 +48,12 @@ DEFAULT_MAX_BACKOFF: float = 8.0
 
 _RETRYABLE_STATUS: frozenset[int] = frozenset({429, 503})
 
+# Methods that are idempotent by HTTP spec: retrying them after a network
+# error or timeout is safe. POST/PATCH are NOT here — a timeout-after-success
+# on a create would silently produce a duplicate, so they fail fast on network
+# errors unless the caller explicitly opts in via ``retry_on_network_error``.
+_IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+
 
 async def request_with_retry(
     client: Any,
@@ -61,6 +67,7 @@ async def request_with_retry(
     max_retries: int = DEFAULT_MAX_RETRIES,
     base_backoff: float = DEFAULT_BASE_BACKOFF,
     max_backoff: float = DEFAULT_MAX_BACKOFF,
+    retry_on_network_error: bool | None = None,
 ) -> Any:
     """Perform an HTTP request with retries on 429/503 and transient errors.
 
@@ -76,6 +83,13 @@ async def request_with_retry(
             request. ``0`` disables retries.
         base_backoff: Initial exponential-backoff delay in seconds.
         max_backoff: Cap on backoff delay in seconds.
+        retry_on_network_error: Whether to retry on network/timeout errors.
+            ``None`` (default) derives it from the method: idempotent methods
+            (GET/HEAD/OPTIONS/PUT/DELETE) retry, non-idempotent ones
+            (POST/PATCH) do not — because a timeout-after-success on a create
+            would silently duplicate the resource. 429/503 responses are always
+            retried regardless, since they mean the server did not process the
+            request.
 
     Returns:
         The final ``httpx.Response``. This is either the first success,
@@ -87,6 +101,9 @@ async def request_with_retry(
             Only re-raised when retries are exhausted.
     """
     import httpx
+
+    if retry_on_network_error is None:
+        retry_on_network_error = method.upper() in _IDEMPOTENT_METHODS
 
     transient_exceptions: tuple[type[BaseException], ...] = (
         httpx.TimeoutException,
@@ -109,7 +126,7 @@ async def request_with_retry(
         try:
             resp = await client.request(method, url, **request_kwargs)
         except transient_exceptions as exc:
-            if attempt >= max_retries:
+            if not retry_on_network_error or attempt >= max_retries:
                 raise
             backoff = min(base_backoff * (2**attempt), max_backoff)
             logger.warning(
@@ -126,6 +143,14 @@ async def request_with_retry(
             continue
 
         if resp.status_code not in _RETRYABLE_STATUS or attempt >= max_retries:
+            return resp
+
+        # 429 means the server rejected the request without processing it, so
+        # retrying is safe for any method. A 503, however, can fire *after* a
+        # non-idempotent request was already processed (e.g. a gateway timing
+        # out post-success), so retrying a POST/PATCH on 503 risks a duplicate
+        # — gate it on the same idempotency signal used for network errors.
+        if resp.status_code == 503 and not retry_on_network_error:
             return resp
 
         retry_after = resp.headers.get("Retry-After", "").strip()

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from machina.connectors.base import set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.exceptions import (
     AssetNotFoundError,
@@ -30,7 +31,18 @@ logger = structlog.get_logger(__name__)
 
 
 def _runtime(ctx: Any) -> Any:
-    return ctx.request_context.lifespan_context["runtime"]
+    """Return the runtime and re-establish sandbox mode for this request.
+
+    The lifespan sets the ``_sandbox_mode`` contextvar once at startup, but
+    each MCP tool call runs in its own request task that does not inherit
+    that contextvar. Without re-setting it here, ``@sandbox_aware`` connector
+    writes would execute live even when the server was started in sandbox
+    mode. Every tool funnels through this helper, so this is the single
+    enforcement point.
+    """
+    runtime = ctx.request_context.lifespan_context["runtime"]
+    set_sandbox_mode(runtime.sandbox_mode)
+    return runtime
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +181,7 @@ async def machina_create_work_order(
         work_order_type: Type of maintenance (corrective, preventive, predictive, improvement).
         failure_mode: Failure mode code from diagnosis (e.g. BEAR-WEAR-01).
     """
+    from machina.domain.services.work_order_factory import auto_work_order_id
     from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
     runtime = _runtime(ctx)
@@ -181,8 +194,12 @@ async def machina_create_work_order(
             f"Asset {asset_id!r} not found — cannot create work order for non-existent asset"
         )
 
+    # Deterministic content-based id (shared with the agent runtime tool and
+    # WorkOrderFactory). A fixed "NEW" placeholder collided under the local-mode
+    # idempotency guard — every create returned the first record. REST backends
+    # assign their own id server-side, so a meaningful client id is harmless there.
     wo = WorkOrder(
-        id="NEW",
+        id=auto_work_order_id(asset_id, work_order_type, priority, description),
         type=WorkOrderType(work_order_type),
         priority=Priority(priority),
         asset_id=asset_id,
@@ -579,7 +596,10 @@ async def machina_send_message(
         return {"error": "No communication connector configured (Telegram, Slack, or Email)"}
     _, comms = matches[0]
     try:
-        await comms.send_message(channel=channel, text=text)
+        # Call positionally: connectors name their first param differently
+        # (Slack: channel, Telegram: chat_id, Email: to). A channel= keyword
+        # would TypeError on Telegram/Email.
+        await comms.send_message(channel, text)
         return {"status": "sent", "channel": channel}
     except SandboxViolationError:
         logger.info("sandbox_write_blocked", operation="send_message", channel=channel)

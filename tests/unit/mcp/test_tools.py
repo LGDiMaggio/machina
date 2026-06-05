@@ -231,6 +231,117 @@ class TestUpdateWorkOrder:
         assert result["metadata"]["sandbox"] is True
 
 
+class TestMcpCreateLocalModeDistinct:
+    """MCP create must produce distinct ids in local mode, not collapse under
+    the connector's id-idempotency guard (the old id='NEW' bug)."""
+
+    @pytest.mark.asyncio
+    async def test_distinct_creates_do_not_collapse(self, tmp_path) -> None:
+        import json as _json
+
+        from machina.connectors.cmms.generic import GenericCmmsConnector
+        from machina.mcp.tools import machina_create_work_order
+
+        cmms_dir = tmp_path / "cmms"
+        cmms_dir.mkdir()
+        (cmms_dir / "assets.json").write_text(
+            _json.dumps(
+                [
+                    {
+                        "id": "P-201",
+                        "name": "Pump",
+                        "type": "rotating_equipment",
+                        "criticality": "A",
+                    },
+                    {
+                        "id": "P-202",
+                        "name": "Pump2",
+                        "type": "rotating_equipment",
+                        "criticality": "A",
+                    },
+                ]
+            )
+        )
+        (cmms_dir / "work_orders.json").write_text("[]")
+        conn = GenericCmmsConnector(data_dir=cmms_dir)
+        await conn.connect()
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        ctx = _make_ctx(runtime)
+
+        r1 = await machina_create_work_order(ctx, asset_id="P-201", description="fix one")
+        r2 = await machina_create_work_order(ctx, asset_id="P-202", description="fix two")
+        assert r1["id"] != r2["id"]
+        assert len(await conn.read_work_orders()) == 2
+
+
+class TestRuntimeSandboxPropagation:
+    """_runtime re-establishes sandbox mode in the per-request task context."""
+
+    @pytest.mark.asyncio
+    async def test_runtime_sets_sandbox_contextvar(self) -> None:
+        from machina.connectors.base import get_sandbox_mode, set_sandbox_mode
+        from machina.mcp.tools import _runtime
+
+        set_sandbox_mode(False)  # simulate a request task that did not inherit it
+        try:
+            runtime = MachinaRuntime(connectors={}, sandbox_mode=True)
+            ctx = _make_ctx(runtime)
+            assert get_sandbox_mode() is False
+            _runtime(ctx)
+            assert get_sandbox_mode() is True
+        finally:
+            set_sandbox_mode(False)
+
+
+class TestSendMessage:
+    @pytest.mark.asyncio
+    async def test_happy_path(self) -> None:
+        from machina.mcp.tools import machina_send_message
+
+        conn = MagicMock()
+        conn.capabilities = frozenset({Capability.SEND_MESSAGE})
+        conn.send_message = AsyncMock(return_value=None)
+        runtime = MachinaRuntime(connectors={"comms": conn})
+        result = await machina_send_message(_make_ctx(runtime), channel="#ops", text="hi")
+        assert result["status"] == "sent"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_returns_blocked(self) -> None:
+        """When the comms connector raises SandboxViolationError, the tool must
+        report it as blocked rather than letting a real message go out. Before
+        the comms send methods were @sandbox_aware, this catch was dead code."""
+        from machina.mcp.tools import machina_send_message
+
+        conn = MagicMock()
+        conn.capabilities = frozenset({Capability.SEND_MESSAGE})
+        conn.send_message = AsyncMock(side_effect=SandboxViolationError("blocked"))
+        runtime = MachinaRuntime(connectors={"comms": conn})
+        result = await machina_send_message(_make_ctx(runtime), channel="#ops", text="hi")
+        assert result["status"] == "blocked"
+        assert result["metadata"]["sandbox"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_works_with_non_channel_first_param(self) -> None:
+        """Telegram/Email name their first param chat_id/to, not channel. The
+        tool must call send_message positionally so it binds across connectors
+        instead of raising TypeError on a channel= keyword."""
+        from machina.mcp.tools import machina_send_message
+
+        captured: dict[str, str] = {}
+
+        class _TelegramLikeConn:
+            capabilities = frozenset({Capability.SEND_MESSAGE})
+
+            async def send_message(self, chat_id: str, text: str) -> None:
+                captured["chat_id"] = chat_id
+                captured["text"] = text
+
+        runtime = MachinaRuntime(connectors={"comms": _TelegramLikeConn()})
+        result = await machina_send_message(_make_ctx(runtime), channel="12345", text="hi")
+        assert result["status"] == "sent"
+        assert captured == {"chat_id": "12345", "text": "hi"}
+
+
 class TestListSpareParts:
     @pytest.mark.asyncio
     async def test_returns_parts(self) -> None:

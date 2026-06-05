@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 import jmespath
 import structlog
+from pydantic import ValidationError
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -209,6 +210,10 @@ class GenericCmmsConnector:
         self._spare_parts: list[SparePart] = []
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
+        # Serialises the read-check-mutate-persist sequence in local mode so
+        # concurrent create/update calls (e.g. via asyncio.gather in AgentTeam)
+        # cannot race on the in-memory list or the file write.
+        self._local_write_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -297,13 +302,43 @@ class GenericCmmsConnector:
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Create a new work order."""
+        """Create a new work order.
+
+        In local mode the operation is idempotent on the work-order ID:
+        re-creating a WO whose ID already exists returns the existing
+        record rather than appending a duplicate. New work orders are
+        persisted back to ``work_orders.json`` so changes survive process
+        restarts (skipped when an inbound ``schema_mapping`` is configured;
+        see :meth:`_persist_work_orders`).
+        """
         self._ensure_connected()
         if self._data_dir:
-            self._work_orders.append(work_order)
+            async with self._local_write_lock:
+                existing = next((wo for wo in self._work_orders if wo.id == work_order.id), None)
+                if existing is not None:
+                    logger.info(
+                        "work_order_create_idempotent_hit",
+                        connector="GenericCmmsConnector",
+                        operation="create_work_order",
+                        work_order_id=work_order.id,
+                        asset_id=work_order.asset_id,
+                    )
+                    return existing
+                self._work_orders.append(work_order)
+                try:
+                    await self._persist_work_orders()
+                except Exception:
+                    # Persist failed (disk full, serialization error): roll the
+                    # in-memory append back so the list stays consistent with
+                    # disk. Otherwise the WO lives in memory but not on disk —
+                    # lost on restart, and the idempotency guard above would
+                    # return it as "existing" for a record never durably stored.
+                    self._work_orders.pop()
+                    raise
             logger.info(
                 "work_order_created",
                 connector="GenericCmmsConnector",
+                operation="create_work_order",
                 work_order_id=work_order.id,
                 asset_id=work_order.asset_id,
             )
@@ -372,12 +407,29 @@ class GenericCmmsConnector:
         """
         self._ensure_connected()
         if self._data_dir:
-            return self._local_update_work_order(
-                work_order_id,
-                status=status,
-                assigned_to=assigned_to,
-                description=description,
-            )
+            async with self._local_write_lock:
+                # Snapshot the pre-update state so a persist failure can be
+                # rolled back — _local_update_work_order mutates in place, and
+                # without rollback the in-memory object would diverge from disk
+                # (new state in memory, old state on disk reloaded at restart).
+                idx = next(
+                    (i for i, wo in enumerate(self._work_orders) if wo.id == work_order_id),
+                    None,
+                )
+                before = self._work_orders[idx].model_copy(deep=True) if idx is not None else None
+                updated = self._local_update_work_order(
+                    work_order_id,
+                    status=status,
+                    assigned_to=assigned_to,
+                    description=description,
+                )
+                try:
+                    await self._persist_work_orders()
+                except Exception:
+                    if idx is not None and before is not None:
+                        self._work_orders[idx] = before
+                    raise
+            return updated
         return await self._rest_update_work_order(
             work_order_id,
             status=status,
@@ -438,6 +490,52 @@ class GenericCmmsConnector:
                 return wo
         raise ConnectorError(f"Work order {work_order_id} not found")
 
+    async def _persist_work_orders(self) -> None:
+        """Write the in-memory work orders back to ``work_orders.json``.
+
+        Local mode is the demo / offline data source: without write-back,
+        ``create_work_order`` and ``update_work_order`` only mutate the
+        in-memory list and changes vanish when the process exits — the
+        "LIVE mode doesn't change the files" surprise.
+
+        Persistence is skipped when an inbound ``schema_mapping`` /
+        ``yaml_mapping`` is configured: the on-disk file is then in the
+        external CMMS shape, and writing the domain shape (``model_dump``)
+        back would not round-trip through :meth:`_apply_mapping` on the
+        next load. Native-format local files (the quickstart case) write
+        back faithfully.
+        """
+        if self._data_dir is None:
+            return
+        if self._schema_mapping or self._yaml_mapping is not None:
+            # INFO (not DEBUG): a create/update in mapped-local mode logs
+            # work_order_created at INFO, so the skip must be equally visible —
+            # otherwise the write silently never reaches disk.
+            logger.info(
+                "local_persist_skipped_mapping",
+                connector="GenericCmmsConnector",
+                operation="_persist_work_orders",
+                file="work_orders.json",
+            )
+            return
+        path = self._data_dir / "work_orders.json"
+        payload = [wo.model_dump(mode="json") for wo in self._work_orders]
+        # Write to a temp sibling then atomically replace, so a crash mid-write
+        # cannot truncate work_orders.json and break the next connect(). Clean up
+        # the temp file if the write or replace fails (e.g. a Windows replace on
+        # an open handle) so it doesn't linger and confuse the next write.
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            await asyncio.to_thread(
+                tmp.write_text,
+                json.dumps(payload, indent=2, default=str),
+                encoding="utf-8",
+            )
+            await asyncio.to_thread(tmp.replace, path)
+        except Exception:
+            await asyncio.to_thread(tmp.unlink, True)
+            raise
+
     # ------------------------------------------------------------------
     # Internal: local data loading
     # ------------------------------------------------------------------
@@ -465,7 +563,28 @@ class GenericCmmsConnector:
         if work_orders_file.exists():
             text = await asyncio.to_thread(work_orders_file.read_text, encoding="utf-8")
             raw = json.loads(text)
+            # Native (unmapped) files are the ones _persist_work_orders writes via
+            # model_dump(mode="json"); model_validate is its lossless inverse, so
+            # timestamps, spare_parts, requested_skills and metadata survive a
+            # write→restart→reload cycle. Fall back to the tolerant parser for
+            # hand-written files that omit or mistype fields.
+            native = not self._schema_mapping and self._yaml_mapping is None
             for item in raw:
+                if native:
+                    try:
+                        self._work_orders.append(WorkOrder.model_validate(item))
+                        continue
+                    except ValidationError as exc:
+                        # Native-format file failed strict validation — a sign of
+                        # corruption or a hand-edit. Log (don't swallow silently)
+                        # then degrade to the tolerant parser below.
+                        logger.debug(
+                            "work_order_native_parse_fallback",
+                            connector="GenericCmmsConnector",
+                            operation="_load_local_data",
+                            work_order_id=item.get("id", "?") if isinstance(item, dict) else "?",
+                            error=str(exc),
+                        )
                 mapped = self._apply_mapping("work_orders", item)
                 self._work_orders.append(_parse_work_order(mapped))
             logger.debug(
@@ -791,15 +910,24 @@ class GenericCmmsConnector:
 
 def _parse_asset(data: dict[str, Any]) -> Asset:
     """Parse a dict into an Asset, tolerating missing fields."""
+    # ``data.get(key) is not None`` so an explicit ``null`` is treated like a
+    # missing field rather than passed to an enum constructor — mirrors
+    # _parse_work_order and keeps assets safe if they are ever persisted.
     return Asset(
         id=str(data.get("id", "")),
         name=str(data.get("name", "")),
-        type=AssetType(data["type"]) if "type" in data else AssetType.ROTATING_EQUIPMENT,
+        type=AssetType(data["type"])
+        if data.get("type") is not None
+        else AssetType.ROTATING_EQUIPMENT,
         location=str(data.get("location", "")),
         manufacturer=str(data.get("manufacturer", "")),
         model=str(data.get("model", "")),
         serial_number=str(data.get("serial_number", "")),
-        criticality=Criticality(data["criticality"]) if "criticality" in data else Criticality.C,
+        criticality=(
+            Criticality(data["criticality"])
+            if data.get("criticality") is not None
+            else Criticality.C
+        ),
         parent=data.get("parent"),
         children=data.get("children", []),
         failure_modes=data.get("failure_modes", []),
@@ -810,15 +938,36 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
 
 def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Parse a dict into a WorkOrder."""
+    # ``data.get(key) is not None`` (not ``key in data``) so an explicit
+    # ``null`` — which ``model_dump`` writes for every optional field during
+    # local-mode persistence — is treated like a missing field instead of being
+    # passed to an enum constructor (``FailureImpact(None)`` would raise).
+    # ``is not None`` (not bare truthiness) so a valid falsy value would still
+    # be honoured; enum string values are never falsy, but this states intent.
     return WorkOrder(
         id=str(data.get("id", "")),
-        type=WorkOrderType(data["type"]) if "type" in data else WorkOrderType.CORRECTIVE,
-        priority=Priority(data["priority"]) if "priority" in data else Priority.MEDIUM,
+        type=WorkOrderType(data["type"])
+        if data.get("type") is not None
+        else WorkOrderType.CORRECTIVE,
+        priority=Priority(data["priority"])
+        if data.get("priority") is not None
+        else Priority.MEDIUM,
+        # status / assigned_to are read so lifecycle changes round-trip through
+        # local-mode persistence (write-back of work_orders.json). Absent in
+        # legacy files, defaulting to CREATED — the pre-existing behaviour.
+        status=(
+            WorkOrderStatus(data["status"])
+            if data.get("status") is not None
+            else WorkOrderStatus.CREATED
+        ),
         asset_id=str(data.get("asset_id", "")),
         description=str(data.get("description", "")),
         failure_mode=data.get("failure_mode"),
+        assigned_to=data.get("assigned_to"),
         failure_impact=(
-            FailureImpact(data["failure_impact"]) if "failure_impact" in data else None
+            FailureImpact(data["failure_impact"])
+            if data.get("failure_impact") is not None
+            else None
         ),
         failure_cause=data.get("failure_cause"),
     )

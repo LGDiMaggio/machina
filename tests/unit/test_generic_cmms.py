@@ -187,6 +187,190 @@ class TestGenericCmmsConnectorLocal:
         assert len(all_wos) == 3
 
     @pytest.mark.asyncio
+    async def test_create_work_order_idempotent(self, sample_data_dir: Path) -> None:
+        """Re-creating a WO with an existing ID does not duplicate it.
+
+        Defends the local store's "unique ID" invariant so a retried or
+        re-requested create (common with weak local models) collapses to a
+        single record instead of appending duplicates.
+        """
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-DUP",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="Replace bearing",
+        )
+        await conn.create_work_order(wo)
+        await conn.create_work_order(wo)
+        all_wos = await conn.read_work_orders()
+        assert sum(1 for w in all_wos if w.id == "WO-DUP") == 1
+        assert len(all_wos) == 3
+
+    @pytest.mark.asyncio
+    async def test_create_work_order_persists_to_disk(self, sample_data_dir: Path) -> None:
+        """Created WOs are written back to work_orders.json in local mode."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-PERSIST",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="bearing",
+        )
+        await conn.create_work_order(wo)
+        disk = json.loads((sample_data_dir / "work_orders.json").read_text())
+        assert any(w["id"] == "WO-PERSIST" for w in disk)
+        # A fresh connector pointed at the same dir reloads the new WO.
+        conn2 = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert any(w.id == "WO-PERSIST" for w in reloaded)
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_persists_status(self, sample_data_dir: Path) -> None:
+        """Status updates round-trip through the local JSON file."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+        conn2 = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn2.connect()
+        reloaded = await conn2.get_work_order("WO-001")
+        assert reloaded is not None
+        assert reloaded.status == WorkOrderStatus.ASSIGNED
+
+    @pytest.mark.asyncio
+    async def test_local_persist_skipped_with_mapping(self, tmp_path: Path) -> None:
+        """A configured inbound mapping disables write-back to avoid corrupting
+        the on-disk (external-format) file."""
+        cmms_dir = tmp_path / "mapped"
+        cmms_dir.mkdir()
+        (cmms_dir / "work_orders.json").write_text(
+            json.dumps([{"wo_id": "WO-001", "asset_id": "P-201"}])
+        )
+        conn = GenericCmmsConnector(
+            data_dir=cmms_dir,
+            schema_mapping={"work_orders": {"wo_id": "id"}},
+        )
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-NEW",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="x",
+        )
+        await conn.create_work_order(wo)
+        # File still in external format — not overwritten with domain shape.
+        disk = json.loads((cmms_dir / "work_orders.json").read_text())
+        assert disk == [{"wo_id": "WO-001", "asset_id": "P-201"}]
+
+    @pytest.mark.asyncio
+    async def test_persist_skipped_with_yaml_mapping(self, sample_data_dir: Path) -> None:
+        """The yaml_mapping branch of the persist skip-guard also suppresses
+        write-back (parity with the schema_mapping path)."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        conn._yaml_mapping = object()  # simulate a configured YAML mapping
+        wof = sample_data_dir / "work_orders.json"
+        before = wof.read_text(encoding="utf-8")
+        await conn.create_work_order(
+            WorkOrder(id="WO-Y", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+        assert wof.read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_create_persists_full_fidelity_roundtrip(self, sample_data_dir: Path) -> None:
+        """All WorkOrder fields — not just the scalar core — survive a
+        write→fresh-connector→reload cycle, and timestamps are not reset."""
+        from machina.domain.work_order import SparePartRequirement
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-RT",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="bearing",
+            assigned_to="Mario",
+            estimated_duration_hours=2.5,
+            requested_skills=["mechanical"],
+            spare_parts=[SparePartRequirement(sku="SKF-6310", qty=2)],
+            metadata={"shift": "night"},
+        )
+        created = await conn.create_work_order(wo)
+
+        conn2 = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn2.connect()
+        r = await conn2.get_work_order("WO-RT")
+        assert r is not None
+        assert r.assigned_to == "Mario"
+        assert r.estimated_duration_hours == 2.5
+        assert r.requested_skills == ["mechanical"]
+        assert len(r.spare_parts) == 1
+        assert r.spare_parts[0].sku == "SKF-6310"
+        assert r.metadata == {"shift": "night"}
+        assert r.created_at == created.created_at  # preserved, not reset to now()
+
+    @pytest.mark.asyncio
+    async def test_persist_atomic_on_failure(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If serialization/write fails mid-persist, the original
+        work_orders.json is left intact (temp-write + atomic replace)."""
+        import machina.connectors.cmms.generic as gmod
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        before = wof.read_text(encoding="utf-8")
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(gmod.json, "dumps", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.create_work_order(
+                WorkOrder(
+                    id="WO-CRASH", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+                )
+            )
+        assert wof.read_text(encoding="utf-8") == before  # not truncated
+        # In-memory list is rolled back too — no memory/disk divergence and the
+        # idempotency guard will not return a WO that was never durably stored.
+        assert all(w.id != "WO-CRASH" for w in await conn.read_work_orders())
+
+    @pytest.mark.asyncio
+    async def test_update_rolls_back_in_memory_on_persist_failure(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed persist during update restores the in-memory work order to
+        its pre-update state (no divergence from the on-disk version)."""
+        import machina.connectors.cmms.generic as gmod
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        original = await conn.get_work_order("WO-001")
+        assert original is not None
+        original_status = original.status
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(gmod.json, "dumps", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        # In-memory object reverted to its pre-update status.
+        reverted = await conn.get_work_order("WO-001")
+        assert reverted is not None
+        assert reverted.status == original_status
+
+    @pytest.mark.asyncio
     async def test_read_spare_parts(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()

@@ -228,6 +228,7 @@ class GenericSqlConnector:
         )
         return work_order
 
+    @sandbox_aware
     async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
         """Update a work order — re-reads after update to return fresh state."""
         if Capability.UPDATE_WORK_ORDER not in self._capabilities:

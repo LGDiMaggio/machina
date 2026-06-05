@@ -19,14 +19,19 @@ import structlog
 
 from machina.agent.citations import parse_response
 from machina.agent.entity_resolver import EntityResolver
-from machina.agent.prompts import build_context_message, build_system_prompt, safe_source
+from machina.agent.prompts import (
+    build_context_message,
+    build_system_prompt,
+    safe_source,
+    safe_text,
+)
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.domain.citation import AgentResponse
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
-from machina.llm.tools import BUILTIN_TOOLS
+from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
@@ -34,6 +39,13 @@ if TYPE_CHECKING:
     from machina.workflows.models import Workflow, WorkflowResult
 
 logger = structlog.get_logger(__name__)
+
+# Tools whose execution mutates external state, memoised per turn in the LLM
+# loop so a model that re-requests the same write does not trigger the side
+# effect twice. Sourced from llm.tools.MUTATING_TOOLS (single source of truth,
+# co-located with the tool definitions) to prevent drift between the dispatch
+# table and this guard.
+_SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -633,11 +645,13 @@ class Agent:
                     operation="search_documents",
                 ):
                     results = await _conn.search(text, asset_id=asset.id)
-                    # Sanitise source at the LLM boundary so absolute file
-                    # paths never reach the prompt context.  See safe_source.
+                    # Sanitise source and content at the LLM boundary so
+                    # absolute file paths never reach the prompt context —
+                    # safe_source for the metadata field, safe_text for paths
+                    # embedded in the chunk body. See prompts.safe_source/safe_text.
                     return [
                         {
-                            "content": r.content,
+                            "content": safe_text(r.content),
                             "source": safe_source(r.source),
                             "page": r.page,
                             "chunk_id": getattr(r, "chunk_id", ""),
@@ -745,6 +759,13 @@ class Agent:
         """Call the LLM, execute tool calls, and return final response."""
         tools = self._get_available_tools()
 
+        # Per-turn memo of side-effecting tool calls (keyed by name + args).
+        # If the model re-requests the same write across loop iterations — the
+        # mechanism behind the duplicate-work-order report — we reuse the first
+        # result instead of executing the side effect again. Read-only tools
+        # are never memoised; they may legitimately be re-issued.
+        executed_side_effects: dict[str, Any] = {}
+
         for _iteration in range(max_iterations):
             with self.tracer.trace(
                 "llm_call",
@@ -779,11 +800,31 @@ class Agent:
                 except (json.JSONDecodeError, AttributeError):
                     args = {}
 
+                memo_key: str | None = None
+                if func_name in _SIDE_EFFECTING_TOOLS:
+                    memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+
                 with self.tracer.trace(
                     "tool_call",
                     operation=func_name,
                 ) as tool_span:
-                    tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
+                    if memo_key is not None and memo_key in executed_side_effects:
+                        tool_result = executed_side_effects[memo_key]
+                        logger.info(
+                            "duplicate_tool_call_suppressed",
+                            agent=self.name,
+                            tool=func_name,
+                            operation=func_name,
+                        )
+                    else:
+                        tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
+                        # Only memoise successful results. A failed side effect
+                        # (e.g. a transient workflow error returned as
+                        # {"error": ...}) must not suppress a legitimate retry
+                        # of the same call later in the turn.
+                        is_error = isinstance(tool_result, dict) and "error" in tool_result
+                        if memo_key is not None and not is_error:
+                            executed_side_effects[memo_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
 
                 messages.append(
@@ -849,7 +890,7 @@ class Agent:
                 # from the v0.3 RAG upgrade and feed citation validation.
                 serialized = [
                     {
-                        "content": r.content,
+                        "content": safe_text(r.content),
                         "source": safe_source(r.source),
                         "page": r.page,
                         "chunk_id": getattr(r, "chunk_id", ""),
@@ -936,6 +977,7 @@ class Agent:
             )
             return {"sandbox": True, "action": "create_work_order", "args": args}
 
+        from machina.domain.services.work_order_factory import auto_work_order_id
         from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
         connectors = self._registry.find_by_capability(Capability.CREATE_WORK_ORDER)
@@ -943,12 +985,21 @@ class Agent:
             return {"error": "No CMMS connector available for creating work orders"}
 
         _, conn = connectors[0]
+        wo_type = args.get("type", "corrective")
+        priority = args.get("priority", "medium")
+        asset_id = args.get("asset_id", "")
+        description = args.get("description", "")
+        # Deterministic, content-based ID (shared with WorkOrderFactory) so a
+        # model that re-requests this tool inside the LLM loop collapses to a
+        # single work order instead of creating one per call. The old
+        # ``id(args) % 10000`` scheme used the memory address of a per-call
+        # dict — non-deterministic, dedup-proof, prone to cross-turn collisions.
         wo = WorkOrder(
-            id=f"WO-AUTO-{id(args) % 10000:04d}",
-            type=WorkOrderType(args.get("type", "corrective")),
-            priority=Priority(args.get("priority", "medium")),
-            asset_id=args.get("asset_id", ""),
-            description=args.get("description", ""),
+            id=auto_work_order_id(asset_id, wo_type, priority, description),
+            type=WorkOrderType(wo_type),
+            priority=Priority(priority),
+            asset_id=asset_id,
+            description=description,
         )
         created = await conn.create_work_order(wo)  # type: ignore[attr-defined]
         logger.info(
@@ -1028,8 +1079,10 @@ class Agent:
                     {
                         "step": sr.step_name,
                         "success": sr.success,
-                        "output_summary": str(sr.output)[:500] if sr.output else None,
-                        "error": str(sr.error) if sr.error else None,
+                        # Scrub user-home / UNC paths from step output and error
+                        # text before it enters the LLM message history.
+                        "output_summary": safe_text(str(sr.output)[:500]) if sr.output else None,
+                        "error": safe_text(str(sr.error)) if sr.error else None,
                     }
                     for sr in result.step_results
                 ],
@@ -1042,7 +1095,7 @@ class Agent:
                 workflow=workflow_name,
                 error=str(exc),
             )
-            return {"error": str(exc), "workflow_name": workflow_name}
+            return {"error": safe_text(str(exc)), "workflow_name": workflow_name}
 
     # ------------------------------------------------------------------
     # Helpers

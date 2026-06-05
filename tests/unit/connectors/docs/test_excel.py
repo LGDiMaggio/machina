@@ -19,7 +19,9 @@ from machina.connectors.docs.excel import (
     _datetime_parse,
     _excel_serial_to_date,
     _float_it,
+    _guard_formula,
     _int_it,
+    _strip_formula_guard,
 )
 from machina.connectors.docs.excel_schema import (
     ColumnMapping,
@@ -518,6 +520,165 @@ class TestCsvSupport:
         assert "WO-001" in content
         assert "P-001" in content
 
+    @pytest.mark.asyncio
+    async def test_update_csv_persists_to_disk(self, tmp_path: Path) -> None:
+        """A CSV-backed update must be written to disk, not just the cache —
+        otherwise the change is lost on restart (the cache-only bug)."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="old"
+            )
+        )
+        await conn.update_work_order("WO-001", {"description": "new description"})
+
+        # The on-disk file reflects the update (no duplicate row).
+        content = csv_file.read_text(encoding="utf-8-sig")
+        assert "new description" in content
+        assert "old" not in content
+        assert content.count("WO-001") == 1
+
+        # A fresh connector reloads the updated value.
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert len(reloaded) == 1
+        assert reloaded[0].description == "new description"
+
+    @pytest.mark.asyncio
+    async def test_csv_rewrite_atomic_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the rewrite fails mid-way, the original file is left intact (the
+        rewrite writes a temp sibling then atomically replaces the target)."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="orig"
+            )
+        )
+        before = csv_file.read_text(encoding="utf-8-sig")
+
+        def _boom(wo: object, schema: object) -> dict[str, object]:
+            raise RuntimeError("disk full mid-rewrite")
+
+        monkeypatch.setattr(conn, "_work_order_to_row", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.update_work_order("WO-001", {"description": "new"})
+
+        # Original file unchanged — not truncated by the failed rewrite.
+        assert csv_file.read_text(encoding="utf-8-sig") == before
+
+    @pytest.mark.asyncio
+    async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """A field starting with a formula trigger is written with a leading
+        apostrophe (so a spreadsheet treats it as text), and round-trips back
+        to its original value through a fresh connector read."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=SUM(A1:A9)+cmd",
+            )
+        )
+        # On disk the trigger is neutralized with a leading apostrophe.
+        on_disk = csv_file.read_text(encoding="utf-8-sig")
+        assert "'=SUM(A1:A9)+cmd" in on_disk
+        assert ",=SUM" not in on_disk  # raw formula must not be present unguarded
+
+        # A fresh connector reads back the original value (clean round-trip).
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=SUM(A1:A9)+cmd"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """xlsx write neutralizes formula triggers (also stops openpyxl from
+        storing the value as a real formula) and round-trips."""
+        import openpyxl
+
+        xlsx_file = tmp_path / "odl.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "OdL"
+        ws.append(["ID", "Codice Asset", "Descrizione"])
+        wb.save(str(xlsx_file))
+        wb.close()
+        schema = SheetSchema(
+            path=str(xlsx_file),
+            sheet="OdL",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=HYPERLINK(0)",
+            )
+        )
+        wb2 = openpyxl.load_workbook(str(xlsx_file))
+        cell = wb2["OdL"].cell(row=2, column=3)
+        wb2.close()
+        # Stored as a text string (leading apostrophe), not a formula.
+        assert cell.data_type != "f"
+        assert cell.value == "'=HYPERLINK(0)"
+
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=HYPERLINK(0)"
+
 
 class TestRefresh:
     @pytest.mark.asyncio
@@ -553,3 +714,35 @@ class TestRefresh:
 
         conn.refresh()
         assert len(await conn.read_assets()) == 2
+
+
+class TestFormulaGuardLossless:
+    """_guard_formula / _strip_formula_guard must be a true inverse for every
+    value class, including ones that already start with an apostrophe + trigger
+    (the corruption case that the naive guard turned "'=approved" into
+    "=approved" on read)."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "=SUM(A1:A2)",
+            "+1",
+            "-1",
+            "@cmd",
+            "'=approved",  # literal apostrophe + trigger — must NOT be corrupted
+            "''=x",  # double apostrophe + trigger
+            "'note",  # apostrophe + non-trigger — left untouched
+            "'",  # lone apostrophe
+            "plain text",
+            "",
+        ],
+    )
+    def test_guard_strip_roundtrip(self, value: str) -> None:
+        assert _strip_formula_guard(_guard_formula(value)) == value
+
+    def test_trigger_is_neutralized_on_write(self) -> None:
+        assert _guard_formula("=SUM(A1)") == "'=SUM(A1)"
+
+    def test_ambiguous_literal_is_escaped_on_write(self) -> None:
+        # The on-disk form gains an extra apostrophe so the strip is unambiguous.
+        assert _guard_formula("'=approved") == "''=approved"

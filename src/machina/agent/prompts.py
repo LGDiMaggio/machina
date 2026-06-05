@@ -7,6 +7,7 @@ order history into the conversation.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from machina.agent.citations import CITATION_PROMPT
@@ -284,6 +285,67 @@ _NON_PATH_CHARS: frozenset[str] = frozenset("\"'{}[]()")
 # embedded JSON/repr, etc.).  Citation specificity is lost in that edge
 # case — preserving privacy is the priority.
 _OPAQUE_SOURCE_PLACEHOLDER = "<document>"
+
+
+# Identity- or infrastructure-revealing absolute paths that may be embedded in
+# free text (document body, error messages) and reach the LLM verbatim. Matches
+# user-home paths (``C:\\Users\\<user>\\...``, ``/home/<user>/...``,
+# ``/Users/<user>/...``) and UNC shares (``\\\\host\\share\\...``). Deliberately
+# does NOT match instructional system paths (``/etc``, ``/usr/bin``,
+# ``C:\\Program Files``) so technical manuals keep full fidelity — those carry
+# no privacy/infra signal. :func:`safe_source` is stricter because a source is
+# never instructional.
+_USER_PATH_RE = re.compile(
+    r"""(?ix)
+    (?:
+        \\\\[^\s\\/]+(?:\\[^\s\\/]+)+               # UNC \\host\share\...
+      | [A-Za-z]:[\\/]Users[\\/][^\s\\/]+(?:[\\/][^\s\\/]+)*   # X:\Users\<user>\...
+      | /(?:home|Users)/[^\s/]+(?:/[^\s/]+)*        # /home/<user>/..., /Users/<user>/...
+    )
+    """
+)
+
+
+def _path_basename(match: re.Match[str]) -> str:
+    """Reduce a matched absolute path to its final component (basename).
+
+    Trailing sentence punctuation captured by the greedy path match is
+    re-appended so prose like ``...see /home/me/notes.md.`` keeps its period.
+    """
+    matched = match.group(0)
+    core = matched.rstrip(".,;:!?")
+    trailing = matched[len(core) :]
+    for part in reversed(re.split(r"[\\/]+", core)):
+        if part:
+            return part + trailing
+    return _OPAQUE_SOURCE_PLACEHOLDER + trailing
+
+
+def safe_text(text: str) -> str:
+    """Redact identity- or infrastructure-revealing absolute paths from text.
+
+    Document body text and error messages can embed absolute paths that name a
+    user account (``C:\\Users\\tedib\\...``, ``/home/me/...``) or an internal
+    host/share (``\\\\FILESRV01\\manuals\\...``). These reach the LLM verbatim
+    via chunk ``content`` and tool/workflow error strings — the same disclosure
+    class :func:`safe_source` closes for the ``source`` field. Each such path is
+    reduced to its basename so the surrounding prose stays intelligible.
+
+    Deliberately conservative: instructional system paths (``/etc/...``,
+    ``/usr/bin``, ``C:\\Program Files\\...``) are left untouched so technical
+    manuals that legitimately reference them keep full fidelity. Only user-home
+    and UNC paths — which carry privacy/infra signal and no instructional
+    value — are redacted.
+
+    Args:
+        text: Free text that may contain embedded absolute paths.
+
+    Returns:
+        The text with user-home / UNC paths reduced to basenames.
+    """
+    if not text:
+        return text
+    return _USER_PATH_RE.sub(_path_basename, text)
 
 
 def safe_source(source: str) -> str:

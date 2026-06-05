@@ -16,6 +16,7 @@ from machina.agent.prompts import (
     format_spare_parts_context,
     format_work_orders_context,
     safe_source,
+    safe_text,
 )
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -319,6 +320,55 @@ class TestSafeSource:
     def test_private_alias_still_resolves_to_same_function(self) -> None:
         """The ``_safe_source`` private alias remains for backwards compatibility."""
         assert _safe_source is safe_source
+
+
+class TestSafeText:
+    """``safe_text`` scrubs identity/infra paths embedded in free text while
+    preserving instructional system paths (C2 hardening)."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # User-home paths are reduced to basename — the reported leak class.
+            (
+                r"See manual at C:\Users\tedib\Documents\pump_p201_manual.md for details",
+                "See manual at pump_p201_manual.md for details",
+            ),
+            (
+                "Saved to /home/me/manuals/pump.md by the loader",
+                "Saved to pump.md by the loader",
+            ),
+            (
+                "macOS path /Users/mario/docs/torque.pdf here",
+                "macOS path torque.pdf here",
+            ),
+            # UNC shares (infra disclosure) reduced to basename.
+            (
+                r"Indexed \\FILESRV01\manuals\bearing.pdf overnight",
+                "Indexed bearing.pdf overnight",
+            ),
+            # Instructional system paths are preserved (manual fidelity).
+            ("Edit /etc/fstab then reboot", "Edit /etc/fstab then reboot"),
+            ("Run /usr/bin/python3 to start", "Run /usr/bin/python3 to start"),
+            (
+                r"Installed under C:\Program Files\App\app.exe",
+                r"Installed under C:\Program Files\App\app.exe",
+            ),
+            # No path → unchanged; empty → unchanged.
+            ("Torque is 45 Nm on bolt M12", "Torque is 45 Nm on bolt M12"),
+            ("", ""),
+        ],
+    )
+    def test_safe_text_table(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
+
+    def test_multiple_paths_in_one_string(self) -> None:
+        raw = r"from C:\Users\a\x.md to /home/b/y.md"
+        assert safe_text(raw) == "from x.md to y.md"
+
+    def test_trailing_sentence_punctuation_not_swallowed_into_name(self) -> None:
+        # A trailing period belongs to the sentence, not the filename.
+        assert safe_text("see /home/me/notes.md.") == "see notes.md."
 
 
 class TestFormatDocumentResultsSanitization:
