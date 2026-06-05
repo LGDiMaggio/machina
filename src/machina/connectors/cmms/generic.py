@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 import jmespath
 import structlog
+from pydantic import ValidationError
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -209,6 +210,10 @@ class GenericCmmsConnector:
         self._spare_parts: list[SparePart] = []
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
+        # Serialises the read-check-mutate-persist sequence in local mode so
+        # concurrent create/update calls (e.g. via asyncio.gather in AgentTeam)
+        # cannot race on the in-memory list or the file write.
+        self._local_write_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -308,20 +313,23 @@ class GenericCmmsConnector:
         """
         self._ensure_connected()
         if self._data_dir:
-            existing = next((wo for wo in self._work_orders if wo.id == work_order.id), None)
-            if existing is not None:
-                logger.info(
-                    "work_order_create_idempotent_hit",
-                    connector="GenericCmmsConnector",
-                    work_order_id=work_order.id,
-                    asset_id=work_order.asset_id,
-                )
-                return existing
-            self._work_orders.append(work_order)
-            await self._persist_work_orders()
+            async with self._local_write_lock:
+                existing = next((wo for wo in self._work_orders if wo.id == work_order.id), None)
+                if existing is not None:
+                    logger.info(
+                        "work_order_create_idempotent_hit",
+                        connector="GenericCmmsConnector",
+                        operation="create_work_order",
+                        work_order_id=work_order.id,
+                        asset_id=work_order.asset_id,
+                    )
+                    return existing
+                self._work_orders.append(work_order)
+                await self._persist_work_orders()
             logger.info(
                 "work_order_created",
                 connector="GenericCmmsConnector",
+                operation="create_work_order",
                 work_order_id=work_order.id,
                 asset_id=work_order.asset_id,
             )
@@ -390,13 +398,14 @@ class GenericCmmsConnector:
         """
         self._ensure_connected()
         if self._data_dir:
-            updated = self._local_update_work_order(
-                work_order_id,
-                status=status,
-                assigned_to=assigned_to,
-                description=description,
-            )
-            await self._persist_work_orders()
+            async with self._local_write_lock:
+                updated = self._local_update_work_order(
+                    work_order_id,
+                    status=status,
+                    assigned_to=assigned_to,
+                    description=description,
+                )
+                await self._persist_work_orders()
             return updated
         return await self._rest_update_work_order(
             work_order_id,
@@ -476,19 +485,27 @@ class GenericCmmsConnector:
         if self._data_dir is None:
             return
         if self._schema_mapping or self._yaml_mapping is not None:
-            logger.debug(
+            # INFO (not DEBUG): a create/update in mapped-local mode logs
+            # work_order_created at INFO, so the skip must be equally visible —
+            # otherwise the write silently never reaches disk.
+            logger.info(
                 "local_persist_skipped_mapping",
                 connector="GenericCmmsConnector",
+                operation="_persist_work_orders",
                 file="work_orders.json",
             )
             return
         path = self._data_dir / "work_orders.json"
         payload = [wo.model_dump(mode="json") for wo in self._work_orders]
+        # Write to a temp sibling then atomically replace, so a crash mid-write
+        # cannot truncate work_orders.json and break the next connect().
+        tmp = path.with_name(path.name + ".tmp")
         await asyncio.to_thread(
-            path.write_text,
+            tmp.write_text,
             json.dumps(payload, indent=2, default=str),
             encoding="utf-8",
         )
+        await asyncio.to_thread(tmp.replace, path)
 
     # ------------------------------------------------------------------
     # Internal: local data loading
@@ -517,7 +534,19 @@ class GenericCmmsConnector:
         if work_orders_file.exists():
             text = await asyncio.to_thread(work_orders_file.read_text, encoding="utf-8")
             raw = json.loads(text)
+            # Native (unmapped) files are the ones _persist_work_orders writes via
+            # model_dump(mode="json"); model_validate is its lossless inverse, so
+            # timestamps, spare_parts, requested_skills and metadata survive a
+            # write→restart→reload cycle. Fall back to the tolerant parser for
+            # hand-written files that omit or mistype fields.
+            native = not self._schema_mapping and self._yaml_mapping is None
             for item in raw:
+                if native:
+                    try:
+                        self._work_orders.append(WorkOrder.model_validate(item))
+                        continue
+                    except ValidationError:
+                        pass
                 mapped = self._apply_mapping("work_orders", item)
                 self._work_orders.append(_parse_work_order(mapped))
             logger.debug(
@@ -843,15 +872,24 @@ class GenericCmmsConnector:
 
 def _parse_asset(data: dict[str, Any]) -> Asset:
     """Parse a dict into an Asset, tolerating missing fields."""
+    # ``data.get(key) is not None`` so an explicit ``null`` is treated like a
+    # missing field rather than passed to an enum constructor — mirrors
+    # _parse_work_order and keeps assets safe if they are ever persisted.
     return Asset(
         id=str(data.get("id", "")),
         name=str(data.get("name", "")),
-        type=AssetType(data["type"]) if "type" in data else AssetType.ROTATING_EQUIPMENT,
+        type=AssetType(data["type"])
+        if data.get("type") is not None
+        else AssetType.ROTATING_EQUIPMENT,
         location=str(data.get("location", "")),
         manufacturer=str(data.get("manufacturer", "")),
         model=str(data.get("model", "")),
         serial_number=str(data.get("serial_number", "")),
-        criticality=Criticality(data["criticality"]) if "criticality" in data else Criticality.C,
+        criticality=(
+            Criticality(data["criticality"])
+            if data.get("criticality") is not None
+            else Criticality.C
+        ),
         parent=data.get("parent"),
         children=data.get("children", []),
         failure_modes=data.get("failure_modes", []),
@@ -862,24 +900,36 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
 
 def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Parse a dict into a WorkOrder."""
-    # ``data.get(key)`` (not ``key in data``) so an explicit ``null`` — which
-    # ``model_dump`` writes for every optional field during local-mode
-    # persistence — is treated like a missing field instead of being passed
-    # to an enum constructor (``FailureImpact(None)`` would raise).
+    # ``data.get(key) is not None`` (not ``key in data``) so an explicit
+    # ``null`` — which ``model_dump`` writes for every optional field during
+    # local-mode persistence — is treated like a missing field instead of being
+    # passed to an enum constructor (``FailureImpact(None)`` would raise).
+    # ``is not None`` (not bare truthiness) so a valid falsy value would still
+    # be honoured; enum string values are never falsy, but this states intent.
     return WorkOrder(
         id=str(data.get("id", "")),
-        type=WorkOrderType(data["type"]) if data.get("type") else WorkOrderType.CORRECTIVE,
-        priority=Priority(data["priority"]) if data.get("priority") else Priority.MEDIUM,
+        type=WorkOrderType(data["type"])
+        if data.get("type") is not None
+        else WorkOrderType.CORRECTIVE,
+        priority=Priority(data["priority"])
+        if data.get("priority") is not None
+        else Priority.MEDIUM,
         # status / assigned_to are read so lifecycle changes round-trip through
         # local-mode persistence (write-back of work_orders.json). Absent in
         # legacy files, defaulting to CREATED — the pre-existing behaviour.
-        status=WorkOrderStatus(data["status"]) if data.get("status") else WorkOrderStatus.CREATED,
+        status=(
+            WorkOrderStatus(data["status"])
+            if data.get("status") is not None
+            else WorkOrderStatus.CREATED
+        ),
         asset_id=str(data.get("asset_id", "")),
         description=str(data.get("description", "")),
         failure_mode=data.get("failure_mode"),
         assigned_to=data.get("assigned_to"),
         failure_impact=(
-            FailureImpact(data["failure_impact"]) if data.get("failure_impact") else None
+            FailureImpact(data["failure_impact"])
+            if data.get("failure_impact") is not None
+            else None
         ),
         failure_cause=data.get("failure_cause"),
     )

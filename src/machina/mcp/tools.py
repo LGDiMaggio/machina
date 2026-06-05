@@ -181,6 +181,7 @@ async def machina_create_work_order(
         work_order_type: Type of maintenance (corrective, preventive, predictive, improvement).
         failure_mode: Failure mode code from diagnosis (e.g. BEAR-WEAR-01).
     """
+    from machina.domain.services.work_order_factory import auto_work_order_id
     from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
     runtime = _runtime(ctx)
@@ -193,8 +194,12 @@ async def machina_create_work_order(
             f"Asset {asset_id!r} not found — cannot create work order for non-existent asset"
         )
 
+    # Deterministic content-based id (shared with the agent runtime tool and
+    # WorkOrderFactory). A fixed "NEW" placeholder collided under the local-mode
+    # idempotency guard — every create returned the first record. REST backends
+    # assign their own id server-side, so a meaningful client id is harmless there.
     wo = WorkOrder(
-        id="NEW",
+        id=auto_work_order_id(asset_id, work_order_type, priority, description),
         type=WorkOrderType(work_order_type),
         priority=Priority(priority),
         asset_id=asset_id,

@@ -231,6 +231,49 @@ class TestUpdateWorkOrder:
         assert result["metadata"]["sandbox"] is True
 
 
+class TestMcpCreateLocalModeDistinct:
+    """MCP create must produce distinct ids in local mode, not collapse under
+    the connector's id-idempotency guard (the old id='NEW' bug)."""
+
+    @pytest.mark.asyncio
+    async def test_distinct_creates_do_not_collapse(self, tmp_path) -> None:
+        import json as _json
+
+        from machina.connectors.cmms.generic import GenericCmmsConnector
+        from machina.mcp.tools import machina_create_work_order
+
+        cmms_dir = tmp_path / "cmms"
+        cmms_dir.mkdir()
+        (cmms_dir / "assets.json").write_text(
+            _json.dumps(
+                [
+                    {
+                        "id": "P-201",
+                        "name": "Pump",
+                        "type": "rotating_equipment",
+                        "criticality": "A",
+                    },
+                    {
+                        "id": "P-202",
+                        "name": "Pump2",
+                        "type": "rotating_equipment",
+                        "criticality": "A",
+                    },
+                ]
+            )
+        )
+        (cmms_dir / "work_orders.json").write_text("[]")
+        conn = GenericCmmsConnector(data_dir=cmms_dir)
+        await conn.connect()
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        ctx = _make_ctx(runtime)
+
+        r1 = await machina_create_work_order(ctx, asset_id="P-201", description="fix one")
+        r2 = await machina_create_work_order(ctx, asset_id="P-202", description="fix two")
+        assert r1["id"] != r2["id"]
+        assert len(await conn.read_work_orders()) == 2
+
+
 class TestRuntimeSandboxPropagation:
     """_runtime re-establishes sandbox mode in the per-request task context."""
 

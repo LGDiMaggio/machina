@@ -269,6 +269,79 @@ class TestGenericCmmsConnectorLocal:
         assert disk == [{"wo_id": "WO-001", "asset_id": "P-201"}]
 
     @pytest.mark.asyncio
+    async def test_persist_skipped_with_yaml_mapping(self, sample_data_dir: Path) -> None:
+        """The yaml_mapping branch of the persist skip-guard also suppresses
+        write-back (parity with the schema_mapping path)."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        conn._yaml_mapping = object()  # simulate a configured YAML mapping
+        wof = sample_data_dir / "work_orders.json"
+        before = wof.read_text(encoding="utf-8")
+        await conn.create_work_order(
+            WorkOrder(id="WO-Y", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+        assert wof.read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_create_persists_full_fidelity_roundtrip(self, sample_data_dir: Path) -> None:
+        """All WorkOrder fields — not just the scalar core — survive a
+        write→fresh-connector→reload cycle, and timestamps are not reset."""
+        from machina.domain.work_order import SparePartRequirement
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = WorkOrder(
+            id="WO-RT",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="bearing",
+            assigned_to="Mario",
+            estimated_duration_hours=2.5,
+            requested_skills=["mechanical"],
+            spare_parts=[SparePartRequirement(sku="SKF-6310", qty=2)],
+            metadata={"shift": "night"},
+        )
+        created = await conn.create_work_order(wo)
+
+        conn2 = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn2.connect()
+        r = await conn2.get_work_order("WO-RT")
+        assert r is not None
+        assert r.assigned_to == "Mario"
+        assert r.estimated_duration_hours == 2.5
+        assert r.requested_skills == ["mechanical"]
+        assert len(r.spare_parts) == 1
+        assert r.spare_parts[0].sku == "SKF-6310"
+        assert r.metadata == {"shift": "night"}
+        assert r.created_at == created.created_at  # preserved, not reset to now()
+
+    @pytest.mark.asyncio
+    async def test_persist_atomic_on_failure(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If serialization/write fails mid-persist, the original
+        work_orders.json is left intact (temp-write + atomic replace)."""
+        import machina.connectors.cmms.generic as gmod
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        before = wof.read_text(encoding="utf-8")
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(gmod.json, "dumps", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.create_work_order(
+                WorkOrder(
+                    id="WO-CRASH", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+                )
+            )
+        assert wof.read_text(encoding="utf-8") == before  # not truncated
+
+    @pytest.mark.asyncio
     async def test_read_spare_parts(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
