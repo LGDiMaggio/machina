@@ -101,5 +101,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[docs]"
 
+      - name: Docs coverage (public API + connectors documented)
+        run: python tests/validate_docs_coverage.py
+
       - name: Build docs (strict)
         run: mkdocs build --strict
