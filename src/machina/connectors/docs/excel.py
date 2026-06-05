@@ -457,10 +457,12 @@ class ExcelCsvConnector:
 
     @sandbox_aware
     async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
-        """Update a work order in cache and persist to file if xlsx/csv.
+        """Update a work order in cache and persist to file.
 
-        Note: for xlsx files, a full rewrite is performed. For csv, only
-        the cache is updated (append-only format).
+        When ``write_mode`` is configured, a full rewrite from cache is
+        performed for both xlsx and csv files, so the change is durable
+        across restarts. When no ``write_mode`` is set, the update is kept
+        in cache only.
         """
         for wo in self._wo_cache:
             if wo.id == work_order_id:
@@ -497,8 +499,13 @@ class ExcelCsvConnector:
             self._rewrite_xlsx(path, schema)
 
     def _rewrite_xlsx(self, path: Path, schema: SheetSchema) -> None:
-        """Rewrite all work orders to the xlsx file from cache."""
+        """Rewrite all work orders to the xlsx file from cache.
+
+        Writes to a temp sibling then atomically replaces the target, so a
+        crash or error mid-write cannot truncate the existing file.
+        """
         openpyxl = _require_openpyxl()
+        tmp = path.with_name(path.name + ".tmp")
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = schema.sheet
@@ -507,18 +514,25 @@ class ExcelCsvConnector:
             row_data = self._work_order_to_row(wo, schema)
             row_values = [row_data.get(m.field) for m in schema.columns]
             ws.append(row_values)
-        wb.save(str(path))
+        wb.save(str(tmp))
         wb.close()
+        tmp.replace(path)
 
     def _rewrite_csv(self, path: Path, schema: SheetSchema) -> None:
-        """Rewrite all work orders to the CSV file from cache (header + rows)."""
+        """Rewrite all work orders to the CSV file from cache (header + rows).
+
+        Writes to a temp sibling then atomically replaces the target, so a
+        crash or error mid-write cannot truncate the existing file.
+        """
         columns = [m.column for m in schema.columns]
-        with path.open("w", newline="", encoding="utf-8") as f:
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=columns)
             writer.writeheader()
             for wo in self._wo_cache:
                 row_data = self._work_order_to_row(wo, schema)
                 writer.writerow({m.column: row_data.get(m.field, "") for m in schema.columns})
+        tmp.replace(path)
 
     # ------------------------------------------------------------------
     # Cache refresh (called by watcher)

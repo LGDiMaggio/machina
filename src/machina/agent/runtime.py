@@ -26,7 +26,7 @@ from machina.domain.citation import AgentResponse
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
-from machina.llm.tools import BUILTIN_TOOLS
+from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
@@ -35,10 +35,12 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Tools whose execution mutates external state. These are memoised per turn in
-# the LLM loop so a model that re-requests the same write does not trigger the
-# side effect twice. Read-only tools are intentionally excluded.
-_SIDE_EFFECTING_TOOLS: frozenset[str] = frozenset({"create_work_order", "execute_workflow"})
+# Tools whose execution mutates external state, memoised per turn in the LLM
+# loop so a model that re-requests the same write does not trigger the side
+# effect twice. Sourced from llm.tools.MUTATING_TOOLS (single source of truth,
+# co-located with the tool definitions) to prevent drift between the dispatch
+# table and this guard.
+_SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -805,10 +807,16 @@ class Agent:
                             "duplicate_tool_call_suppressed",
                             agent=self.name,
                             tool=func_name,
+                            operation=func_name,
                         )
                     else:
                         tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
-                        if memo_key is not None:
+                        # Only memoise successful results. A failed side effect
+                        # (e.g. a transient workflow error returned as
+                        # {"error": ...}) must not suppress a legitimate retry
+                        # of the same call later in the turn.
+                        is_error = isinstance(tool_result, dict) and "error" in tool_result
+                        if memo_key is not None and not is_error:
                             executed_side_effects[memo_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
 

@@ -231,6 +231,25 @@ class TestUpdateWorkOrder:
         assert result["metadata"]["sandbox"] is True
 
 
+class TestRuntimeSandboxPropagation:
+    """_runtime re-establishes sandbox mode in the per-request task context."""
+
+    @pytest.mark.asyncio
+    async def test_runtime_sets_sandbox_contextvar(self) -> None:
+        from machina.connectors.base import get_sandbox_mode, set_sandbox_mode
+        from machina.mcp.tools import _runtime
+
+        set_sandbox_mode(False)  # simulate a request task that did not inherit it
+        try:
+            runtime = MachinaRuntime(connectors={}, sandbox_mode=True)
+            ctx = _make_ctx(runtime)
+            assert get_sandbox_mode() is False
+            _runtime(ctx)
+            assert get_sandbox_mode() is True
+        finally:
+            set_sandbox_mode(False)
+
+
 class TestSendMessage:
     @pytest.mark.asyncio
     async def test_happy_path(self) -> None:

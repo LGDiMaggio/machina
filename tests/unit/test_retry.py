@@ -183,15 +183,67 @@ async def test_post_not_retried_on_network_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_still_retried_on_503() -> None:
-    """503 means the server did not process the request, so retrying a POST is
-    safe (no duplicate)."""
+async def test_post_not_retried_on_503() -> None:
+    """503 can fire after a POST was already processed (gateway timeout
+    post-success), so a non-idempotent POST is NOT retried on 503."""
     client = _SequenceClient([_FakeResponse(503), _FakeResponse(200)])
     resp = await request_with_retry(
         client, "POST", "https://example.com/work_orders", max_retries=3, base_backoff=0.01
     )
+    assert resp.status_code == 503
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_get_retried_on_503() -> None:
+    """503 on an idempotent GET is still retried."""
+    client = _SequenceClient([_FakeResponse(503), _FakeResponse(200)])
+    resp = await request_with_retry(
+        client, "GET", "https://example.com/x", max_retries=3, base_backoff=0.01
+    )
     assert resp.status_code == 200
     assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_post_retried_on_429() -> None:
+    """429 means the server rejected without processing, so retrying a POST is
+    safe even though POST is non-idempotent."""
+    client = _SequenceClient(
+        [_FakeResponse(429, headers={"Retry-After": "1"}), _FakeResponse(201)]
+    )
+    resp = await request_with_retry(
+        client, "POST", "https://example.com/work_orders", max_retries=3, base_backoff=0.01
+    )
+    assert resp.status_code == 201
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_patch_not_retried_on_network_error() -> None:
+    """PATCH is non-idempotent by spec, so it fast-fails on network errors."""
+    client = _SequenceClient([httpx.TimeoutException("boom"), _FakeResponse(200)])
+    with pytest.raises(httpx.TimeoutException):
+        await request_with_retry(
+            client, "PATCH", "https://example.com/x", max_retries=3, base_backoff=0.01
+        )
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_network_retry_explicit_opt_out_on_get() -> None:
+    """retry_on_network_error=False forces fast-fail even for an idempotent GET."""
+    client = _SequenceClient([httpx.ConnectError("boom"), _FakeResponse(200)])
+    with pytest.raises(httpx.ConnectError):
+        await request_with_retry(
+            client,
+            "GET",
+            "https://example.com/x",
+            max_retries=3,
+            base_backoff=0.01,
+            retry_on_network_error=False,
+        )
+    assert client.calls == 1
 
 
 @pytest.mark.asyncio

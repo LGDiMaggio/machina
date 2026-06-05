@@ -253,3 +253,10 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
     GET_MAINTENANCE_SCHEDULE_TOOL,
     EXECUTE_WORKFLOW_TOOL,
 ]
+
+# Tools whose execution mutates external state. The agent loop memoises these
+# per turn so a re-requested write does not fire its side effect twice. Declared
+# here, next to the tool definitions, so adding a new write tool above prompts
+# the author to classify it; a consistency test guards that every name here is
+# a real builtin tool. Read-only tools are intentionally excluded.
+MUTATING_TOOLS: frozenset[str] = frozenset({"create_work_order", "execute_workflow"})

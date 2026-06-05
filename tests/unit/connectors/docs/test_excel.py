@@ -556,6 +556,43 @@ class TestCsvSupport:
         assert len(reloaded) == 1
         assert reloaded[0].description == "new description"
 
+    @pytest.mark.asyncio
+    async def test_csv_rewrite_atomic_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the rewrite fails mid-way, the original file is left intact (the
+        rewrite writes a temp sibling then atomically replaces the target)."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="orig"
+            )
+        )
+        before = csv_file.read_text(encoding="utf-8-sig")
+
+        def _boom(wo: object, schema: object) -> dict[str, object]:
+            raise RuntimeError("disk full mid-rewrite")
+
+        monkeypatch.setattr(conn, "_work_order_to_row", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.update_work_order("WO-001", {"description": "new"})
+
+        # Original file unchanged — not truncated by the failed rewrite.
+        assert csv_file.read_text(encoding="utf-8-sig") == before
+
 
 class TestRefresh:
     @pytest.mark.asyncio

@@ -145,6 +145,14 @@ async def request_with_retry(
         if resp.status_code not in _RETRYABLE_STATUS or attempt >= max_retries:
             return resp
 
+        # 429 means the server rejected the request without processing it, so
+        # retrying is safe for any method. A 503, however, can fire *after* a
+        # non-idempotent request was already processed (e.g. a gateway timing
+        # out post-success), so retrying a POST/PATCH on 503 risks a duplicate
+        # — gate it on the same idempotency signal used for network errors.
+        if resp.status_code == 503 and not retry_on_network_error:
+            return resp
+
         retry_after = resp.headers.get("Retry-After", "").strip()
         if retry_after.isdigit():
             backoff = float(retry_after)

@@ -764,6 +764,32 @@ class _CountingCreateWoConnector(_FakeCreateWoConnector):
         return work_order
 
 
+class _FakeLLMTwoDistinctCreates:
+    """Requests create_work_order for two DIFFERENT assets, then returns text."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        assets = {1: "P-201", 2: "P-202"}
+        if self._call_count in assets:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": assets[self._call_count], "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._call_count:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Done.", "tool_calls": None}
+
+
 class TestLoopIdempotency:
     """A re-requested side-effecting tool must not execute twice in one turn."""
 
@@ -776,6 +802,48 @@ class TestLoopIdempotency:
         await agent.handle_message("crea un work order per P-201, sostituire cuscinetto")
         # The model asked twice with identical args; the side effect ran once.
         assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_args_not_suppressed(self) -> None:
+        """The memo must not over-suppress: distinct args run distinct writes."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoDistinctCreates()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message("crea due work order")
+        assert conn.create_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_error_result_not_memoised(self) -> None:
+        """A failed side effect must not suppress a legitimate retry in-turn."""
+        agent = Agent()
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        calls = {"n": 0}
+
+        async def fake_exec(name: str, args: dict[str, Any], *, chat_id: str = "default") -> Any:
+            calls["n"] += 1
+            return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
+
+        agent._execute_tool = fake_exec  # type: ignore[assignment]
+        await agent.handle_message("crea un work order per P-201")
+        # First call errored (not memoised) → second identical request re-runs.
+        assert calls["n"] == 2
+
+
+class TestMutatingToolsRegistry:
+    """The per-turn memo guard is sourced from the canonical tool registry."""
+
+    def test_mutating_tools_are_real_builtins(self) -> None:
+        from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
+
+        names = {t["function"]["name"] for t in BUILTIN_TOOLS}
+        assert names >= MUTATING_TOOLS, "MUTATING_TOOLS names must exist in BUILTIN_TOOLS"
+
+    def test_known_write_tools_classified(self) -> None:
+        from machina.agent.runtime import _SIDE_EFFECTING_TOOLS
+
+        assert "create_work_order" in _SIDE_EFFECTING_TOOLS
+        assert "execute_workflow" in _SIDE_EFFECTING_TOOLS
 
 
 class TestHandleMessage:

@@ -32,6 +32,15 @@ def auto_work_order_id(
     ``StrEnum`` formats to its value, so the agent runtime (which passes
     raw strings) and the factory (which passes enums) produce identical
     ids for equivalent content.
+
+    Args:
+        asset_id: Target asset identifier, mixed into the hash.
+        type: Maintenance type (``WorkOrderType`` enum or its string value).
+        priority: Urgency level (``Priority`` enum or its string value).
+        description: Free-text summary, mixed into the hash.
+
+    Returns:
+        A stable ``WO-AUTO-<sha8>`` identifier string.
     """
     digest = (
         hashlib.sha256(f"{asset_id}|{type}|{priority}|{description}".encode())

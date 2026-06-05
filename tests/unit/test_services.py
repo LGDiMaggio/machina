@@ -115,6 +115,15 @@ class TestWorkOrderFactory:
         b = factory.create(asset_id="P-202", description="Replace bearing")
         assert a.id != b.id
 
+    def test_auto_id_enum_string_equivalence(self) -> None:
+        """The agent runtime passes raw strings, the factory passes enums; both
+        must yield the same id so the CMMS dedups instead of duplicating."""
+        from machina.domain.services.work_order_factory import auto_work_order_id
+
+        with_enum = auto_work_order_id("P-201", WorkOrderType.CORRECTIVE, Priority.HIGH, "x")
+        with_str = auto_work_order_id("P-201", "corrective", "high", "x")
+        assert with_enum == with_str
+
 
 class TestMaintenanceScheduler:
     """Test due date calculation."""

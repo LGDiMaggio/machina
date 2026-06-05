@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from machina.connectors.base import set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.exceptions import (
     AssetNotFoundError,
@@ -30,7 +31,18 @@ logger = structlog.get_logger(__name__)
 
 
 def _runtime(ctx: Any) -> Any:
-    return ctx.request_context.lifespan_context["runtime"]
+    """Return the runtime and re-establish sandbox mode for this request.
+
+    The lifespan sets the ``_sandbox_mode`` contextvar once at startup, but
+    each MCP tool call runs in its own request task that does not inherit
+    that contextvar. Without re-setting it here, ``@sandbox_aware`` connector
+    writes would execute live even when the server was started in sandbox
+    mode. Every tool funnels through this helper, so this is the single
+    enforcement point.
+    """
+    runtime = ctx.request_context.lifespan_context["runtime"]
+    set_sandbox_mode(runtime.sandbox_mode)
+    return runtime
 
 
 # ---------------------------------------------------------------------------
