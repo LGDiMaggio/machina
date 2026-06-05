@@ -80,11 +80,20 @@ own payload, not an LLM hallucination.
 
 - The two runtime boundaries that build LLM-visible document payloads
   (`Agent._gather_context` and the `search_documents` tool result) pass every
-  source through `agent.prompts._safe_source`, which strips directory
+  source through `agent.prompts.safe_source`, which strips directory
   components from path-like strings and passes through opaque IDs and URLs.
-- `format_document_results` invokes `_safe_source` again as defence in depth,
+- `format_document_results` invokes `safe_source` again as defence in depth,
   so any future call site that forgets the sanitisation upstream is still
   protected at the prompt-formatting layer.
+- **Beyond the `source` field (v0.3.1):** absolute paths can also be embedded
+  in the chunk **content** text itself and in **workflow error / output
+  strings** that flow back to the LLM. `agent.prompts.safe_text` scrubs those
+  — it reduces identity-/infrastructure-revealing paths (user-home dirs like
+  `C:\Users\<user>\…`, `/home/<user>/…`, and UNC shares `\\host\share\…`) to
+  their basename, while deliberately preserving instructional system paths
+  (`/etc`, `/usr/bin`, `C:\Program Files`) so technical-manual fidelity is
+  kept. It is applied to chunk content in both runtime boundaries and to the
+  `execute_workflow` step `output_summary` / `error` payloads.
 - The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
   absolute file paths, directory structures, database schemas, or system
   architecture. This is a backstop, not the primary defence — the primary
@@ -93,6 +102,40 @@ own payload, not an LLM hallucination.
   trace files protected separately by `ActionTracer.redacting_dump_json`).
   See [Traces / Redaction](../observability/traces.md#redaction) for the
   parallel mechanism on the trace export side.
+
+### Sandbox Enforcement (Layer-Wide)
+
+**Trust level:** Sandbox mode is the safety boundary for evaluation, demos, and
+initial deployment — no real external side effect must execute while it is on.
+
+**Guarantee (v0.3.1):** sandbox enforcement is a *layer-wide invariant*, not a
+per-connector choice. Every external-mutation path is guarded by the
+`@sandbox_aware` decorator, which raises `SandboxViolationError` before the
+method body runs:
+
+- CMMS `create_work_order` / `update_work_order` (Generic, SAP PM, Maximo, UpKeep, SQL)
+- Comms `send_message` (Telegram, Slack, Email)
+- MQTT `publish`
+- Calendar `create_event` / `delete_event`
+
+`CliChannel.send_message` is intentionally **exempt** — it only prints to
+stdout and must keep working in sandbox so the agent can still reply.
+
+**MCP request tasks:** each MCP tool call runs in its own asyncio task that does
+**not** inherit the `_sandbox_mode` contextvar set once at server startup. Both
+the domain (`mcp.tools._runtime`) and vendor (`mcp.tools_vendor._runtime`)
+helpers re-establish it on every request, and the vendor tools read
+`get_sandbox_mode()` only *after* that — otherwise a raw vendor write (e.g. the
+Maximo OData PATCH, which has no decorator backstop) would execute live in
+sandbox mode.
+
+**Companion invariant — write integrity:** the same write paths are also
+**idempotent**. Auto-generated work-order IDs are a deterministic content hash
+(`auto_work_order_id`), the agent loop memoises side-effecting tools per turn,
+and HTTP retries are method-aware (POST/PATCH are *not* retried on network
+errors or 503, since a timeout-after-success would duplicate the resource).
+Together these prevent both unintended live writes (sandbox) and accidental
+duplicate writes (idempotency).
 
 ### Trace JSONL Files
 

@@ -7,6 +7,15 @@ repo_url: https://github.com/LGDiMaggio/machina
 repo_name: LGDiMaggio/machina
 edit_uri: edit/main/docs/
 
+# Local-only planning artifacts (gitignored) live under docs/ but are not part
+# of the published site. Excluding them keeps `mkdocs build --strict` runnable
+# locally — it would otherwise abort on not-in-nav / autoref warnings from
+# files that never exist in CI.
+exclude_docs: |
+  brainstorms/
+  plans/
+  solutions/
+
 theme:
   name: material
   logo: assets/machina-logo.svg
