@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate that the public API surface is mentioned in the published docs.
+"""Validate docs currency: public-API coverage + migration-guide version coverage.
+
+Two presence gates (not content-correctness checks):
+  1. Every public symbol is mentioned somewhere in the published docs.
+  2. The latest released CHANGELOG version is mentioned in docs/migration/.
 
 The MkDocs ``nav:`` is maintained by hand and the readthedocs site only
 renders pages it links to, so a new connector or top-level export can ship
@@ -37,9 +41,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
 DOCS_DIR = REPO_ROOT / "docs"
 MKDOCS = REPO_ROOT / "mkdocs.yml"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+MIGRATION_DIR = DOCS_DIR / "migration"
 
 # Gitignored, local-only planning trees — not part of the published site.
 _LOCAL_DOCS = {"brainstorms", "plans", "solutions"}
+
+# First released version heading in CHANGELOG.md, e.g. "## [0.3.1] - 2026-06-05".
+# Skips "## [Unreleased]" because the X.Y.Z group only matches real versions.
+_CHANGELOG_VERSION_RE = re.compile(r"^##\s*\[(\d+\.\d+\.\d+)\]", re.MULTILINE)
 
 # Protocol / abstract base connectors — not user-facing connector pages.
 # They are covered conceptually in docs/connectors/custom.md.
@@ -83,8 +93,34 @@ def find_undocumented() -> list[str]:
     return sorted(n for n in names if n not in blob)
 
 
+def latest_changelog_version() -> str | None:
+    """Most recent released version in CHANGELOG.md (the first ``[X.Y.Z]``)."""
+    if not CHANGELOG.exists():
+        return None
+    match = _CHANGELOG_VERSION_RE.search(CHANGELOG.read_text(encoding="utf-8"))
+    return match.group(1) if match else None
+
+
+def migration_version_gap() -> str | None:
+    """Return the latest released version if it is *not* mentioned in any
+    migration guide, else ``None``.
+
+    Enforces version *coverage* of the migration docs — when you cut a release,
+    the migration guide must at least acknowledge that version. It does not (and
+    cannot) check that the prose is correct; that stays an authoring judgement
+    (see the write-docs / sync-docs skills).
+    """
+    version = latest_changelog_version()
+    if version is None or not MIGRATION_DIR.exists():
+        return None
+    blob = "\n".join(
+        p.read_text(encoding="utf-8", errors="ignore") for p in MIGRATION_DIR.rglob("*.md")
+    )
+    return None if version in blob else version
+
+
 def test_public_api_is_documented() -> None:
-    """pytest entry point."""
+    """pytest entry point — public surface coverage."""
     missing = find_undocumented()
     assert not missing, (
         "Public API/connectors with no mention in the published docs "
@@ -92,9 +128,23 @@ def test_public_api_is_documented() -> None:
     )
 
 
+def test_latest_version_in_migration_guide() -> None:
+    """pytest entry point — migration-guide version coverage."""
+    gap = migration_version_gap()
+    assert gap is None, (
+        f"CHANGELOG's latest release {gap!r} is not mentioned in any "
+        "docs/migration/*.md — add it (at least a 'v{prev} -> v{new}' note) "
+        "before release. Prose correctness is your call; this only enforces "
+        "that the version is acknowledged."
+    )
+
+
 def main() -> int:
+    failed = False
+
     missing = find_undocumented()
     if missing:
+        failed = True
         sys.stderr.write(
             "Undocumented public surface — every public export and concrete "
             "connector must be mentioned in docs/ or mkdocs.yml.\n"
@@ -102,9 +152,25 @@ def main() -> int:
         )
         for name in missing:
             sys.stderr.write(f"  - {name}\n")
+
+    gap = migration_version_gap()
+    if gap is not None:
+        failed = True
+        sys.stderr.write(
+            f"Migration guide is stale: CHANGELOG's latest release {gap!r} is "
+            "not mentioned in docs/migration/. Add at least a version note "
+            "before release.\n"
+        )
+
+    if failed:
         return 1
+
     total = len(_public_api_names() | _connector_class_names())
-    print(f"OK: all {total} public names are mentioned in the docs.")
+    version = latest_changelog_version() or "?"
+    print(
+        f"OK: all {total} public names documented; "
+        f"migration guide mentions latest release {version}."
+    )
     return 0
 
 
