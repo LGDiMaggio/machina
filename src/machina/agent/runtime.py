@@ -19,7 +19,12 @@ import structlog
 
 from machina.agent.citations import parse_response
 from machina.agent.entity_resolver import EntityResolver
-from machina.agent.prompts import build_context_message, build_system_prompt, safe_source
+from machina.agent.prompts import (
+    build_context_message,
+    build_system_prompt,
+    safe_source,
+    safe_text,
+)
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.domain.citation import AgentResponse
@@ -640,11 +645,13 @@ class Agent:
                     operation="search_documents",
                 ):
                     results = await _conn.search(text, asset_id=asset.id)
-                    # Sanitise source at the LLM boundary so absolute file
-                    # paths never reach the prompt context.  See safe_source.
+                    # Sanitise source and content at the LLM boundary so
+                    # absolute file paths never reach the prompt context —
+                    # safe_source for the metadata field, safe_text for paths
+                    # embedded in the chunk body. See prompts.safe_source/safe_text.
                     return [
                         {
-                            "content": r.content,
+                            "content": safe_text(r.content),
                             "source": safe_source(r.source),
                             "page": r.page,
                             "chunk_id": getattr(r, "chunk_id", ""),
@@ -883,7 +890,7 @@ class Agent:
                 # from the v0.3 RAG upgrade and feed citation validation.
                 serialized = [
                     {
-                        "content": r.content,
+                        "content": safe_text(r.content),
                         "source": safe_source(r.source),
                         "page": r.page,
                         "chunk_id": getattr(r, "chunk_id", ""),
@@ -1072,8 +1079,10 @@ class Agent:
                     {
                         "step": sr.step_name,
                         "success": sr.success,
-                        "output_summary": str(sr.output)[:500] if sr.output else None,
-                        "error": str(sr.error) if sr.error else None,
+                        # Scrub user-home / UNC paths from step output and error
+                        # text before it enters the LLM message history.
+                        "output_summary": safe_text(str(sr.output)[:500]) if sr.output else None,
+                        "error": safe_text(str(sr.error)) if sr.error else None,
                     }
                     for sr in result.step_results
                 ],
@@ -1086,7 +1095,7 @@ class Agent:
                 workflow=workflow_name,
                 error=str(exc),
             )
-            return {"error": str(exc), "workflow_name": workflow_name}
+            return {"error": safe_text(str(exc)), "workflow_name": workflow_name}
 
     # ------------------------------------------------------------------
     # Helpers
