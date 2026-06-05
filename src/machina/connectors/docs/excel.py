@@ -149,6 +149,31 @@ _TYPE_COERCERS: dict[str, Any] = {
 }
 
 
+# Leading characters a spreadsheet (Excel/LibreOffice) interprets as the start
+# of a formula. A cell value beginning with one of these is a CSV/formula-
+# injection vector when the exported file is opened in a spreadsheet app.
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@")
+
+
+def _guard_formula(value: str) -> str:
+    """Neutralize a leading formula trigger by prefixing an apostrophe.
+
+    The apostrophe makes spreadsheets treat the cell as text (and stops
+    openpyxl from storing it as a real formula). Reversed by
+    :func:`_strip_formula_guard` on read so values round-trip unchanged.
+    """
+    if value[:1] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
+def _strip_formula_guard(value: str) -> str:
+    """Reverse :func:`_guard_formula` so guarded values read back intact."""
+    if value[:1] == "'" and value[1:2] in _FORMULA_PREFIXES:
+        return value[1:]
+    return value
+
+
 def _coerce_cell(value: Any, mapping: ColumnMapping) -> Any:
     """Coerce a single cell value according to its column mapping."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
@@ -156,8 +181,12 @@ def _coerce_cell(value: Any, mapping: ColumnMapping) -> Any:
             return None  # caller detects and flags the row
         return mapping.default
     if mapping.coerce and mapping.coerce in COERCER_REGISTRY:
-        return COERCER_REGISTRY[mapping.coerce](value)
-    return _TYPE_COERCERS.get(mapping.type, str)(value)
+        result = COERCER_REGISTRY[mapping.coerce](value)
+    else:
+        result = _TYPE_COERCERS.get(mapping.type, str)(value)
+    if isinstance(result, str):
+        result = _strip_formula_guard(result)
+    return result
 
 
 def _require_openpyxl() -> Any:
@@ -609,5 +638,7 @@ class ExcelCsvConnector:
                 value = value.isoformat()
             elif isinstance(value, StrEnum):
                 value = value.value
+            if isinstance(value, str):
+                value = _guard_formula(value)
             row[mapping.field] = value
         return row

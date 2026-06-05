@@ -593,6 +593,90 @@ class TestCsvSupport:
         # Original file unchanged — not truncated by the failed rewrite.
         assert csv_file.read_text(encoding="utf-8-sig") == before
 
+    @pytest.mark.asyncio
+    async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """A field starting with a formula trigger is written with a leading
+        apostrophe (so a spreadsheet treats it as text), and round-trips back
+        to its original value through a fresh connector read."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=SUM(A1:A9)+cmd",
+            )
+        )
+        # On disk the trigger is neutralized with a leading apostrophe.
+        on_disk = csv_file.read_text(encoding="utf-8-sig")
+        assert "'=SUM(A1:A9)+cmd" in on_disk
+        assert ",=SUM" not in on_disk  # raw formula must not be present unguarded
+
+        # A fresh connector reads back the original value (clean round-trip).
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=SUM(A1:A9)+cmd"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """xlsx write neutralizes formula triggers (also stops openpyxl from
+        storing the value as a real formula) and round-trips."""
+        import openpyxl
+
+        xlsx_file = tmp_path / "odl.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "OdL"
+        ws.append(["ID", "Codice Asset", "Descrizione"])
+        wb.save(str(xlsx_file))
+        wb.close()
+        schema = SheetSchema(
+            path=str(xlsx_file),
+            sheet="OdL",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=HYPERLINK(0)",
+            )
+        )
+        wb2 = openpyxl.load_workbook(str(xlsx_file))
+        cell = wb2["OdL"].cell(row=2, column=3)
+        wb2.close()
+        # Stored as a text string (leading apostrophe), not a formula.
+        assert cell.data_type != "f"
+        assert cell.value == "'=HYPERLINK(0)"
+
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=HYPERLINK(0)"
+
 
 class TestRefresh:
     @pytest.mark.asyncio
