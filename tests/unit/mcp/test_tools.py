@@ -231,6 +231,34 @@ class TestUpdateWorkOrder:
         assert result["metadata"]["sandbox"] is True
 
 
+class TestSendMessage:
+    @pytest.mark.asyncio
+    async def test_happy_path(self) -> None:
+        from machina.mcp.tools import machina_send_message
+
+        conn = MagicMock()
+        conn.capabilities = frozenset({Capability.SEND_MESSAGE})
+        conn.send_message = AsyncMock(return_value=None)
+        runtime = MachinaRuntime(connectors={"comms": conn})
+        result = await machina_send_message(_make_ctx(runtime), channel="#ops", text="hi")
+        assert result["status"] == "sent"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_returns_blocked(self) -> None:
+        """When the comms connector raises SandboxViolationError, the tool must
+        report it as blocked rather than letting a real message go out. Before
+        the comms send methods were @sandbox_aware, this catch was dead code."""
+        from machina.mcp.tools import machina_send_message
+
+        conn = MagicMock()
+        conn.capabilities = frozenset({Capability.SEND_MESSAGE})
+        conn.send_message = AsyncMock(side_effect=SandboxViolationError("blocked"))
+        runtime = MachinaRuntime(connectors={"comms": conn})
+        result = await machina_send_message(_make_ctx(runtime), channel="#ops", text="hi")
+        assert result["status"] == "blocked"
+        assert result["metadata"]["sandbox"] is True
+
+
 class TestListSpareParts:
     @pytest.mark.asyncio
     async def test_returns_parts(self) -> None:

@@ -22,7 +22,7 @@ from typing import Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
@@ -353,6 +353,7 @@ class MqttConnector:
             subscription_id=subscription.id,
         )
 
+    @sandbox_aware
     async def publish(self, topic: str, payload: str | bytes, *, qos: int = 0) -> None:
         """Publish a message to an MQTT topic.
 

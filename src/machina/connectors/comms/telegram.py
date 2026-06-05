@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
@@ -94,6 +94,7 @@ class TelegramConnector:
             return ConnectorHealth(status=ConnectorStatus.UNHEALTHY, message="Not connected")
         return ConnectorHealth(status=ConnectorStatus.HEALTHY, message="Connected")
 
+    @sandbox_aware
     async def send_message(self, chat_id: str | int, text: str) -> None:
         """Send a message to a Telegram chat.
 
@@ -103,6 +104,7 @@ class TelegramConnector:
 
         Raises:
             ConnectorError: If not connected or application not initialised.
+            SandboxViolationError: If sandbox mode is active.
         """
         self._ensure_connected()
         if self._application is None:

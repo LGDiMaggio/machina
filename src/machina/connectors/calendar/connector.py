@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.domain.calendar import CalendarEvent, EventType
 from machina.exceptions import ConnectorError
@@ -204,6 +204,7 @@ class CalendarConnector:
 
         return list(events)
 
+    @sandbox_aware
     async def create_event(self, event: CalendarEvent, calendar_id: str = "") -> CalendarEvent:
         """Create a calendar event.
 
@@ -221,6 +222,7 @@ class CalendarConnector:
         result: CalendarEvent = await self._backend.create_event(calendar_id, event)
         return result
 
+    @sandbox_aware
     async def delete_event(self, event_id: str, calendar_id: str = "") -> None:
         """Delete a calendar event.
 

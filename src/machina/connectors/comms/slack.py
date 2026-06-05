@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 import structlog
 
-from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
@@ -101,6 +101,7 @@ class SlackConnector:
             return ConnectorHealth(status=ConnectorStatus.UNHEALTHY, message="Not connected")
         return ConnectorHealth(status=ConnectorStatus.HEALTHY, message="Connected")
 
+    @sandbox_aware
     async def send_message(self, channel: str, text: str) -> None:
         """Send a message to a Slack channel or DM.
 
