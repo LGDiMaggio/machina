@@ -19,7 +19,9 @@ from machina.connectors.docs.excel import (
     _datetime_parse,
     _excel_serial_to_date,
     _float_it,
+    _guard_formula,
     _int_it,
+    _strip_formula_guard,
 )
 from machina.connectors.docs.excel_schema import (
     ColumnMapping,
@@ -712,3 +714,35 @@ class TestRefresh:
 
         conn.refresh()
         assert len(await conn.read_assets()) == 2
+
+
+class TestFormulaGuardLossless:
+    """_guard_formula / _strip_formula_guard must be a true inverse for every
+    value class, including ones that already start with an apostrophe + trigger
+    (the corruption case that the naive guard turned "'=approved" into
+    "=approved" on read)."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "=SUM(A1:A2)",
+            "+1",
+            "-1",
+            "@cmd",
+            "'=approved",  # literal apostrophe + trigger — must NOT be corrupted
+            "''=x",  # double apostrophe + trigger
+            "'note",  # apostrophe + non-trigger — left untouched
+            "'",  # lone apostrophe
+            "plain text",
+            "",
+        ],
+    )
+    def test_guard_strip_roundtrip(self, value: str) -> None:
+        assert _strip_formula_guard(_guard_formula(value)) == value
+
+    def test_trigger_is_neutralized_on_write(self) -> None:
+        assert _guard_formula("=SUM(A1)") == "'=SUM(A1)"
+
+    def test_ambiguous_literal_is_escaped_on_write(self) -> None:
+        # The on-disk form gains an extra apostrophe so the strip is unambiguous.
+        assert _guard_formula("'=approved") == "''=approved"

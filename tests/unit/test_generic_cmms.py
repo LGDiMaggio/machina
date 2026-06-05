@@ -340,6 +340,35 @@ class TestGenericCmmsConnectorLocal:
                 )
             )
         assert wof.read_text(encoding="utf-8") == before  # not truncated
+        # In-memory list is rolled back too — no memory/disk divergence and the
+        # idempotency guard will not return a WO that was never durably stored.
+        assert all(w.id != "WO-CRASH" for w in await conn.read_work_orders())
+
+    @pytest.mark.asyncio
+    async def test_update_rolls_back_in_memory_on_persist_failure(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed persist during update restores the in-memory work order to
+        its pre-update state (no divergence from the on-disk version)."""
+        import machina.connectors.cmms.generic as gmod
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        original = await conn.get_work_order("WO-001")
+        assert original is not None
+        original_status = original.status
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(gmod.json, "dumps", _boom)
+        with pytest.raises(RuntimeError):
+            await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        # In-memory object reverted to its pre-update status.
+        reverted = await conn.get_work_order("WO-001")
+        assert reverted is not None
+        assert reverted.status == original_status
 
     @pytest.mark.asyncio
     async def test_read_spare_parts(self, sample_data_dir: Path) -> None:

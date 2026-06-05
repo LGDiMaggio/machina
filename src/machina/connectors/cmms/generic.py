@@ -325,7 +325,16 @@ class GenericCmmsConnector:
                     )
                     return existing
                 self._work_orders.append(work_order)
-                await self._persist_work_orders()
+                try:
+                    await self._persist_work_orders()
+                except Exception:
+                    # Persist failed (disk full, serialization error): roll the
+                    # in-memory append back so the list stays consistent with
+                    # disk. Otherwise the WO lives in memory but not on disk —
+                    # lost on restart, and the idempotency guard above would
+                    # return it as "existing" for a record never durably stored.
+                    self._work_orders.pop()
+                    raise
             logger.info(
                 "work_order_created",
                 connector="GenericCmmsConnector",
@@ -399,13 +408,27 @@ class GenericCmmsConnector:
         self._ensure_connected()
         if self._data_dir:
             async with self._local_write_lock:
+                # Snapshot the pre-update state so a persist failure can be
+                # rolled back — _local_update_work_order mutates in place, and
+                # without rollback the in-memory object would diverge from disk
+                # (new state in memory, old state on disk reloaded at restart).
+                idx = next(
+                    (i for i, wo in enumerate(self._work_orders) if wo.id == work_order_id),
+                    None,
+                )
+                before = self._work_orders[idx].model_copy(deep=True) if idx is not None else None
                 updated = self._local_update_work_order(
                     work_order_id,
                     status=status,
                     assigned_to=assigned_to,
                     description=description,
                 )
-                await self._persist_work_orders()
+                try:
+                    await self._persist_work_orders()
+                except Exception:
+                    if idx is not None and before is not None:
+                        self._work_orders[idx] = before
+                    raise
             return updated
         return await self._rest_update_work_order(
             work_order_id,
@@ -498,14 +521,20 @@ class GenericCmmsConnector:
         path = self._data_dir / "work_orders.json"
         payload = [wo.model_dump(mode="json") for wo in self._work_orders]
         # Write to a temp sibling then atomically replace, so a crash mid-write
-        # cannot truncate work_orders.json and break the next connect().
+        # cannot truncate work_orders.json and break the next connect(). Clean up
+        # the temp file if the write or replace fails (e.g. a Windows replace on
+        # an open handle) so it doesn't linger and confuse the next write.
         tmp = path.with_name(path.name + ".tmp")
-        await asyncio.to_thread(
-            tmp.write_text,
-            json.dumps(payload, indent=2, default=str),
-            encoding="utf-8",
-        )
-        await asyncio.to_thread(tmp.replace, path)
+        try:
+            await asyncio.to_thread(
+                tmp.write_text,
+                json.dumps(payload, indent=2, default=str),
+                encoding="utf-8",
+            )
+            await asyncio.to_thread(tmp.replace, path)
+        except Exception:
+            await asyncio.to_thread(tmp.unlink, True)
+            raise
 
     # ------------------------------------------------------------------
     # Internal: local data loading
@@ -545,8 +574,17 @@ class GenericCmmsConnector:
                     try:
                         self._work_orders.append(WorkOrder.model_validate(item))
                         continue
-                    except ValidationError:
-                        pass
+                    except ValidationError as exc:
+                        # Native-format file failed strict validation — a sign of
+                        # corruption or a hand-edit. Log (don't swallow silently)
+                        # then degrade to the tolerant parser below.
+                        logger.debug(
+                            "work_order_native_parse_fallback",
+                            connector="GenericCmmsConnector",
+                            operation="_load_local_data",
+                            work_order_id=item.get("id", "?") if isinstance(item, dict) else "?",
+                            error=str(exc),
+                        )
                 mapped = self._apply_mapping("work_orders", item)
                 self._work_orders.append(_parse_work_order(mapped))
             logger.debug(

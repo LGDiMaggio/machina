@@ -65,3 +65,47 @@ class TestMaximoRawUpdateNoConnector:
         ctx.request_context.lifespan_context = {"runtime": runtime}
         result = await maximo_raw_attribute_update(ctx, resource_type="mxwo", resource_id="WO-1")
         assert "error" in result
+
+
+class TestVendorToolsSandboxPropagation:
+    """A sandbox-mode server must block raw vendor writes even when the
+    per-request task did not inherit the sandbox contextvar. Regression:
+    the vendor tools read get_sandbox_mode() before _runtime() re-established
+    it, and the Maximo raw httpx PATCH has no @sandbox_aware backstop — so the
+    write executed live in sandbox mode."""
+
+    @pytest.mark.asyncio
+    async def test_maximo_raw_blocked_in_sandbox(self) -> None:
+        from machina.connectors.base import set_sandbox_mode
+        from machina.mcp.tools_vendor import maximo_raw_attribute_update
+        from machina.runtime import MachinaRuntime
+
+        set_sandbox_mode(False)  # simulate a request task that did not inherit it
+        try:
+            runtime = MachinaRuntime(sandbox_mode=True)
+            ctx = MagicMock()
+            ctx.request_context.lifespan_context = {"runtime": runtime}
+            result = await maximo_raw_attribute_update(
+                ctx, resource_type="mxwo", resource_id="WO-1", attributes={"status": "x"}
+            )
+            assert result["metadata"]["sandbox"] is True
+        finally:
+            set_sandbox_mode(False)
+
+    @pytest.mark.asyncio
+    async def test_sap_raw_blocked_in_sandbox(self) -> None:
+        from machina.connectors.base import set_sandbox_mode
+        from machina.mcp.tools_vendor import sap_pm_raw_iw38_notification
+        from machina.runtime import MachinaRuntime
+
+        set_sandbox_mode(False)
+        try:
+            runtime = MachinaRuntime(sandbox_mode=True)
+            ctx = MagicMock()
+            ctx.request_context.lifespan_context = {"runtime": runtime}
+            result = await sap_pm_raw_iw38_notification(
+                ctx, equipment_id="EQ-1", description="test"
+            )
+            assert result["metadata"]["sandbox"] is True
+        finally:
+            set_sandbox_mode(False)

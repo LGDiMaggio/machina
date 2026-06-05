@@ -14,7 +14,7 @@ from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 
 def auto_work_order_id(
     asset_id: str = "",
-    type: WorkOrderType | str = WorkOrderType.CORRECTIVE,
+    wo_type: WorkOrderType | str = WorkOrderType.CORRECTIVE,
     priority: Priority | str = Priority.MEDIUM,
     description: str = "",
 ) -> str:
@@ -28,14 +28,14 @@ def auto_work_order_id(
     loop — collapses to a single id the CMMS can dedup, instead of minting
     a fresh id each time and accumulating duplicates.
 
-    ``type``/``priority`` accept either the enum or its string value;
+    ``wo_type``/``priority`` accept either the enum or its string value;
     ``StrEnum`` formats to its value, so the agent runtime (which passes
     raw strings) and the factory (which passes enums) produce identical
     ids for equivalent content.
 
     Args:
         asset_id: Target asset identifier, mixed into the hash.
-        type: Maintenance type (``WorkOrderType`` enum or its string value).
+        wo_type: Maintenance type (``WorkOrderType`` enum or its string value).
         priority: Urgency level (``Priority`` enum or its string value).
         description: Free-text summary, mixed into the hash.
 
@@ -43,7 +43,7 @@ def auto_work_order_id(
         A stable ``WO-AUTO-<sha8>`` identifier string.
     """
     digest = (
-        hashlib.sha256(f"{asset_id}|{type}|{priority}|{description}".encode())
+        hashlib.sha256(f"{asset_id}|{wo_type}|{priority}|{description}".encode())
         .hexdigest()[:8]
         .upper()
     )
