@@ -277,6 +277,27 @@ class TestSendMessage:
         assert result["status"] == "blocked"
         assert result["metadata"]["sandbox"] is True
 
+    @pytest.mark.asyncio
+    async def test_send_works_with_non_channel_first_param(self) -> None:
+        """Telegram/Email name their first param chat_id/to, not channel. The
+        tool must call send_message positionally so it binds across connectors
+        instead of raising TypeError on a channel= keyword."""
+        from machina.mcp.tools import machina_send_message
+
+        captured: dict[str, str] = {}
+
+        class _TelegramLikeConn:
+            capabilities = frozenset({Capability.SEND_MESSAGE})
+
+            async def send_message(self, chat_id: str, text: str) -> None:
+                captured["chat_id"] = chat_id
+                captured["text"] = text
+
+        runtime = MachinaRuntime(connectors={"comms": _TelegramLikeConn()})
+        result = await machina_send_message(_make_ctx(runtime), channel="12345", text="hi")
+        assert result["status"] == "sent"
+        assert captured == {"chat_id": "12345", "text": "hi"}
+
 
 class TestListSpareParts:
     @pytest.mark.asyncio

@@ -591,7 +591,10 @@ async def machina_send_message(
         return {"error": "No communication connector configured (Telegram, Slack, or Email)"}
     _, comms = matches[0]
     try:
-        await comms.send_message(channel=channel, text=text)
+        # Call positionally: connectors name their first param differently
+        # (Slack: channel, Telegram: chat_id, Email: to). A channel= keyword
+        # would TypeError on Telegram/Email.
+        await comms.send_message(channel, text)
         return {"status": "sent", "channel": channel}
     except SandboxViolationError:
         logger.info("sandbox_write_blocked", operation="send_message", channel=channel)
