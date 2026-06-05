@@ -73,6 +73,21 @@ settings:
 When `sandbox: true`, write operations (`CREATE_WORK_ORDER`, etc.) are logged
 but the file is not modified. The trace entry records what would have been written.
 
+## Durable & Safe Writes
+
+When `write_mode` is set, updates are persisted by **rewriting the file from
+cache to a temp sibling and atomically replacing** the target — both for
+`.xlsx` and `.csv` — so a crash mid-write cannot truncate your data (and CSV
+updates are no longer cache-only).
+
+**CSV/Excel formula-injection is neutralised on write.** A cell value that
+starts with a spreadsheet formula trigger (`=`, `+`, `-`, `@`) is written with
+a leading apostrophe so a spreadsheet app treats it as text rather than
+executing it when the exported file is opened. The guard is reversed on read,
+so values round-trip unchanged (a literal `'=value` is preserved, not
+corrupted). This protects downstream users who open Machina-written files in
+Excel/LibreOffice from a classic CSV-injection vector.
+
 ## Use Cases
 
 - **Quick demos:** Load sample data from Excel without setting up a CMMS
