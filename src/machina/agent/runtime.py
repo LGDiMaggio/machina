@@ -179,8 +179,16 @@ class Agent:
 
         # Per-turn chunk registry (chat_id -> chunk_id -> {source, page, content}).
         # Populated by _gather_context and the search_documents tool; consumed by
-        # citation parsing at the end of each turn.
+        # citation parsing at the end of each turn for the source/page fallback.
         self._turn_chunks: dict[str, dict[str, dict[str, Any]]] = {}
+
+        # Per-turn ordered index map (chat_id -> [chunk_id by display position]).
+        # Element ``i`` is the chunk the model saw as ``[i + 1]``; an empty
+        # string marks a displayed-but-unregistered slot so the visible index
+        # stays aligned with what the model saw. Built from the SAME
+        # ``enumerate(results[:5], 1)`` the prompt rendering uses — never from
+        # the filtered registry, which would drift off-by-k.
+        self._turn_ordered: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -484,8 +492,9 @@ class Agent:
             message_preview=text[:100],
         )
 
-        # Reset the per-turn chunk registry.
+        # Reset the per-turn chunk registry and ordered index map.
         self._turn_chunks[chat_id] = {}
+        self._turn_ordered[chat_id] = []
 
         try:
             # 1. Entity resolution
@@ -508,8 +517,14 @@ class Agent:
                 )
                 raise LLMError(f"LLM call failed: {exc}") from exc
 
-            # 5. Parse citations against the per-turn chunk registry.
-            rendered, citations = parse_response(raw_response, self._turn_chunks.get(chat_id, {}))
+            # 5. Parse citations against the per-turn chunk registry. The
+            #    ordered index map resolves visible ``[n]`` markers; the
+            #    registry backs the source/page fallback.
+            rendered, citations = parse_response(
+                raw_response,
+                self._turn_chunks.get(chat_id, {}),
+                self._turn_ordered.get(chat_id, []),
+            )
 
             # 6. Update history (use the rendered text without citation block).
             self._add_to_history(chat_id, "user", text)
@@ -519,6 +534,7 @@ class Agent:
             # long-lived agent does not accumulate orphan slots from failed
             # turns.
             self._turn_chunks.pop(chat_id, None)
+            self._turn_ordered.pop(chat_id, None)
 
         logger.info(
             "response_generated",
@@ -684,10 +700,27 @@ class Agent:
         return context
 
     def _register_document_results(self, chat_id: str, results: list[dict[str, Any]]) -> None:
-        """Add retrieved chunks to the per-turn registry for citation parsing."""
+        """Register retrieved chunks for citation parsing.
+
+        Builds two per-turn structures from the **same** ``results[:5]``
+        enumeration the prompt renders:
+
+        * ``self._turn_chunks[chat_id]`` — ``chunk_id`` → metadata, backing
+          the source/page citation fallback (skips empty ``chunk_id`` rows).
+        * ``self._turn_ordered[chat_id]`` — ``chunk_id`` by display position,
+          so the visible ``[n]`` the model saw resolves directly. A
+          displayed-but-unregistered row (empty ``chunk_id``) is appended as
+          an empty string so later indices stay aligned with the prompt and
+          do not drift off-by-k.
+
+        Truncation to ``[:5]`` mirrors :func:`format_document_results`, which
+        only renders the first five results.
+        """
         registry = self._turn_chunks.setdefault(chat_id, {})
-        for r in results:
+        ordered = self._turn_ordered.setdefault(chat_id, [])
+        for r in results[:5]:
             chunk_id = r.get("chunk_id") or ""
+            ordered.append(chunk_id)
             if not chunk_id:
                 continue
             registry[chunk_id] = {
@@ -888,8 +921,17 @@ class Agent:
                 # serialised straight into the conversation history.  The
                 # citation fields (chunk_id / section_title / is_table) come
                 # from the v0.3 RAG upgrade and feed citation validation.
+                # Surface a visible ``citation_index`` on the tool result so
+                # the model can cite tool-retrieved chunks by ``[n]`` — the
+                # same index contract the pre-fetch context uses. The index
+                # is offset by any chunks already displayed this turn (e.g.
+                # from pre-fetch context) so it matches the ordered map
+                # _register_document_results builds. Only the first five are
+                # indexed, mirroring format_document_results' ``[:5]``.
+                offset = len(self._turn_ordered.get(chat_id, []))
                 serialized = [
                     {
+                        "citation_index": offset + i,
                         "content": safe_text(r.content),
                         "source": safe_source(r.source),
                         "page": r.page,
@@ -897,7 +939,7 @@ class Agent:
                         "section_title": getattr(r, "section_title", ""),
                         "is_table": getattr(r, "is_table", False),
                     }
-                    for r in results
+                    for i, r in enumerate(results[:5], 1)
                 ]
                 # Register tool-retrieved chunks against the in-flight chat
                 # only, so concurrent chats do not see each other's chunks

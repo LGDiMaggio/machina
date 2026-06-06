@@ -967,6 +967,173 @@ class TestHandleMessageFullCitations:
         assert chunk_ids == {"fake-chunk-1"}  # ghost-chunk dropped
 
 
+class TestIndexCitationContract:
+    """Index-based citation contract end-to-end (U1)."""
+
+    @pytest.mark.asyncio
+    async def test_index_citation_resolves_end_to_end(self) -> None:
+        """AE5: the model cites by visible ``[1]`` and it resolves."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()  # one chunk, chunk_id='fake-chunk-1'
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        # The model never sees the chunk_id — it cites by index only.
+        llm_response = "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Tell me about P-201 bearing")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+        assert response.citations[0].source == "manual.txt"
+        assert "[1]" in response.text
+        assert "<citations>" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_bare_source_fallback_end_to_end(self) -> None:
+        """AE6: the model cites a bare filename → fallback resolves it."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = "Procedure [manual.txt].\n\n<citations>\nmanual.txt\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201 bearing")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_index_dropped_end_to_end(self) -> None:
+        """Regression guard: an out-of-range index with no fallback drops."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = "Body.\n\n<citations>\n[9]\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201")
+        assert response.citations == []
+
+
+class TestRegisterDocumentResults:
+    """Ordered index map vs. filtered chunk registry (U1 off-by-k guard)."""
+
+    def test_ordered_map_includes_empty_chunk_id_slots(self) -> None:
+        """The display index must not drift when an earlier chunk_id is empty.
+
+        ``_register_document_results`` skips empty chunk_ids in the registry
+        (the fallback map) but MUST keep them as positional placeholders in
+        the ordered map, so the visible ``[2]`` resolves to the second
+        *displayed* chunk, not the first *registered* one.
+        """
+        agent = Agent()
+        results = [
+            {"chunk_id": "", "source": "a.md", "page": 0, "content": "x"},
+            {"chunk_id": "real-2", "source": "b.md", "page": 0, "content": "y"},
+        ]
+        agent._register_document_results("chat-z", results)
+
+        ordered = agent._turn_ordered["chat-z"]
+        assert ordered == ["", "real-2"]
+        # [2] (display position) resolves to real-2.
+        assert ordered[1] == "real-2"
+        # The filtered registry skipped the empty-chunk_id row.
+        assert "real-2" in agent._turn_chunks["chat-z"]
+        assert "" not in agent._turn_chunks["chat-z"]
+
+    def test_ordered_map_truncates_to_five(self) -> None:
+        """Mirrors format_document_results' ``[:5]`` display cap."""
+        agent = Agent()
+        results = [
+            {"chunk_id": f"c{i}", "source": f"{i}.md", "page": 0, "content": "x"} for i in range(8)
+        ]
+        agent._register_document_results("chat-z", results)
+        assert len(agent._turn_ordered["chat-z"]) == 5
+        assert agent._turn_ordered["chat-z"] == ["c0", "c1", "c2", "c3", "c4"]
+
+
+class TestSearchDocumentsToolIndex:
+    """The search_documents tool result carries a visible citation index."""
+
+    @pytest.mark.asyncio
+    async def test_tool_result_has_citation_index(self) -> None:
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_ordered["chat-a"] = []
+
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        assert isinstance(result, list)
+        assert result[0]["citation_index"] == 1
+        # The ordered map registers the tool-retrieved chunk by display pos.
+        assert agent._turn_ordered["chat-a"] == ["fake-chunk-1"]
+
+    @pytest.mark.asyncio
+    async def test_tool_index_offset_after_prefetch(self) -> None:
+        """Tool indices continue after pre-fetch chunks already displayed."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        # Simulate one pre-fetch chunk already displayed this turn as [1].
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_ordered["chat-a"] = ["prefetch-1"]
+
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        # The tool chunk is displayed as [2], not [1].
+        assert result[0]["citation_index"] == 2
+        assert agent._turn_ordered["chat-a"] == ["prefetch-1", "fake-chunk-1"]
+
+    @pytest.mark.asyncio
+    async def test_tool_path_index_citation_resolves_end_to_end(self) -> None:
+        """A ``[n]`` citation resolves for a chunk retrieved via the tool."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        # Two-step fake LLM: first turn calls search_documents, then cites [1].
+        class _ToolThenCiteLLM:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._calls = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>"
+
+            async def complete_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                **kwargs: Any,
+            ) -> dict[str, Any]:
+                self._calls += 1
+                if self._calls == 1:
+                    tc = MagicMock()
+                    tc.function.name = "search_documents"
+                    tc.function.arguments = json.dumps({"query": "bearing"})
+                    tc.id = "tc1"
+                    return {"content": "", "tool_calls": [tc]}
+                return {
+                    "content": "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>",
+                    "tool_calls": None,
+                }
+
+        agent._llm = _ToolThenCiteLLM()  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("How do I replace the P-201 bearing?")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+
+
 class TestGatherContext:
     """Test _gather_context — retrieves data from connectors."""
 
