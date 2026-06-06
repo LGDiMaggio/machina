@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -48,6 +49,14 @@ logger = structlog.get_logger(__name__)
 # co-located with the tool definitions) to prevent drift between the dispatch
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
+
+# Lifetime of a stored pending write-confirmation (seconds). A pending
+# confirmation is meant for the IMMEDIATE next message; an hour is
+# generous-but-safe and bounds the window in which a much-later bare
+# affirmation ("ok"/"sì") could execute a stale write. Measured with
+# ``time.monotonic()`` so it is immune to wall-clock changes. Named so it is
+# tunable.
+_PENDING_ACTION_TTL_SECONDS: float = 3600.0
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -190,13 +199,17 @@ class Agent:
         self._histories: dict[str, list[dict[str, str]]] = {}
 
         # Turn-surviving pending-action store for the two-turn confirmation
-        # degrade (U5). Keyed (chat_id, user_id) → (func_name, args, prompt).
+        # degrade (U5). Keyed (chat_id, user_id) →
+        # (func_name, args, prompt, stored_monotonic_ts).
         # Follows the ``self._histories`` lifecycle (persists across turns) —
         # deliberately NOT ``self._turn_chunks``, which is reset/popped each
         # turn and would wipe a pending action before the confirming message
         # arrives. On a shared/group channel the key includes ``user_id`` so a
-        # different participant cannot confirm another user's pending write.
-        self._pending_actions: dict[tuple[str, str], tuple[str, dict[str, Any], str]] = {}
+        # different participant cannot confirm another user's pending write; an
+        # empty (untrusted) ``user_id`` is never stored (fail-safe withhold).
+        # The trailing monotonic timestamp drives TTL expiry on resume so a
+        # much-later bare affirmation cannot execute a stale write.
+        self._pending_actions: dict[tuple[str, str], tuple[str, dict[str, Any], str, float]] = {}
 
         # Per-turn chunk registry (chat_id -> chunk_id -> {source, page, content}).
         # Populated by _gather_context and the search_documents tool; consumed by
@@ -1224,53 +1237,98 @@ class Agent:
         result is returned so the turn ends with the confirmation question as
         the response and a programmatic caller never writes unconfirmed.
 
-        A new proposal for an existing key replaces the stale one (natural with
-        dict assignment): only one pending action lives per ``(chat_id,
-        user_id)`` at a time.
+        Two safety rules apply when deciding whether to store:
+
+        * **Empty (untrusted) ``user_id`` → withhold, never store.** On a shared
+          async channel any anonymous participant could otherwise confirm
+          another sender's pending write. Without an identified sender the write
+          is withheld: the result carries ``unconfirmable: True`` and an
+          explanatory prompt, nothing is stored, and nothing executes.
+        * **A different, live pending action already exists → keep it, reject
+          the new one.** The first proposal survives and stays confirmable; the
+          second returns ``already_pending: True`` without overwriting. An
+          identical re-proposal (same tool + args) is a no-op that re-returns the
+          existing prompt. Stale pendings are popped by the TTL check on resume
+          BEFORE any new proposal reaches here, so keep-first only blocks a live
+          pending.
 
         Args:
             func_name: The mutating tool that was gated.
             args: The arguments the model supplied.
             chat_id: Conversation identifier (part of the pending key).
-            user_id: Sender identifier (part of the pending key). When empty
-                (CLI uses ``cli_user``; email derives a spoofable identity;
-                anonymous channels emit ``""``), the per-user guarantee
-                degrades to chat-level — this is logged, not silently treated
-                as a per-user confirmation.
+            user_id: Sender identifier (part of the pending key). Empty when the
+                channel cannot supply a trusted identity — the write is then
+                withheld (see above).
 
         Returns:
             A structured result the LLM loop feeds back as the tool result.
         """
         prompt = self._confirmation_prompt(func_name, args)
+
         if not user_id:
-            # Explicit, documented degradation: the action is still stored and
-            # confirmable, but under the (chat_id, "") key — anyone on the chat
-            # can confirm it. Do NOT silently pretend it is per-user.
+            # Fail-safe: no trusted sender identity, so a deferred confirmation
+            # cannot be bound to anyone. Withhold the write — do NOT store, do
+            # NOT execute — and explain why. (CLI is unaffected: it sets
+            # user_id="cli_user" and uses the synchronous confirmer path, not
+            # this two-turn store.)
             logger.warning(
-                "confirmation_chat_scoped",
+                "write_withheld_anonymous",
                 agent=self.name,
                 tool=func_name,
                 operation=func_name,
                 chat_id=chat_id,
-                reason="empty_user_id_degrades_to_chat_level",
+                reason="empty_user_id_no_trusted_sender",
             )
-        # Observability for the single-slot overwrite: when a turn proposes more
-        # than one write, the second proposal silently replaces the first in this
-        # key (only one pending action lives per (chat_id, user_id)). The dropped
-        # proposal would otherwise vanish without trace — log it so the lost
-        # confirmation question is visible. Single-slot behaviour is unchanged.
+            return {
+                "confirmation_required": True,
+                "tool": func_name,
+                "prompt": (
+                    "This write needs confirmation, but deferred confirmation on "
+                    "this channel requires an identified sender (none was "
+                    "supplied), so the action was withheld and NOT performed. "
+                    "Use a channel that provides a sender identity, or a channel "
+                    "that can confirm in the same turn.\n\n"
+                    f"{prompt}"
+                ),
+                "unconfirmable": True,
+            }
+
+        # Keep-first: a DIFFERENT live pending action must not be silently
+        # overwritten by a second proposal in the same turn. Staleness is
+        # handled by the TTL check on resume (which pops an expired pending
+        # before a new proposal arrives), so anything still here is live.
         existing = self._pending_actions.get((chat_id, user_id))
-        if existing is not None and existing[:2] != (func_name, dict(args)):
+        if existing is not None:
+            if existing[:2] == (func_name, dict(args)):
+                # Identical re-proposal — no-op; re-return the existing prompt.
+                return {
+                    "confirmation_required": True,
+                    "tool": func_name,
+                    "prompt": existing[2],
+                }
+            # Different proposal — reject it, keep the first confirmable.
             logger.warning(
-                "pending_write_overwritten",
+                "pending_write_rejected_existing",
                 agent=self.name,
                 tool=func_name,
                 operation=func_name,
                 chat_id=chat_id,
-                dropped_tool=existing[0],
-                dropped_operation=existing[0],
+                kept_tool=existing[0],
+                kept_operation=existing[0],
             )
-        self._pending_actions[(chat_id, user_id)] = (func_name, dict(args), prompt)
+            return {
+                "confirmation_required": True,
+                "tool": func_name,
+                "prompt": prompt,
+                "already_pending": True,
+            }
+
+        self._pending_actions[(chat_id, user_id)] = (
+            func_name,
+            dict(args),
+            prompt,
+            time.monotonic(),
+        )
         logger.info(
             "write_confirmation_required",
             agent=self.name,
@@ -1286,7 +1344,7 @@ class Agent:
 
     async def _resume_pending_action(
         self,
-        pending: tuple[str, dict[str, Any], str],
+        pending: tuple[str, dict[str, Any], str, float],
         text: str,
         *,
         chat_id: str,
@@ -1298,6 +1356,10 @@ class Agent:
         exists for ``(chat_id, user_id)``. The decision is deterministic — the
         LLM is never asked to interpret the confirmation.
 
+        * **Expired** (age exceeds :data:`_PENDING_ACTION_TTL_SECONDS`): pop the
+          stale pending and return ``None`` WITHOUT executing — the incoming
+          message is then processed as a fresh message, so a much-later "ok" is
+          never read as a confirmation of a stale write.
         * **Affirmation** (the whole message is one yes-token): pop the pending
           action, execute it via :meth:`_execute_tool` (so the connector's own
           ``@sandbox_aware`` check still applies if state changed since the
@@ -1310,17 +1372,33 @@ class Agent:
           silently executes the pending write).
 
         Args:
-            pending: The stored ``(func_name, args, prompt)`` tuple.
+            pending: The stored ``(func_name, args, prompt, stored_ts)`` tuple.
             text: The raw incoming message.
             chat_id: Conversation identifier.
             user_id: Sender identifier.
 
         Returns:
             The narrated response when the write was confirmed and executed;
-            ``None`` when the pending action was cancelled (caller proceeds
-            with normal processing).
+            ``None`` when the pending action was cancelled or expired (caller
+            proceeds with normal processing).
         """
-        func_name, args, _prompt = pending
+        func_name, args, _prompt, stored_ts = pending
+
+        # TTL check FIRST: an aged pending is treated as if it were never there.
+        # Pop it, do not execute, and fall through so the incoming message is
+        # processed fresh (a stale "ok" must not confirm a stale write).
+        if time.monotonic() - stored_ts > _PENDING_ACTION_TTL_SECONDS:
+            self._pending_actions.pop((chat_id, user_id), None)
+            logger.info(
+                "pending_write_expired",
+                agent=self.name,
+                tool=func_name,
+                operation=func_name,
+                chat_id=chat_id,
+                age_seconds=round(time.monotonic() - stored_ts, 1),
+            )
+            return None
+
         if not self._is_affirmation(text):
             # Decline or unrelated: cancel and let the caller process normally.
             self._pending_actions.pop((chat_id, user_id), None)

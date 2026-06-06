@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
@@ -759,9 +760,11 @@ class _CountingCreateWoConnector(_FakeCreateWoConnector):
 
     def __init__(self) -> None:
         self.create_calls = 0
+        self.created_assets: list[str] = []
 
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         self.create_calls += 1
+        self.created_assets.append(work_order.asset_id)
         return work_order
 
 
@@ -2104,8 +2107,8 @@ class TestTwoTurnConfirmation:
         assert ("c1", "userA") in agent._pending_actions
 
     @pytest.mark.asyncio
-    async def test_empty_user_id_logs_chat_scoped_warning(self) -> None:
-        """Empty user_id → chat-scoped warning logged; not silently per-user."""
+    async def test_empty_user_id_withholds_write(self) -> None:
+        """Empty (untrusted) user_id → write withheld: not stored, not executed."""
         import structlog
 
         conn = _CountingCreateWoConnector()
@@ -2123,9 +2126,23 @@ class TestTwoTurnConfirmation:
             await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="")
         finally:
             structlog.reset_defaults()
-        assert any(e.get("event") == "confirmation_chat_scoped" for e in events)
-        # Stored under the empty-user key (explicitly chat-scoped, not refused).
-        assert ("c1", "") in agent._pending_actions
+        assert any(e.get("event") == "write_withheld_anonymous" for e in events)
+        # Fail-safe: nothing stored, nothing executed.
+        assert ("c1", "") not in agent._pending_actions
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_returns_unconfirmable_result(self) -> None:
+        """Empty user_id → the gated tool result carries unconfirmable=True."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        result = await agent._await_write_confirmation(
+            "create_work_order", {"asset_id": "P-201"}, "c1", ""
+        )
+        assert result.get("unconfirmable") is True
+        assert result.get("confirmation_required") is True
+        assert ("c1", "") not in agent._pending_actions
+        assert conn.create_calls == 0
 
     @pytest.mark.asyncio
     async def test_reentry_suppresses_verbatim_reissue(self) -> None:
@@ -2157,8 +2174,12 @@ class TestTwoTurnConfirmation:
         assert conn.create_calls == 1
 
     @pytest.mark.asyncio
-    async def test_new_proposal_replaces_stale_pending(self) -> None:
-        """A new proposal replaces a stale pending action for the same key."""
+    async def test_unrelated_proposal_supersedes_after_cancel(self) -> None:
+        """A new proposal in a LATER turn supersedes the prior pending.
+
+        The prior pending is first cancelled by the (non-affirmation) incoming
+        message on the resume path, then the fresh turn proposes its own write.
+        """
         conn = _CountingCreateWoConnector()
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMSingleCreate(  # type: ignore[assignment]
@@ -2167,7 +2188,7 @@ class TestTwoTurnConfirmation:
         await agent.start()
         await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
         first = agent._pending_actions[("c1", "userA")]
-        # A different proposal arrives before confirmation.
+        # A different proposal arrives before confirmation (separate turn).
         agent._llm = _FakeLLMSingleCreate(  # type: ignore[assignment]
             {"asset_id": "P-202", "type": "corrective", "description": "second"}
         )
@@ -2175,6 +2196,40 @@ class TestTwoTurnConfirmation:
         second = agent._pending_actions[("c1", "userA")]
         assert first != second
         assert second[1]["asset_id"] == "P-202"
+
+    @pytest.mark.asyncio
+    async def test_expired_pending_not_executed_on_affirmation(self) -> None:
+        """FIX 2: a pending older than the TTL is not executed by a later 'yes'."""
+        import machina.agent.runtime as runtime_mod
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        assert ("c1", "userA") in agent._pending_actions
+        # Back-date the stored timestamp beyond the TTL.
+        fn, args, prompt, _ts = agent._pending_actions[("c1", "userA")]
+        stale_ts = time.monotonic() - runtime_mod._PENDING_ACTION_TTL_SECONDS - 1.0
+        agent._pending_actions[("c1", "userA")] = (fn, args, prompt, stale_ts)
+        # A later "yes" must NOT execute the stale write; it is processed fresh.
+        agent._llm = _FakeLLMNarrate("Nothing pending.")  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+        assert ("c1", "userA") not in agent._pending_actions
+
+    @pytest.mark.asyncio
+    async def test_fresh_pending_within_ttl_still_executes(self) -> None:
+        """FIX 2: a pending within the TTL still executes on affirmation."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 1
+        assert ("c1", "userA") not in agent._pending_actions
 
 
 # ---------------------------------------------------------------------------
@@ -2411,7 +2466,7 @@ class TestSafetyCoverageGaps:
 
 
 # ---------------------------------------------------------------------------
-# FIX G — pending-slot overwrite is observable
+# FIX 3 — a different second pending in one turn is rejected, first survives
 # ---------------------------------------------------------------------------
 
 
@@ -2441,12 +2496,38 @@ class _FakeLLMTwoPendingProposals:
         return {"content": "Proposed.", "tool_calls": None}
 
 
-class TestPendingOverwriteObservability:
-    """FIX G: a multi-write turn that overwrites the single pending slot logs a
-    warning so the dropped proposal is observable."""
+class _FakeLLMIdenticalProposalsTwice:
+    """Proposes the SAME write twice in a single turn (two loop iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Proposed."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n in (1, 2):
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "fix"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Proposed.", "tool_calls": None}
+
+
+class TestPendingKeepFirst:
+    """FIX 3: a multi-write turn keeps the FIRST pending; a different second
+    proposal is rejected (logged) and does NOT overwrite. Confirming executes
+    the first. An identical re-proposal is a no-op (single pending)."""
 
     @pytest.mark.asyncio
-    async def test_overwrite_logs_warning(self) -> None:
+    async def test_second_different_proposal_rejected(self) -> None:
         import structlog
 
         conn = _CountingCreateWoConnector()
@@ -2468,9 +2549,34 @@ class TestPendingOverwriteObservability:
         finally:
             structlog.reset_defaults()
 
-        assert any(e.get("event") == "pending_write_overwritten" for e in events)
-        # The second proposal won the single slot; the first was dropped.
-        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-202"
+        assert any(e.get("event") == "pending_write_rejected_existing" for e in events)
+        # Keep-first: the FIRST proposal owns the single slot; second is dropped.
+        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_confirming_executes_the_first(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create two work orders", chat_id="c1", user_id="userA")
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        # The first (P-201) is the one that executes.
+        assert conn.create_calls == 1
+        assert conn.created_assets == ["P-201"]
+
+    @pytest.mark.asyncio
+    async def test_identical_reproposal_is_noop(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMIdenticalProposalsTwice()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # Exactly one pending action survives.
+        assert ("c1", "userA") in agent._pending_actions
+        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-201"
+        assert conn.create_calls == 0
 
 
 # ---------------------------------------------------------------------------
