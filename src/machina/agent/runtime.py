@@ -48,6 +48,19 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
+# Deterministic affirmation / decline token sets for the two-turn confirmation
+# degrade (U5). A weak local model must NOT be the component that interprets a
+# "yes" — the parse here is mechanical, never delegated to the LLM. Tokens cover
+# English + Italian (the example's two primary languages); matching is
+# case/whitespace-insensitive and requires the WHOLE message to be a single
+# token (a compound like "ok, but set priority high" is deliberately neither —
+# treated as unrelated, which cancels the pending action). Unicode/homoglyph
+# folding is intentionally deferred (see plan "Deferred to Implementation").
+_AFFIRMATION_TOKENS: frozenset[str] = frozenset(
+    {"y", "yes", "ok", "okay", "confirm", "confirmed", "sì", "si", "conferma", "procedi", "vai"}
+)
+_DECLINE_TOKENS: frozenset[str] = frozenset({"n", "no", "annulla", "cancel", "stop", "abort"})
+
 
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
@@ -187,6 +200,15 @@ class Agent:
 
         # Conversation history per chat
         self._histories: dict[str, list[dict[str, str]]] = {}
+
+        # Turn-surviving pending-action store for the two-turn confirmation
+        # degrade (U5). Keyed (chat_id, user_id) → (func_name, args, prompt).
+        # Follows the ``self._histories`` lifecycle (persists across turns) —
+        # deliberately NOT ``self._turn_chunks``, which is reset/popped each
+        # turn and would wipe a pending action before the confirming message
+        # arrives. On a shared/group channel the key includes ``user_id`` so a
+        # different participant cannot confirm another user's pending write.
+        self._pending_actions: dict[tuple[str, str], tuple[str, dict[str, Any], str]] = {}
 
         # Per-turn chunk registry (chat_id -> chunk_id -> {source, page, content}).
         # Populated by _gather_context and the search_documents tool; consumed by
@@ -563,6 +585,21 @@ class Agent:
             message_preview=text[:100],
         )
 
+        # Two-turn confirmation resume (U5). If a write is pending for this
+        # (chat_id, user_id), interpret THIS message deterministically (never
+        # via the LLM): a bare affirmation executes the pending write and
+        # re-enters the loop in narration-only mode; anything else (a decline
+        # OR an unrelated message) cancels the pending action and falls through
+        # to normal processing — so an unrelated next message never silently
+        # executes.
+        pending = self._pending_actions.get((chat_id, user_id))
+        if pending is not None:
+            confirmed = await self._resume_pending_action(
+                pending, text, chat_id=chat_id, user_id=user_id
+            )
+            if confirmed is not None:
+                return confirmed
+
         # Reset the per-turn chunk registry and ordered index map.
         self._turn_chunks[chat_id] = {}
         self._turn_ordered[chat_id] = []
@@ -882,6 +919,8 @@ class Agent:
         max_iterations: int = 5,
         confirmer: Callable[[str], Awaitable[bool]] | None = None,
         user_id: str = "",
+        narration_only: bool = False,
+        seed_side_effects: dict[str, Any] | None = None,
     ) -> str:
         """Call the LLM, execute tool calls, and return final response.
 
@@ -894,18 +933,36 @@ class Agent:
           decision is awaited; on yes the write executes, on no a structured
           ``{"declined": ...}`` result is returned without executing.
         * **no ``confirmer``** (programmatic callers / async channels) → the
-          write is NOT executed; :meth:`_await_write_confirmation` returns a
-          fail-safe ``{"confirmation_required": ...}`` result (U5 extends this
-          into the two-turn pending-action flow).
+          write is NOT executed; :meth:`_await_write_confirmation` stores the
+          pending action and returns a fail-safe
+          ``{"confirmation_required": ...}`` result (the two-turn flow).
+
+        Args:
+            narration_only: When ``True`` (the two-turn confirmation re-entry,
+                U5) the offered toolset EXCLUDES :data:`_SIDE_EFFECTING_TOOLS`
+                so the model cannot request another write while narrating the
+                just-confirmed one — preventing a re-gate or a reworded
+                duplicate. Combined with ``seed_side_effects``, even a verbatim
+                re-issue collapses to the memoised result.
+            seed_side_effects: Optional pre-populated side-effect memo (the
+                ``(func_name, args) → result`` of the just-confirmed write) so
+                a verbatim re-issue during narration collapses instead of
+                executing again.
         """
         tools = self._get_available_tools()
+        if narration_only:
+            # Suppress mutating tools entirely for this pass so an eager model
+            # cannot ratchet a second confirmation or write a reworded duplicate
+            # while narrating the just-confirmed write.
+            tools = [t for t in tools if t["function"]["name"] not in _SIDE_EFFECTING_TOOLS]
 
         # Per-turn memo of side-effecting tool calls (keyed by name + args).
         # If the model re-requests the same write across loop iterations — the
         # mechanism behind the duplicate-work-order report — we reuse the first
         # result instead of executing the side effect again. Read-only tools
-        # are never memoised; they may legitimately be re-issued.
-        executed_side_effects: dict[str, Any] = {}
+        # are never memoised; they may legitimately be re-issued. Seeded with
+        # the just-confirmed write on the two-turn narration re-entry.
+        executed_side_effects: dict[str, Any] = dict(seed_side_effects or {})
 
         # Per-turn set of declined proposal keys (same canonical key as the
         # memo). A chatty model that re-proposes a write the user already
@@ -1089,6 +1146,41 @@ class Agent:
             parts = [f"{k}={v}" for k, v in list(event.items())[:3]]
         return ", ".join(parts)
 
+    @staticmethod
+    def _is_affirmation(text: str) -> bool:
+        """Deterministically recognise a bare affirmation (NOT via the LLM).
+
+        Returns ``True`` only when the WHOLE message — after strip + lowercase
+        — is a single recognised affirmation token (English or Italian). A
+        compound message such as ``"ok, but set priority high"`` is NOT an
+        affirmation (it is treated as unrelated → cancel + process normally),
+        so the gate is never bypassed by an ambiguous "yes …" prefix.
+
+        Args:
+            text: The raw incoming message text.
+
+        Returns:
+            ``True`` if the message is exactly one affirmation token.
+        """
+        return text.strip().lower() in _AFFIRMATION_TOKENS
+
+    @staticmethod
+    def _is_decline(text: str) -> bool:
+        """Deterministically recognise a bare decline (NOT via the LLM).
+
+        Mirror of :meth:`_is_affirmation` for decline tokens. Both a decline
+        and any unrelated message clear the pending action; this helper exists
+        for symmetry and clearer logging, not because the two branches differ
+        in effect (both cancel).
+
+        Args:
+            text: The raw incoming message text.
+
+        Returns:
+            ``True`` if the message is exactly one decline token.
+        """
+        return text.strip().lower() in _DECLINE_TOKENS
+
     async def _await_write_confirmation(
         self,
         func_name: str,
@@ -1098,24 +1190,45 @@ class Agent:
     ) -> dict[str, Any]:
         """Handle a gated write when no synchronous confirmer is available.
 
-        For U4 this is a minimal, real fail-safe: the write is NOT executed and
-        a structured ``confirmation_required`` result is returned (so a direct
-        ``handle_message_full`` call with confirmations on and no confirmer
-        never writes). U5 extends this into the two-turn pending-action flow:
-        it will store ``(func_name, args, prompt)`` keyed on
-        ``(chat_id, user_id)`` and resume on a deterministically-recognised
-        confirmation in the next message.
+        The write is NOT executed. The proposed action is stored in the
+        turn-surviving :attr:`_pending_actions` store keyed
+        ``(chat_id, user_id)`` so the next inbound message for the same
+        ``(chat_id, user_id)`` can confirm it (the two-turn degrade — see
+        :meth:`handle_message_full`). A structured ``confirmation_required``
+        result is returned so the turn ends with the confirmation question as
+        the response and a programmatic caller never writes unconfirmed.
+
+        A new proposal for an existing key replaces the stale one (natural with
+        dict assignment): only one pending action lives per ``(chat_id,
+        user_id)`` at a time.
 
         Args:
             func_name: The mutating tool that was gated.
             args: The arguments the model supplied.
-            chat_id: Conversation identifier (used by U5's pending store).
-            user_id: Sender identifier (used by U5's cross-user scoping).
+            chat_id: Conversation identifier (part of the pending key).
+            user_id: Sender identifier (part of the pending key). When empty
+                (CLI uses ``cli_user``; email derives a spoofable identity;
+                anonymous channels emit ``""``), the per-user guarantee
+                degrades to chat-level — this is logged, not silently treated
+                as a per-user confirmation.
 
         Returns:
             A structured result the LLM loop feeds back as the tool result.
         """
         prompt = self._confirmation_prompt(func_name, args)
+        if not user_id:
+            # Explicit, documented degradation: the action is still stored and
+            # confirmable, but under the (chat_id, "") key — anyone on the chat
+            # can confirm it. Do NOT silently pretend it is per-user.
+            logger.warning(
+                "confirmation_chat_scoped",
+                agent=self.name,
+                tool=func_name,
+                operation=func_name,
+                chat_id=chat_id,
+                reason="empty_user_id_degrades_to_chat_level",
+            )
+        self._pending_actions[(chat_id, user_id)] = (func_name, dict(args), prompt)
         logger.info(
             "write_confirmation_required",
             agent=self.name,
@@ -1123,13 +1236,127 @@ class Agent:
             operation=func_name,
             chat_id=chat_id,
         )
-        # U5 extends this into the two-turn pending-action flow (store the
-        # pending action keyed on (chat_id, user_id) and resume next turn).
         return {
             "confirmation_required": True,
             "tool": func_name,
             "prompt": prompt,
         }
+
+    async def _resume_pending_action(
+        self,
+        pending: tuple[str, dict[str, Any], str],
+        text: str,
+        *,
+        chat_id: str,
+        user_id: str,
+    ) -> AgentResponse | None:
+        """Resume (or cancel) a pending two-turn write based on this message.
+
+        Called at the top of :meth:`handle_message_full` when a pending action
+        exists for ``(chat_id, user_id)``. The decision is deterministic — the
+        LLM is never asked to interpret the confirmation.
+
+        * **Affirmation** (the whole message is one yes-token): pop the pending
+          action, execute it via :meth:`_execute_tool` (so the connector's own
+          ``@sandbox_aware`` check still applies if state changed since the
+          proposal), then re-enter :meth:`_llm_loop` in **narration-only** mode
+          so the model narrates the outcome and emits citations instead of
+          returning a raw payload. Returns the narrated :class:`AgentResponse`.
+        * **Anything else** (a decline OR an unrelated message): pop/clear the
+          pending action and return ``None`` so the caller falls through to
+          normal processing of this message (an unrelated message never
+          silently executes the pending write).
+
+        Args:
+            pending: The stored ``(func_name, args, prompt)`` tuple.
+            text: The raw incoming message.
+            chat_id: Conversation identifier.
+            user_id: Sender identifier.
+
+        Returns:
+            The narrated response when the write was confirmed and executed;
+            ``None`` when the pending action was cancelled (caller proceeds
+            with normal processing).
+        """
+        func_name, args, _prompt = pending
+        if not self._is_affirmation(text):
+            # Decline or unrelated: cancel and let the caller process normally.
+            self._pending_actions.pop((chat_id, user_id), None)
+            logger.info(
+                "pending_write_cancelled",
+                agent=self.name,
+                tool=func_name,
+                operation=func_name,
+                chat_id=chat_id,
+                declined=self._is_decline(text),
+            )
+            return None
+
+        # Affirmation: pop FIRST so a re-entrant failure cannot leave a
+        # confirmable ghost, then execute the write through the normal tool
+        # path (the connector's sandbox check still applies if state changed).
+        self._pending_actions.pop((chat_id, user_id), None)
+        logger.info(
+            "pending_write_confirmed",
+            agent=self.name,
+            tool=func_name,
+            operation=func_name,
+            chat_id=chat_id,
+        )
+
+        # Fresh per-turn citation state for the narration pass.
+        self._turn_chunks[chat_id] = {}
+        self._turn_ordered[chat_id] = []
+        try:
+            tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
+
+            # Re-enter the loop in narration-only mode: mutating tools are
+            # suppressed AND the just-executed (func_name, args) is seeded into
+            # the memo, so an eager model that re-issues the write — verbatim or
+            # reworded — can neither ratchet a second confirmation nor write a
+            # duplicate. The re-entry carries NO confirmer.
+            memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+            messages: list[dict[str, Any]] = [
+                {
+                    "role": "system",
+                    "content": self._build_messages(text, chat_id, {})[0]["content"],
+                },
+                {"role": "user", "content": text},
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"The confirmed action {func_name!r} has been executed. "
+                        "Summarise the outcome for the user and cite any sources."
+                    ),
+                },
+                {"role": "tool", "content": json.dumps(tool_result, default=str)},
+            ]
+            raw_response = await self._llm_loop(
+                messages,
+                chat_id,
+                max_iterations=2,
+                narration_only=True,
+                seed_side_effects={memo_key: tool_result},
+            )
+            rendered, citations = parse_response(
+                raw_response,
+                self._turn_chunks.get(chat_id, {}),
+                self._turn_ordered.get(chat_id, []),
+            )
+            self._add_to_history(chat_id, "user", text)
+            self._add_to_history(chat_id, "assistant", rendered)
+        finally:
+            self._turn_chunks.pop(chat_id, None)
+            self._turn_ordered.pop(chat_id, None)
+
+        logger.info(
+            "response_generated",
+            agent=self.name,
+            chat_id=chat_id,
+            response_length=len(rendered),
+            citation_count=len(citations),
+        )
+        return AgentResponse(text=rendered, citations=citations)
 
     async def _execute_tool(
         self,
