@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
 import structlog
@@ -474,7 +475,14 @@ class Agent:
             await conn.disconnect()
         logger.info("agent_stopped", agent=self.name)
 
-    async def handle_message(self, text: str, *, chat_id: str = "default") -> str:
+    async def handle_message(
+        self,
+        text: str,
+        *,
+        chat_id: str = "default",
+        confirmer: Callable[[str], Awaitable[bool]] | None = None,
+        user_id: str = "",
+    ) -> str:
         """Process a user message and return the agent's response text.
 
         This is the main entry point for programmatic usage. The returned
@@ -486,6 +494,15 @@ class Agent:
         Args:
             text: The user's message.
             chat_id: Identifier for the conversation.
+            confirmer: Optional async callable that renders a confirmation
+                prompt and returns the user's yes/no decision. Supplied by a
+                channel that can confirm a write synchronously (e.g.
+                ``CliChannel``). When ``None`` and :attr:`confirmations` is on,
+                a mutating tool call is NOT executed (fail-safe).
+            user_id: Identifier for the sender, forwarded for cross-user
+                confirmation scoping. Note: ``confirmations`` only gates writes
+                that flow through the agent LLM loop; ``trigger_workflow`` is a
+                deliberate direct-execution path guarded by ``sandbox`` only.
 
         Returns:
             The agent's response text.
@@ -493,15 +510,33 @@ class Agent:
         Raises:
             LLMError: If the underlying LLM call fails.
         """
-        response = await self.handle_message_full(text, chat_id=chat_id)
+        response = await self.handle_message_full(
+            text, chat_id=chat_id, confirmer=confirmer, user_id=user_id
+        )
         return response.text
 
-    async def handle_message_full(self, text: str, *, chat_id: str = "default") -> AgentResponse:
+    async def handle_message_full(
+        self,
+        text: str,
+        *,
+        chat_id: str = "default",
+        confirmer: Callable[[str], Awaitable[bool]] | None = None,
+        user_id: str = "",
+    ) -> AgentResponse:
         """Process a user message and return the structured agent response.
 
         Args:
             text: The user's message.
             chat_id: Identifier for the conversation.
+            confirmer: Optional async callable that renders a confirmation
+                prompt and returns the user's yes/no decision (see
+                :meth:`handle_message`). When ``None`` and
+                :attr:`confirmations` is on, a mutating tool call is NOT
+                executed (fail-safe — a programmatic caller that wants
+                autonomous writes sets ``confirmations=False`` or passes a
+                ``confirmer``).
+            user_id: Identifier for the sender, forwarded for cross-user
+                confirmation scoping.
 
         Returns:
             An :class:`AgentResponse` with the rendered text and any
@@ -544,7 +579,9 @@ class Agent:
 
             # 4. Call LLM (with tool-calling loop)
             try:
-                raw_response = await self._llm_loop(messages, chat_id)
+                raw_response = await self._llm_loop(
+                    messages, chat_id, confirmer=confirmer, user_id=user_id
+                )
             except Exception as exc:
                 logger.error(
                     "llm_error",
@@ -615,8 +652,27 @@ class Agent:
         # Use the first channel for listen (typically Telegram or CLI)
         channel = self._channels[0]
 
+        # Bind this channel's synchronous confirmation primitive (if any) into
+        # the handler so the HITL gate can prompt in-turn. A channel without it
+        # (async channels) leaves ``confirmer=None`` → the runtime fails safe
+        # (U4) and U5 extends that into the two-turn propose→confirm flow.
+        from machina.connectors.comms.types import supports_sync_confirmation
+
+        sync_confirm = supports_sync_confirmation(channel)
+
         async def _handler(msg: Any) -> str:
-            response = await self.handle_message_full(msg.text, chat_id=msg.chat_id)
+            confirmer: Callable[[str], Awaitable[bool]] | None = None
+            if sync_confirm:
+
+                async def confirmer(prompt: str, _msg: Any = msg) -> bool:
+                    return bool(await channel.request_confirmation(_msg.chat_id, prompt))
+
+            response = await self.handle_message_full(
+                msg.text,
+                chat_id=msg.chat_id,
+                confirmer=confirmer,
+                user_id=getattr(msg, "user_id", ""),
+            )
             return _format_response_for_channel(response)
 
         try:
@@ -824,8 +880,24 @@ class Agent:
         chat_id: str,
         *,
         max_iterations: int = 5,
+        confirmer: Callable[[str], Awaitable[bool]] | None = None,
+        user_id: str = "",
     ) -> str:
-        """Call the LLM, execute tool calls, and return final response."""
+        """Call the LLM, execute tool calls, and return final response.
+
+        When :attr:`confirmations` is on, every mutating tool call
+        (``func_name in _SIDE_EFFECTING_TOOLS``) is gated:
+
+        * **sandbox on** → the gate is skipped (the write short-circuits to a
+          no-op inside the tool; confirming a no-op would mislead).
+        * **``confirmer`` available** (synchronous channels, e.g. CLI) → the
+          decision is awaited; on yes the write executes, on no a structured
+          ``{"declined": ...}`` result is returned without executing.
+        * **no ``confirmer``** (programmatic callers / async channels) → the
+          write is NOT executed; :meth:`_await_write_confirmation` returns a
+          fail-safe ``{"confirmation_required": ...}`` result (U5 extends this
+          into the two-turn pending-action flow).
+        """
         tools = self._get_available_tools()
 
         # Per-turn memo of side-effecting tool calls (keyed by name + args).
@@ -834,6 +906,13 @@ class Agent:
         # result instead of executing the side effect again. Read-only tools
         # are never memoised; they may legitimately be re-issued.
         executed_side_effects: dict[str, Any] = {}
+
+        # Per-turn set of declined proposal keys (same canonical key as the
+        # memo). A chatty model that re-proposes a write the user already
+        # declined this turn is auto-declined WITHOUT re-prompting, so it
+        # cannot ratchet repeated [y/N] prompts up to max_iterations. A
+        # genuinely different proposal still prompts.
+        declined_side_effects: set[str] = set()
 
         for _iteration in range(max_iterations):
             with self.tracer.trace(
@@ -873,6 +952,11 @@ class Agent:
                 if func_name in _SIDE_EFFECTING_TOOLS:
                     memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
 
+                # The confirmation gate applies only to mutating tools and only
+                # when confirmations are on AND we are not in sandbox (sandbox
+                # already no-ops the write — confirming a no-op would mislead).
+                gate_write = memo_key is not None and self._confirmations and not self.sandbox
+
                 with self.tracer.trace(
                     "tool_call",
                     operation=func_name,
@@ -884,6 +968,41 @@ class Agent:
                             agent=self.name,
                             tool=func_name,
                             operation=func_name,
+                        )
+                    elif gate_write and memo_key in declined_side_effects:
+                        # Same proposal the user already declined this turn:
+                        # auto-decline without re-prompting (anti-friction).
+                        tool_result = {"declined": True, "tool": func_name}
+                        logger.info(
+                            "write_auto_declined",
+                            agent=self.name,
+                            tool=func_name,
+                            operation=func_name,
+                        )
+                    elif gate_write and confirmer is not None:
+                        # Synchronous path (e.g. CLI): ask, then act on yes.
+                        approved = await confirmer(self._confirmation_prompt(func_name, args))
+                        if approved:
+                            tool_result = await self._execute_tool(
+                                func_name, args, chat_id=chat_id
+                            )
+                            is_error = isinstance(tool_result, dict) and "error" in tool_result
+                            if memo_key is not None and not is_error:
+                                executed_side_effects[memo_key] = tool_result
+                        else:
+                            tool_result = {"declined": True, "tool": func_name}
+                            if memo_key is not None:
+                                declined_side_effects.add(memo_key)
+                            logger.info(
+                                "write_declined",
+                                agent=self.name,
+                                tool=func_name,
+                                operation=func_name,
+                            )
+                    elif gate_write:
+                        # No synchronous primitive available. Do NOT execute.
+                        tool_result = await self._await_write_confirmation(
+                            func_name, args, chat_id, user_id
                         )
                     else:
                         tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
@@ -906,6 +1025,111 @@ class Agent:
 
         # Exhausted iterations — get final response without tools
         return await self._llm.complete(messages)
+
+    # ------------------------------------------------------------------
+    # Confirmation gate helpers
+    # ------------------------------------------------------------------
+
+    def _confirmation_prompt(self, func_name: str, args: dict[str, Any]) -> str:
+        """Build a concrete, human-readable description of a pending write (R6).
+
+        Pure function of the tool name and its arguments — no I/O. The channel
+        renders this text verbatim, so it must state exactly what will happen.
+
+        Args:
+            func_name: The mutating tool the model requested.
+            args: The arguments the model supplied for the call.
+
+        Returns:
+            A one-paragraph confirmation question naming the concrete action.
+        """
+        if func_name == "create_work_order":
+            asset = args.get("asset_id") or "(unspecified asset)"
+            wo_type = args.get("type") or "corrective"
+            priority = args.get("priority") or "medium"
+            description = args.get("description") or "(no description)"
+            return (
+                "Create a work order?\n"
+                f"  • Asset: {asset}\n"
+                f"  • Type: {wo_type}\n"
+                f"  • Priority: {priority}\n"
+                f"  • Description: {description}"
+            )
+
+        if func_name == "execute_workflow":
+            workflow = args.get("workflow_name") or "(unnamed workflow)"
+            event = args.get("event")
+            summary = self._summarize_event(event)
+            return f"Run workflow {workflow!r}?\n  • Event: {summary}"
+
+        # Generic fallback for any other (future) mutating tool — better a
+        # weaker description than no gate. New write tools should add a branch
+        # above so R6 stays concrete.
+        rendered_args = ", ".join(f"{k}={v!r}" for k, v in args.items()) or "(no arguments)"
+        return f"Execute {func_name}?\n  • Arguments: {rendered_args}"
+
+    @staticmethod
+    def _summarize_event(event: Any) -> str:
+        """Summarise a workflow ``event`` payload for the confirmation prompt.
+
+        Highlights the target asset and a few key fields; falls back to a
+        plain marker when the payload is empty or not a mapping.
+        """
+        if not isinstance(event, dict) or not event:
+            return "(no event payload)"
+        parts: list[str] = []
+        asset = event.get("asset_id") or event.get("asset")
+        if asset:
+            parts.append(f"asset={asset}")
+        for key in ("alarm_id", "failure_mode", "priority", "severity", "type"):
+            if event.get(key):
+                parts.append(f"{key}={event[key]}")
+        if not parts:
+            # Show up to three arbitrary keys so the user sees something.
+            parts = [f"{k}={v}" for k, v in list(event.items())[:3]]
+        return ", ".join(parts)
+
+    async def _await_write_confirmation(
+        self,
+        func_name: str,
+        args: dict[str, Any],
+        chat_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Handle a gated write when no synchronous confirmer is available.
+
+        For U4 this is a minimal, real fail-safe: the write is NOT executed and
+        a structured ``confirmation_required`` result is returned (so a direct
+        ``handle_message_full`` call with confirmations on and no confirmer
+        never writes). U5 extends this into the two-turn pending-action flow:
+        it will store ``(func_name, args, prompt)`` keyed on
+        ``(chat_id, user_id)`` and resume on a deterministically-recognised
+        confirmation in the next message.
+
+        Args:
+            func_name: The mutating tool that was gated.
+            args: The arguments the model supplied.
+            chat_id: Conversation identifier (used by U5's pending store).
+            user_id: Sender identifier (used by U5's cross-user scoping).
+
+        Returns:
+            A structured result the LLM loop feeds back as the tool result.
+        """
+        prompt = self._confirmation_prompt(func_name, args)
+        logger.info(
+            "write_confirmation_required",
+            agent=self.name,
+            tool=func_name,
+            operation=func_name,
+            chat_id=chat_id,
+        )
+        # U5 extends this into the two-turn pending-action flow (store the
+        # pending action keyed on (chat_id, user_id) and resume next turn).
+        return {
+            "confirmation_required": True,
+            "tool": func_name,
+            "prompt": prompt,
+        }
 
     async def _execute_tool(
         self,
