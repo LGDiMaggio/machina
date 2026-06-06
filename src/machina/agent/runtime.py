@@ -28,6 +28,7 @@ from machina.agent.prompts import (
 )
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
+from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
@@ -47,19 +48,6 @@ logger = structlog.get_logger(__name__)
 # co-located with the tool definitions) to prevent drift between the dispatch
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
-
-# Deterministic affirmation / decline token sets for the two-turn confirmation
-# degrade (U5). A weak local model must NOT be the component that interprets a
-# "yes" — the parse here is mechanical, never delegated to the LLM. Tokens cover
-# English + Italian (the example's two primary languages); matching is
-# case/whitespace-insensitive and requires the WHOLE message to be a single
-# token (a compound like "ok, but set priority high" is deliberately neither —
-# treated as unrelated, which cancels the pending action). Unicode/homoglyph
-# folding is intentionally deferred (see plan "Deferred to Implementation").
-_AFFIRMATION_TOKENS: frozenset[str] = frozenset(
-    {"y", "yes", "ok", "okay", "confirm", "confirmed", "sì", "si", "conferma", "procedi", "vai"}
-)
-_DECLINE_TOKENS: frozenset[str] = frozenset({"n", "no", "annulla", "cancel", "stop", "abort"})
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -626,34 +614,18 @@ class Agent:
                     error=str(exc),
                 )
                 raise LLMError(f"LLM call failed: {exc}") from exc
-
-            # 5. Parse citations against the per-turn chunk registry. The
-            #    ordered index map resolves visible ``[n]`` markers; the
-            #    registry backs the source/page fallback.
-            rendered, citations = parse_response(
-                raw_response,
-                self._turn_chunks.get(chat_id, {}),
-                self._turn_ordered.get(chat_id, []),
-            )
-
-            # 6. Update history (use the rendered text without citation block).
-            self._add_to_history(chat_id, "user", text)
-            self._add_to_history(chat_id, "assistant", rendered)
-        finally:
-            # Always drop the per-turn registry — even on LLM errors — so a
-            # long-lived agent does not accumulate orphan slots from failed
-            # turns.
+        except BaseException:
+            # On any failure before finalization (entity resolution, context
+            # gathering, or a wrapped LLM error) drop the per-turn registry so a
+            # long-lived agent does not accumulate orphan slots, then re-raise
+            # unchanged. The success path's cleanup lives in _finalize_turn.
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            raise
 
-        logger.info(
-            "response_generated",
-            agent=self.name,
-            chat_id=chat_id,
-            response_length=len(rendered),
-            citation_count=len(citations),
-        )
-        return AgentResponse(text=rendered, citations=citations)
+        # 5/6. Parse citations, update history, clean up the per-turn registry,
+        #      and log — the shared turn-finalization tail.
+        return self._finalize_turn(chat_id=chat_id, user_text=text, raw_response=raw_response)
 
     def run(self) -> None:
         """Start the agent with all channels (blocking, sync wrapper).
@@ -857,6 +829,62 @@ class Agent:
                 "page": r.get("page", 0),
                 "content": r.get("content", ""),
             }
+
+    # ------------------------------------------------------------------
+    # Internal: turn finalization
+    # ------------------------------------------------------------------
+
+    def _finalize_turn(
+        self,
+        *,
+        chat_id: str,
+        user_text: str,
+        raw_response: str,
+    ) -> AgentResponse:
+        """Parse the raw LLM output into the final response and close the turn.
+
+        Shared tail of both turn paths (:meth:`handle_message_full` and
+        :meth:`_resume_pending_action`): the two differ only in how they set up
+        and produce ``raw_response`` (entity resolution + context gathering vs.
+        the narration-only re-entry), but converge on an identical finalization:
+
+        1. Parse citations against the per-turn chunk registry (the ordered
+           index map resolves visible ``[n]`` markers; the registry backs the
+           source/page fallback).
+        2. Append the user message and the rendered assistant reply to history.
+        3. In a ``finally``, always drop the per-turn chunk registry and ordered
+           index map for ``chat_id`` — even on error — so a long-lived agent
+           does not accumulate orphan slots from failed turns.
+        4. Log ``response_generated`` and return the :class:`AgentResponse`.
+
+        Args:
+            chat_id: Conversation identifier.
+            user_text: The user message to record in history.
+            raw_response: The raw LLM output (with any trailing citation block).
+
+        Returns:
+            The rendered :class:`AgentResponse` with parsed citations.
+        """
+        try:
+            rendered, citations = parse_response(
+                raw_response,
+                self._turn_chunks.get(chat_id, {}),
+                self._turn_ordered.get(chat_id, []),
+            )
+            self._add_to_history(chat_id, "user", user_text)
+            self._add_to_history(chat_id, "assistant", rendered)
+        finally:
+            self._turn_chunks.pop(chat_id, None)
+            self._turn_ordered.pop(chat_id, None)
+
+        logger.info(
+            "response_generated",
+            agent=self.name,
+            chat_id=chat_id,
+            response_length=len(rendered),
+            citation_count=len(citations),
+        )
+        return AgentResponse(text=rendered, citations=citations)
 
     # ------------------------------------------------------------------
     # Internal: message building
@@ -1150,11 +1178,14 @@ class Agent:
     def _is_affirmation(text: str) -> bool:
         """Deterministically recognise a bare affirmation (NOT via the LLM).
 
-        Returns ``True`` only when the WHOLE message — after strip + lowercase
-        — is a single recognised affirmation token (English or Italian). A
-        compound message such as ``"ok, but set priority high"`` is NOT an
-        affirmation (it is treated as unrelated → cancel + process normally),
-        so the gate is never bypassed by an ambiguous "yes …" prefix.
+        Thin delegator to
+        :func:`machina.connectors.comms.types.is_affirmation` — the single
+        source of truth for the affirmation grammar, shared with a channel's
+        synchronous ``request_confirmation``. Returns ``True`` only when the
+        WHOLE message — after strip + lowercase — is a single recognised
+        affirmation token (English or Italian); a compound such as
+        ``"ok, but set priority high"`` is NOT an affirmation, so the gate is
+        never bypassed by an ambiguous "yes …" prefix.
 
         Args:
             text: The raw incoming message text.
@@ -1162,16 +1193,16 @@ class Agent:
         Returns:
             ``True`` if the message is exactly one affirmation token.
         """
-        return text.strip().lower() in _AFFIRMATION_TOKENS
+        return is_affirmation(text)
 
     @staticmethod
     def _is_decline(text: str) -> bool:
         """Deterministically recognise a bare decline (NOT via the LLM).
 
-        Mirror of :meth:`_is_affirmation` for decline tokens. Both a decline
-        and any unrelated message clear the pending action; this helper exists
-        for symmetry and clearer logging, not because the two branches differ
-        in effect (both cancel).
+        Thin delegator to :func:`machina.connectors.comms.types.is_decline`.
+        Both a decline and any unrelated message clear the pending action; this
+        helper exists for symmetry and clearer logging, not because the two
+        branches differ in effect (both cancel).
 
         Args:
             text: The raw incoming message text.
@@ -1179,7 +1210,7 @@ class Agent:
         Returns:
             ``True`` if the message is exactly one decline token.
         """
-        return text.strip().lower() in _DECLINE_TOKENS
+        return is_decline(text)
 
     async def _await_write_confirmation(
         self,
@@ -1316,10 +1347,26 @@ class Agent:
             # reworded — can neither ratchet a second confirmation nor write a
             # duplicate. The re-entry carries NO confirmer.
             memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+            # Build the system prompt directly instead of fishing it out of
+            # ``_build_messages(...)[0]["content"]`` — the positional ``[0]``
+            # coupling is fragile, and on this cold confirm path the discarded
+            # parts (context message, history) cost a needless registry walk and
+            # history copy. Pass the SAME arguments ``_build_messages`` passes
+            # ``build_system_prompt`` so the produced prompt string is identical.
+            all_caps: list[str] = []
+            for _, conn in self._registry.all().items():
+                all_caps.extend(conn.capabilities)
+            system_prompt = build_system_prompt(
+                plant_name=self.plant.name,
+                asset_count=len(self.plant.assets),
+                capabilities=all_caps,
+                workflows=list(self._workflows.keys()),
+                sandbox=self._sandbox,
+            )
             messages: list[dict[str, Any]] = [
                 {
                     "role": "system",
-                    "content": self._build_messages(text, chat_id, {})[0]["content"],
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": text},
                 {
@@ -1338,25 +1385,18 @@ class Agent:
                 narration_only=True,
                 seed_side_effects={memo_key: tool_result},
             )
-            rendered, citations = parse_response(
-                raw_response,
-                self._turn_chunks.get(chat_id, {}),
-                self._turn_ordered.get(chat_id, []),
-            )
-            self._add_to_history(chat_id, "user", text)
-            self._add_to_history(chat_id, "assistant", rendered)
-        finally:
+        except BaseException:
+            # Drop the per-turn registry on any failure during execution or
+            # narration so a long-lived agent does not accumulate orphan slots,
+            # then re-raise unchanged. The success path's cleanup lives in
+            # _finalize_turn.
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            raise
 
-        logger.info(
-            "response_generated",
-            agent=self.name,
-            chat_id=chat_id,
-            response_length=len(rendered),
-            citation_count=len(citations),
-        )
-        return AgentResponse(text=rendered, citations=citations)
+        # Parse citations, update history, clean up the per-turn registry, and
+        # log — the shared turn-finalization tail (same as handle_message_full).
+        return self._finalize_turn(chat_id=chat_id, user_text=text, raw_response=raw_response)
 
     async def _execute_tool(
         self,

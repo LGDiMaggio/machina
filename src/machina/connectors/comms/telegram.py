@@ -14,7 +14,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.comms.types import IncomingMessage, MessageHandler
+from machina.connectors.comms.types import IncomingMessage, MessageHandler, is_affirmation
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -256,16 +256,20 @@ class CliChannel:
             prompt: Human-readable confirmation text describing the write.
 
         Returns:
-            ``True`` only when the user types an affirmative answer
-            (``y`` / ``yes``, case-insensitive, trimmed); ``False`` for an
-            empty line or anything not affirmative (safe default — never
-            auto-confirm).
+            ``True`` only when the user types an affirmative answer (one of the
+            shared English/Italian affirmation tokens — ``y`` / ``yes`` / ``ok``
+            / ``sì`` / ``conferma`` …, case-insensitive, trimmed, whole-message
+            only); ``False`` for an empty line or anything not affirmative
+            (safe default — never auto-confirm). Uses the same
+            :func:`~machina.connectors.comms.types.is_affirmation` grammar as
+            the runtime's two-turn confirmation path, so CLI and async channels
+            accept identical answers.
         """
         print(f"\n⚠️  {prompt}")
 
         loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(None, lambda: input("Confirm? [y/N] "))
-        return answer.strip().lower() in ("y", "yes")
+        return is_affirmation(answer)
 
     async def listen(self, handler: MessageHandler) -> None:
         """Read from stdin in a loop and dispatch to handler.

@@ -260,22 +260,28 @@ class TestCliChannel:
 class TestCliChannelConfirmation:
     """Test CliChannel.request_confirmation (the synchronous HITL primitive)."""
 
-    @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", " yes ", "Yes"])
+    @pytest.mark.parametrize(
+        "answer",
+        # Shared IT+EN affirmation grammar (machina.connectors.comms.types
+        # .is_affirmation), case-insensitive and trimmed — CLI now accepts the
+        # same tokens as the runtime's two-turn confirmation path.
+        ["y", "Y", "yes", "YES", " yes ", "Yes", "ok", "OK", " ok ", "sì", "si", "conferma"],
+    )
     @pytest.mark.asyncio
     async def test_returns_true_on_affirmative(
         self, monkeypatch: pytest.MonkeyPatch, answer: str
     ) -> None:
-        """Affirmative input (y/yes, case-insensitive, trimmed) returns True."""
+        """Affirmative input (shared IT+EN tokens, case-insensitive, trimmed) returns True."""
         monkeypatch.setattr("builtins.input", lambda _prompt="": answer)
         cli = CliChannel()
         assert await cli.request_confirmation("cli", "Create WO?") is True
 
-    @pytest.mark.parametrize("answer", ["n", "N", "no", "", "  ", "maybe", "yeah", "ok"])
+    @pytest.mark.parametrize("answer", ["n", "N", "no", "", "  ", "maybe", "yeah", "ok, but high"])
     @pytest.mark.asyncio
     async def test_returns_false_on_non_affirmative(
         self, monkeypatch: pytest.MonkeyPatch, answer: str
     ) -> None:
-        """Non-affirmative / empty / unrelated input returns False (safe default)."""
+        """Non-affirmative / empty / unrelated / compound input returns False (safe default)."""
         monkeypatch.setattr("builtins.input", lambda _prompt="": answer)
         cli = CliChannel()
         assert await cli.request_confirmation("cli", "Create WO?") is False

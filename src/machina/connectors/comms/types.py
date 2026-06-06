@@ -50,6 +50,56 @@ class IncomingMessage:
 MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, str]]
 
 
+# Deterministic affirmation / decline token sets shared by every confirmation
+# path (the agent runtime's two-turn degrade AND a channel's synchronous
+# ``request_confirmation``). A weak local model must NOT be the component that
+# interprets a "yes" — the parse here is mechanical, never delegated to the LLM.
+# Tokens cover English + Italian; matching is case/whitespace-insensitive and
+# requires the WHOLE message to be a single token (a compound like
+# "ok, but set priority high" is deliberately neither — treated as unrelated).
+# Unicode/homoglyph folding is intentionally deferred.
+#
+# Lives in the connectors layer (BELOW the agent layer) so both
+# ``agent/runtime.py`` and the comms channels can import it without an upward
+# dependency. Distinct from the data-coercion token sets in
+# ``connectors/cmms/generic_coercers.py`` / ``excel.py`` (different domain).
+AFFIRMATION_TOKENS: frozenset[str] = frozenset(
+    {"y", "yes", "ok", "okay", "confirm", "confirmed", "sì", "si", "conferma", "procedi", "vai"}
+)
+DECLINE_TOKENS: frozenset[str] = frozenset({"n", "no", "annulla", "cancel", "stop", "abort"})
+
+
+def is_affirmation(text: str) -> bool:
+    """Deterministically recognise a bare affirmation (NOT via the LLM).
+
+    Returns ``True`` only when the WHOLE message — after strip + lowercase — is
+    a single recognised affirmation token (English or Italian). A compound
+    message such as ``"ok, but set priority high"`` is NOT an affirmation, so a
+    confirmation gate is never bypassed by an ambiguous "yes …" prefix.
+
+    Args:
+        text: The raw incoming message text.
+
+    Returns:
+        ``True`` if the message is exactly one affirmation token.
+    """
+    return text.strip().lower() in AFFIRMATION_TOKENS
+
+
+def is_decline(text: str) -> bool:
+    """Deterministically recognise a bare decline (NOT via the LLM).
+
+    Mirror of :func:`is_affirmation` for decline tokens.
+
+    Args:
+        text: The raw incoming message text.
+
+    Returns:
+        ``True`` if the message is exactly one decline token.
+    """
+    return text.strip().lower() in DECLINE_TOKENS
+
+
 @runtime_checkable
 class SupportsConfirmation(Protocol):
     """Channels that can confirm a pending write synchronously, in-turn.
@@ -109,8 +159,12 @@ def supports_sync_confirmation(channel: object) -> bool:
 
 
 __all__ = [
+    "AFFIRMATION_TOKENS",
+    "DECLINE_TOKENS",
     "IncomingMessage",
     "MessageHandler",
     "SupportsConfirmation",
+    "is_affirmation",
+    "is_decline",
     "supports_sync_confirmation",
 ]
