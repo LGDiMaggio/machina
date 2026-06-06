@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from machina.connectors.comms.telegram import CliChannel, IncomingMessage, TelegramConnector
+from machina.connectors.comms.types import (
+    SupportsConfirmation,
+    supports_sync_confirmation,
+)
 from machina.exceptions import ConnectorError
 
 
@@ -251,6 +255,59 @@ class TestCliChannel:
         handler = AsyncMock(return_value="")
         await cli.listen(handler)
         handler.assert_awaited_once()
+
+
+class TestCliChannelConfirmation:
+    """Test CliChannel.request_confirmation (the synchronous HITL primitive)."""
+
+    @pytest.mark.parametrize("answer", ["y", "Y", "yes", "YES", " yes ", "Yes"])
+    @pytest.mark.asyncio
+    async def test_returns_true_on_affirmative(
+        self, monkeypatch: pytest.MonkeyPatch, answer: str
+    ) -> None:
+        """Affirmative input (y/yes, case-insensitive, trimmed) returns True."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": answer)
+        cli = CliChannel()
+        assert await cli.request_confirmation("cli", "Create WO?") is True
+
+    @pytest.mark.parametrize("answer", ["n", "N", "no", "", "  ", "maybe", "yeah", "ok"])
+    @pytest.mark.asyncio
+    async def test_returns_false_on_non_affirmative(
+        self, monkeypatch: pytest.MonkeyPatch, answer: str
+    ) -> None:
+        """Non-affirmative / empty / unrelated input returns False (safe default)."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": answer)
+        cli = CliChannel()
+        assert await cli.request_confirmation("cli", "Create WO?") is False
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_write_description(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The concrete write description passed by the caller is rendered."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+        cli = CliChannel()
+        write_desc = "Create work order for asset P-201: bearing wear (HIGH)"
+        await cli.request_confirmation("cli", write_desc)
+        captured = capsys.readouterr()
+        assert write_desc in captured.out
+
+
+class TestConfirmationCapabilityDetection:
+    """Test the SupportsConfirmation protocol / supports_sync_confirmation helper."""
+
+    def test_cli_channel_is_sync_capable(self) -> None:
+        cli = CliChannel()
+        assert supports_sync_confirmation(cli) is True
+        assert isinstance(cli, SupportsConfirmation)
+
+    def test_telegram_connector_needs_two_turn(self) -> None:
+        conn = TelegramConnector(bot_token="fake")
+        assert supports_sync_confirmation(conn) is False
+        assert not isinstance(conn, SupportsConfirmation)
+
+    def test_plain_object_needs_two_turn(self) -> None:
+        assert supports_sync_confirmation(object()) is False
 
 
 class TestTelegramListen:

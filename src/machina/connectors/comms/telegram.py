@@ -240,6 +240,33 @@ class CliChannel:
         """Print message to stdout."""
         print(f"\n🤖 {text}")
 
+    async def request_confirmation(self, chat_id: str | int, prompt: str) -> bool:
+        """Render a pending-write prompt and read a ``[y/N]`` decision.
+
+        Implements the :class:`~machina.connectors.comms.types.SupportsConfirmation`
+        seam synchronously for CLI use: the runtime-built ``prompt`` (which
+        already states the concrete proposed write) is printed, then a single
+        line is read from stdin via the same ``run_in_executor(None, input)``
+        pattern :meth:`listen` uses, so the agent loop can pause for input
+        without blocking the event loop.
+
+        Args:
+            chat_id: Identifier for the chat (unused for CLI; kept for the
+                protocol signature).
+            prompt: Human-readable confirmation text describing the write.
+
+        Returns:
+            ``True`` only when the user types an affirmative answer
+            (``y`` / ``yes``, case-insensitive, trimmed); ``False`` for an
+            empty line or anything not affirmative (safe default — never
+            auto-confirm).
+        """
+        print(f"\n⚠️  {prompt}")
+
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(None, lambda: input("Confirm? [y/N] "))
+        return answer.strip().lower() in ("y", "yes")
+
     async def listen(self, handler: MessageHandler) -> None:
         """Read from stdin in a loop and dispatch to handler.
 
