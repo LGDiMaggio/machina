@@ -168,7 +168,7 @@ preventive_scheduling = Workflow(
 # ── The agent with both workflows ───────────────────────────────
 
 
-def build_agent(llm: str = "ollama:llama3", sandbox: bool = True) -> Agent:
+def build_agent(llm: str = "ollama:qwen2.5:3b", sandbox: bool = True) -> Agent:
     return Agent(
         name="Workflow Agent",
         plant=Plant(name="North Plant"),
@@ -231,7 +231,7 @@ async def run_demo(llm: str, sandbox: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Custom Workflow Agent")
-    parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
+    parser.add_argument("--llm", default="ollama:qwen2.5:3b", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
 
     add_mode_flags(parser, default_sandbox=True)

@@ -6,17 +6,32 @@ Talk to your plant data in under 5 minutes.
 
 Pick one:
 
-### Option A: Ollama (local, free, no API key)
+### Option A: Ollama (local, free, no API key) — default
 
 1. Install Ollama from [ollama.com](https://ollama.com)
-2. Pull a model:
+2. Pull the default model — a small Qwen that runs comfortably on CPU:
    ```bash
-   ollama pull llama3
+   ollama pull qwen2.5:3b
    ```
 3. Verify it's running:
    ```bash
    ollama list
    ```
+
+The quickstart defaults to `ollama:qwen2.5:3b`. If you already have a newer
+Qwen pulled (e.g. `qwen3:4b`), pass it with `--llm ollama:qwen3:4b`.
+
+**On a machine with a GPU?** Pull a larger Qwen for noticeably better
+answers and just point the example at it:
+
+```bash
+ollama pull qwen2.5:14b
+python agent.py --llm ollama:qwen2.5:14b   # or ollama:qwen3:14b
+```
+
+Ollama uses the GPU automatically — Machina adds no device or GPU
+configuration of its own. Same code, same command, the larger model just
+loads onto the GPU.
 
 ### Option B: OpenAI API
 
@@ -73,8 +88,11 @@ cd machina
 pip install -e ".[litellm,docs-rag,examples]"
 cd examples/quickstart
 
-# With Ollama (default):
+# With Ollama (default: ollama:qwen2.5:3b):
 python agent.py
+
+# With a larger Qwen (GPU recommended):
+python agent.py --llm ollama:qwen2.5:14b
 
 # With OpenAI:
 python agent.py --llm openai:gpt-4o
@@ -102,7 +120,7 @@ agent = Agent(
         DocumentStoreConnector(paths=["../sample_data/manuals"]),
     ],
     channels=[CliChannel()],
-    llm="ollama:llama3",
+    llm="ollama:qwen2.5:3b",
 )
 agent.run()
 ```
@@ -117,45 +135,46 @@ You: What is the bearing replacement procedure for pump P-201?
 Agent: Based on the Grundfos CR 32-2 maintenance manual for pump P-201
 (Cooling Water Pump), the bearing replacement procedure is:
 
-1. Lock out/tag out the pump and isolate power supply
+1. Lock out/tag out the pump and isolate power supply [1]
 2. Drain the pump casing and disconnect piping
 3. Remove the coupling guard and motor coupling
 4. Remove the bearing housing cover bolts (6x M12)
-5. Extract the drive-end bearing (SKF 6310-2RS) using a bearing puller
+5. Extract the drive-end bearing (SKF 6310-2RS) using a bearing puller [1]
 6. Clean the shaft journal and housing bore
-7. Press-fit the new bearing using an induction heater (target: 110°C)
+7. Press-fit the new bearing using an induction heater (target: 110°C) [1]
 8. Reassemble in reverse order, torque cover bolts to 45 Nm
 9. Verify vibration levels per ISO 10816-3 after commissioning
 
 Recommended spare: SKF 6310-2RS (currently in stock: 4 units)
 
-You: Are there spare parts available for the compressor?
+— Sources:
+  • [pump_p201_manual.md]
 
-Agent: For Compressor C-301 (Atlas Copco GA 55), the following spare
-parts are tracked in inventory:
+You: Create a work order for bearing replacement on P-201, priority HIGH
 
-| Part           | SKU          | In Stock | Reorder Point |
-|----------------|--------------|----------|---------------|
-| Air filter     | AF-AC-GA55   | 6        | 3             |
-| Oil filter     | OF-AC-GA55   | 4        | 2             |
-| Separator elem.| SE-AC-GA55   | 2        | 1             |
+⚠️  Create a work order?
+  • Asset: P-201
+  • Type: predictive
+  • Priority: high
+  • Description: Replace drive-end bearing (SKF 6310-2RS) following the
+    manual procedure; elevated vibration on the drive-end bearing.
+Confirm? [y/N] y
 
-All parts are above reorder point. No procurement action needed.
+Agent: Done — created work order WO-2026-0412:
+  Asset: P-201 | Type: PREDICTIVE | Priority: HIGH
+  Description: Replace drive-end bearing (SKF 6310-2RS).
 
 You: List all critical assets
 
 Agent: Critical assets (Criticality A) in the plant:
 
 1. P-201 — Cooling Water Pump (Grundfos CR 32-2) — Building A, Line 2
-   - Equipment class: PU (ISO 14224)
-   - 1 open corrective work order (WO-2026-0087)
-
 2. C-301 — Main Air Compressor (Atlas Copco GA 55) — Building B
-   - Equipment class: CO (ISO 14224)
-   - Preventive maintenance due in 12 days
 ```
 
-The agent resolves "the pump" to Asset P-201, retrieves context from your CMMS, searches equipment manuals via RAG, and answers in natural language. That's the domain model working for you.
+The agent resolves "the pump" to Asset P-201, retrieves context from your CMMS, searches equipment manuals via RAG (note the inline `[1]` citations and the `— Sources` footer tracing each claim back to the manual), and answers in natural language. That's the domain model working for you.
+
+Notice the **confirmation gate**: the agent did not silently create the work order. It proposed the exact write — asset, type, priority, description — and only executed it after you typed `y`. Type anything else (or just press Enter) and the write is declined. This gate is on by default; see [Safety: the confirmation gate](#safety-the-confirmation-gate) below.
 
 ## What's Happening Under the Hood
 
@@ -164,32 +183,47 @@ The agent resolves "the pump" to Asset P-201, retrieves context from your CMMS, 
 3. **RAG retrieval** -- equipment manuals are searched and relevant sections are injected into the LLM prompt
 4. **Domain grounding** -- the LLM works with real Asset, WorkOrder, SparePart data, not hallucinated IDs
 
-## Try Sandbox Mode
+## Safety: the confirmation gate
 
-The quickstart runs in **live** mode by default (read-mostly Q&A is safe). Want to test write operations without touching anything? Use sandbox mode — every action is logged, none executed:
-
-```bash
-python agent.py --sandbox    # log-only
-python agent.py --live       # execute writes (default)
-```
+The agent never performs a write — creating a work order, triggering a
+workflow — without your explicit go-ahead. When the model decides to call a
+mutating tool, the runtime pauses and prints the **concrete** proposed
+action, then waits for a `y`:
 
 ```
 You: Create a work order for bearing replacement on P-201, priority HIGH
 
-Agent: [SANDBOX] Work order WO-2026-0412 created:
-  Type: PREDICTIVE | Priority: HIGH | Asset: P-201
-  Description: Replace drive-end bearing (SKF 6310-2RS) based on
-  elevated vibration readings exceeding ISO 10816-3 Zone B limit.
-  Estimated duration: 4 hours
-  Required skills: mechanical fitter, vibration analyst
-
-  Note: Running in sandbox mode -- work order logged but not
-  submitted to CMMS.
+⚠️  Create a work order?
+  • Asset: P-201
+  • Type: predictive
+  • Priority: high
+  • Description: Replace drive-end bearing (SKF 6310-2RS).
+Confirm? [y/N]
 ```
+
+Type `y` (or `yes`) to proceed; anything else — including an empty line —
+declines, and nothing is written. This is **on by default** and is the
+quickstart's safety story: you see exactly what the agent will do before it
+happens.
+
+### Sandbox vs. live (testing aid)
+
+Separately, `--sandbox` lets you dry-run write logic — every action is
+logged, none executed — which is handy when developing or demoing without a
+live CMMS:
+
+```bash
+python agent.py --sandbox    # log-only (writes are no-ops)
+python agent.py --live       # execute writes (default)
+```
+
+The confirmation gate, not sandbox mode, is the headline guard against
+unintended writes; sandbox is a developer testing convenience.
 
 ## Swap Your LLM
 
 ```bash
+python agent.py --llm ollama:qwen2.5:14b   # larger local Qwen (GPU)
 python agent.py --llm openai:gpt-4o
 python agent.py --llm anthropic:claude-sonnet-4-20250514
 python agent.py --llm ollama:mistral

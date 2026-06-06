@@ -2,7 +2,7 @@
 """Your first maintenance agent — 13 lines of Python.
 
 pip install machina-ai[litellm]
-ollama pull llama3
+ollama pull qwen2.5:3b
 python agent.py
 """
 
@@ -27,7 +27,9 @@ from machina.connectors.docs import DocumentStoreConnector
 SAMPLE_DIR = _examples_dir / "sample_data"
 
 
-def _build_agent(llm: str = "ollama:llama3", sandbox: bool = False) -> Agent:
+# Small, CPU-runnable default. Substitute a newer Qwen you have pulled
+# (e.g. "ollama:qwen3:4b") via --llm if you prefer.
+def _build_agent(llm: str = "ollama:qwen2.5:3b", sandbox: bool = False) -> Agent:
     """Build the agent with the given LLM and sandbox settings."""
     return Agent(
         name="Maintenance Assistant",
@@ -61,7 +63,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Machina Quickstart")
     parser.add_argument(
         "--llm",
-        default="ollama:llama3",
+        default="ollama:qwen2.5:3b",
         help="LLM provider:model (e.g. openai:gpt-4o, anthropic:claude-sonnet-4-20250514)",
     )
 

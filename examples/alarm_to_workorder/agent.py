@@ -42,9 +42,14 @@ agent = Agent(
         DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
     ],
     channels=[CliChannel()],
-    llm="ollama:llama3",
+    llm="ollama:qwen2.5:3b",
     workflows=[alarm_to_workorder],
     sandbox=True,
+    # Autonomous-by-design: this demo drives the workflow directly (see
+    # trigger_workflow below), which bypasses the LLM loop and its
+    # confirmation gate, so the flag is documentary here. The real guard
+    # for writes on this path remains `sandbox`.
+    confirmations=False,
 )
 # ────────────────────────────────────────────────────────────────
 
@@ -98,7 +103,7 @@ async def run_alarm_demo(llm: str, sandbox: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Alarm Response Agent")
-    parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
+    parser.add_argument("--llm", default="ollama:qwen2.5:3b", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
 
     add_mode_flags(parser, default_sandbox=True)

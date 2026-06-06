@@ -50,7 +50,7 @@ SCENARIO_EN = (
 )
 
 
-def _build_agent(llm: str = "ollama:llama3", sandbox: bool = True) -> Agent:
+def _build_agent(llm: str = "ollama:qwen2.5:3b", sandbox: bool = True) -> Agent:
     """Build the agent with connectors but no workflows."""
     return Agent(
         name="Autonomous Maintenance Agent",
@@ -85,7 +85,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--llm",
-        default="ollama:llama3",
+        default="ollama:qwen2.5:3b",
         help="LLM provider:model (e.g. openai:gpt-4o, anthropic:claude-sonnet-4-20250514)",
     )
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
