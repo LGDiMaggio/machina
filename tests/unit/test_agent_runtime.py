@@ -1572,6 +1572,24 @@ class TestAgentWorkflows:
         agent._build_domain_services()
         assert agent._engine.sandbox is True
 
+    def test_confirmations_default_true(self) -> None:
+        """Confirmations are on by default (unlike sandbox)."""
+        agent = Agent()
+        assert agent.confirmations is True
+
+    def test_confirmations_flag_stored(self) -> None:
+        """``Agent(confirmations=False)`` stores the value."""
+        agent = Agent(confirmations=False)
+        assert agent.confirmations is False
+
+    def test_confirmations_setter_toggles_value(self) -> None:
+        """The setter flips the agent-loop-local flag at runtime."""
+        agent = Agent(confirmations=True)
+        agent.confirmations = False
+        assert agent.confirmations is False
+        agent.confirmations = True
+        assert agent.confirmations is True
+
 
 # ---------------------------------------------------------------------------
 # Path-leak sanitisation at the runtime boundary (regression for report-luigi U1)

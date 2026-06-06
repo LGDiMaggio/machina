@@ -117,6 +117,10 @@ class MachinaConfig(BaseModel):
     sandbox: bool = Field(
         default=False, description="Enable sandbox mode (writes are logged, not executed)"
     )
+    confirmations: bool = Field(
+        default=True,
+        description="Require human confirmation before write/mutation tool calls",
+    )
     logging: dict[str, Any] = Field(
         default_factory=dict,
         description="Logging configuration overrides",

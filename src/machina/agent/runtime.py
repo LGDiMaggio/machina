@@ -81,6 +81,8 @@ class Agent:
         max_history: Maximum conversation turns to keep in memory.
         workflows: List of workflow definitions to register.
         sandbox: If ``True``, write actions are logged but not executed.
+        confirmations: If ``True`` (default), the agent requires human
+            confirmation before executing write/mutation tool calls.
 
     Example:
         ```python
@@ -115,6 +117,7 @@ class Agent:
         max_history: int = 20,
         workflows: list[Workflow] | None = None,
         sandbox: bool = False,
+        confirmations: bool = True,
     ) -> None:
         self.name = name
         self.description = description
@@ -162,6 +165,13 @@ class Agent:
         # the engine's heuristic gate.
         self._sandbox = sandbox
         set_sandbox_mode(sandbox)
+
+        # Confirmation gate — agent-loop-local switch (no contextvar, unlike
+        # sandbox). Read directly by ``_llm_loop`` to decide whether a
+        # write/mutation tool call must be confirmed by a human before it
+        # executes. On by default. The gate logic itself is consumed
+        # elsewhere; this just holds the value.
+        self._confirmations = confirmations
 
         # Workflow engine
         self._workflows: dict[str, Workflow] = {}
@@ -230,6 +240,31 @@ class Agent:
         set_sandbox_mode(value)
 
     # ------------------------------------------------------------------
+    # Confirmation gate — agent-loop-local, no contextvar
+    # ------------------------------------------------------------------
+
+    @property
+    def confirmations(self) -> bool:
+        """Whether write/mutation tool calls require human confirmation.
+
+        Read this attribute through normal access — the value is consumed
+        inside the agent loop to gate side-effecting tool calls. Unlike
+        :attr:`sandbox`, there is no contextvar or engine snapshot: the
+        switch is purely agent-loop-local.
+        """
+        return self._confirmations
+
+    @confirmations.setter
+    def confirmations(self, value: bool) -> None:
+        """Toggle the confirmation gate at runtime.
+
+        Sets the agent-loop-local flag read by the loop. No contextvar or
+        engine state is involved (in contrast to :attr:`sandbox`), so this
+        setter only updates ``self._confirmations``.
+        """
+        self._confirmations = value
+
+    # ------------------------------------------------------------------
     # Public API — factory
     # ------------------------------------------------------------------
 
@@ -285,6 +320,7 @@ class Agent:
             llm=config.llm.provider,
             temperature=config.llm.temperature,
             sandbox=config.sandbox,
+            confirmations=config.confirmations,
         )
 
     # ------------------------------------------------------------------
