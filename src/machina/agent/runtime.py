@@ -890,6 +890,27 @@ class Agent:
     # Internal: message building
     # ------------------------------------------------------------------
 
+    def _build_system_prompt(self) -> str:
+        """Build the domain-aware system prompt string.
+
+        Single source of the capability-gathering loop + ``build_system_prompt``
+        call, shared by :meth:`_build_messages` (the normal turn) and
+        :meth:`_resume_pending_action` (the two-turn narration re-entry). Keeping
+        both call sites on this one helper makes the "identical system prompt"
+        guarantee structural rather than a comment obligation.
+        """
+        all_caps: list[str] = []
+        for _, conn in self._registry.all().items():
+            all_caps.extend(conn.capabilities)
+
+        return build_system_prompt(
+            plant_name=self.plant.name,
+            asset_count=len(self.plant.assets),
+            capabilities=all_caps,
+            workflows=list(self._workflows.keys()),
+            sandbox=self._sandbox,
+        )
+
     def _build_messages(
         self,
         text: str,
@@ -897,18 +918,7 @@ class Agent:
         context_data: dict[str, Any],
     ) -> list[dict[str, str]]:
         """Build the LLM message list with system prompt, context, and history."""
-        # Gather all capabilities
-        all_caps: list[str] = []
-        for _, conn in self._registry.all().items():
-            all_caps.extend(conn.capabilities)
-
-        system = build_system_prompt(
-            plant_name=self.plant.name,
-            asset_count=len(self.plant.assets),
-            capabilities=all_caps,
-            workflows=list(self._workflows.keys()),
-            sandbox=self._sandbox,
-        )
+        system = self._build_system_prompt()
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 
@@ -947,8 +957,6 @@ class Agent:
         max_iterations: int = 5,
         confirmer: Callable[[str], Awaitable[bool]] | None = None,
         user_id: str = "",
-        narration_only: bool = False,
-        seed_side_effects: dict[str, Any] | None = None,
     ) -> str:
         """Call the LLM, execute tool calls, and return final response.
 
@@ -965,32 +973,19 @@ class Agent:
           pending action and returns a fail-safe
           ``{"confirmation_required": ...}`` result (the two-turn flow).
 
-        Args:
-            narration_only: When ``True`` (the two-turn confirmation re-entry,
-                U5) the offered toolset EXCLUDES :data:`_SIDE_EFFECTING_TOOLS`
-                so the model cannot request another write while narrating the
-                just-confirmed one — preventing a re-gate or a reworded
-                duplicate. Combined with ``seed_side_effects``, even a verbatim
-                re-issue collapses to the memoised result.
-            seed_side_effects: Optional pre-populated side-effect memo (the
-                ``(func_name, args) → result`` of the just-confirmed write) so
-                a verbatim re-issue during narration collapses instead of
-                executing again.
+        Note: the two-turn confirmation narration does NOT re-enter this loop.
+        :meth:`_resume_pending_action` narrates an already-executed write via the
+        no-tools :meth:`LLMProvider.complete` path, so there is no orphan
+        ``role:tool`` message and no risk of a second write here.
         """
         tools = self._get_available_tools()
-        if narration_only:
-            # Suppress mutating tools entirely for this pass so an eager model
-            # cannot ratchet a second confirmation or write a reworded duplicate
-            # while narrating the just-confirmed write.
-            tools = [t for t in tools if t["function"]["name"] not in _SIDE_EFFECTING_TOOLS]
 
         # Per-turn memo of side-effecting tool calls (keyed by name + args).
         # If the model re-requests the same write across loop iterations — the
         # mechanism behind the duplicate-work-order report — we reuse the first
         # result instead of executing the side effect again. Read-only tools
-        # are never memoised; they may legitimately be re-issued. Seeded with
-        # the just-confirmed write on the two-turn narration re-entry.
-        executed_side_effects: dict[str, Any] = dict(seed_side_effects or {})
+        # are never memoised; they may legitimately be re-issued.
+        executed_side_effects: dict[str, Any] = {}
 
         # Per-turn set of declined proposal keys (same canonical key as the
         # memo). A chatty model that re-proposes a write the user already
@@ -1259,6 +1254,22 @@ class Agent:
                 chat_id=chat_id,
                 reason="empty_user_id_degrades_to_chat_level",
             )
+        # Observability for the single-slot overwrite: when a turn proposes more
+        # than one write, the second proposal silently replaces the first in this
+        # key (only one pending action lives per (chat_id, user_id)). The dropped
+        # proposal would otherwise vanish without trace — log it so the lost
+        # confirmation question is visible. Single-slot behaviour is unchanged.
+        existing = self._pending_actions.get((chat_id, user_id))
+        if existing is not None and existing[:2] != (func_name, dict(args)):
+            logger.warning(
+                "pending_write_overwritten",
+                agent=self.name,
+                tool=func_name,
+                operation=func_name,
+                chat_id=chat_id,
+                dropped_tool=existing[0],
+                dropped_operation=existing[0],
+            )
         self._pending_actions[(chat_id, user_id)] = (func_name, dict(args), prompt)
         logger.info(
             "write_confirmation_required",
@@ -1341,50 +1352,32 @@ class Agent:
         try:
             tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
 
-            # Re-enter the loop in narration-only mode: mutating tools are
-            # suppressed AND the just-executed (func_name, args) is seeded into
-            # the memo, so an eager model that re-issues the write — verbatim or
-            # reworded — can neither ratchet a second confirmation nor write a
-            # duplicate. The re-entry carries NO confirmer.
-            memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
-            # Build the system prompt directly instead of fishing it out of
-            # ``_build_messages(...)[0]["content"]`` — the positional ``[0]``
-            # coupling is fragile, and on this cold confirm path the discarded
-            # parts (context message, history) cost a needless registry walk and
-            # history copy. Pass the SAME arguments ``_build_messages`` passes
-            # ``build_system_prompt`` so the produced prompt string is identical.
-            all_caps: list[str] = []
-            for _, conn in self._registry.all().items():
-                all_caps.extend(conn.capabilities)
-            system_prompt = build_system_prompt(
-                plant_name=self.plant.name,
-                asset_count=len(self.plant.assets),
-                capabilities=all_caps,
-                workflows=list(self._workflows.keys()),
-                sandbox=self._sandbox,
-            )
-            messages: list[dict[str, Any]] = [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
+            # Narrate the already-executed write with the NO-TOOLS completion
+            # path (``complete``), not ``_llm_loop``. The previous tool-calling
+            # re-entry hand-built an orphan ``role:tool`` message (no
+            # ``tool_call_id``, no preceding assistant ``tool_calls``), which
+            # OpenAI-compatible providers reject with a 400 — and since the write
+            # had already executed, the user saw an error and a retried "yes"
+            # could create a DUPLICATE write. The narration only summarises an
+            # already-executed result, so it needs no tools and no tool-role
+            # message: the executed result is embedded as plain TEXT. The system
+            # prompt is built identically to the normal turn (via
+            # :meth:`_build_system_prompt`). Citations still parse from this
+            # output through :meth:`_finalize_turn`.
+            system_prompt = self._build_system_prompt()
+            messages: list[dict[str, str]] = [
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
                 {
-                    "role": "assistant",
+                    "role": "user",
                     "content": (
                         f"The confirmed action {func_name!r} has been executed. "
-                        "Summarise the outcome for the user and cite any sources."
+                        "Summarise the outcome for the user and cite any sources.\n\n"
+                        f"Result:\n{json.dumps(tool_result, default=str)}"
                     ),
                 },
-                {"role": "tool", "content": json.dumps(tool_result, default=str)},
             ]
-            raw_response = await self._llm_loop(
-                messages,
-                chat_id,
-                max_iterations=2,
-                narration_only=True,
-                seed_side_effects={memo_key: tool_result},
-            )
+            raw_response = await self._llm.complete(messages)
         except BaseException:
             # Drop the per-turn registry on any failure during execution or
             # narration so a long-lived agent does not accumulate orphan slots,

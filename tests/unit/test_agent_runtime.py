@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
@@ -2174,3 +2175,408 @@ class TestTwoTurnConfirmation:
         second = agent._pending_actions[("c1", "userA")]
         assert first != second
         assert second[1]["asset_id"] == "P-202"
+
+
+# ---------------------------------------------------------------------------
+# FIX A — narration re-entry builds a VALID message sequence (no orphan tool)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLLM:
+    """Fake LLM that records every message list it receives.
+
+    ``complete`` returns a narrated answer; ``complete_with_tools`` records the
+    call and returns plain text (so it never drives a write). Used to assert the
+    narration re-entry uses the no-tools ``complete`` path and never builds an
+    orphan ``role:tool`` message.
+    """
+
+    def __init__(self, response: str = "I created the work order.") -> None:
+        self.model = "fake:model"
+        self._response = response
+        self.complete_messages: list[list[dict[str, Any]]] = []
+        self.complete_with_tools_messages: list[list[dict[str, Any]]] = []
+
+    async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        self.complete_messages.append([dict(m) for m in messages])
+        return self._response
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self.complete_with_tools_messages.append([dict(m) for m in messages])
+        return {"content": self._response, "tool_calls": None}
+
+
+def _assert_tool_message_contract(messages: list[dict[str, Any]]) -> None:
+    """Every ``role:tool`` message must carry a ``tool_call_id`` and follow an
+    assistant message that announced that id in its ``tool_calls``."""
+    announced_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+                if tc_id:
+                    announced_ids.add(tc_id)
+        if msg.get("role") == "tool":
+            tcid = msg.get("tool_call_id")
+            assert tcid, f"role:tool message has no tool_call_id: {msg!r}"
+            assert tcid in announced_ids, (
+                f"role:tool message {tcid!r} not preceded by an assistant tool_calls entry"
+            )
+
+
+class TestNarrationReentryContract:
+    """FIX A: the two-turn narration pass must not emit an orphan role:tool."""
+
+    @pytest.mark.asyncio
+    async def test_narration_uses_complete_not_tool_loop(self) -> None:
+        """Confirming a pending write narrates via the no-tools ``complete``
+        path; no ``role:tool`` message lacking a ``tool_call_id`` is ever sent,
+        and the write executes exactly once."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+
+        rec = _RecordingLLM()
+        agent._llm = rec  # type: ignore[assignment]
+        resp = await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+
+        # The write executed exactly once on the confirm path.
+        assert conn.create_calls == 1
+        # Narration went through the no-tools completion path.
+        assert len(rec.complete_messages) == 1
+        assert rec.complete_with_tools_messages == []
+        # No orphan role:tool messages, and the contract holds on every message
+        # list the LLM saw during narration.
+        narration_msgs = rec.complete_messages[0]
+        assert not any(m.get("role") == "tool" for m in narration_msgs)
+        _assert_tool_message_contract(narration_msgs)
+        # A narrated AgentResponse is returned (not a raw payload).
+        assert isinstance(resp, AgentResponse)
+        assert resp.text
+
+
+# ---------------------------------------------------------------------------
+# FIX D — _confirmation_prompt is concrete for EVERY mutating tool
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationPromptCompleteness:
+    """Every MUTATING_TOOLS entry must produce a concrete (non-fallback) prompt."""
+
+    def test_all_mutating_tools_have_concrete_prompt(self) -> None:
+        from machina.llm.tools import MUTATING_TOOLS
+
+        agent = Agent()
+        # Minimal valid args per known mutating tool.
+        minimal_args: dict[str, dict[str, Any]] = {
+            "create_work_order": {
+                "asset_id": "P-201",
+                "type": "corrective",
+                "priority": "high",
+                "description": "Replace bearing",
+            },
+            "execute_workflow": {
+                "workflow_name": "AlarmToWO",
+                "event": {"asset_id": "P-201"},
+            },
+        }
+        for name in MUTATING_TOOLS:
+            assert name in minimal_args, (
+                f"No minimal args registered for mutating tool {name!r} — add a "
+                "branch in _confirmation_prompt AND an entry here so R6 stays concrete."
+            )
+            prompt = agent._confirmation_prompt(name, minimal_args[name])
+            # The generic fallback is "Execute {name}?  • Arguments: ..." — a
+            # concrete branch must NOT fall through to it.
+            assert not prompt.startswith(f"Execute {name}?"), (
+                f"_confirmation_prompt({name!r}) fell through to the generic "
+                "fallback — add a concrete branch."
+            )
+            assert prompt.strip()
+
+
+# ---------------------------------------------------------------------------
+# FIX F — safety-coverage gaps
+# ---------------------------------------------------------------------------
+
+
+class _RaisingConfirmer:
+    """Sync confirmer that raises (e.g. stdin EOF) — fail-closed contract."""
+
+    def __init__(self, exc: BaseException | None = None) -> None:
+        self.calls = 0
+        self._exc = exc or EOFError("no input")
+
+    async def __call__(self, prompt: str) -> bool:
+        self.calls += 1
+        raise self._exc
+
+
+class _FakeLLMCreateThenSuccess:
+    """Issues create_work_order twice with identical args (two iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n <= 2:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Done.", "tool_calls": None}
+
+
+class TestSafetyCoverageGaps:
+    """FIX F: fail-closed confirmer, error-not-memoised through the gate, and
+    edge cases on the prompt/event helpers."""
+
+    @pytest.mark.asyncio
+    async def test_raising_confirmer_does_not_execute_write(self) -> None:
+        """A confirmer that raises must NOT result in a write (fail-closed)."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RaisingConfirmer()
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        # The exception may propagate OR be converted to a decline; either way
+        # the write must NOT fire.
+        with contextlib.suppress(EOFError):
+            await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert confirmer.calls == 1
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_error_result_not_memoised_through_gate(self) -> None:
+        """On the confirmed path, an errored result is not memoised, so the
+        write is attempted again on a verbatim re-issue (mirrors the
+        confirmations=False test, but through the HITL gate)."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMCreateThenSuccess()  # type: ignore[assignment]
+        await agent.start()
+
+        calls = {"n": 0}
+
+        async def fake_exec(name: str, args: dict[str, Any], *, chat_id: str = "default") -> Any:
+            calls["n"] += 1
+            return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
+
+        agent._execute_tool = fake_exec  # type: ignore[assignment]
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        # First confirmed call errored (not memoised) → the verbatim re-issue is
+        # confirmed AND executed again.
+        assert calls["n"] == 2
+        assert len(confirmer.prompts) == 2
+
+    def test_confirmation_prompt_generic_fallback_non_empty(self) -> None:
+        """A future/unknown mutating tool still yields a concrete-ish prompt."""
+        agent = Agent()
+        prompt = agent._confirmation_prompt("some_future_tool", {"x": 1, "y": "z"})
+        assert prompt.strip()
+        assert "some_future_tool" in prompt
+        # Arguments are rendered so the user sees what would happen.
+        assert "x=" in prompt
+
+    def test_confirmation_prompt_generic_fallback_no_args(self) -> None:
+        agent = Agent()
+        prompt = agent._confirmation_prompt("some_future_tool", {})
+        assert prompt.strip()
+        assert "some_future_tool" in prompt
+
+    def test_summarize_event_edge_cases(self) -> None:
+        """``_summarize_event`` returns a non-empty marker for None/empty/non-dict."""
+        assert Agent._summarize_event(None).strip()
+        assert Agent._summarize_event({}).strip()
+        assert Agent._summarize_event("not a dict").strip()
+        assert Agent._summarize_event([1, 2, 3]).strip()
+
+
+# ---------------------------------------------------------------------------
+# FIX G — pending-slot overwrite is observable
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLMTwoPendingProposals:
+    """Proposes two DIFFERENT writes in a single turn (two loop iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Proposed."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        assets = {1: "P-201", 2: "P-202"}
+        if self._n in assets:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": assets[self._n], "type": "corrective", "description": "fix"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Proposed.", "tool_calls": None}
+
+
+class TestPendingOverwriteObservability:
+    """FIX G: a multi-write turn that overwrites the single pending slot logs a
+    warning so the dropped proposal is observable."""
+
+    @pytest.mark.asyncio
+    async def test_overwrite_logs_warning(self) -> None:
+        import structlog
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
+        await agent.start()
+
+        events: list[dict[str, Any]] = []
+
+        def _capture(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append(dict(event_dict))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            await agent.handle_message_full(
+                "create two work orders", chat_id="c1", user_id="userA"
+            )
+        finally:
+            structlog.reset_defaults()
+
+        assert any(e.get("event") == "pending_write_overwritten" for e in events)
+        # The second proposal won the single slot; the first was dropped.
+        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-202"
+
+
+# ---------------------------------------------------------------------------
+# FIX F (listen wiring) — confirmer binding depends on sync-confirmation support
+# ---------------------------------------------------------------------------
+
+
+class _SyncConfirmChannel:
+    """Async channel that DOES support synchronous confirmation."""
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "create a WO for P-201") -> None:
+        self._message_text = message_text
+        self.confirmer_was_some: bool | None = None
+        self.confirm_called = False
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def request_confirmation(self, chat_id: str | int, prompt: str) -> bool:
+        self.confirm_called = True
+        return True
+
+    async def listen(self, handler: Any) -> None:
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = self._message_text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        msg.user_id = "userZ"  # type: ignore[attr-defined]
+        await handler(msg)
+
+
+class _AsyncOnlyChannel:
+    """Async channel WITHOUT synchronous confirmation support."""
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "hello") -> None:
+        self._message_text = message_text
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def listen(self, handler: Any) -> None:
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = self._message_text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        msg.user_id = "userZ"  # type: ignore[attr-defined]
+        await handler(msg)
+
+
+class TestListenConfirmerWiring:
+    """FIX F: listen() binds a non-None confirmer only for sync-capable channels,
+    and forwards msg.user_id into handle_message_full."""
+
+    @pytest.mark.asyncio
+    async def test_sync_channel_binds_confirmer_and_forwards_user_id(self) -> None:
+        conn = _CountingCreateWoConnector()
+        channel = _SyncConfirmChannel()
+        agent = Agent(connectors=[conn], channels=[channel])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+
+        captured: dict[str, Any] = {}
+        orig = agent.handle_message_full
+
+        async def spy(text: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return await orig(text, **kwargs)
+
+        agent.handle_message_full = spy  # type: ignore[assignment]
+        await agent._run_async()
+
+        assert captured.get("confirmer") is not None
+        assert captured.get("user_id") == "userZ"
+        # The bound confirmer routes through the channel's request_confirmation,
+        # which returned True → the write executed.
+        assert channel.confirm_called is True
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_async_channel_leaves_confirmer_none(self) -> None:
+        channel = _AsyncOnlyChannel()
+        agent = Agent(channels=[channel])
+        agent._llm = _FakeLLM("Hi there.")  # type: ignore[assignment]
+
+        captured: dict[str, Any] = {}
+        orig = agent.handle_message_full
+
+        async def spy(text: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return await orig(text, **kwargs)
+
+        agent.handle_message_full = spy  # type: ignore[assignment]
+        await agent._run_async()
+
+        assert captured.get("confirmer") is None
+        assert captured.get("user_id") == "userZ"
