@@ -97,3 +97,23 @@ class TestLoadConfig:
         assert config.connectors["telegram"].settings["bot_token"] == "tok-123"
         assert config.llm.provider == "ollama:llama3"
         assert config.llm.temperature == 0.2
+
+    def test_confirmations_default_true(self) -> None:
+        """The ``confirmations`` flag defaults to True (unlike ``sandbox``)."""
+        config = MachinaConfig()
+        assert config.confirmations is True
+
+    def test_confirmations_false_loads_from_yaml(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "machina.yaml"
+        cfg.write_text("name: My Agent\nconfirmations: false\n")
+        config = load_config(cfg)
+        assert config.confirmations is False
+
+    def test_confirmations_reaches_agent_through_from_config(self, tmp_path: Path) -> None:
+        """``confirmations: false`` must thread through ``from_config`` to the Agent."""
+        from machina.agent.runtime import Agent
+
+        cfg = tmp_path / "machina.yaml"
+        cfg.write_text("name: My Agent\nconfirmations: false\n")
+        agent = Agent.from_config(cfg)
+        assert agent.confirmations is False

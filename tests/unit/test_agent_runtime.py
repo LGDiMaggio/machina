@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import time
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
@@ -758,9 +760,11 @@ class _CountingCreateWoConnector(_FakeCreateWoConnector):
 
     def __init__(self) -> None:
         self.create_calls = 0
+        self.created_assets: list[str] = []
 
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         self.create_calls += 1
+        self.created_assets.append(work_order.asset_id)
         return work_order
 
 
@@ -796,7 +800,9 @@ class TestLoopIdempotency:
     @pytest.mark.asyncio
     async def test_duplicate_create_suppressed_in_loop(self) -> None:
         conn = _CountingCreateWoConnector()
-        agent = Agent(connectors=[conn])
+        # confirmations=False isolates the memo behaviour from the HITL gate
+        # (U4 gates writes by default; here we exercise the write path itself).
+        agent = Agent(connectors=[conn], confirmations=False)
         agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
         await agent.start()
         await agent.handle_message("crea un work order per P-201, sostituire cuscinetto")
@@ -807,7 +813,7 @@ class TestLoopIdempotency:
     async def test_distinct_args_not_suppressed(self) -> None:
         """The memo must not over-suppress: distinct args run distinct writes."""
         conn = _CountingCreateWoConnector()
-        agent = Agent(connectors=[conn])
+        agent = Agent(connectors=[conn], confirmations=False)
         agent._llm = _FakeLLMTwoDistinctCreates()  # type: ignore[assignment]
         await agent.start()
         await agent.handle_message("crea due work order")
@@ -816,7 +822,7 @@ class TestLoopIdempotency:
     @pytest.mark.asyncio
     async def test_error_result_not_memoised(self) -> None:
         """A failed side effect must not suppress a legitimate retry in-turn."""
-        agent = Agent()
+        agent = Agent(confirmations=False)
         agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
         calls = {"n": 0}
 
@@ -965,6 +971,173 @@ class TestHandleMessageFullCitations:
         response = await agent.handle_message_full("P-201")
         chunk_ids = {c.chunk_id for c in response.citations}
         assert chunk_ids == {"fake-chunk-1"}  # ghost-chunk dropped
+
+
+class TestIndexCitationContract:
+    """Index-based citation contract end-to-end (U1)."""
+
+    @pytest.mark.asyncio
+    async def test_index_citation_resolves_end_to_end(self) -> None:
+        """AE5: the model cites by visible ``[1]`` and it resolves."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()  # one chunk, chunk_id='fake-chunk-1'
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        # The model never sees the chunk_id — it cites by index only.
+        llm_response = "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Tell me about P-201 bearing")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+        assert response.citations[0].source == "manual.txt"
+        assert "[1]" in response.text
+        assert "<citations>" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_bare_source_fallback_end_to_end(self) -> None:
+        """AE6: the model cites a bare filename → fallback resolves it."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = "Procedure [manual.txt].\n\n<citations>\nmanual.txt\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201 bearing")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_index_dropped_end_to_end(self) -> None:
+        """Regression guard: an out-of-range index with no fallback drops."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        llm_response = "Body.\n\n<citations>\n[9]\n</citations>"
+        agent._llm = _FakeLLM(llm_response)  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("P-201")
+        assert response.citations == []
+
+
+class TestRegisterDocumentResults:
+    """Ordered index map vs. filtered chunk registry (U1 off-by-k guard)."""
+
+    def test_ordered_map_includes_empty_chunk_id_slots(self) -> None:
+        """The display index must not drift when an earlier chunk_id is empty.
+
+        ``_register_document_results`` skips empty chunk_ids in the registry
+        (the fallback map) but MUST keep them as positional placeholders in
+        the ordered map, so the visible ``[2]`` resolves to the second
+        *displayed* chunk, not the first *registered* one.
+        """
+        agent = Agent()
+        results = [
+            {"chunk_id": "", "source": "a.md", "page": 0, "content": "x"},
+            {"chunk_id": "real-2", "source": "b.md", "page": 0, "content": "y"},
+        ]
+        agent._register_document_results("chat-z", results)
+
+        ordered = agent._turn_ordered["chat-z"]
+        assert ordered == ["", "real-2"]
+        # [2] (display position) resolves to real-2.
+        assert ordered[1] == "real-2"
+        # The filtered registry skipped the empty-chunk_id row.
+        assert "real-2" in agent._turn_chunks["chat-z"]
+        assert "" not in agent._turn_chunks["chat-z"]
+
+    def test_ordered_map_truncates_to_five(self) -> None:
+        """Mirrors format_document_results' ``[:5]`` display cap."""
+        agent = Agent()
+        results = [
+            {"chunk_id": f"c{i}", "source": f"{i}.md", "page": 0, "content": "x"} for i in range(8)
+        ]
+        agent._register_document_results("chat-z", results)
+        assert len(agent._turn_ordered["chat-z"]) == 5
+        assert agent._turn_ordered["chat-z"] == ["c0", "c1", "c2", "c3", "c4"]
+
+
+class TestSearchDocumentsToolIndex:
+    """The search_documents tool result carries a visible citation index."""
+
+    @pytest.mark.asyncio
+    async def test_tool_result_has_citation_index(self) -> None:
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_ordered["chat-a"] = []
+
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        assert isinstance(result, list)
+        assert result[0]["citation_index"] == 1
+        # The ordered map registers the tool-retrieved chunk by display pos.
+        assert agent._turn_ordered["chat-a"] == ["fake-chunk-1"]
+
+    @pytest.mark.asyncio
+    async def test_tool_index_offset_after_prefetch(self) -> None:
+        """Tool indices continue after pre-fetch chunks already displayed."""
+        conn = _FakeDocConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        # Simulate one pre-fetch chunk already displayed this turn as [1].
+        agent._turn_chunks["chat-a"] = {}
+        agent._turn_ordered["chat-a"] = ["prefetch-1"]
+
+        result = await agent._execute_tool(
+            "search_documents", {"query": "bearing"}, chat_id="chat-a"
+        )
+        # The tool chunk is displayed as [2], not [1].
+        assert result[0]["citation_index"] == 2
+        assert agent._turn_ordered["chat-a"] == ["prefetch-1", "fake-chunk-1"]
+
+    @pytest.mark.asyncio
+    async def test_tool_path_index_citation_resolves_end_to_end(self) -> None:
+        """A ``[n]`` citation resolves for a chunk retrieved via the tool."""
+        plant = _make_plant()
+        doc_conn = _FakeDocConnector()
+        agent = Agent(plant=plant, connectors=[doc_conn])
+
+        # Two-step fake LLM: first turn calls search_documents, then cites [1].
+        class _ToolThenCiteLLM:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._calls = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>"
+
+            async def complete_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                **kwargs: Any,
+            ) -> dict[str, Any]:
+                self._calls += 1
+                if self._calls == 1:
+                    tc = MagicMock()
+                    tc.function.name = "search_documents"
+                    tc.function.arguments = json.dumps({"query": "bearing"})
+                    tc.id = "tc1"
+                    return {"content": "", "tool_calls": [tc]}
+                return {
+                    "content": "Replace the bearing [1].\n\n<citations>\n[1]\n</citations>",
+                    "tool_calls": None,
+                }
+
+        agent._llm = _ToolThenCiteLLM()  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("How do I replace the P-201 bearing?")
+        assert len(response.citations) == 1
+        assert response.citations[0].chunk_id == "fake-chunk-1"
 
 
 class TestGatherContext:
@@ -1405,6 +1578,24 @@ class TestAgentWorkflows:
         agent._build_domain_services()
         assert agent._engine.sandbox is True
 
+    def test_confirmations_default_true(self) -> None:
+        """Confirmations are on by default (unlike sandbox)."""
+        agent = Agent()
+        assert agent.confirmations is True
+
+    def test_confirmations_flag_stored(self) -> None:
+        """``Agent(confirmations=False)`` stores the value."""
+        agent = Agent(confirmations=False)
+        assert agent.confirmations is False
+
+    def test_confirmations_setter_toggles_value(self) -> None:
+        """The setter flips the agent-loop-local flag at runtime."""
+        agent = Agent(confirmations=True)
+        agent.confirmations = False
+        assert agent.confirmations is False
+        agent.confirmations = True
+        assert agent.confirmations is True
+
 
 # ---------------------------------------------------------------------------
 # Path-leak sanitisation at the runtime boundary (regression for report-luigi U1)
@@ -1466,3 +1657,1032 @@ class TestRuntimeContextPayloadSanitization:
             assert "/home/me" not in r["source"]
             assert "tedib" not in r["source"]
             assert "file://" not in r["source"]
+
+
+# ---------------------------------------------------------------------------
+# U4 — Runtime HITL gate (synchronous / CLI path)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConfirmer:
+    """Async confirmer stub that records prompts and returns canned decisions."""
+
+    def __init__(self, decisions: list[bool] | bool = True) -> None:
+        self.prompts: list[str] = []
+        self._decisions = decisions
+
+    async def __call__(self, prompt: str) -> bool:
+        self.prompts.append(prompt)
+        if isinstance(self._decisions, bool):
+            return self._decisions
+        idx = len(self.prompts) - 1
+        return self._decisions[idx] if idx < len(self._decisions) else self._decisions[-1]
+
+
+class _FakeLLMSingleCreate:
+    """Requests create_work_order once, then returns text."""
+
+    def __init__(self, args: dict[str, Any] | None = None) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+        self._args = args or {
+            "asset_id": "P-201",
+            "type": "corrective",
+            "priority": "high",
+            "description": "Replace bearing",
+        }
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Work order handled."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        if self._call_count == 1:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(self._args)
+            tc.id = "call_001"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Work order handled.", "tool_calls": None}
+
+
+class _FakeLLMRewordedCreate:
+    """Requests create_work_order twice with DIFFERENT descriptions (reworded)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._call_count = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        descriptions = {1: "Replace bearing", 2: "Swap the worn bearing out"}
+        if self._call_count in descriptions:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {
+                    "asset_id": "P-201",
+                    "type": "corrective",
+                    "description": descriptions[self._call_count],
+                }
+            )
+            tc.id = f"call_{self._call_count:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Done.", "tool_calls": None}
+
+
+class TestHitlGateSyncPath:
+    """U4: the synchronous confirmer gates mutating tool calls in _llm_loop."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_true_executes_write(self) -> None:
+        """AE1: confirmations on + confirmer True → write fires once."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert conn.create_calls == 1
+        assert len(confirmer.prompts) == 1
+
+    @pytest.mark.asyncio
+    async def test_confirm_false_blocks_write(self) -> None:
+        """AE1: confirmer False → connector NOT called; loop still responds."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer(False)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        result = await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert conn.create_calls == 0
+        assert isinstance(result, str)
+        assert len(confirmer.prompts) == 1
+
+    @pytest.mark.asyncio
+    async def test_reworded_create_prompts_each_distinct(self) -> None:
+        """AE2: a reworded create is a distinct proposal → fresh prompt; decline blocks it."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMRewordedCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer([True, False])
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        # Two distinct proposals → two prompts; only the first (confirmed) wrote.
+        assert len(confirmer.prompts) == 2
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_confirmations_off_no_confirmer_call(self) -> None:
+        """AE4 regression: confirmations off → write executes, confirmer untouched."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], confirmations=False)
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert conn.create_calls == 1
+        assert confirmer.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_sandbox_skips_gate(self) -> None:
+        """Sandbox on + confirmations on → no confirmer call, no real write."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], sandbox=True)
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert conn.create_calls == 0
+        assert confirmer.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_programmatic_caller_no_confirmer_blocks_write(self) -> None:
+        """No confirmer + confirmations on → fail-safe, write NOT executed."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1")
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_programmatic_handle_message_full_blocks_write(self) -> None:
+        """handle_message_full with confirmations on + no confirmer → no write."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201")
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_decline_collapse_same_proposal(self) -> None:
+        """An identical (tool, args) re-proposed in the same turn auto-declines."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMDoubleCreate()  # identical args twice
+        await agent.start()
+        confirmer = _RecordingConfirmer(False)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        # Declined once; the verbatim re-proposal is auto-declined (no 2nd prompt).
+        assert len(confirmer.prompts) == 1
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_read_only_tool_never_gated(self) -> None:
+        """search_assets (read-only) is never gated."""
+        plant = _make_plant()
+        agent = Agent(plant=plant, connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMWithToolCalls()  # calls search_assets
+        await agent.start()
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "Tell me about P-201"}]
+        result = await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert "P-201" in result
+        assert confirmer.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_workflow_gated_once_at_boundary(self) -> None:
+        """execute_workflow is gated once; internal writes don't re-prompt."""
+        from machina.workflows import Step, Workflow
+
+        # Workflow whose step performs a create-work-order side effect
+        # internally (via the CMMS connector action). The gate must fire only
+        # at the execute_workflow boundary — the engine runs the internal write
+        # through trigger_workflow, which never re-enters _llm_loop.
+        wf = Workflow(
+            name="AlarmToWO",
+            steps=[
+                Step(
+                    name="open_wo",
+                    action="cmms.create_work_order",
+                    inputs={"asset_id": "P-201", "description": "Replace bearing"},
+                )
+            ],
+        )
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], workflows=[wf])
+
+        class _WorkflowLLM:
+            model = "fake:model"
+
+            def __init__(self) -> None:
+                self._n = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Workflow launched."
+
+            async def complete_with_tools(
+                self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+            ) -> dict[str, Any]:
+                self._n += 1
+                if self._n == 1:
+                    tc = MagicMock()
+                    tc.function.name = "execute_workflow"
+                    tc.function.arguments = json.dumps(
+                        {"workflow_name": "AlarmToWO", "event": {"asset_id": "P-201"}}
+                    )
+                    tc.id = "wf1"
+                    return {"content": "", "tool_calls": [tc]}
+                return {"content": "Workflow launched.", "tool_calls": None}
+
+        agent._llm = _WorkflowLLM()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "run the alarm workflow"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        # Exactly one confirmation at the workflow boundary.
+        assert len(confirmer.prompts) == 1
+
+    def test_confirmation_prompt_describes_create_work_order(self) -> None:
+        """R6: the prompt names asset/type/priority/description concretely."""
+        agent = Agent()
+        prompt = agent._confirmation_prompt(
+            "create_work_order",
+            {
+                "asset_id": "P-201",
+                "type": "corrective",
+                "priority": "high",
+                "description": "Replace bearing",
+            },
+        )
+        assert "P-201" in prompt
+        assert "corrective" in prompt
+        assert "high" in prompt
+        assert "Replace bearing" in prompt
+
+    def test_confirmation_prompt_describes_execute_workflow(self) -> None:
+        """R6: workflow prompt names the workflow and summarises the event."""
+        agent = Agent()
+        prompt = agent._confirmation_prompt(
+            "execute_workflow",
+            {"workflow_name": "AlarmToWO", "event": {"asset_id": "P-201"}},
+        )
+        assert "AlarmToWO" in prompt
+        assert "P-201" in prompt
+
+    def test_confirmation_prompt_workflow_empty_event_fallback(self) -> None:
+        """R6: a workflow with no event still yields a non-empty description."""
+        agent = Agent()
+        prompt = agent._confirmation_prompt("execute_workflow", {"workflow_name": "WF"})
+        assert "WF" in prompt
+        assert prompt.strip()
+
+
+# ---------------------------------------------------------------------------
+# U5 — Two-turn confirmation degrade for async channels
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLMNarrate:
+    """Narration-only fake LLM: never requests a tool, just returns text.
+
+    Used to assert that a re-entered narration-only loop produces a narrated
+    answer rather than a raw connector payload.
+    """
+
+    def __init__(self, text: str = "I created the work order for P-201.") -> None:
+        self.model = "fake:model"
+        self._text = text
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return self._text
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        return {"content": self._text, "tool_calls": None}
+
+
+class _FakeLLMReissueCreate:
+    """Always re-issues create_work_order (verbatim or reworded) every call.
+
+    Used to assert the narration-only re-entry suppresses a second write and a
+    second confirmation prompt even when the model is eager.
+    """
+
+    def __init__(self, reworded: bool = False) -> None:
+        self.model = "fake:model"
+        self._reworded = reworded
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Narrated."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        desc = (
+            "Swap the worn bearing out" if (self._reworded and self._n > 1) else "Replace bearing"
+        )
+        tc = MagicMock()
+        tc.function.name = "create_work_order"
+        tc.function.arguments = json.dumps(
+            {"asset_id": "P-201", "type": "corrective", "description": desc}
+        )
+        tc.id = f"reissue_{self._n:03d}"
+        return {"content": "", "tool_calls": [tc]}
+
+
+class TestAffirmationGrammar:
+    """U5/R5: deterministic affirmation/decline parse (no LLM)."""
+
+    def test_affirmation_recognizes_en_and_it_tokens(self) -> None:
+        agent = Agent()
+        for tok in ("y", "yes", "ok", "okay", "confirm", "sì", "si", "conferma", "procedi", "vai"):
+            assert agent._is_affirmation(tok), tok
+            assert agent._is_affirmation(tok.upper()), tok
+            assert agent._is_affirmation(f"  {tok}  "), tok
+
+    def test_decline_recognizes_en_and_it_tokens(self) -> None:
+        agent = Agent()
+        for tok in ("n", "no", "annulla", "cancel", "stop", "abort"):
+            assert agent._is_decline(tok), tok
+            assert agent._is_decline(tok.upper()), tok
+
+    def test_compound_message_is_neither(self) -> None:
+        agent = Agent()
+        assert not agent._is_affirmation("ok, but set priority high")
+        assert not agent._is_decline("no thanks, check P-202 instead")
+        # an unrelated message is neither
+        assert not agent._is_affirmation("what is the status of P-201?")
+        assert not agent._is_decline("what is the status of P-201?")
+
+
+class TestTwoTurnConfirmation:
+    """U5: propose → confirm → execute across two turns on async channels."""
+
+    @pytest.mark.asyncio
+    async def test_propose_stores_pending_and_does_not_write(self) -> None:
+        """AE3: no confirmer + model proposes a write → confirmation question, no write."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        resp = await agent.handle_message_full(
+            "create a WO for P-201", chat_id="c1", user_id="userA"
+        )
+        assert conn.create_calls == 0
+        assert ("c1", "userA") in agent._pending_actions
+        # The confirmation question (the prompt) surfaces in the response.
+        assert "work order" in resp.text.lower() or "P-201" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_affirmation_executes_and_narrates(self) -> None:
+        """AE3: next message is an affirmation → write executes once, narrated answer."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+        # Confirming message — swap the LLM for a narrator so the re-entry narrates.
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        resp = await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 1
+        assert ("c1", "userA") not in agent._pending_actions
+        # Narrated answer, not a raw model_dump payload.
+        assert "work order" in resp.text.lower()
+        assert "model_dump" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_unrelated_message_discards_pending(self) -> None:
+        """AE3: an unrelated next message → pending discarded, processed normally, no write."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # Unrelated follow-up; swap to a narrator so the normal path returns text.
+        agent._llm = _FakeLLMNarrate("P-201 is a cooling water pump.")  # type: ignore[assignment]
+        await agent.handle_message_full("what is P-201?", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+        assert ("c1", "userA") not in agent._pending_actions
+
+    @pytest.mark.asyncio
+    async def test_pending_survives_turn_chunk_reset(self) -> None:
+        """Turn-survival: pending is NOT in _turn_chunks (reset each turn)."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # _turn_chunks is popped at the end of the turn; the pending action lives elsewhere.
+        assert "c1" not in agent._turn_chunks
+        assert ("c1", "userA") in agent._pending_actions
+        # A second call still finds it.
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_cross_user_isolation(self) -> None:
+        """A pending action for userA is NOT confirmable by userB."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # userB says "yes" on the same chat — must NOT execute userA's pending write.
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userB")
+        assert conn.create_calls == 0
+        # userA's pending is still intact.
+        assert ("c1", "userA") in agent._pending_actions
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_withholds_write(self) -> None:
+        """Empty (untrusted) user_id → write withheld: not stored, not executed."""
+        import structlog
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        events: list[dict[str, Any]] = []
+
+        def _capture(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append(dict(event_dict))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="")
+        finally:
+            structlog.reset_defaults()
+        assert any(e.get("event") == "write_withheld_anonymous" for e in events)
+        # Fail-safe: nothing stored, nothing executed.
+        assert ("c1", "") not in agent._pending_actions
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_returns_unconfirmable_result(self) -> None:
+        """Empty user_id → the gated tool result carries unconfirmable=True."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        result = await agent._await_write_confirmation(
+            "create_work_order", {"asset_id": "P-201"}, "c1", ""
+        )
+        assert result.get("unconfirmable") is True
+        assert result.get("confirmation_required") is True
+        assert ("c1", "") not in agent._pending_actions
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_reentry_suppresses_verbatim_reissue(self) -> None:
+        """Re-entry safety: a verbatim re-issue produces no 2nd write, no 2nd prompt."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # On confirm, the re-entered loop's model keeps re-issuing the SAME write.
+        agent._llm = _FakeLLMReissueCreate(reworded=False)  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        # The just-confirmed write executed exactly once; the re-issues collapse.
+        assert conn.create_calls == 1
+        assert ("c1", "userA") not in agent._pending_actions
+
+    @pytest.mark.asyncio
+    async def test_reentry_suppresses_reworded_reissue(self) -> None:
+        """Re-entry safety: a reworded re-issue produces no 2nd write, no 2nd prompt."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        agent._llm = _FakeLLMReissueCreate(reworded=True)  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        # Mutating tools are suppressed during narration, so even a reworded
+        # re-issue cannot write a duplicate.
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_unrelated_proposal_supersedes_after_cancel(self) -> None:
+        """A new proposal in a LATER turn supersedes the prior pending.
+
+        The prior pending is first cancelled by the (non-affirmation) incoming
+        message on the resume path, then the fresh turn proposes its own write.
+        """
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate(  # type: ignore[assignment]
+            {"asset_id": "P-201", "type": "corrective", "description": "first"}
+        )
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        first = agent._pending_actions[("c1", "userA")]
+        # A different proposal arrives before confirmation (separate turn).
+        agent._llm = _FakeLLMSingleCreate(  # type: ignore[assignment]
+            {"asset_id": "P-202", "type": "corrective", "description": "second"}
+        )
+        await agent.handle_message_full("create a WO for P-202", chat_id="c1", user_id="userA")
+        second = agent._pending_actions[("c1", "userA")]
+        assert first != second
+        assert second[1]["asset_id"] == "P-202"
+
+    @pytest.mark.asyncio
+    async def test_expired_pending_not_executed_on_affirmation(self) -> None:
+        """FIX 2: a pending older than the TTL is not executed by a later 'yes'."""
+        import machina.agent.runtime as runtime_mod
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        assert ("c1", "userA") in agent._pending_actions
+        # Back-date the stored timestamp beyond the TTL.
+        fn, args, prompt, _ts = agent._pending_actions[("c1", "userA")]
+        stale_ts = time.monotonic() - runtime_mod._PENDING_ACTION_TTL_SECONDS - 1.0
+        agent._pending_actions[("c1", "userA")] = (fn, args, prompt, stale_ts)
+        # A later "yes" must NOT execute the stale write; it is processed fresh.
+        agent._llm = _FakeLLMNarrate("Nothing pending.")  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+        assert ("c1", "userA") not in agent._pending_actions
+
+    @pytest.mark.asyncio
+    async def test_fresh_pending_within_ttl_still_executes(self) -> None:
+        """FIX 2: a pending within the TTL still executes on affirmation."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 1
+        assert ("c1", "userA") not in agent._pending_actions
+
+
+# ---------------------------------------------------------------------------
+# FIX A — narration re-entry builds a VALID message sequence (no orphan tool)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLLM:
+    """Fake LLM that records every message list it receives.
+
+    ``complete`` returns a narrated answer; ``complete_with_tools`` records the
+    call and returns plain text (so it never drives a write). Used to assert the
+    narration re-entry uses the no-tools ``complete`` path and never builds an
+    orphan ``role:tool`` message.
+    """
+
+    def __init__(self, response: str = "I created the work order.") -> None:
+        self.model = "fake:model"
+        self._response = response
+        self.complete_messages: list[list[dict[str, Any]]] = []
+        self.complete_with_tools_messages: list[list[dict[str, Any]]] = []
+
+    async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        self.complete_messages.append([dict(m) for m in messages])
+        return self._response
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self.complete_with_tools_messages.append([dict(m) for m in messages])
+        return {"content": self._response, "tool_calls": None}
+
+
+def _assert_tool_message_contract(messages: list[dict[str, Any]]) -> None:
+    """Every ``role:tool`` message must carry a ``tool_call_id`` and follow an
+    assistant message that announced that id in its ``tool_calls``."""
+    announced_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+                if tc_id:
+                    announced_ids.add(tc_id)
+        if msg.get("role") == "tool":
+            tcid = msg.get("tool_call_id")
+            assert tcid, f"role:tool message has no tool_call_id: {msg!r}"
+            assert tcid in announced_ids, (
+                f"role:tool message {tcid!r} not preceded by an assistant tool_calls entry"
+            )
+
+
+class TestNarrationReentryContract:
+    """FIX A: the two-turn narration pass must not emit an orphan role:tool."""
+
+    @pytest.mark.asyncio
+    async def test_narration_uses_complete_not_tool_loop(self) -> None:
+        """Confirming a pending write narrates via the no-tools ``complete``
+        path; no ``role:tool`` message lacking a ``tool_call_id`` is ever sent,
+        and the write executes exactly once."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        assert conn.create_calls == 0
+
+        rec = _RecordingLLM()
+        agent._llm = rec  # type: ignore[assignment]
+        resp = await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+
+        # The write executed exactly once on the confirm path.
+        assert conn.create_calls == 1
+        # Narration went through the no-tools completion path.
+        assert len(rec.complete_messages) == 1
+        assert rec.complete_with_tools_messages == []
+        # No orphan role:tool messages, and the contract holds on every message
+        # list the LLM saw during narration.
+        narration_msgs = rec.complete_messages[0]
+        assert not any(m.get("role") == "tool" for m in narration_msgs)
+        _assert_tool_message_contract(narration_msgs)
+        # A narrated AgentResponse is returned (not a raw payload).
+        assert isinstance(resp, AgentResponse)
+        assert resp.text
+
+
+# ---------------------------------------------------------------------------
+# FIX D — _confirmation_prompt is concrete for EVERY mutating tool
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationPromptCompleteness:
+    """Every MUTATING_TOOLS entry must produce a concrete (non-fallback) prompt."""
+
+    def test_all_mutating_tools_have_concrete_prompt(self) -> None:
+        from machina.llm.tools import MUTATING_TOOLS
+
+        agent = Agent()
+        # Minimal valid args per known mutating tool.
+        minimal_args: dict[str, dict[str, Any]] = {
+            "create_work_order": {
+                "asset_id": "P-201",
+                "type": "corrective",
+                "priority": "high",
+                "description": "Replace bearing",
+            },
+            "execute_workflow": {
+                "workflow_name": "AlarmToWO",
+                "event": {"asset_id": "P-201"},
+            },
+        }
+        for name in MUTATING_TOOLS:
+            assert name in minimal_args, (
+                f"No minimal args registered for mutating tool {name!r} — add a "
+                "branch in _confirmation_prompt AND an entry here so R6 stays concrete."
+            )
+            prompt = agent._confirmation_prompt(name, minimal_args[name])
+            # The generic fallback is "Execute {name}?  • Arguments: ..." — a
+            # concrete branch must NOT fall through to it.
+            assert not prompt.startswith(f"Execute {name}?"), (
+                f"_confirmation_prompt({name!r}) fell through to the generic "
+                "fallback — add a concrete branch."
+            )
+            assert prompt.strip()
+
+
+# ---------------------------------------------------------------------------
+# FIX F — safety-coverage gaps
+# ---------------------------------------------------------------------------
+
+
+class _RaisingConfirmer:
+    """Sync confirmer that raises (e.g. stdin EOF) — fail-closed contract."""
+
+    def __init__(self, exc: BaseException | None = None) -> None:
+        self.calls = 0
+        self._exc = exc or EOFError("no input")
+
+    async def __call__(self, prompt: str) -> bool:
+        self.calls += 1
+        raise self._exc
+
+
+class _FakeLLMCreateThenSuccess:
+    """Issues create_work_order twice with identical args (two iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n <= 2:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "Replace bearing"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Done.", "tool_calls": None}
+
+
+class TestSafetyCoverageGaps:
+    """FIX F: fail-closed confirmer, error-not-memoised through the gate, and
+    edge cases on the prompt/event helpers."""
+
+    @pytest.mark.asyncio
+    async def test_raising_confirmer_does_not_execute_write(self) -> None:
+        """A confirmer that raises must NOT result in a write (fail-closed)."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        confirmer = _RaisingConfirmer()
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        # The exception may propagate OR be converted to a decline; either way
+        # the write must NOT fire.
+        with contextlib.suppress(EOFError):
+            await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        assert confirmer.calls == 1
+        assert conn.create_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_error_result_not_memoised_through_gate(self) -> None:
+        """On the confirmed path, an errored result is not memoised, so the
+        write is attempted again on a verbatim re-issue (mirrors the
+        confirmations=False test, but through the HITL gate)."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMCreateThenSuccess()  # type: ignore[assignment]
+        await agent.start()
+
+        calls = {"n": 0}
+
+        async def fake_exec(name: str, args: dict[str, Any], *, chat_id: str = "default") -> Any:
+            calls["n"] += 1
+            return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
+
+        agent._execute_tool = fake_exec  # type: ignore[assignment]
+        confirmer = _RecordingConfirmer(True)
+        messages = [{"role": "user", "content": "create a WO for P-201"}]
+        await agent._llm_loop(messages, "chat1", confirmer=confirmer)
+        # First confirmed call errored (not memoised) → the verbatim re-issue is
+        # confirmed AND executed again.
+        assert calls["n"] == 2
+        assert len(confirmer.prompts) == 2
+
+    def test_confirmation_prompt_generic_fallback_non_empty(self) -> None:
+        """A future/unknown mutating tool still yields a concrete-ish prompt."""
+        agent = Agent()
+        prompt = agent._confirmation_prompt("some_future_tool", {"x": 1, "y": "z"})
+        assert prompt.strip()
+        assert "some_future_tool" in prompt
+        # Arguments are rendered so the user sees what would happen.
+        assert "x=" in prompt
+
+    def test_confirmation_prompt_generic_fallback_no_args(self) -> None:
+        agent = Agent()
+        prompt = agent._confirmation_prompt("some_future_tool", {})
+        assert prompt.strip()
+        assert "some_future_tool" in prompt
+
+    def test_summarize_event_edge_cases(self) -> None:
+        """``_summarize_event`` returns a non-empty marker for None/empty/non-dict."""
+        assert Agent._summarize_event(None).strip()
+        assert Agent._summarize_event({}).strip()
+        assert Agent._summarize_event("not a dict").strip()
+        assert Agent._summarize_event([1, 2, 3]).strip()
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — a different second pending in one turn is rejected, first survives
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLMTwoPendingProposals:
+    """Proposes two DIFFERENT writes in a single turn (two loop iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Proposed."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        assets = {1: "P-201", 2: "P-202"}
+        if self._n in assets:
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": assets[self._n], "type": "corrective", "description": "fix"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Proposed.", "tool_calls": None}
+
+
+class _FakeLLMIdenticalProposalsTwice:
+    """Proposes the SAME write twice in a single turn (two loop iterations)."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Proposed."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n in (1, 2):
+            tc = MagicMock()
+            tc.function.name = "create_work_order"
+            tc.function.arguments = json.dumps(
+                {"asset_id": "P-201", "type": "corrective", "description": "fix"}
+            )
+            tc.id = f"call_{self._n:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Proposed.", "tool_calls": None}
+
+
+class TestPendingKeepFirst:
+    """FIX 3: a multi-write turn keeps the FIRST pending; a different second
+    proposal is rejected (logged) and does NOT overwrite. Confirming executes
+    the first. An identical re-proposal is a no-op (single pending)."""
+
+    @pytest.mark.asyncio
+    async def test_second_different_proposal_rejected(self) -> None:
+        import structlog
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
+        await agent.start()
+
+        events: list[dict[str, Any]] = []
+
+        def _capture(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append(dict(event_dict))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            await agent.handle_message_full(
+                "create two work orders", chat_id="c1", user_id="userA"
+            )
+        finally:
+            structlog.reset_defaults()
+
+        assert any(e.get("event") == "pending_write_rejected_existing" for e in events)
+        # Keep-first: the FIRST proposal owns the single slot; second is dropped.
+        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_confirming_executes_the_first(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create two work orders", chat_id="c1", user_id="userA")
+        agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
+        await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+        # The first (P-201) is the one that executes.
+        assert conn.create_calls == 1
+        assert conn.created_assets == ["P-201"]
+
+    @pytest.mark.asyncio
+    async def test_identical_reproposal_is_noop(self) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMIdenticalProposalsTwice()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # Exactly one pending action survives.
+        assert ("c1", "userA") in agent._pending_actions
+        assert agent._pending_actions[("c1", "userA")][1]["asset_id"] == "P-201"
+        assert conn.create_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# FIX F (listen wiring) — confirmer binding depends on sync-confirmation support
+# ---------------------------------------------------------------------------
+
+
+class _SyncConfirmChannel:
+    """Async channel that DOES support synchronous confirmation."""
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "create a WO for P-201") -> None:
+        self._message_text = message_text
+        self.confirmer_was_some: bool | None = None
+        self.confirm_called = False
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def request_confirmation(self, chat_id: str | int, prompt: str) -> bool:
+        self.confirm_called = True
+        return True
+
+    async def listen(self, handler: Any) -> None:
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = self._message_text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        msg.user_id = "userZ"  # type: ignore[attr-defined]
+        await handler(msg)
+
+
+class _AsyncOnlyChannel:
+    """Async channel WITHOUT synchronous confirmation support."""
+
+    capabilities: ClassVar[list[str]] = ["send_message"]
+
+    def __init__(self, message_text: str = "hello") -> None:
+        self._message_text = message_text
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def listen(self, handler: Any) -> None:
+        class _Msg:
+            pass
+
+        msg = _Msg()
+        msg.text = self._message_text  # type: ignore[attr-defined]
+        msg.chat_id = "test-chat"  # type: ignore[attr-defined]
+        msg.user_id = "userZ"  # type: ignore[attr-defined]
+        await handler(msg)
+
+
+class TestListenConfirmerWiring:
+    """FIX F: listen() binds a non-None confirmer only for sync-capable channels,
+    and forwards msg.user_id into handle_message_full."""
+
+    @pytest.mark.asyncio
+    async def test_sync_channel_binds_confirmer_and_forwards_user_id(self) -> None:
+        conn = _CountingCreateWoConnector()
+        channel = _SyncConfirmChannel()
+        agent = Agent(connectors=[conn], channels=[channel])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+
+        captured: dict[str, Any] = {}
+        orig = agent.handle_message_full
+
+        async def spy(text: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return await orig(text, **kwargs)
+
+        agent.handle_message_full = spy  # type: ignore[assignment]
+        await agent._run_async()
+
+        assert captured.get("confirmer") is not None
+        assert captured.get("user_id") == "userZ"
+        # The bound confirmer routes through the channel's request_confirmation,
+        # which returned True → the write executed.
+        assert channel.confirm_called is True
+        assert conn.create_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_async_channel_leaves_confirmer_none(self) -> None:
+        channel = _AsyncOnlyChannel()
+        agent = Agent(channels=[channel])
+        agent._llm = _FakeLLM("Hi there.")  # type: ignore[assignment]
+
+        captured: dict[str, Any] = {}
+        orig = agent.handle_message_full
+
+        async def spy(text: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return await orig(text, **kwargs)
+
+        agent.handle_message_full = spy  # type: ignore[assignment]
+        await agent._run_async()
+
+        assert captured.get("confirmer") is None
+        assert captured.get("user_id") == "userZ"

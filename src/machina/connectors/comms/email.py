@@ -32,6 +32,18 @@ class EmailConnector:
     environments, pass ``gmail_credentials_file`` to use the Gmail API
     backend instead (requires ``pip install machina-ai[gmail]``).
 
+    .. warning::
+
+        **Email sender identity is NOT authenticated.** ``chat_id`` and
+        ``user_id`` are derived from the unauthenticated ``From:`` header,
+        which is trivially spoofable (no DKIM/SPF/allowlist verification is
+        performed). The agent's two-turn write-confirmation gate keys pending
+        actions on ``(chat_id, user_id)``, so over email that gate provides
+        **no integrity guarantee** — a spoofed sender could confirm a write.
+        If you rely on write confirmations, gate this connector behind sandbox
+        mode or a verified-sender allowlist, or avoid using confirmations over
+        email entirely.
+
     Args:
         smtp_host: SMTP server hostname.
         smtp_port: SMTP server port (default 465 for SSL).

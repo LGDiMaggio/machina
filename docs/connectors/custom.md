@@ -407,3 +407,10 @@ shape; documenting it here makes the contract explicit for third-party
 channel authors.
 
 ::: machina.connectors.comms.types.IncomingMessage
+
+A channel may optionally implement the synchronous confirmation seam so the
+agent's human-in-the-loop write gate can collect a yes/no decision within the
+same turn (e.g. `CliChannel` reads a `[y/N]` line). Channels that do not
+implement it degrade to the two-turn propose→confirm flow.
+
+::: machina.connectors.comms.types.SupportsConfirmation

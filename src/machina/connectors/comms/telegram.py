@@ -14,7 +14,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.comms.types import IncomingMessage, MessageHandler
+from machina.connectors.comms.types import IncomingMessage, MessageHandler, is_affirmation
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
@@ -239,6 +239,37 @@ class CliChannel:
     async def send_message(self, chat_id: str | int, text: str) -> None:
         """Print message to stdout."""
         print(f"\n🤖 {text}")
+
+    async def request_confirmation(self, chat_id: str | int, prompt: str) -> bool:
+        """Render a pending-write prompt and read a ``[y/N]`` decision.
+
+        Implements the :class:`~machina.connectors.comms.types.SupportsConfirmation`
+        seam synchronously for CLI use: the runtime-built ``prompt`` (which
+        already states the concrete proposed write) is printed, then a single
+        line is read from stdin via the same ``run_in_executor(None, input)``
+        pattern :meth:`listen` uses, so the agent loop can pause for input
+        without blocking the event loop.
+
+        Args:
+            chat_id: Identifier for the chat (unused for CLI; kept for the
+                protocol signature).
+            prompt: Human-readable confirmation text describing the write.
+
+        Returns:
+            ``True`` only when the user types an affirmative answer (one of the
+            shared English/Italian affirmation tokens — ``y`` / ``yes`` / ``ok``
+            / ``sì`` / ``conferma`` …, case-insensitive, trimmed, whole-message
+            only); ``False`` for an empty line or anything not affirmative
+            (safe default — never auto-confirm). Uses the same
+            :func:`~machina.connectors.comms.types.is_affirmation` grammar as
+            the runtime's two-turn confirmation path, so CLI and async channels
+            accept identical answers.
+        """
+        print(f"\n⚠️  {prompt}")
+
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(None, lambda: input("Confirm? [y/N] "))
+        return is_affirmation(answer)
 
     async def listen(self, handler: MessageHandler) -> None:
         """Read from stdin in a loop and dispatch to handler.

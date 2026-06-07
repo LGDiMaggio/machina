@@ -31,7 +31,7 @@ def _resolve_llm(config_path: str, cli_llm: str | None) -> str:
 
     with open(config_path) as f:
         data = yaml.safe_load(f) or {}
-    return data.get("llm", {}).get("provider", "ollama:llama3")
+    return data.get("llm", {}).get("provider", "ollama:qwen2.5:3b")
 
 
 def main() -> None:

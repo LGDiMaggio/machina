@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Human-in-the-loop write confirmation.** `Agent.handle_message` and `Agent.handle_message_full` accept two new keyword params: `confirmer` (an optional async callable that renders a confirmation prompt and returns the user's yes/no decision) and `user_id` (forwarded for cross-user confirmation scoping). A synchronous channel (e.g. CLI) supplies a `confirmer` so a write is confirmed in-turn; async channels degrade to a two-turn propose→confirm flow.
+- **Two-turn confirmation degrade for async channels.** When no synchronous `confirmer` is available and `confirmations` is on, a proposed write is NOT executed: the agent stores the pending action keyed `(chat_id, user_id)` and returns the confirmation question. The next inbound message for the same key either confirms (a bare affirmation executes the write and the agent narrates the outcome) or cancels (a decline OR any unrelated message). The affirmation/decline parse is deterministic — never delegated to the LLM.
+- **Public `SupportsConfirmation` protocol** plus the channel-author-facing helpers `supports_sync_confirmation`, `is_affirmation`, `is_decline`, and the token sets `AFFIRMATION_TOKENS` / `DECLINE_TOKENS`, exported from `machina.connectors.comms`. A channel that implements `request_confirmation(chat_id, prompt) -> bool` (now on `CliChannel`) advertises synchronous in-turn confirmation; channels that omit it use the two-turn degrade.
+- **Index-based RAG citations.** The agent surfaces a stable `[n]` citation index for retrieved document chunks (consistent between pre-fetch context and the `search_documents` tool result), with a source/page fallback when the index cannot be resolved.
+
+### Changed
+
+- **BREAKING (behaviour): `confirmations` now defaults to `True` on `Agent`,** and a new `confirmations:` YAML config key mirrors it. Writes (mutating tool calls such as `create_work_order` / `execute_workflow`) now require human confirmation by default. A programmatic caller that wants autonomous writes must opt out with `Agent(confirmations=False)` (or `confirmations: false` in YAML) or pass a `confirmer`. With confirmations on and **no** confirmer available, a mutating tool call is fail-safe: it is NOT executed (the two-turn degrade stores it for the next message). `trigger_workflow` is a deliberate direct-execution path guarded by `sandbox` only — it is not gated by `confirmations`.
+
 ## [0.3.1] - 2026-06-05
 
 ### Added

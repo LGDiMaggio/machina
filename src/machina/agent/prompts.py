@@ -425,8 +425,11 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
 
     Args:
         results: List of dicts with ``content``, ``source``, ``page``, and
-            optional ``chunk_id`` keys. ``chunk_id`` is surfaced in the
-            prompt so the LLM can cite chunks by id in its response.
+            optional ``section_title`` / ``is_table`` keys. Each document is
+            rendered with a visible ``[i]`` index marker; the model cites by
+            that index (see :data:`machina.agent.citations.CITATION_PROMPT`).
+            The opaque ``chunk_id`` is deliberately **not** surfaced — it is
+            resolved server-side from the display position.
 
     Returns:
         Formatted document excerpts.
@@ -440,7 +443,6 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         # forgot to.  Idempotent for already-sanitised values.
         source = safe_source(result.get("source", "unknown"))
         page = result.get("page", "")
-        chunk_id = result.get("chunk_id", "")
         section_title = result.get("section_title", "")
         # Pass the full chunk content. The retrieval layer already
         # returns parent-section text bounded by the splitter's
@@ -449,9 +451,8 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         content = result.get("content", "")
         page_ref = f" (p. {page})" if page else ""
         section_ref = f" § {section_title}" if section_title else ""
-        cid_ref = f" chunk_id={chunk_id}" if chunk_id else ""
         table_tag = " [TABLE]" if result.get("is_table") else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{cid_ref}{table_tag}")
+        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{table_tag}")
         lines.append(f"  {content}")
     return "\n".join(lines)
 
