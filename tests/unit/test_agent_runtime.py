@@ -961,13 +961,153 @@ class TestReadOnlyLoopTermination:
         assert exec_calls["n"] == 1
         # The loop forced a final answer instead of running all 5 iterations.
         assert result == "Final answer."
-        assert llm.tool_call_invocations <= 2
+        # Deterministic: iter 1 executes + caches, iter 2 is all-repeat (served
+        # from cache) → no-progress break before a third tool-offering call.
+        assert llm.tool_call_invocations == 2
 
         # The replayed read carries an explicit "already retrieved" signal.
         tool_payloads = [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
         replayed = [p for p in tool_payloads if isinstance(p, dict) and p.get("already_retrieved")]
         assert replayed, "the repeated read must be served from cache with a replay note"
         assert replayed[0].get("note") == _DUPLICATE_READ_NOTE
+
+    @pytest.mark.asyncio
+    async def test_errored_read_not_cached_and_retried(self) -> None:
+        """A read that errors must NOT be cached, and a verbatim retry must
+        re-execute the connector (the retry is real work, not a no-op repeat)
+        — so a transient failure can recover instead of tripping the
+        no-progress break on the retry iteration."""
+
+        class _FakeLLMRetryRead:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._n = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Recovered."
+
+            async def complete_with_tools(
+                self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+            ) -> dict[str, Any]:
+                self._n += 1
+                if self._n <= 2:
+                    tc = MagicMock()
+                    tc.function.name = "search_assets"
+                    tc.function.arguments = json.dumps({"query": "P-201"})
+                    tc.id = f"call_{self._n:03d}"
+                    return {"content": "", "tool_calls": [tc]}
+                return {"content": "Recovered.", "tool_calls": None}
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMRetryRead()  # type: ignore[assignment]
+
+        exec_calls = {"n": 0}
+
+        async def flaky_exec(name: str, args: dict[str, Any], *, chat_id: str = "default") -> Any:
+            exec_calls["n"] += 1
+            # First attempt errors (must not be cached); retry succeeds.
+            return {"error": "transient"} if exec_calls["n"] == 1 else [{"id": "P-201"}]
+
+        agent._execute_tool = flaky_exec  # type: ignore[assignment]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "about P-201"}]
+        result = await agent._llm_loop(messages, "chat1", max_iterations=5)
+
+        # The errored read was re-executed (not served from cache) on the retry.
+        assert exec_calls["n"] == 2
+        assert result == "Recovered."
+
+    @pytest.mark.asyncio
+    async def test_mixed_new_and_repeat_does_not_break_early(self) -> None:
+        """An iteration that pairs a genuinely-new read with a repeated one
+        makes progress, so the no-progress break must NOT fire — the loop keeps
+        running while the model still asks for new information."""
+
+        class _FakeLLMMixed:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._n = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Done."
+
+            async def complete_with_tools(
+                self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+            ) -> dict[str, Any]:
+                self._n += 1
+                if self._n <= 3:
+                    repeat = MagicMock()
+                    repeat.function.name = "search_assets"
+                    repeat.function.arguments = json.dumps({"query": "P-201"})
+                    repeat.id = f"rep_{self._n:03d}"
+                    fresh = MagicMock()
+                    fresh.function.name = "search_assets"
+                    fresh.function.arguments = json.dumps({"query": f"asset-{self._n}"})
+                    fresh.id = f"new_{self._n:03d}"
+                    return {"content": "", "tool_calls": [repeat, fresh]}
+                return {"content": "Done.", "tool_calls": None}
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        llm = _FakeLLMMixed()
+        agent._llm = llm  # type: ignore[assignment]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "explore"}]
+        result = await agent._llm_loop(messages, "chat1", max_iterations=5)
+
+        # The fresh call each iteration kept progress alive: the model reached
+        # its own no-tool-call terminus (iteration 4) rather than being cut off.
+        assert result == "Done."
+        assert llm._n == 4
+
+    @pytest.mark.asyncio
+    async def test_distinct_reads_have_independent_cache_slots(self) -> None:
+        """Two different read tools called once each must both execute — the
+        cache key is per (name + args), so one read must not replay from the
+        other's slot."""
+
+        class _FakeLLMTwoReads:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._n = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Done."
+
+            async def complete_with_tools(
+                self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+            ) -> dict[str, Any]:
+                self._n += 1
+                calls = {
+                    1: ("search_assets", {"query": "P-201"}),
+                    2: ("read_work_orders", {"asset_id": "P-201"}),
+                }
+                if self._n in calls:
+                    name, args = calls[self._n]
+                    tc = MagicMock()
+                    tc.function.name = name
+                    tc.function.arguments = json.dumps(args)
+                    tc.id = f"call_{self._n:03d}"
+                    return {"content": "", "tool_calls": [tc]}
+                return {"content": "Done.", "tool_calls": None}
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMTwoReads()  # type: ignore[assignment]
+
+        exec_calls: list[str] = []
+
+        async def recording_exec(
+            name: str, args: dict[str, Any], *, chat_id: str = "default"
+        ) -> Any:
+            exec_calls.append(name)
+            return [{"id": "X"}]
+
+        agent._execute_tool = recording_exec  # type: ignore[assignment]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "about P-201"}]
+        await agent._llm_loop(messages, "chat1", max_iterations=5)
+
+        # Both distinct reads executed; neither was a false cache hit.
+        assert exec_calls == ["search_assets", "read_work_orders"]
 
 
 class TestMutatingToolsRegistry:

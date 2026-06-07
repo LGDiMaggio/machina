@@ -1150,17 +1150,25 @@ class Agent:
                     args = {}
 
                 # Canonical key for EVERY call (read or write), used for both the
-                # read-replay cache and the no-progress detector. A call whose key
-                # has not been seen this turn counts as forward progress.
+                # read-replay cache and the no-progress detector.
                 call_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
                 is_repeat_call = call_key in seen_call_keys
                 seen_call_keys.add(call_key)
-                if not is_repeat_call:
-                    iteration_made_progress = True
 
-                memo_key: str | None = None
-                if func_name in _SIDE_EFFECTING_TOOLS:
-                    memo_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+                # ``memo_key`` is the same string for write tools; reuse it rather
+                # than recomputing the f-string (and risking the two drifting).
+                memo_key: str | None = call_key if func_name in _SIDE_EFFECTING_TOOLS else None
+
+                # An iteration makes progress when it asks for something genuinely
+                # new, OR re-issues a read that will actually re-run because its
+                # earlier attempt was not cached (e.g. it errored — the retry is
+                # real work, not a no-op). Only a verbatim repeat served from the
+                # read cache, or a write the suppression path will short-circuit,
+                # counts as "no progress". Without the read-retry clause, a read
+                # that errors then retries would trip the no-progress break and
+                # deny the model a follow-up step after recovery.
+                if not is_repeat_call or (memo_key is None and call_key not in executed_reads):
+                    iteration_made_progress = True
 
                 # The confirmation gate applies only to mutating tools and only
                 # when confirmations are on AND we are not in sandbox (sandbox
@@ -1281,10 +1289,13 @@ class Agent:
                 )
                 break
 
-            # If the model keeps re-issuing a write we've already suppressed,
-            # stop offering tools and force a final answer — the annotation is
-            # only a hint, and an uncooperative model would otherwise loop to
-            # max_iterations.
+            # Still reachable, and NOT subsumed by the no-progress break above:
+            # the no-progress break fires only when an iteration is ALL repeats,
+            # whereas this guard catches the model that interleaves a genuinely
+            # new call with the same suppressed write every iteration (so
+            # ``iteration_made_progress`` stays True but the write loops). The
+            # annotation we feed back is only a hint; an uncooperative model would
+            # otherwise loop to max_iterations.
             if any(c >= _MAX_DUPLICATE_SUPPRESSIONS for c in suppression_counts.values()):
                 logger.info(
                     "duplicate_suppression_limit_reached",
