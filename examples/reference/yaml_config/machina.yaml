@@ -30,7 +30,7 @@ channels:
   - type: cli
 
 llm:
-  provider: "ollama:qwen2.5:3b"    # or "openai:gpt-4o", "anthropic:claude-sonnet-4-20250514"
+  provider: "ollama:llama3"    # or "openai:gpt-4o", "anthropic:claude-sonnet-4-20250514"
   temperature: 0.1
 
 sandbox: false
