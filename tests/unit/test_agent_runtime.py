@@ -835,6 +835,29 @@ class TestLoopIdempotency:
         # First call errored (not memoised) → second identical request re-runs.
         assert calls["n"] == 2
 
+    @pytest.mark.asyncio
+    async def test_suppressed_duplicate_signals_completion(self) -> None:
+        """A suppressed duplicate write must feed back an 'already executed'
+        signal so the model stops re-issuing the call instead of looping to
+        max_iterations."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], confirmations=False)
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        await agent.start()
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "crea un work order per P-201"}
+        ]
+        await agent._llm_loop(messages, "chat1")
+
+        assert conn.create_calls == 1
+        tool_payloads = [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+        suppressed = [
+            p for p in tool_payloads if isinstance(p, dict) and p.get("already_executed")
+        ]
+        assert suppressed, "the suppressed duplicate must carry an already_executed signal"
+        # The original result is preserved under "result" for the model to read.
+        assert suppressed[0].get("result") is not None
+
 
 class TestMutatingToolsRegistry:
     """The per-turn memo guard is sourced from the canonical tool registry."""
@@ -1300,6 +1323,44 @@ class TestLlmLoop:
         messages = [{"role": "user", "content": "test"}]
         result = await agent._llm_loop(messages, "chat1")
         assert result == ""
+
+
+class TestEmptyResponseFallback:
+    """An empty rendered answer must surface a fallback, never blank output.
+
+    ``_llm_loop`` faithfully returns the model's empty string (asserted in
+    ``test_tool_call_returns_no_content``); the user-facing substitution
+    happens one layer up, in ``_finalize_turn``.
+    """
+
+    def test_empty_raw_response_yields_fallback(self) -> None:
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response="")
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+
+    def test_citations_only_response_yields_fallback(self) -> None:
+        """A response that is nothing but a citations block strips to empty."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        raw = "<citations>\n[1]\n</citations>"
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+
+    def test_nonempty_response_is_untouched(self) -> None:
+        """A real answer must pass through unchanged — no false-positive fallback."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(
+            chat_id="c", user_text="hi", raw_response="Replace the bearing."
+        )
+        assert resp.text == "Replace the bearing."
+        assert resp.text != _EMPTY_RESPONSE_FALLBACK
 
 
 class TestFormatResponseForChannel:

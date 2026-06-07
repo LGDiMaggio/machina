@@ -58,6 +58,15 @@ _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 # tunable.
 _PENDING_ACTION_TTL_SECONDS: float = 3600.0
 
+# Surfaced to the user when the LLM yields no usable text — an empty
+# completion, or a response that was nothing but a citations block. Weak
+# local models hit this often; blank output reads as a crash, so we say
+# something honest and actionable instead of delivering nothing.
+_EMPTY_RESPONSE_FALLBACK = (
+    "I couldn't produce a response to that. Try rephrasing your question, "
+    "or switch to a more capable model."
+)
+
 
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
@@ -884,6 +893,14 @@ class Agent:
                 self._turn_chunks.get(chat_id, {}),
                 self._turn_ordered.get(chat_id, []),
             )
+            # A model that returns nothing (empty completion) or only a
+            # citations block leaves an empty rendered answer. Surface an
+            # explicit fallback instead of delivering blank output — weak
+            # local models hit this routinely. Citations with no prose have
+            # nothing to attribute, so drop them.
+            if not rendered.strip():
+                rendered = _EMPTY_RESPONSE_FALLBACK
+                citations = []
             self._add_to_history(chat_id, "user", user_text)
             self._add_to_history(chat_id, "assistant", rendered)
         finally:
@@ -1055,7 +1072,20 @@ class Agent:
                     operation=func_name,
                 ) as tool_span:
                     if memo_key is not None and memo_key in executed_side_effects:
-                        tool_result = executed_side_effects[memo_key]
+                        # Re-feed the prior result, but flag it as already done
+                        # so the model stops re-issuing the write and moves on
+                        # to summarising. Without this signal a weak model can
+                        # loop the same suppressed call up to max_iterations,
+                        # burning latency and degrading the final answer.
+                        tool_result = {
+                            "already_executed": True,
+                            "note": (
+                                "This action was already completed earlier in "
+                                "this turn. Do not call it again — summarise the "
+                                "result for the user."
+                            ),
+                            "result": executed_side_effects[memo_key],
+                        }
                         logger.info(
                             "duplicate_tool_call_suppressed",
                             agent=self.name,
