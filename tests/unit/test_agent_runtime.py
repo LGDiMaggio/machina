@@ -905,6 +905,71 @@ class TestLoopIdempotency:
         assert llm._n <= _MAX_DUPLICATE_SUPPRESSIONS + 1
 
 
+class _FakeLLMRepeatRead:
+    """Re-issues the SAME read-only tool call on every iteration and never
+    emits a final text answer on its own — mimics a weak local model that
+    keeps querying instead of synthesising. The loop must dedup the read and
+    force a final answer well before max_iterations."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self.tool_call_invocations = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Final answer."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self.tool_call_invocations += 1
+        tc = MagicMock()
+        tc.function.name = "search_assets"
+        tc.function.arguments = json.dumps({"query": "P-201"})
+        tc.id = f"call_{self.tool_call_invocations:03d}"
+        return {"content": "", "tool_calls": [tc]}
+
+
+class TestReadOnlyLoopTermination:
+    """A read-only tool re-issued verbatim must be served from cache and the
+    loop must stop offering tools once an iteration asks for nothing new —
+    so a weak model cannot burn every iteration on redundant reads."""
+
+    @pytest.mark.asyncio
+    async def test_repeated_read_dedup_and_early_stop(self) -> None:
+        from machina.agent.runtime import _DUPLICATE_READ_NOTE
+
+        plant = _make_plant()
+        agent = Agent(plant=plant, connectors=[_FakeConnector()])
+        llm = _FakeLLMRepeatRead()
+        agent._llm = llm  # type: ignore[assignment]
+
+        exec_calls = {"n": 0}
+        real_exec = agent._execute_tool
+
+        async def counting_exec(
+            name: str, args: dict[str, Any], *, chat_id: str = "default"
+        ) -> Any:
+            exec_calls["n"] += 1
+            return await real_exec(name, args, chat_id=chat_id)
+
+        agent._execute_tool = counting_exec  # type: ignore[assignment]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "tell me about P-201"}]
+        result = await agent._llm_loop(messages, "chat1", max_iterations=5)
+
+        # The identical read executed once; every repeat was served from cache.
+        assert exec_calls["n"] == 1
+        # The loop forced a final answer instead of running all 5 iterations.
+        assert result == "Final answer."
+        assert llm.tool_call_invocations <= 2
+
+        # The replayed read carries an explicit "already retrieved" signal.
+        tool_payloads = [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+        replayed = [p for p in tool_payloads if isinstance(p, dict) and p.get("already_retrieved")]
+        assert replayed, "the repeated read must be served from cache with a replay note"
+        assert replayed[0].get("note") == _DUPLICATE_READ_NOTE
+
+
 class TestMutatingToolsRegistry:
     """The per-turn memo guard is sourced from the canonical tool registry."""
 

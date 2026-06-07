@@ -83,6 +83,16 @@ _DUPLICATE_TOOL_NOTE_SANDBOX = (
     "real change was made). Do not call it again — summarise the result."
 )
 
+# Re-fed when a READ-ONLY tool call is re-issued with identical arguments within
+# the same turn. The cached result is replayed (the connector is NOT queried
+# again) and the note nudges the model to answer instead of looping. Weak local
+# models routinely re-request the same lookup every iteration, which — without
+# this — burns the whole iteration budget on redundant reads.
+_DUPLICATE_READ_NOTE = (
+    "You already retrieved this exact information earlier in this turn. Do not "
+    "request it again — answer the user with the data you already have."
+)
+
 # Hard cap on how many times the same side-effecting call may be suppressed in
 # one turn before the loop stops offering tools and forces a final answer. The
 # annotated duplicate result is only a cooperative hint; a model that ignores it
@@ -1089,6 +1099,17 @@ class Agent:
         # answer — guaranteeing quick termination regardless of model behaviour.
         suppression_counts: dict[str, int] = {}
 
+        # Per-turn memo of READ-ONLY tool results (keyed by name + args) and the
+        # set of every tool-call key seen this turn. An identical read is
+        # replayed from cache instead of re-querying the connector; an iteration
+        # whose calls are ALL repeats (no new information requested) means the
+        # model is looping, so we stop offering tools and force a final answer.
+        # This is the read-only analogue of the write-duplicate guard above —
+        # without it, a weak model that re-requests the same lookup every
+        # iteration runs the full max_iterations on redundant reads.
+        executed_reads: dict[str, Any] = {}
+        seen_call_keys: set[str] = set()
+
         for _iteration in range(max_iterations):
             with self.tracer.trace(
                 "llm_call",
@@ -1116,12 +1137,26 @@ class Agent:
                 }
             )
 
+            # Tracks whether this iteration requested anything the turn had not
+            # already seen. If every call is a verbatim repeat, the model is
+            # looping without making progress and we break after the loop.
+            iteration_made_progress = False
+
             for tc in tool_calls:
                 func_name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, AttributeError):
                     args = {}
+
+                # Canonical key for EVERY call (read or write), used for both the
+                # read-replay cache and the no-progress detector. A call whose key
+                # has not been seen this turn counts as forward progress.
+                call_key = f"{func_name}:{json.dumps(args, sort_keys=True, default=str)}"
+                is_repeat_call = call_key in seen_call_keys
+                seen_call_keys.add(call_key)
+                if not is_repeat_call:
+                    iteration_made_progress = True
 
                 memo_key: str | None = None
                 if func_name in _SIDE_EFFECTING_TOOLS:
@@ -1136,7 +1171,22 @@ class Agent:
                     "tool_call",
                     operation=func_name,
                 ) as tool_span:
-                    if memo_key is not None and memo_key in executed_side_effects:
+                    if memo_key is None and call_key in executed_reads:
+                        # Read-only call re-issued verbatim — replay the cached
+                        # result instead of re-querying the connector, and nudge
+                        # the model to answer with the data it already has.
+                        tool_result = {
+                            "already_retrieved": True,
+                            "note": _DUPLICATE_READ_NOTE,
+                            "result": executed_reads[call_key],
+                        }
+                        logger.info(
+                            "duplicate_read_call_suppressed",
+                            agent=self.name,
+                            tool=func_name,
+                            operation=func_name,
+                        )
+                    elif memo_key is not None and memo_key in executed_side_effects:
                         # Re-feed the prior result, flagged as already done so the
                         # model stops re-issuing the write and moves on to
                         # summarising. The write does NOT run again. In sandbox the
@@ -1204,6 +1254,10 @@ class Agent:
                         is_error = isinstance(tool_result, dict) and "error" in tool_result
                         if memo_key is not None and not is_error:
                             executed_side_effects[memo_key] = tool_result
+                        elif memo_key is None and not is_error:
+                            # Cache the read so a verbatim re-issue this turn is
+                            # served from here instead of re-querying.
+                            executed_reads[call_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
 
                 messages.append(
@@ -1213,6 +1267,19 @@ class Agent:
                         "tool_call_id": tc.id,
                     }
                 )
+
+            # If this whole iteration only re-issued calls already made this turn
+            # (read or write), the model is looping without asking for anything
+            # new. Stop offering tools and force a final answer — this is the
+            # general termination guard that covers repeated read-only lookups,
+            # which the write-only suppression counter below does not catch.
+            if not iteration_made_progress:
+                logger.info(
+                    "no_new_tool_calls_forcing_final_answer",
+                    agent=self.name,
+                    operation="llm_loop",
+                )
+                break
 
             # If the model keeps re-issuing a write we've already suppressed,
             # stop offering tools and force a final answer — the annotation is
