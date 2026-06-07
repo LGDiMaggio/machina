@@ -9,19 +9,29 @@ Pick one:
 ### Option A: Ollama (local, free, no API key) — default
 
 1. Install Ollama from [ollama.com](https://ollama.com)
-2. Pull the default model — a small Qwen that runs comfortably on CPU:
+2. Pull the default model — `llama3` (8B):
    ```bash
-   ollama pull qwen2.5:3b
+   ollama pull llama3
    ```
 3. Verify it's running:
    ```bash
    ollama list
    ```
 
-The quickstart defaults to `ollama:qwen2.5:3b`. If you already have a newer
-Qwen pulled (e.g. `qwen3:4b`), pass it with `--llm ollama:qwen3:4b`.
+The quickstart defaults to `ollama:llama3`. It runs on CPU — the first
+answer can take ~20–40s, and questions that trigger a tool call (like
+creating a work order) take a little longer; a GPU or a hosted key (Options
+B/C) is noticeably snappier.
 
-**On a machine with a GPU?** Pull a larger Qwen for noticeably better
+> **Why an 8B model?** The agent relies on tool calling, multi-step
+> synthesis, and a citation contract. `llama3` handles all three reliably.
+> Smaller models are tempting for speed, but 3–4B ones (e.g. `qwen2.5:3b`,
+> `qwen3:4b`) often can't keep the contract and return empty or
+> raw-context answers — so they're listed as fast-but-may-struggle options,
+> not the default. Pass any tool-calling model you prefer with `--llm`
+> (e.g. `--llm ollama:qwen2.5:7b`).
+
+**On a machine with a GPU?** Pull a larger model for noticeably better
 answers and just point the example at it:
 
 ```bash
@@ -88,10 +98,10 @@ cd machina
 pip install -e ".[litellm,docs-rag,examples]"
 cd examples/quickstart
 
-# With Ollama (default: ollama:qwen2.5:3b):
+# With Ollama (default: ollama:llama3):
 python agent.py
 
-# With a larger Qwen (GPU recommended):
+# With a larger model (GPU recommended):
 python agent.py --llm ollama:qwen2.5:14b
 
 # With OpenAI:
@@ -120,7 +130,7 @@ agent = Agent(
         DocumentStoreConnector(paths=["../sample_data/manuals"]),
     ],
     channels=[CliChannel()],
-    llm="ollama:qwen2.5:3b",
+    llm="ollama:llama3",
 )
 agent.run()
 ```
