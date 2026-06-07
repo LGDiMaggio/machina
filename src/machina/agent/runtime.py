@@ -58,6 +58,37 @@ _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 # tunable.
 _PENDING_ACTION_TTL_SECONDS: float = 3600.0
 
+# Surfaced to the user when the LLM yields no usable text — an empty
+# completion, or a response that was nothing but a citations block. Weak
+# local models hit this often; blank output reads as a crash, so we say
+# something honest and actionable instead of delivering nothing.
+_EMPTY_RESPONSE_FALLBACK = (
+    "I couldn't produce a response to that. Try rephrasing your question, "
+    "or switch to a more capable model."
+)
+
+# Fed back to the model when a side-effecting tool call is re-issued within the
+# same turn. The first call's result is replayed (the write does NOT run again);
+# the note tells the model to stop re-calling and summarise.
+_DUPLICATE_TOOL_NOTE = (
+    "This action was already completed earlier in this turn. Do not call it "
+    "again — summarise the result for the user."
+)
+
+# Same situation, but the original call was a sandbox no-op (no real write). We
+# must NOT claim the action "executed" — that would mislead the model about a
+# mutation that never happened.
+_DUPLICATE_TOOL_NOTE_SANDBOX = (
+    "This action was already simulated earlier in this turn (sandbox mode — no "
+    "real change was made). Do not call it again — summarise the result."
+)
+
+# Hard cap on how many times the same side-effecting call may be suppressed in
+# one turn before the loop stops offering tools and forces a final answer. The
+# annotated duplicate result is only a cooperative hint; a model that ignores it
+# would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
+_MAX_DUPLICATE_SUPPRESSIONS = 2
+
 
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
@@ -71,6 +102,25 @@ def _format_response_for_channel(response: AgentResponse) -> str:
         return response.text
     sources = "\n".join(f"  • {c.inline_marker()}" for c in response.citations)
     return f"{response.text}\n\n— Sources:\n{sources}"
+
+
+def _executed_write_fallback(func_name: str, tool_result: Any) -> str:
+    """Fallback narration for a confirmed write whose summary came back empty.
+
+    Used only on the two-turn confirmation path, where the write has ALREADY
+    executed. The message must reflect success and never invite a retry — the
+    generic :data:`_EMPTY_RESPONSE_FALLBACK` ("try rephrasing / switch models")
+    would read as a failure and could drive a duplicate write. Surfaces the
+    result identifier when the tool returned one.
+    """
+    identifier = ""
+    if isinstance(tool_result, dict):
+        identifier = str(tool_result.get("id") or tool_result.get("work_order_id") or "")
+    suffix = f" ({identifier})" if identifier else ""
+    return (
+        f"Done — the {func_name} action completed{suffix}. I couldn't generate a "
+        "full summary; switch to a more capable model for a detailed narration."
+    )
 
 
 class Agent:
@@ -853,6 +903,7 @@ class Agent:
         chat_id: str,
         user_text: str,
         raw_response: str,
+        fallback_text: str = _EMPTY_RESPONSE_FALLBACK,
     ) -> AgentResponse:
         """Parse the raw LLM output into the final response and close the turn.
 
@@ -874,16 +925,39 @@ class Agent:
             chat_id: Conversation identifier.
             user_text: The user message to record in history.
             raw_response: The raw LLM output (with any trailing citation block).
+            fallback_text: Substituted (and flagged via
+                :attr:`AgentResponse.is_fallback`) when the rendered answer is
+                empty. Defaults to :data:`_EMPTY_RESPONSE_FALLBACK`; the
+                post-write narration path passes a write-aware string so a
+                successful write is never reported as a failure.
 
         Returns:
             The rendered :class:`AgentResponse` with parsed citations.
         """
+        is_fallback = False
         try:
             rendered, citations = parse_response(
                 raw_response,
                 self._turn_chunks.get(chat_id, {}),
                 self._turn_ordered.get(chat_id, []),
             )
+            # A model that returns nothing (empty completion) or only a
+            # citations block leaves an empty rendered answer. Surface an
+            # explicit fallback instead of delivering blank output — weak
+            # local models hit this routinely. Citations with no prose have
+            # nothing to attribute, so drop them. Log at WARNING so the
+            # degradation is queryable (the INFO line below would otherwise
+            # look healthy — its length is the fallback's, not the empty raw).
+            if not rendered.strip():
+                logger.warning(
+                    "empty_llm_response",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    raw_response_length=len(raw_response),
+                )
+                rendered = fallback_text
+                citations = []
+                is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             self._add_to_history(chat_id, "assistant", rendered)
         finally:
@@ -896,8 +970,9 @@ class Agent:
             chat_id=chat_id,
             response_length=len(rendered),
             citation_count=len(citations),
+            is_fallback=is_fallback,
         )
-        return AgentResponse(text=rendered, citations=citations)
+        return AgentResponse(text=rendered, citations=citations, is_fallback=is_fallback)
 
     # ------------------------------------------------------------------
     # Internal: message building
@@ -1007,6 +1082,13 @@ class Agent:
         # genuinely different proposal still prompts.
         declined_side_effects: set[str] = set()
 
+        # Per-turn count of how many times each write was suppressed as a
+        # duplicate. The annotation we feed back is only a cooperative hint; a
+        # model that ignores it would loop to max_iterations. Once any key hits
+        # _MAX_DUPLICATE_SUPPRESSIONS we stop offering tools and force a final
+        # answer — guaranteeing quick termination regardless of model behaviour.
+        suppression_counts: dict[str, int] = {}
+
         for _iteration in range(max_iterations):
             with self.tracer.trace(
                 "llm_call",
@@ -1055,7 +1137,23 @@ class Agent:
                     operation=func_name,
                 ) as tool_span:
                     if memo_key is not None and memo_key in executed_side_effects:
-                        tool_result = executed_side_effects[memo_key]
+                        # Re-feed the prior result, flagged as already done so the
+                        # model stops re-issuing the write and moves on to
+                        # summarising. The write does NOT run again. In sandbox the
+                        # prior result is a no-op, so we must not claim a real
+                        # execution happened — that would mislead the model.
+                        prior = executed_side_effects[memo_key]
+                        is_sandbox_noop = isinstance(prior, dict) and prior.get("sandbox") is True
+                        suppression_counts[memo_key] = suppression_counts.get(memo_key, 0) + 1
+                        tool_result = {
+                            "already_executed": not is_sandbox_noop,
+                            "note": (
+                                _DUPLICATE_TOOL_NOTE_SANDBOX
+                                if is_sandbox_noop
+                                else _DUPLICATE_TOOL_NOTE
+                            ),
+                            "result": prior,
+                        }
                         logger.info(
                             "duplicate_tool_call_suppressed",
                             agent=self.name,
@@ -1115,6 +1213,18 @@ class Agent:
                         "tool_call_id": tc.id,
                     }
                 )
+
+            # If the model keeps re-issuing a write we've already suppressed,
+            # stop offering tools and force a final answer — the annotation is
+            # only a hint, and an uncooperative model would otherwise loop to
+            # max_iterations.
+            if any(c >= _MAX_DUPLICATE_SUPPRESSIONS for c in suppression_counts.values()):
+                logger.info(
+                    "duplicate_suppression_limit_reached",
+                    agent=self.name,
+                    operation="llm_loop",
+                )
+                break
 
         # Exhausted iterations — get final response without tools
         return await self._llm.complete(messages)
@@ -1467,7 +1577,15 @@ class Agent:
 
         # Parse citations, update history, clean up the per-turn registry, and
         # log — the shared turn-finalization tail (same as handle_message_full).
-        return self._finalize_turn(chat_id=chat_id, user_text=text, raw_response=raw_response)
+        # The write ALREADY executed, so if the narration comes back empty the
+        # fallback must report success, never invite a retry (a reworded retry
+        # could mint a duplicate write past the per-turn memo).
+        return self._finalize_turn(
+            chat_id=chat_id,
+            user_text=text,
+            raw_response=raw_response,
+            fallback_text=_executed_write_fallback(func_name, tool_result),
+        )
 
     async def _execute_tool(
         self,

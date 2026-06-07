@@ -835,6 +835,75 @@ class TestLoopIdempotency:
         # First call errored (not memoised) → second identical request re-runs.
         assert calls["n"] == 2
 
+    @pytest.mark.asyncio
+    async def test_suppressed_duplicate_signals_completion(self) -> None:
+        """A suppressed duplicate write must feed back an 'already executed'
+        signal so the model stops re-issuing the call instead of looping to
+        max_iterations."""
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], confirmations=False)
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        await agent.start()
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "crea un work order per P-201"}
+        ]
+        await agent._llm_loop(messages, "chat1")
+
+        from machina.agent.runtime import _DUPLICATE_TOOL_NOTE
+
+        assert conn.create_calls == 1
+        tool_payloads = [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+        suppressed = [
+            p for p in tool_payloads if isinstance(p, dict) and p.get("already_executed")
+        ]
+        assert suppressed, "the suppressed duplicate must carry an already_executed signal"
+        # The original result is preserved under "result" for the model to read.
+        assert suppressed[0].get("result") is not None
+        # The note is the actual loop-breaking signal — pin it so a rename/reword
+        # cannot silently defeat the fix.
+        assert suppressed[0].get("note") == _DUPLICATE_TOOL_NOTE
+
+    @pytest.mark.asyncio
+    async def test_sandbox_duplicate_not_mislabeled(self) -> None:
+        """In sandbox the suppressed duplicate must NOT claim a real execution."""
+        from machina.agent.runtime import _DUPLICATE_TOOL_NOTE_SANDBOX
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], sandbox=True)
+        agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
+        await agent.start()
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "crea un work order per P-201"}
+        ]
+        await agent._llm_loop(messages, "chat1")
+
+        # Sandbox: the connector write never ran.
+        assert conn.create_calls == 0
+        tool_payloads = [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+        suppressed = [p for p in tool_payloads if isinstance(p, dict) and "already_executed" in p]
+        assert suppressed, "the suppressed duplicate must still be annotated in sandbox"
+        # Must NOT assert a real execution happened, and must use the sandbox note.
+        assert suppressed[0]["already_executed"] is False
+        assert suppressed[0].get("note") == _DUPLICATE_TOOL_NOTE_SANDBOX
+
+    @pytest.mark.asyncio
+    async def test_duplicate_suppression_terminates_early(self) -> None:
+        """A model that ignores the signal and re-issues forever must still stop
+        well before max_iterations."""
+        from machina.agent.runtime import _MAX_DUPLICATE_SUPPRESSIONS
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn], confirmations=False)
+        llm = _FakeLLMReissueCreate(reworded=False)
+        agent._llm = llm  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message("crea un work order per P-201, sostituire cuscinetto")
+
+        # The side effect ran exactly once, and the loop forced a final answer
+        # after the suppression cap rather than running all max_iterations (5).
+        assert conn.create_calls == 1
+        assert llm._n <= _MAX_DUPLICATE_SUPPRESSIONS + 1
+
 
 class TestMutatingToolsRegistry:
     """The per-turn memo guard is sourced from the canonical tool registry."""
@@ -1300,6 +1369,67 @@ class TestLlmLoop:
         messages = [{"role": "user", "content": "test"}]
         result = await agent._llm_loop(messages, "chat1")
         assert result == ""
+
+
+class TestEmptyResponseFallback:
+    """An empty rendered answer must surface a fallback, never blank output.
+
+    ``_llm_loop`` faithfully returns the model's empty string (asserted in
+    ``test_tool_call_returns_no_content``); the user-facing substitution
+    happens one layer up, in ``_finalize_turn``.
+    """
+
+    def test_empty_raw_response_yields_fallback(self) -> None:
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response="")
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+        # The fallback is flagged so callers can tell it apart from a real answer.
+        assert resp.is_fallback is True
+
+    def test_citations_only_response_yields_fallback(self) -> None:
+        """A response that is nothing but a citations block strips to empty."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        raw = "<citations>\n[1]\n</citations>"
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+        assert resp.is_fallback is True
+
+    def test_whitespace_only_response_yields_fallback(self) -> None:
+        """The guard is strip()-based, so whitespace-only output also falls back."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response="  \n  ")
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+        assert resp.is_fallback is True
+
+    def test_custom_fallback_text_is_used(self) -> None:
+        """The narration path can supply a write-aware fallback string."""
+        agent = Agent()
+        resp = agent._finalize_turn(
+            chat_id="c", user_text="hi", raw_response="", fallback_text="Done — created WO-1."
+        )
+        assert resp.text == "Done — created WO-1."
+        assert resp.is_fallback is True
+
+    def test_nonempty_response_is_untouched(self) -> None:
+        """A real answer must pass through unchanged — no false-positive fallback."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(
+            chat_id="c", user_text="hi", raw_response="Replace the bearing."
+        )
+        assert resp.text == "Replace the bearing."
+        assert resp.text != _EMPTY_RESPONSE_FALLBACK
+        assert resp.is_fallback is False
 
 
 class TestFormatResponseForChannel:
@@ -2060,6 +2190,28 @@ class TestTwoTurnConfirmation:
         # Narrated answer, not a raw model_dump payload.
         assert "work order" in resp.text.lower()
         assert "model_dump" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_confirmed_write_empty_narration_is_not_failure(self) -> None:
+        """A confirmed write whose narration comes back empty must report success,
+        not the generic 'try rephrasing / switch models' fallback (which could
+        drive the user to retry and mint a duplicate write)."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
+        await agent.start()
+        await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
+        # Narrator returns nothing — the write already executed.
+        agent._llm = _FakeLLMNarrate("")  # type: ignore[assignment]
+        resp = await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
+
+        assert conn.create_calls == 1
+        assert resp.is_fallback is True
+        # Must NOT be the generic failure-flavoured fallback, and must not invite a retry.
+        assert resp.text != _EMPTY_RESPONSE_FALLBACK
+        assert "completed" in resp.text.lower()
 
     @pytest.mark.asyncio
     async def test_unrelated_message_discards_pending(self) -> None:

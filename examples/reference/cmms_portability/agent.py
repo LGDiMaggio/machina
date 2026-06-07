@@ -96,7 +96,7 @@ BACKEND_CONFIGS = {
 
 def build_agent(
     backend: str = "generic",
-    llm: str = "ollama:qwen2.5:3b",
+    llm: str = "ollama:llama3",
     sandbox: bool = True,
 ) -> Agent:
     """Build agent -- show the selected backend config, run with GenericCmms."""
@@ -151,7 +151,7 @@ def main() -> None:
         default="generic",
         help="CMMS backend to show",
     )
-    parser.add_argument("--llm", default="ollama:qwen2.5:3b", help="LLM provider:model")
+    parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--interactive", action="store_true", help="Interactive chat mode")
     parser.add_argument("--verbose", action="store_true")
 
