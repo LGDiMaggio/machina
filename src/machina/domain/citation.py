@@ -51,7 +51,15 @@ class AgentResponse(BaseModel):
         citations: List of source citations, one per chunk the agent
             relied on. May be empty when the answer is not grounded in
             documents.
+        is_fallback: ``True`` when ``text`` is a synthetic fallback the
+            runtime substituted because the LLM returned no usable output
+            (an empty completion or a citations-only block), not a real
+            model answer. Lets programmatic callers and monitors tell a
+            genuine response apart from a degraded one.
     """
 
     text: str = Field(default="", description="Rendered answer text")
     citations: list[Citation] = Field(default_factory=list, description="Source citations")
+    is_fallback: bool = Field(
+        default=False, description="True when text is a synthetic empty-output fallback"
+    )
