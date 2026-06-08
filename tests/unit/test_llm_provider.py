@@ -74,7 +74,28 @@ class TestLLMProviderComplete:
             temperature=0.5,
             max_tokens=1024,
             timeout=120.0,
+            drop_params=True,
         )
+
+    @pytest.mark.asyncio
+    async def test_complete_passes_drop_params(self) -> None:
+        """Reasoning models (o1/o3/gpt-5) reject non-default temperature.
+
+        ``drop_params=True`` tells LiteLLM to silently omit parameters a
+        model does not support instead of raising a 400 BadRequestError,
+        so the same provider config works across chat and reasoning models.
+        Regression guard for the "temperature does not support 0.1" failure.
+        """
+        provider = LLMProvider(model="openai:gpt-5")
+        mock_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+        mock_acompletion = AsyncMock(return_value=mock_response)
+        fake_litellm = _make_fake_litellm(mock_acompletion)
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            await provider.complete(messages=[{"role": "user", "content": "test"}])
+
+        assert mock_acompletion.call_args.kwargs["drop_params"] is True
 
     @pytest.mark.asyncio
     async def test_complete_forwards_kwargs(self) -> None:
@@ -159,6 +180,7 @@ class TestLLMProviderCompleteWithTools:
 
         call_kwargs = mock_acompletion.call_args.kwargs
         assert call_kwargs["tools"] == tools
+        assert call_kwargs["drop_params"] is True
         assert result["content"] == "No tool needed"
         assert result["tool_calls"] is None
 

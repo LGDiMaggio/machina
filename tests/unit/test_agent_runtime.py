@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent, _format_response_for_channel
+from machina.agent.runtime import Agent, _format_response_for_channel, _history_text
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
@@ -723,6 +723,78 @@ class TestHistory:
             agent._add_to_history("chat1", "user", f"msg {i}")
         # Max history is 2, so *2 = 4 messages kept
         assert len(agent._histories["chat1"]) == 4
+
+
+class TestGroundingPersistedToHistory:
+    """A turn's cited sources must survive into conversation history.
+
+    Without this, a follow-up like "what are the sources?" has nothing to
+    resolve against — the ``<citations>`` block is stripped from the rendered
+    text and the per-turn Retrieved Context is never recorded — so the model
+    re-runs document search and repeats the whole prior answer.
+    """
+
+    def test_finalize_appends_source_note_to_history_only(self) -> None:
+        agent = Agent()
+        chat_id = "c1"
+        agent._turn_chunks[chat_id] = {
+            "ck1": {"source": "pump_p201_manual.md", "page": 12, "content": "Heat to 110C"}
+        }
+        agent._turn_ordered[chat_id] = ["ck1"]
+        raw = "Heat the bearings to 110C [1].\n<citations>\n[1]\n</citations>"
+
+        response = agent._finalize_turn(chat_id=chat_id, user_text="procedure?", raw_response=raw)
+
+        # The user-facing text stays clean: no grounding note, no raw block.
+        assert "Sources used" not in response.text
+        assert "<citations>" not in response.text
+        assert response.citations[0].source == "pump_p201_manual.md"
+
+        # History carries the source so a follow-up can answer from memory
+        # instead of forcing a fresh document search.
+        assistant_entry = agent._histories[chat_id][-1]
+        assert assistant_entry["role"] == "assistant"
+        assert "pump_p201_manual.md" in assistant_entry["content"]
+        assert "Sources used" in assistant_entry["content"]
+
+    def test_finalize_no_note_when_no_citations(self) -> None:
+        agent = Agent()
+        chat_id = "c2"
+        response = agent._finalize_turn(
+            chat_id=chat_id, user_text="hi", raw_response="Hello, how can I help?"
+        )
+        assistant_entry = agent._histories[chat_id][-1]
+        assert assistant_entry["content"] == response.text
+        assert "Sources used" not in assistant_entry["content"]
+
+
+class TestHistoryTextHelper:
+    """Pure-function tests for the grounding-note builder."""
+
+    @staticmethod
+    def _cite(source: str) -> Citation:
+        return Citation(chunk_id=source, source=source, page=0)
+
+    def test_no_citations_returns_rendered_unchanged(self) -> None:
+        assert _history_text("answer", []) == "answer"
+
+    def test_citations_without_source_add_no_note(self) -> None:
+        # A citation with an empty source carries nothing to attribute.
+        assert _history_text("answer", [self._cite("")]) == "answer"
+
+    def test_single_source_appended(self) -> None:
+        out = _history_text("answer", [self._cite("pump.md")])
+        assert out == "answer\n\n[Sources used in this answer: pump.md]"
+
+    def test_multiple_distinct_sources_listed_in_order(self) -> None:
+        out = _history_text("answer", [self._cite("a.md"), self._cite("b.md")])
+        assert out == "answer\n\n[Sources used in this answer: a.md, b.md]"
+
+    def test_duplicate_sources_deduped_first_seen_order(self) -> None:
+        cites = [self._cite("b.md"), self._cite("a.md"), self._cite("b.md")]
+        out = _history_text("answer", cites)
+        # b.md appears once, in first-seen position, before a.md.
+        assert out == "answer\n\n[Sources used in this answer: b.md, a.md]"
 
 
 class _FakeLLMDoubleCreate:

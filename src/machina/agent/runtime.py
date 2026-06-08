@@ -30,7 +30,7 @@ from machina.agent.prompts import (
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
-from machina.domain.citation import AgentResponse
+from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
 from machina.exceptions import LLMError
 from machina.llm.provider import LLMProvider
@@ -98,6 +98,41 @@ _DUPLICATE_READ_NOTE = (
 # annotated duplicate result is only a cooperative hint; a model that ignores it
 # would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
 _MAX_DUPLICATE_SUPPRESSIONS = 2
+
+# Appended to the assistant reply stored in conversation history (never to the
+# user-facing text) so a follow-up like "what are the sources?" resolves from
+# memory instead of forcing a fresh document search. See _history_text.
+_HISTORY_SOURCES_TEMPLATE = "{rendered}\n\n[Sources used in this answer: {sources}]"
+
+
+def _history_text(rendered: str, citations: list[Citation]) -> str:
+    """Build the assistant text to store in history, carrying its grounding.
+
+    The rendered answer keeps inline ``[n]`` markers, but ``parse_response``
+    strips the ``<citations>`` block and the per-turn "Retrieved Context"
+    system message is never recorded — so the source filenames that grounded
+    the answer would otherwise be lost from the conversation. Without them, a
+    follow-up ("what are the sources?") has nothing to resolve against and the
+    model re-runs document search and repeats the whole prior answer.
+
+    Appending the cited sources to the *history* entry (not to the user-facing
+    ``AgentResponse.text``) lets such follow-ups be answered from memory. Each
+    ``Citation.source`` is already ``safe_source``-sanitised by the citation
+    parser, so no filesystem path can leak back into the next turn's prompt.
+
+    Args:
+        rendered: The user-facing answer text (citation block already stripped).
+        citations: Citations parsed for this turn; may be empty.
+
+    Returns:
+        ``rendered`` unchanged when there are no cited sources, otherwise
+        ``rendered`` with a trailing source note. Sources are de-duplicated
+        in first-seen order.
+    """
+    sources = list(dict.fromkeys(c.source for c in citations if c.source))
+    if not sources:
+        return rendered
+    return _HISTORY_SOURCES_TEMPLATE.format(rendered=rendered, sources=", ".join(sources))
 
 
 def _format_response_for_channel(response: AgentResponse) -> str:
@@ -969,7 +1004,9 @@ class Agent:
                 citations = []
                 is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
-            self._add_to_history(chat_id, "assistant", rendered)
+            # Carry the turn's grounding into history so follow-ups resolve from
+            # memory instead of re-running document search (see _history_text).
+            self._add_to_history(chat_id, "assistant", _history_text(rendered, citations))
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)

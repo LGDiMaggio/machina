@@ -15,6 +15,13 @@ class LLMProvider:
     ``complete_with_tools()`` methods.  Machina's agent layer uses
     this instead of calling LLM libraries directly.
 
+    Both methods pass ``drop_params=True`` to LiteLLM so that parameters a
+    given model does not accept are silently dropped rather than raising.
+    The motivating case is OpenAI reasoning models (``o1``/``o3``/``gpt-5``
+    family) that reject any explicit ``temperature`` other than the default
+    ``1`` with a 400 error; LiteLLM knows the per-model support matrix and
+    omits the unsupported value instead of failing the call.
+
     Args:
         model: Provider and model identifier (e.g. ``"openai:gpt-4o"``).
         temperature: Sampling temperature.
@@ -63,6 +70,10 @@ class LLMProvider:
             )
             raise ImportError(msg) from None
 
+        # ``setdefault`` (rather than a literal keyword) so a caller may still
+        # override via ``**kwargs`` and we never raise "multiple values for
+        # keyword argument 'drop_params'".
+        kwargs.setdefault("drop_params", True)
         response = await litellm.acompletion(
             model=self.model,
             messages=messages,
@@ -103,6 +114,9 @@ class LLMProvider:
             )
             raise ImportError(msg) from None
 
+        # See complete() — setdefault keeps drop_params overridable and
+        # collision-free with the **kwargs passthrough.
+        kwargs.setdefault("drop_params", True)
         response = await litellm.acompletion(
             model=self.model,
             messages=messages,
