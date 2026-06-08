@@ -126,6 +126,24 @@ class TestIndexContract:
         _, cites = parse_response(text, registry, ordered)
         assert cites == []
 
+    def test_unterminated_block_opener_stripped(self) -> None:
+        # Weak models sometimes open the block but never close it. The bare
+        # ``<citations>`` tag must NOT leak into the rendered answer.
+        text = "Just an answer.\n<citations>"
+        rendered, cites = parse_response(text, _registry(), _ordered())
+        assert "<citations>" not in rendered
+        assert rendered == "Just an answer."
+        assert cites == []
+
+    def test_unterminated_block_still_parses_indices(self) -> None:
+        # An unterminated block with valid entries still yields citations.
+        text = "Body [1].\n<citations>\n[1]"
+        rendered, cites = parse_response(text, _registry(), _ordered())
+        assert "<citations>" not in rendered
+        assert rendered == "Body [1]."
+        assert len(cites) == 1
+        assert cites[0].chunk_id == "abc123"
+
 
 # ---------------------------------------------------------------------------
 # Source / page fallback

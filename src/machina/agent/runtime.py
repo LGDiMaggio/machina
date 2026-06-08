@@ -135,6 +135,81 @@ def _history_text(rendered: str, citations: list[Citation]) -> str:
     return _HISTORY_SOURCES_TEMPLATE.format(rendered=rendered, sources=", ".join(sources))
 
 
+# Substituted (and flagged via ``AgentResponse.is_fallback``) when a turn's
+# rendered answer merely repeats the previous turn's answer. Weak local models
+# copy the prior assistant message straight out of conversation history, so the
+# user sees the same long paragraph on every follow-up; delivering it again
+# reads as the agent being stuck. Mirrors :data:`_EMPTY_RESPONSE_FALLBACK` — an
+# honest, distinct degrade. The echo is NOT written back to history, so it
+# cannot keep priming the next turn. See _is_echo / _is_echo_of_previous.
+_REPEATED_RESPONSE_FALLBACK = (
+    "I seem to be repeating my previous answer. Could you rephrase your "
+    "question, or switch to a more capable model? The current model may be "
+    "struggling to follow this conversation."
+)
+
+# Minimum rendered length (characters) before the cross-turn echo guard applies.
+# Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
+# the degenerate-echo failure mode is always a long canned paragraph, so the
+# guard only inspects substantial answers and never trips on terse ones.
+_MIN_ECHO_LENGTH = 200
+
+# Normalised char-similarity at/above which two answers are treated as the same
+# answer. High enough that two genuinely different maintenance answers never
+# collide, low enough to catch an echo that drifts by a word or two.
+_ECHO_SIMILARITY_THRESHOLD = 0.92
+
+# Marker prefixing the grounding note appended to a stored assistant reply by
+# _history_text. Stripped before echo comparison: the previous turn's stored
+# text may carry it, the current turn's freshly rendered answer never does.
+_HISTORY_NOTE_MARKER = "\n\n[Sources used in this answer:"
+
+
+def _normalized_for_echo(text: str) -> str:
+    """Collapse runs of whitespace and lowercase, for echo comparison."""
+    return " ".join(text.split()).lower()
+
+
+def _strip_history_note(text: str) -> str:
+    """Drop a trailing ``[Sources used in this answer: ...]`` note, if present.
+
+    The previous turn's stored assistant text may carry the grounding note
+    :func:`_history_text` appends; the current turn's freshly rendered answer
+    never does. Stripping it before comparison keeps the note's presence from
+    masking an otherwise-verbatim echo.
+    """
+    idx = text.rfind(_HISTORY_NOTE_MARKER)
+    return text[:idx] if idx != -1 else text
+
+
+def _is_echo(rendered: str, previous: str) -> bool:
+    """Whether ``rendered`` repeats ``previous`` closely enough to be an echo.
+
+    Only substantial answers (``len(rendered) >= _MIN_ECHO_LENGTH``) are
+    considered — short replies legitimately recur across turns. Comparison is
+    whitespace/case-insensitive and ignores any trailing grounding note on the
+    stored ``previous`` text. Returns ``True`` when normalised character
+    similarity meets :data:`_ECHO_SIMILARITY_THRESHOLD`.
+
+    Args:
+        rendered: This turn's freshly rendered answer.
+        previous: The previous turn's stored assistant text (may carry a
+            grounding note, stripped before comparison).
+
+    Returns:
+        ``True`` when the two are the same answer up to the threshold.
+    """
+    if len(rendered) < _MIN_ECHO_LENGTH:
+        return False
+    import difflib
+
+    current = _normalized_for_echo(rendered)
+    prior = _normalized_for_echo(_strip_history_note(previous))
+    if not current or not prior:
+        return False
+    return difflib.SequenceMatcher(None, current, prior).ratio() >= _ECHO_SIMILARITY_THRESHOLD
+
+
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
 
@@ -1003,6 +1078,21 @@ class Agent:
                 rendered = fallback_text
                 citations = []
                 is_fallback = True
+            elif self._is_echo_of_previous(chat_id, user_text, rendered):
+                # The model reproduced the previous turn's answer near-verbatim
+                # (weak models copy the prior assistant message out of history).
+                # Surface an honest, distinct degrade instead of repeating, and
+                # do NOT store the echo — storing it would keep priming the loop.
+                logger.warning(
+                    "repeated_response_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                    response_length=len(rendered),
+                )
+                rendered = _REPEATED_RESPONSE_FALLBACK
+                citations = []
+                is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -1020,6 +1110,44 @@ class Agent:
             is_fallback=is_fallback,
         )
         return AgentResponse(text=rendered, citations=citations, is_fallback=is_fallback)
+
+    def _is_echo_of_previous(self, chat_id: str, user_text: str, rendered: str) -> bool:
+        """Whether ``rendered`` merely repeats the previous turn's answer.
+
+        Reads the most recent assistant and user messages already in history.
+        Called from :meth:`_finalize_turn` BEFORE this turn is appended, so the
+        "previous" entries are genuinely the prior turn's.
+
+        Returns ``False`` when the current user message matches the previous
+        one: asking the same question twice and getting the same answer is
+        legitimate, not a degenerate echo. Otherwise defers the content
+        comparison to :func:`_is_echo` (length floor + normalised similarity).
+
+        Args:
+            chat_id: Conversation identifier.
+            user_text: The current turn's user message.
+            rendered: The current turn's freshly rendered answer.
+
+        Returns:
+            ``True`` when the answer should be suppressed as a repeat.
+        """
+        history = self._histories.get(chat_id, [])
+        prev_assistant: str | None = None
+        prev_user: str | None = None
+        for entry in reversed(history):
+            if prev_assistant is None and entry["role"] == "assistant":
+                prev_assistant = entry["content"]
+            elif prev_user is None and entry["role"] == "user":
+                prev_user = entry["content"]
+            if prev_assistant is not None and prev_user is not None:
+                break
+        if prev_assistant is None:
+            return False
+        if prev_user is not None and _normalized_for_echo(prev_user) == _normalized_for_echo(
+            user_text
+        ):
+            return False
+        return _is_echo(rendered, prev_assistant)
 
     # ------------------------------------------------------------------
     # Internal: message building

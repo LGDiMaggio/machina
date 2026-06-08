@@ -10,7 +10,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent, _format_response_for_channel, _history_text
+from machina.agent.runtime import (
+    _REPEATED_RESPONSE_FALLBACK,
+    Agent,
+    _format_response_for_channel,
+    _history_text,
+    _is_echo,
+)
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
@@ -795,6 +801,104 @@ class TestHistoryTextHelper:
         out = _history_text("answer", cites)
         # b.md appears once, in first-seen position, before a.md.
         assert out == "answer\n\n[Sources used in this answer: b.md, a.md]"
+
+
+class TestRepeatedResponseSuppressed:
+    """A turn must not deliver the previous turn's answer verbatim.
+
+    Weak local models routinely copy the prior assistant message straight out
+    of conversation history, so the user sees the same long canned paragraph on
+    every follow-up. The within-turn dedup guards in ``_llm_loop`` reset each
+    turn and cannot catch this — the cross-turn guard in ``_finalize_turn`` does.
+    """
+
+    # A realistic, >200-char canned answer of the kind weak models echo.
+    _LONG = (
+        "I'm a specialized maintenance assistant powered by the Machina "
+        "framework. I can help you with equipment information, maintenance "
+        "history, procedures and manuals, failure diagnosis, spare parts, work "
+        "orders, and maintenance schedules. What would you like to accomplish?"
+    )
+
+    def test_first_long_answer_delivered_normally(self) -> None:
+        agent = Agent()
+        r = agent._finalize_turn(chat_id="c", user_text="q1", raw_response=self._LONG)
+        assert r.text == self._LONG
+        assert not r.is_fallback
+
+    def test_repeat_on_different_question_is_suppressed(self) -> None:
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="chi sei?", raw_response=self._LONG)
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="sei sicuro esista questa pompa?", raw_response=self._LONG
+        )
+        # The echo is replaced with an honest, distinct fallback...
+        assert r2.is_fallback
+        assert r2.text == _REPEATED_RESPONSE_FALLBACK
+        assert r2.text != self._LONG
+        # ...and the echo is NOT written back to history, so it cannot keep
+        # priming the next turn.
+        assert agent._histories["c"][-1]["content"] == _REPEATED_RESPONSE_FALLBACK
+
+    def test_identical_answer_to_identical_question_is_allowed(self) -> None:
+        # Asking the SAME question twice and getting the same answer is
+        # legitimate, not a degenerate echo — must NOT be suppressed.
+        agent = Agent()
+        agent._finalize_turn(
+            chat_id="c", user_text="list critical assets", raw_response=self._LONG
+        )
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="list critical assets", raw_response=self._LONG
+        )
+        assert not r2.is_fallback
+        assert r2.text == self._LONG
+
+    def test_short_identical_answers_not_suppressed(self) -> None:
+        # Short generic answers ("Yes.") legitimately recur; the guard only
+        # targets long canned paragraphs.
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="q1", raw_response="Yes, that is correct.")
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="q2", raw_response="Yes, that is correct."
+        )
+        assert not r2.is_fallback
+        assert r2.text == "Yes, that is correct."
+
+    def test_guard_is_per_chat(self) -> None:
+        # An echo in one conversation must not suppress the same text as a
+        # first answer in a different conversation.
+        agent = Agent()
+        agent._finalize_turn(chat_id="a", user_text="q1", raw_response=self._LONG)
+        r = agent._finalize_turn(chat_id="b", user_text="q1", raw_response=self._LONG)
+        assert not r.is_fallback
+        assert r.text == self._LONG
+
+
+class TestIsEchoHelper:
+    """Pure-function tests for the cross-turn echo detector."""
+
+    _LONG = "x" * 250
+
+    def test_below_min_length_never_echo(self) -> None:
+        assert _is_echo("short", "short") is False
+
+    def test_identical_long_text_is_echo(self) -> None:
+        assert _is_echo(self._LONG, self._LONG) is True
+
+    def test_whitespace_and_case_normalized(self) -> None:
+        a = "  The  Bearing   Needs Replacement. " + "y" * 220
+        b = "the bearing needs replacement. " + "y" * 220
+        assert _is_echo(a, b) is True
+
+    def test_history_source_note_ignored_when_comparing(self) -> None:
+        body = "Replace the bearing every 2000 hours of operation. " + "z" * 200
+        stored = body + "\n\n[Sources used in this answer: pump.md]"
+        assert _is_echo(body, stored) is True
+
+    def test_distinct_long_answers_not_echo(self) -> None:
+        a = "The cooling pump P-201 is criticality A and located in Building A. " + "a" * 200
+        b = "Spare bearing SKF-6205 is out of stock; lead time is six weeks. " + "b" * 200
+        assert _is_echo(a, b) is False
 
 
 class _FakeLLMDoubleCreate:
