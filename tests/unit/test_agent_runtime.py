@@ -16,6 +16,7 @@ from machina.agent.runtime import (
     _format_response_for_channel,
     _history_text,
     _is_echo,
+    _strip_history_note,
 )
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -802,6 +803,15 @@ class TestHistoryTextHelper:
         # b.md appears once, in first-seen position, before a.md.
         assert out == "answer\n\n[Sources used in this answer: b.md, a.md]"
 
+    def test_note_written_by_template_is_stripped_for_echo(self) -> None:
+        # Couples _history_text's note format to _strip_history_note: a note
+        # produced by the template must be fully removed before echo comparison.
+        # If the wording drifts in only one place, this round-trip fails.
+        body = "answer text"
+        with_note = _history_text(body, [self._cite("pump.md")])
+        assert with_note != body
+        assert _strip_history_note(with_note) == body
+
 
 class TestRepeatedResponseSuppressed:
     """A turn must not deliver the previous turn's answer verbatim.
@@ -832,13 +842,55 @@ class TestRepeatedResponseSuppressed:
         r2 = agent._finalize_turn(
             chat_id="c", user_text="sei sicuro esista questa pompa?", raw_response=self._LONG
         )
-        # The echo is replaced with an honest, distinct fallback...
+        # The user sees an honest, distinct fallback instead of the repeat...
         assert r2.is_fallback
         assert r2.text == _REPEATED_RESPONSE_FALLBACK
         assert r2.text != self._LONG
-        # ...and the echo is NOT written back to history, so it cannot keep
-        # priming the next turn.
-        assert agent._histories["c"][-1]["content"] == _REPEATED_RESPONSE_FALLBACK
+        # ...but history records the REAL echoed text, so it stays the
+        # comparison baseline for the next turn (storing the fallback instead
+        # would let the echo leak again on turn 3 — see the three-turn test).
+        assert agent._histories["c"][-1]["content"] == self._LONG
+
+    def test_three_consecutive_echoes_all_suppressed(self) -> None:
+        # Regression for the alternating-leak bug: if history stored the
+        # fallback rather than the real echo, turn 3 would compare against the
+        # short fallback, miss, and leak the long answer again.
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="q1", raw_response=self._LONG)
+        r2 = agent._finalize_turn(chat_id="c", user_text="q2", raw_response=self._LONG)
+        r3 = agent._finalize_turn(chat_id="c", user_text="q3", raw_response=self._LONG)
+        assert r2.is_fallback and r2.text == _REPEATED_RESPONSE_FALLBACK
+        assert r3.is_fallback and r3.text == _REPEATED_RESPONSE_FALLBACK
+        assert r3.text != self._LONG
+
+    def test_echo_guard_skipped_on_post_write_narration_path(self) -> None:
+        # The two-turn post-write narration passes a write-aware fallback_text.
+        # A write has already executed, so the echo guard must NOT replace the
+        # narration with the "rephrase / switch model" message (which could
+        # imply failure and invite a duplicate write).
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="create a WO", raw_response=self._LONG)
+        write_fallback = "Done — the create_work_order action completed (WO-123)."
+        r2 = agent._finalize_turn(
+            chat_id="c",
+            user_text="yes",
+            raw_response=self._LONG,
+            fallback_text=write_fallback,
+        )
+        # Narration delivered as-is; echo guard did not fire on this path.
+        assert not r2.is_fallback
+        assert r2.text == self._LONG
+        assert r2.text != _REPEATED_RESPONSE_FALLBACK
+
+    def test_suppresses_when_only_assistant_in_history(self) -> None:
+        # prev_user is None (e.g. a seeded assistant turn or history truncated
+        # mid-pair): the same-question short-circuit is skipped and the content
+        # comparison still runs.
+        agent = Agent()
+        agent._histories["c"] = [{"role": "assistant", "content": self._LONG}]
+        r = agent._finalize_turn(chat_id="c", user_text="q", raw_response=self._LONG)
+        assert r.is_fallback
+        assert r.text == _REPEATED_RESPONSE_FALLBACK
 
     def test_identical_answer_to_identical_question_is_allowed(self) -> None:
         # Asking the SAME question twice and getting the same answer is

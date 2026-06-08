@@ -99,10 +99,16 @@ _DUPLICATE_READ_NOTE = (
 # would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
 _MAX_DUPLICATE_SUPPRESSIONS = 2
 
+# Prefix of the grounding note appended to a stored assistant reply. Single
+# source of truth shared by _HISTORY_SOURCES_TEMPLATE (which writes the note)
+# and _strip_history_note (which removes it before echo comparison) so the two
+# cannot silently desync if the wording is ever changed.
+_HISTORY_NOTE_PREFIX = "\n\n[Sources used in this answer:"
+
 # Appended to the assistant reply stored in conversation history (never to the
 # user-facing text) so a follow-up like "what are the sources?" resolves from
 # memory instead of forcing a fresh document search. See _history_text.
-_HISTORY_SOURCES_TEMPLATE = "{rendered}\n\n[Sources used in this answer: {sources}]"
+_HISTORY_SOURCES_TEMPLATE = "{rendered}" + _HISTORY_NOTE_PREFIX + " {sources}]"
 
 
 def _history_text(rendered: str, citations: list[Citation]) -> str:
@@ -159,11 +165,6 @@ _MIN_ECHO_LENGTH = 200
 # collide, low enough to catch an echo that drifts by a word or two.
 _ECHO_SIMILARITY_THRESHOLD = 0.92
 
-# Marker prefixing the grounding note appended to a stored assistant reply by
-# _history_text. Stripped before echo comparison: the previous turn's stored
-# text may carry it, the current turn's freshly rendered answer never does.
-_HISTORY_NOTE_MARKER = "\n\n[Sources used in this answer:"
-
 
 def _normalized_for_echo(text: str) -> str:
     """Collapse runs of whitespace and lowercase, for echo comparison."""
@@ -178,7 +179,7 @@ def _strip_history_note(text: str) -> str:
     never does. Stripping it before comparison keeps the note's presence from
     masking an otherwise-verbatim echo.
     """
-    idx = text.rfind(_HISTORY_NOTE_MARKER)
+    idx = text.rfind(_HISTORY_NOTE_PREFIX)
     return text[:idx] if idx != -1 else text
 
 
@@ -1055,6 +1056,9 @@ class Agent:
             The rendered :class:`AgentResponse` with parsed citations.
         """
         is_fallback = False
+        # Assistant text to record in history, when it must differ from the
+        # user-facing ``rendered`` (set only on the echo path — see below).
+        history_override: str | None = None
         try:
             rendered, citations = parse_response(
                 raw_response,
@@ -1078,11 +1082,22 @@ class Agent:
                 rendered = fallback_text
                 citations = []
                 is_fallback = True
-            elif self._is_echo_of_previous(chat_id, user_text, rendered):
+            # The echo guard applies only to the normal turn path (identified by
+            # the default empty-response fallback). The two-turn post-write
+            # narration path passes a write-aware ``fallback_text``; a write has
+            # already executed there, so suppressing its narration with a
+            # "rephrase / switch model" message could imply the write failed and
+            # invite a duplicate-write retry.
+            elif fallback_text is _EMPTY_RESPONSE_FALLBACK and self._is_echo_of_previous(
+                chat_id, user_text, rendered
+            ):
                 # The model reproduced the previous turn's answer near-verbatim
                 # (weak models copy the prior assistant message out of history).
-                # Surface an honest, distinct degrade instead of repeating, and
-                # do NOT store the echo — storing it would keep priming the loop.
+                # Surface an honest, distinct degrade to the user, but record the
+                # REAL echoed text in history: it must stay the comparison
+                # baseline so a third, fourth, … consecutive repeat is also
+                # caught. Storing the fallback instead would let the echo leak
+                # again on the next turn (baseline no longer matches).
                 logger.warning(
                     "repeated_response_suppressed",
                     agent=self.name,
@@ -1090,13 +1105,19 @@ class Agent:
                     operation="finalize_turn",
                     response_length=len(rendered),
                 )
+                history_override = rendered
                 rendered = _REPEATED_RESPONSE_FALLBACK
                 citations = []
                 is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
-            self._add_to_history(chat_id, "assistant", _history_text(rendered, citations))
+            stored = (
+                history_override
+                if history_override is not None
+                else _history_text(rendered, citations)
+            )
+            self._add_to_history(chat_id, "assistant", stored)
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
