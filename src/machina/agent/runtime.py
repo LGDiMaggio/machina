@@ -959,7 +959,28 @@ class Agent:
                 citations = []
                 is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
-            self._add_to_history(chat_id, "assistant", rendered)
+            # Carry the grounding into history. The rendered text keeps inline
+            # ``[n]`` markers but ``parse_response`` strips the ``<citations>``
+            # block, and the per-turn "Retrieved Context" system message is
+            # never recorded — so without this note the source filenames that
+            # grounded the answer are lost from the conversation. A follow-up
+            # like "what are the sources?" would then have nothing to resolve
+            # against and the model would re-run document search and repeat the
+            # whole prior answer. The trailing note lets such follow-ups be
+            # answered from history instead. Sources are already
+            # ``safe_source``-sanitised in the citation parser.
+            assistant_text = rendered
+            if citations:
+                cited_sources: list[str] = []
+                for citation in citations:
+                    if citation.source and citation.source not in cited_sources:
+                        cited_sources.append(citation.source)
+                if cited_sources:
+                    assistant_text = (
+                        f"{rendered}\n\n"
+                        f"[Sources used in this answer: {', '.join(cited_sources)}]"
+                    )
+            self._add_to_history(chat_id, "assistant", assistant_text)
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)

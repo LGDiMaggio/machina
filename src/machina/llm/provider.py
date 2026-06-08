@@ -15,6 +15,13 @@ class LLMProvider:
     ``complete_with_tools()`` methods.  Machina's agent layer uses
     this instead of calling LLM libraries directly.
 
+    Both methods pass ``drop_params=True`` to LiteLLM so that parameters a
+    given model does not accept are silently dropped rather than raising.
+    The motivating case is OpenAI reasoning models (``o1``/``o3``/``gpt-5``
+    family) that reject any explicit ``temperature`` other than the default
+    ``1`` with a 400 error; LiteLLM knows the per-model support matrix and
+    omits the unsupported value instead of failing the call.
+
     Args:
         model: Provider and model identifier (e.g. ``"openai:gpt-4o"``).
         temperature: Sampling temperature.
@@ -69,6 +76,7 @@ class LLMProvider:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.request_timeout,
+            drop_params=True,
             **kwargs,
         )
         content = str(response.choices[0].message.content)
@@ -110,6 +118,7 @@ class LLMProvider:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.request_timeout,
+            drop_params=True,
             **kwargs,
         )
         message = response.choices[0].message
