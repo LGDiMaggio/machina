@@ -70,13 +70,16 @@ class LLMProvider:
             )
             raise ImportError(msg) from None
 
+        # ``setdefault`` (rather than a literal keyword) so a caller may still
+        # override via ``**kwargs`` and we never raise "multiple values for
+        # keyword argument 'drop_params'".
+        kwargs.setdefault("drop_params", True)
         response = await litellm.acompletion(
             model=self.model,
             messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.request_timeout,
-            drop_params=True,
             **kwargs,
         )
         content = str(response.choices[0].message.content)
@@ -111,6 +114,9 @@ class LLMProvider:
             )
             raise ImportError(msg) from None
 
+        # See complete() — setdefault keeps drop_params overridable and
+        # collision-free with the **kwargs passthrough.
+        kwargs.setdefault("drop_params", True)
         response = await litellm.acompletion(
             model=self.model,
             messages=messages,
@@ -118,7 +124,6 @@ class LLMProvider:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.request_timeout,
-            drop_params=True,
             **kwargs,
         )
         message = response.choices[0].message

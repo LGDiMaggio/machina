@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent, _format_response_for_channel
+from machina.agent.runtime import Agent, _format_response_for_channel, _history_text
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
@@ -766,6 +766,35 @@ class TestGroundingPersistedToHistory:
         assistant_entry = agent._histories[chat_id][-1]
         assert assistant_entry["content"] == response.text
         assert "Sources used" not in assistant_entry["content"]
+
+
+class TestHistoryTextHelper:
+    """Pure-function tests for the grounding-note builder."""
+
+    @staticmethod
+    def _cite(source: str) -> Citation:
+        return Citation(chunk_id=source, source=source, page=0)
+
+    def test_no_citations_returns_rendered_unchanged(self) -> None:
+        assert _history_text("answer", []) == "answer"
+
+    def test_citations_without_source_add_no_note(self) -> None:
+        # A citation with an empty source carries nothing to attribute.
+        assert _history_text("answer", [self._cite("")]) == "answer"
+
+    def test_single_source_appended(self) -> None:
+        out = _history_text("answer", [self._cite("pump.md")])
+        assert out == "answer\n\n[Sources used in this answer: pump.md]"
+
+    def test_multiple_distinct_sources_listed_in_order(self) -> None:
+        out = _history_text("answer", [self._cite("a.md"), self._cite("b.md")])
+        assert out == "answer\n\n[Sources used in this answer: a.md, b.md]"
+
+    def test_duplicate_sources_deduped_first_seen_order(self) -> None:
+        cites = [self._cite("b.md"), self._cite("a.md"), self._cite("b.md")]
+        out = _history_text("answer", cites)
+        # b.md appears once, in first-seen position, before a.md.
+        assert out == "answer\n\n[Sources used in this answer: b.md, a.md]"
 
 
 class _FakeLLMDoubleCreate:
