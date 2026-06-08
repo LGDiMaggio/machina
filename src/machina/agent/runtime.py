@@ -977,8 +977,7 @@ class Agent:
                         cited_sources.append(citation.source)
                 if cited_sources:
                     assistant_text = (
-                        f"{rendered}\n\n"
-                        f"[Sources used in this answer: {', '.join(cited_sources)}]"
+                        f"{rendered}\n\n[Sources used in this answer: {', '.join(cited_sources)}]"
                     )
             self._add_to_history(chat_id, "assistant", assistant_text)
         finally:
