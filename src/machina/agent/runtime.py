@@ -2108,7 +2108,7 @@ class Agent:
             return {"error": "No CMMS connector available"}
 
         if name == "create_work_order":
-            return await self._tool_create_work_order(args)
+            return await self._tool_create_work_order(args, chat_id=chat_id)
 
         if name == "search_documents":
             connectors = self._registry.find_by_capability(Capability.SEARCH_DOCUMENTS)
@@ -2297,7 +2297,9 @@ class Agent:
             "by_type": by_type,
         }
 
-    async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
+    async def _tool_create_work_order(
+        self, args: dict[str, Any], *, chat_id: str = "default"
+    ) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
         if self.sandbox:
             logger.info(
@@ -2325,7 +2327,12 @@ class Agent:
         # ``id(args) % 10000`` scheme used the memory address of a per-call
         # dict — non-deterministic, dedup-proof, prone to cross-turn collisions.
         wo = WorkOrder(
-            id=auto_work_order_id(asset_id, wo_type, priority, description),
+            # Scope the dedup hash by chat_id (U7): a reworded retry in the same
+            # conversation still collapses to one WO, but the same content in a
+            # later session is a new WO, not a months-old collision. The
+            # autonomous workflow path (WorkOrderFactory) passes no session and
+            # keeps the content-only hash.
+            id=auto_work_order_id(asset_id, wo_type, priority, description, session_id=chat_id),
             type=WorkOrderType(wo_type),
             priority=Priority(priority),
             asset_id=asset_id,

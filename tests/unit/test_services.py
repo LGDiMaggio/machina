@@ -124,6 +124,40 @@ class TestWorkOrderFactory:
         with_str = auto_work_order_id("P-201", "corrective", "high", "x")
         assert with_enum == with_str
 
+    def test_empty_session_reproduces_content_only_id(self) -> None:
+        """U7 characterisation: an empty session_id keeps the pre-U7 digest."""
+        from machina.domain.services.work_order_factory import auto_work_order_id
+
+        content_only = auto_work_order_id("P-201", "corrective", "high", "x")
+        explicit_empty = auto_work_order_id("P-201", "corrective", "high", "x", session_id="")
+        assert content_only == explicit_empty
+
+    def test_autonomous_path_dedups_same_content(self) -> None:
+        """U7: the same alarm fired twice (no session) → one WO id."""
+        from machina.domain.services.work_order_factory import auto_work_order_id
+
+        first = auto_work_order_id("P-201", "corrective", "high", "bearing wear")
+        second = auto_work_order_id("P-201", "corrective", "high", "bearing wear")
+        assert first == second
+
+    def test_same_session_same_content_dedups(self) -> None:
+        """U7: a reworded retry in the same chat collapses to one WO id."""
+        from machina.domain.services.work_order_factory import auto_work_order_id
+
+        a = auto_work_order_id("P-201", "corrective", "high", "x", session_id="chat-42")
+        b = auto_work_order_id("P-201", "corrective", "high", "x", session_id="chat-42")
+        assert a == b
+
+    def test_different_sessions_diverge(self) -> None:
+        """U7: the same content in a later session is a distinct WO, not a collision."""
+        from machina.domain.services.work_order_factory import auto_work_order_id
+
+        s1 = auto_work_order_id("P-201", "corrective", "high", "x", session_id="chat-1")
+        s2 = auto_work_order_id("P-201", "corrective", "high", "x", session_id="chat-2")
+        assert s1 != s2
+        # …and both differ from the content-only (autonomous) id.
+        assert s1 != auto_work_order_id("P-201", "corrective", "high", "x")
+
 
 class TestMaintenanceScheduler:
     """Test due date calculation."""
