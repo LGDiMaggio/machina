@@ -128,6 +128,11 @@ class SapPmConnector:
 
     _PAGE_SIZE: ClassVar[int] = 100
 
+    # Defense-in-depth cap on rows accumulated across all pages of one read.
+    # Pagination chunks the fetch but does NOT bound memory — a missing $filter
+    # would otherwise page an entire S/4HANA table into RAM. Raises instead (H3).
+    _MAX_ODATA_ROWS: ClassVar[int] = 50_000
+
     def __init__(
         self,
         *,
@@ -180,6 +185,20 @@ class SapPmConnector:
             raise ConnectorError(f"SAP PM health check failed: HTTP {resp.status_code}")
         self._connected = True
         logger.info("connected", connector="SapPmConnector", url=self.url)
+        if not self._bom_equipment_field:
+            # Surface the misconfiguration once, loudly, at connect time rather
+            # than only on each read: asset-scoped spare-part reads cannot be
+            # server-side filtered and will return empty instead of OOMing (H3).
+            logger.warning(
+                "bom_equipment_field_unconfigured",
+                connector="SapPmConnector",
+                bom_entity_set=self._bom_entity_set,
+                message=(
+                    "bom_equipment_field is not set — asset-scoped spare-part reads "
+                    "will return empty (no unbounded BOM fetch). Set bom_equipment_field "
+                    "to enable them."
+                ),
+            )
 
     async def disconnect(self) -> None:
         """Close the connector."""
@@ -398,15 +417,34 @@ class SapPmConnector:
         if asset_id:
             if self._bom_equipment_field:
                 filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
-            else:
+            elif not sku:
+                # asset_id requested, but it cannot be filtered server-side
+                # (bom_equipment_field unset — the default) and there is no sku to
+                # narrow the query. Issuing this read would page the ENTIRE BOM
+                # into memory (OOM on a real S/4HANA). Refuse it (H3).
                 logger.warning(
                     "bom_asset_filter_unsupported",
                     connector="SapPmConnector",
                     asset_id=asset_id,
                     bom_entity_set=self._bom_entity_set,
                     message=(
-                        "asset_id filter ignored: bom_equipment_field is not "
-                        "configured for this BOM service"
+                        "asset_id filter ignored and no sku to narrow the query: "
+                        "refusing an unbounded BOM fetch. Configure bom_equipment_field "
+                        "for asset-scoped spare-part reads."
+                    ),
+                )
+                return []
+            else:
+                # asset_id cannot be filtered, but the sku below will keep the
+                # query bounded — proceed with the sku filter only.
+                logger.warning(
+                    "bom_asset_filter_unsupported",
+                    connector="SapPmConnector",
+                    asset_id=asset_id,
+                    bom_entity_set=self._bom_entity_set,
+                    message=(
+                        "asset_id filter ignored (bom_equipment_field unset); "
+                        "narrowing by sku instead"
                     ),
                 )
         if sku:
@@ -566,6 +604,12 @@ class SapPmConnector:
                     # Single entity returned (not a list)
                     results = [results]
                 all_items.extend(results)
+                if len(all_items) > self._MAX_ODATA_ROWS:
+                    raise ConnectorError(
+                        f"SAP PM GET {service}/{entity_set} exceeded the "
+                        f"{self._MAX_ODATA_ROWS}-row safety cap — refusing to load an "
+                        "unbounded result set into memory. Narrow the query with a $filter."
+                    )
 
                 # Server-driven pagination
                 next_link = d.get("__next", body.get("@odata.nextLink"))

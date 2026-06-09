@@ -360,3 +360,91 @@ class TestRequireHttpx:
         monkeypatch.setitem(sys.modules, "httpx", None)
         with pytest.raises(ConnectorError, match="pip install machina-ai"):
             _require_httpx()
+
+
+class TestSparePartsBomGuard:
+    """U8 — asset-scoped spare-part reads never trigger an unbounded BOM fetch."""
+
+    def _conn(self, *, bom_equipment_field: str = "") -> SapPmConnector:
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+            bom_equipment_field=bom_equipment_field,
+        )
+        conn._connected = True
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_unfilterable_asset_read_returns_empty_without_fetching(self) -> None:
+        from unittest.mock import AsyncMock
+
+        conn = self._conn(bom_equipment_field="")  # default config
+        conn._odata_get = AsyncMock(return_value=[])
+        parts = await conn.read_spare_parts(asset_id="P-201")
+        assert parts == []
+        conn._odata_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_configured_equipment_field_filters_server_side(self) -> None:
+        from unittest.mock import AsyncMock
+
+        conn = self._conn(bom_equipment_field="BillOfMaterialEquipment")
+        conn._odata_get = AsyncMock(return_value=[])
+        await conn.read_spare_parts(asset_id="P-201")
+        conn._odata_get.assert_awaited_once()
+        assert (
+            "BillOfMaterialEquipment eq 'P-201'"
+            in conn._odata_get.await_args.kwargs["odata_filter"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_sku_narrows_even_without_equipment_field(self) -> None:
+        from unittest.mock import AsyncMock
+
+        conn = self._conn(bom_equipment_field="")
+        conn._odata_get = AsyncMock(return_value=[])
+        await conn.read_spare_parts(asset_id="P-201", sku="SKF-6310")
+        conn._odata_get.assert_awaited_once()
+        odata_filter = conn._odata_get.await_args.kwargs["odata_filter"]
+        assert "SKF-6310" in odata_filter
+        assert "P-201" not in odata_filter  # the unfilterable asset clause is dropped
+
+
+class TestOdataRowCap:
+    """U8 — _odata_get refuses to accumulate an unbounded result set."""
+
+    @pytest.mark.asyncio
+    async def test_exceeding_row_cap_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from machina.connectors.cmms import sap_pm as sap_mod
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {"value": [{} for _ in range(5)]}
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _FakeHttpx:
+            def AsyncClient(self, **kwargs):  # noqa: N802 — mimics httpx.AsyncClient
+                return _FakeClient()
+
+        async def _fake_request(*args, **kwargs):
+            return _FakeResp()
+
+        monkeypatch.setattr(sap_mod, "_require_httpx", lambda: _FakeHttpx())
+        monkeypatch.setattr(sap_mod, "request_with_retry", _fake_request)
+        monkeypatch.setattr(SapPmConnector, "_MAX_ODATA_ROWS", 3)
+
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+        conn._connected = True
+        with pytest.raises(ConnectorError, match="safety cap"):
+            await conn._odata_get("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem")
