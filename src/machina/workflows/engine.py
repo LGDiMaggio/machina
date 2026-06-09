@@ -238,7 +238,13 @@ class WorkflowEngine:
                     attempt=attempt,
                     timeout=step.timeout_seconds,
                 )
-                if attempt < attempts:
+                # A timed-out WRITE may have already been applied before
+                # ``wait_for`` cancelled it — retrying a non-idempotent write
+                # would duplicate it. Never retry write steps on timeout,
+                # regardless of remaining attempts (U10); reads are safe to retry.
+                # (An external CancelledError is *not* caught here, so it still
+                # propagates and unwinds the connector's ``async with`` cleanly.)
+                if attempt < attempts and not self._is_write_action(step.action, step=step):
                     continue
                 return self._handle_step_failure(step, error_msg, elapsed)
 

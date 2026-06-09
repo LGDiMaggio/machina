@@ -499,6 +499,73 @@ class TestErrorPolicies:
 
 
 # ---------------------------------------------------------------------------
+# Tests — timeout cancellation safety (U10)
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutCancellationSafety:
+    """A timed-out WRITE is not retried (it may already have applied); reads are."""
+
+    @pytest.mark.asyncio
+    async def test_write_step_not_retried_on_timeout(self, tracer: ActionTracer) -> None:
+        class _SlowWrite:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create_thing(self, **kwargs: Any) -> str:
+                self.calls += 1
+                await asyncio.sleep(1.0)
+                return "done"
+
+        svc = _SlowWrite()
+        engine = WorkflowEngine(tracer=tracer, services={"svc": svc})
+        wf = Workflow(
+            name="WriteTimeout",
+            steps=[
+                Step(
+                    "w",
+                    action="svc.create_thing",
+                    timeout_seconds=0.01,
+                    on_error=ErrorPolicy.RETRY,
+                    retries=2,
+                ),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.success is False
+        assert svc.calls == 1  # the non-idempotent write was NOT retried
+
+    @pytest.mark.asyncio
+    async def test_read_step_is_retried_on_timeout(self, tracer: ActionTracer) -> None:
+        class _SlowRead:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def read_thing(self, **kwargs: Any) -> str:
+                self.calls += 1
+                await asyncio.sleep(1.0)
+                return "done"
+
+        svc = _SlowRead()
+        engine = WorkflowEngine(tracer=tracer, services={"svc": svc})
+        wf = Workflow(
+            name="ReadTimeout",
+            steps=[
+                Step(
+                    "r",
+                    action="svc.read_thing",
+                    timeout_seconds=0.01,
+                    on_error=ErrorPolicy.RETRY,
+                    retries=2,
+                ),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.success is False
+        assert svc.calls == 3  # read retried: 1 initial + 2 retries
+
+
+# ---------------------------------------------------------------------------
 # Tests — guard conditions
 # ---------------------------------------------------------------------------
 
