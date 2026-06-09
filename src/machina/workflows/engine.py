@@ -257,7 +257,13 @@ class WorkflowEngine:
                     attempt=attempt,
                     error=error_msg,
                 )
-                if attempt < attempts:
+                # Same idempotency hazard as the timeout branch (U10): a write
+                # that raises *after* the server already applied it (e.g. a SAP
+                # ConnectorError on HTTP 500 post-create, or a transport error
+                # after the POST landed) would be duplicated by a retry. This
+                # layer cannot tell "failed before apply" from "failed after
+                # apply", so never retry a write step on any error; reads retry.
+                if attempt < attempts and not self._is_write_action(step.action, step=step):
                     continue
                 return self._handle_step_failure(step, error_msg, elapsed)
 

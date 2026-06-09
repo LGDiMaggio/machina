@@ -564,6 +564,70 @@ class TestTimeoutCancellationSafety:
         assert result.success is False
         assert svc.calls == 3  # read retried: 1 initial + 2 retries
 
+    @pytest.mark.asyncio
+    async def test_write_step_not_retried_on_exception(self, tracer: ActionTracer) -> None:
+        """A write that RAISES after a possible apply is not retried either.
+
+        The connector may have mutated the system before the exception fired
+        (e.g. a 5xx after the row was inserted), so retrying would duplicate it.
+        This guards the ``except Exception`` branch, the sibling of the timeout
+        guard — both must skip retry for writes.
+        """
+
+        class _RaisingWrite:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create_thing(self, **kwargs: Any) -> str:
+                self.calls += 1
+                raise RuntimeError("HTTP 500 after the row was inserted")
+
+        svc = _RaisingWrite()
+        engine = WorkflowEngine(tracer=tracer, services={"svc": svc})
+        wf = Workflow(
+            name="WriteError",
+            steps=[
+                Step(
+                    "w",
+                    action="svc.create_thing",
+                    on_error=ErrorPolicy.RETRY,
+                    retries=2,
+                ),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.success is False
+        assert svc.calls == 1  # the non-idempotent write was NOT retried
+
+    @pytest.mark.asyncio
+    async def test_read_step_is_retried_on_exception(self, tracer: ActionTracer) -> None:
+        """A read that raises IS retried (idempotent, safe to repeat)."""
+
+        class _RaisingRead:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def read_thing(self, **kwargs: Any) -> str:
+                self.calls += 1
+                raise RuntimeError("transient")
+
+        svc = _RaisingRead()
+        engine = WorkflowEngine(tracer=tracer, services={"svc": svc})
+        wf = Workflow(
+            name="ReadError",
+            steps=[
+                Step(
+                    "r",
+                    action="svc.read_thing",
+                    on_error=ErrorPolicy.RETRY,
+                    retries=2,
+                ),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.success is False
+        assert svc.calls == 3  # read retried: 1 initial + 2 retries
+
 
 # ---------------------------------------------------------------------------
 # Tests — sandbox write detection (U11)
@@ -757,6 +821,47 @@ class TestSandboxMode:
         assert result.step_results[0].output["sandbox"] is True
         assert result.step_results[0].output["sent"] is False
         assert not hasattr(comms, "last_message")
+
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_publish_message_at_engine(self, tracer: ActionTracer) -> None:
+        """U11 regression at the engine level: an MQTT publish is intercepted.
+
+        Before U11, ``publish_message`` matched no write keyword, so a sandbox
+        run dispatched it to the live connector. This asserts the real
+        interception path — not just the classifier — so a future keyword-set
+        regression that still passed ``_is_write_action("publish_message")``
+        but broke engine dispatch would be caught here.
+        """
+
+        class _FakeMqttConnector:
+            capabilities: ClassVar[list[str]] = ["publish_message"]
+
+            def __init__(self) -> None:
+                self.publish_count = 0
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def health_check(self) -> bool:
+                return True
+
+            async def publish_message(self, **kwargs: Any) -> None:
+                self.publish_count += 1
+
+        mqtt = _FakeMqttConnector()
+        registry = ConnectorRegistry()
+        registry.register("iot", mqtt)
+        engine = WorkflowEngine(registry=registry, tracer=tracer, sandbox=True)
+        wf = Workflow(
+            name="SandboxPublish",
+            steps=[Step("emit", action="iot.publish_message", inputs={"topic": "t"})],
+        )
+        result = await engine.execute(wf)
+        assert result.step_results[0].output["sandbox"] is True
+        assert mqtt.publish_count == 0  # the live MQTT write was NOT executed
 
     @pytest.mark.asyncio
     async def test_sandbox_write_service(self, tracer: ActionTracer) -> None:
