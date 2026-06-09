@@ -15,7 +15,6 @@ import pytest
 from machina.agent.runtime import _TOOL_CALL_LEAK_FALLBACK, Agent
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
-from machina.domain.work_order import WorkOrder
 
 
 def _plant() -> Plant:
@@ -65,7 +64,7 @@ class _SpyWriteConnector:
     async def health_check(self) -> bool:  # pragma: no cover
         return True
 
-    async def create_work_order(self, wo: WorkOrder) -> WorkOrder:  # pragma: no cover
+    async def create_work_order(self, wo: Any) -> Any:  # pragma: no cover
         self.created += 1
         return wo
 

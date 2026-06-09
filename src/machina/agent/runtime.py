@@ -185,6 +185,22 @@ _TOOL_CALL_LEAK_FALLBACK = (
     "capable model."
 )
 
+# Fed back to the model (as the tool result) when it supplies a non-empty but
+# unparseable arguments blob, so it can retry with valid JSON instead of the
+# error being silently swallowed as ``{}`` and crashing a downstream tool that
+# needs required keys. FIXED text — never the raw exception, which echoes the
+# offending (possibly injected) argument bytes back into the prompt (H1).
+_INVALID_ARGS_MESSAGE = (
+    "Arguments could not be parsed as valid JSON. Retry this call with valid JSON arguments."
+)
+
+# Hard cap on how many unparseable-argument retries one turn may feed back
+# before the loop stops offering tools and forces a final answer. The fed-back
+# error is "progress" to the no-progress guard, so a model that emits *different*
+# junk every iteration would otherwise loop to max_iterations — this counter is
+# the real bound (H1).
+_MAX_ARG_CORRECTION_ATTEMPTS = 2
+
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
 # the degenerate-echo failure mode is always a long canned paragraph, so the
@@ -1208,7 +1224,7 @@ class Agent:
             text=rendered,
             citations=citations,
             is_fallback=is_fallback,
-            completeness=completeness,  # type: ignore[arg-type]
+            completeness=completeness,
         )
 
     def _is_echo_of_previous(self, chat_id: str, user_text: str, rendered: str) -> bool:
@@ -1364,6 +1380,11 @@ class Agent:
         # answer — guaranteeing quick termination regardless of model behaviour.
         suppression_counts: dict[str, int] = {}
 
+        # Per-turn count of unparseable-argument retries fed back for
+        # self-correction. Bounds the worst case independently of the
+        # no-progress guard (see _MAX_ARG_CORRECTION_ATTEMPTS).
+        arg_error_count = 0
+
         # Per-turn memo of READ-ONLY tool results (keyed by name + args) and the
         # set of every tool-call key seen this turn. An identical read is
         # replayed from cache instead of re-querying the connector; an iteration
@@ -1463,10 +1484,40 @@ class Agent:
 
             for tc in tool_calls:
                 func_name = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, AttributeError):
+                raw_arguments = getattr(tc.function, "arguments", None)
+                if raw_arguments is None or not str(raw_arguments).strip():
+                    # No arguments supplied — a valid no-arg call (e.g.
+                    # list_assets), not a parse failure.
                     args = {}
+                else:
+                    try:
+                        args = json.loads(raw_arguments)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        # Genuinely malformed args. Instead of silently coercing to
+                        # {} (which masks the error and crashes a tool that needs
+                        # required keys like asset_id), feed a FIXED error back so
+                        # the model self-corrects. Bounded by
+                        # _MAX_ARG_CORRECTION_ATTEMPTS so persistent junk still
+                        # terminates (H1).
+                        arg_error_count += 1
+                        logger.warning(
+                            "invalid_tool_arguments",
+                            agent=self.name,
+                            tool=func_name,
+                            operation="llm_loop",
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
+                                "tool_call_id": tc.id,
+                            }
+                        )
+                        # The fed-back error is new information; mark progress so a
+                        # single bad call doesn't trip the no-progress guard — the
+                        # dedicated counter is the real bound.
+                        iteration_made_progress = True
+                        continue
 
                 # Canonical key for EVERY call (read or write), used for both the
                 # read-replay cache and the no-progress detector.
@@ -1618,6 +1669,18 @@ class Agent:
             if any(c >= _MAX_DUPLICATE_SUPPRESSIONS for c in suppression_counts.values()):
                 logger.info(
                     "duplicate_suppression_limit_reached",
+                    agent=self.name,
+                    operation="llm_loop",
+                )
+                break
+
+            # The model kept emitting unparseable arguments past the correction
+            # budget. Each fed-back error counts as "progress", so only this
+            # dedicated counter bounds it — stop offering tools and force a final
+            # answer (H1).
+            if arg_error_count >= _MAX_ARG_CORRECTION_ATTEMPTS:
+                logger.info(
+                    "arg_correction_limit_reached",
                     agent=self.name,
                     operation="llm_loop",
                 )
