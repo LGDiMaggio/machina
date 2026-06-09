@@ -50,6 +50,12 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
+# Every builtin tool name — used to recognise a tool/function call the model
+# emitted as plain-text content instead of a structured tool_call (weak local
+# models do this). Sourced from BUILTIN_TOOLS so it can never drift from the
+# real dispatch surface. See _detect_leaked_tool_call (U3 — output validity).
+_KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
+
 # Lifetime of a stored pending write-confirmation (seconds). A pending
 # confirmation is meant for the IMMEDIATE next message; an hour is
 # generous-but-safe and bounds the window in which a much-later bare
@@ -166,6 +172,17 @@ _REPEATED_RESPONSE_FALLBACK = (
 _PARTIAL_COMPLETENESS_HEDGE = (
     "\n\n_Note: I stopped before confirming I'd retrieved everything here, so this "
     "may be incomplete — ask me to re-check a specific item if you need certainty._"
+)
+
+# Substituted (and flagged via ``AgentResponse.is_fallback``) when the model
+# emitted a tool/function call as its final answer text and the runtime could
+# not safely recover it (an unknown tool, a leaked write that must not be
+# auto-executed, or a repeated leak). Guarantees raw tool-call JSON never
+# reaches the user. See _detect_leaked_tool_call and the _finalize_turn backstop.
+_TOOL_CALL_LEAK_FALLBACK = (
+    "I couldn't complete that request properly — the model returned an internal "
+    "tool instruction instead of an answer. Please rephrase, or switch to a more "
+    "capable model."
 )
 
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
@@ -1131,6 +1148,26 @@ class Agent:
                 rendered = _REPEATED_RESPONSE_FALLBACK
                 citations = []
                 is_fallback = True
+            # Backstop (U3): a tool/function call that reached finalize as the
+            # answer text (e.g. the forced-final ``complete()`` returned one, or a
+            # leak slipped past the loop seam) must never be shown raw. Store the
+            # fallback in history too (no override) so the JSON cannot re-prime
+            # the next turn. Uses the write-aware ``fallback_text`` on the
+            # narration path, the specific leak message on the normal path.
+            elif self._detect_leaked_tool_call(rendered) is not None:
+                logger.warning(
+                    "tool_call_leak_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                )
+                rendered = (
+                    _TOOL_CALL_LEAK_FALLBACK
+                    if fallback_text is _EMPTY_RESPONSE_FALLBACK
+                    else fallback_text
+                )
+                citations = []
+                is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -1353,7 +1390,61 @@ class Agent:
             tool_calls = result.get("tool_calls")
 
             if not tool_calls:
-                return content or ""
+                # The model may have emitted a tool call as plain-text content
+                # instead of a structured tool_call (weak local models do this).
+                # Never surface that raw JSON as the answer (R2.1).
+                leaked = self._detect_leaked_tool_call(content)
+                if leaked is None:
+                    return content or ""
+                leaked_name, leaked_args = leaked
+                if leaked_name in _SIDE_EFFECTING_TOOLS:
+                    # A write emitted as prose is exactly the low-trust output the
+                    # gate withholds — never auto-execute it off the dedup/confirm
+                    # path. Fall back instead of recovering it.
+                    logger.warning(
+                        "tool_call_leak_suppressed",
+                        agent=self.name,
+                        tool=leaked_name,
+                        operation="llm_loop",
+                    )
+                    return _TOOL_CALL_LEAK_FALLBACK
+                leaked_key = (
+                    f"{leaked_name}:{json.dumps(leaked_args, sort_keys=True, default=str)}"
+                )
+                if leaked_key in seen_call_keys:
+                    # Already recovered this exact call once — a re-leak means the
+                    # model is stuck; stop rather than loop on it.
+                    logger.warning(
+                        "tool_call_leak_suppressed",
+                        agent=self.name,
+                        tool=leaked_name,
+                        operation="llm_loop",
+                    )
+                    return _TOOL_CALL_LEAK_FALLBACK
+                # Recover a leaked READ: run it once and feed the result back so
+                # the model answers from it next iteration. Recording the key lets
+                # the check above (and the no-progress guard) bound any re-leak.
+                logger.warning(
+                    "tool_call_leak_recovered",
+                    agent=self.name,
+                    tool=leaked_name,
+                    operation="llm_loop",
+                )
+                seen_call_keys.add(leaked_key)
+                leaked_result = await self._execute_tool(leaked_name, leaked_args, chat_id=chat_id)
+                messages.append({"role": "assistant", "content": content or ""})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"That last message was an internal {leaked_name} tool "
+                            "request, not an answer. Here is its result: "
+                            f"{json.dumps(leaked_result, default=str)}. "
+                            "Now answer my question in plain language."
+                        ),
+                    }
+                )
+                continue
 
             # Process tool calls
             span.output_summary = f"{len(tool_calls)} tool calls"
@@ -2040,6 +2131,48 @@ class Agent:
                 operation="get_asset_details",
             )
             return {"error": f"Asset {asset_id!r} not found"}
+
+    @staticmethod
+    def _detect_leaked_tool_call(content: str) -> tuple[str, dict[str, Any]] | None:
+        """Recognise a tool/function call the model emitted as plain text (U3).
+
+        Weak models sometimes serialize a tool call into the message *content*
+        instead of producing a structured ``tool_call``. Returns ``(name, args)``
+        when ``content`` is such a call naming a known builtin tool, otherwise
+        ``None``. Tolerant by design — anything that does not cleanly parse as a
+        known tool-call shape is treated as ordinary prose so a normal answer is
+        never misclassified.
+        """
+        text = (content or "").strip()
+        if not (text.startswith("{") and text.endswith("}")):
+            return None
+        try:
+            obj = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        fn = obj.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            # Shape A: {"type":"function","function":{"name":..,"arguments":..}}
+            name = fn["name"]
+            raw_args: Any = fn.get("arguments", fn.get("parameters", {}))
+        elif isinstance(obj.get("name"), str) and ("arguments" in obj or "parameters" in obj):
+            # Shape B: {"name":.., "arguments":..}
+            name = obj["name"]
+            raw_args = obj.get("arguments", obj.get("parameters", {}))
+        else:
+            return None
+        if name not in _KNOWN_TOOL_NAMES:
+            return None
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                raw_args = {}
+        if not isinstance(raw_args, dict):
+            raw_args = {}
+        return name, raw_args
 
     def _tool_list_assets(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Enumerate the full asset registry (R1.1).
