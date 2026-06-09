@@ -158,6 +158,16 @@ _REPEATED_RESPONSE_FALLBACK = (
     "struggling to follow this conversation."
 )
 
+# Appended to a real answer when the runtime had to force the turn to finalize
+# before the agent confirmed it had retrieved everything (a no-progress or
+# suppressed-read break). The answer stands, but the user is told it may be
+# incomplete rather than letting an unverified "that's everything" claim go
+# unqualified (R1.3 / R1.4). Paired with ``AgentResponse.completeness="partial"``.
+_PARTIAL_COMPLETENESS_HEDGE = (
+    "\n\n_Note: I stopped before confirming I'd retrieved everything here, so this "
+    "may be incomplete — ask me to re-check a specific item if you need certainty._"
+)
+
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
 # the degenerate-echo failure mode is always a long canned paragraph, so the
@@ -398,6 +408,12 @@ class Agent:
         # ``enumerate(results[:5], 1)`` the prompt rendering uses — never from
         # the filtered registry, which would drift off-by-k.
         self._turn_ordered: dict[str, list[str]] = {}
+        # Per-turn, chat-scoped completeness marker. The LLM loop sets
+        # ``"partial"`` when it force-finalizes a turn (no-progress / suppression
+        # / iteration-exhaustion break) so _finalize_turn can hedge the answer
+        # and flag ``AgentResponse.completeness``. Absent → complete. Popped in
+        # _finalize_turn (and the error path), like the chunk registries.
+        self._turn_completeness: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -809,6 +825,7 @@ class Agent:
             # unchanged. The success path's cleanup lives in _finalize_turn.
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
             raise
 
         # 5/6. Parse citations, update history, clean up the per-turn registry,
@@ -1060,6 +1077,7 @@ class Agent:
             The rendered :class:`AgentResponse` with parsed citations.
         """
         is_fallback = False
+        completeness = "complete"
         # Assistant text to record in history, when it must differ from the
         # user-facing ``rendered`` (set only on the echo path — see below).
         history_override: str | None = None
@@ -1122,9 +1140,23 @@ class Agent:
                 else _history_text(rendered, citations)
             )
             self._add_to_history(chat_id, "assistant", stored)
+            # A real answer the loop was forced to finalize early may be missing
+            # data. Hedge the USER-facing text only — ``stored`` above already
+            # captured the clean answer so echo detection and source follow-ups
+            # stay accurate — and flag it structurally (R1.3/R1.4/R5). Gated to
+            # the normal turn path (default fallback) so the post-write narration
+            # path is never hedged.
+            if (
+                not is_fallback
+                and fallback_text is _EMPTY_RESPONSE_FALLBACK
+                and self._turn_completeness.get(chat_id) == "partial"
+            ):
+                completeness = "partial"
+                rendered = rendered + _PARTIAL_COMPLETENESS_HEDGE
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
 
         logger.info(
             "response_generated",
@@ -1133,8 +1165,14 @@ class Agent:
             response_length=len(rendered),
             citation_count=len(citations),
             is_fallback=is_fallback,
+            completeness=completeness,
         )
-        return AgentResponse(text=rendered, citations=citations, is_fallback=is_fallback)
+        return AgentResponse(
+            text=rendered,
+            citations=citations,
+            is_fallback=is_fallback,
+            completeness=completeness,  # type: ignore[arg-type]
+        )
 
     def _is_echo_of_previous(self, chat_id: str, user_text: str, rendered: str) -> bool:
         """Whether ``rendered`` merely repeats the previous turn's answer.
@@ -1494,7 +1532,14 @@ class Agent:
                 )
                 break
 
-        # Exhausted iterations — get final response without tools
+        # Reached only by force-finalization: a no-progress break, the
+        # duplicate-suppression limit, or iteration exhaustion. The agent was
+        # cut off before it signalled it was done, so the answer may be
+        # incomplete — mark the turn partial so _finalize_turn hedges it (R1.4).
+        # The natural returns above (model produced its own final answer) leave
+        # the marker unset, i.e. complete.
+        self._turn_completeness[chat_id] = "partial"
+        # Exhausted/forced — get final response without tools
         return await self._llm.complete(messages)
 
     # ------------------------------------------------------------------

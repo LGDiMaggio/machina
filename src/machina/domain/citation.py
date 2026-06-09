@@ -7,6 +7,8 @@ user can trace the answer back to its origin.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -56,10 +58,21 @@ class AgentResponse(BaseModel):
             (an empty completion or a citations-only block), not a real
             model answer. Lets programmatic callers and monitors tell a
             genuine response apart from a degraded one.
+        completeness: ``"partial"`` when the runtime was forced to finalize
+            the turn before the agent could confirm it had retrieved
+            everything (a no-progress / suppressed-read break), so the answer
+            may be incomplete; ``"complete"`` otherwise. Distinct from
+            ``is_fallback`` — a partial answer is a *real* model answer that
+            may be missing data, not a synthetic non-answer. Monitors that
+            count fallbacks must not treat a partial answer as degraded.
     """
 
     text: str = Field(default="", description="Rendered answer text")
     citations: list[Citation] = Field(default_factory=list, description="Source citations")
     is_fallback: bool = Field(
         default=False, description="True when text is a synthetic empty-output fallback"
+    )
+    completeness: Literal["complete", "partial"] = Field(
+        default="complete",
+        description="'partial' when finalization was forced before the agent confirmed completeness",
     )
