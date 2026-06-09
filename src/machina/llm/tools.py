@@ -57,6 +57,18 @@ SEARCH_ASSETS_TOOL = make_tool(
     },
 )
 
+LIST_ASSETS_TOOL = make_tool(
+    name="list_assets",
+    description=(
+        "List every asset in the plant registry. Use this when the user asks for "
+        "all assets, how many assets exist, or a complete inventory. Do NOT "
+        "reconstruct the asset list from work orders — that only covers assets "
+        "that have one and silently omits the rest. Returns the full registry, or "
+        "a count plus a grouped summary when the plant is large."
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+
 GET_ASSET_DETAILS_TOOL = make_tool(
     name="get_asset_details",
     description=(
@@ -244,6 +256,7 @@ EXECUTE_WORKFLOW_TOOL = make_tool(
 # All built-in tools, ready for the agent runtime
 BUILTIN_TOOLS: list[dict[str, Any]] = [
     SEARCH_ASSETS_TOOL,
+    LIST_ASSETS_TOOL,
     GET_ASSET_DETAILS_TOOL,
     READ_WORK_ORDERS_TOOL,
     CREATE_WORK_ORDER_TOOL,

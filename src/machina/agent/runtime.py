@@ -99,6 +99,10 @@ _DUPLICATE_READ_NOTE = (
 # would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
 _MAX_DUPLICATE_SUPPRESSIONS = 2
 
+# Above this many assets, ``list_assets`` returns a count plus a grouped summary
+# instead of every record, so a large plant cannot flood the prompt/answer (R1.2).
+_ENUM_SUMMARY_THRESHOLD = 50
+
 # Prefix of the grounding note appended to a stored assistant reply. Single
 # source of truth shared by _HISTORY_SOURCES_TEMPLATE (which writes the note)
 # and _strip_history_note (which removes it before echo comparison) so the two
@@ -1872,6 +1876,9 @@ class Agent:
         if name == "get_asset_details":
             return self._tool_get_asset_details(args.get("asset_id", ""))
 
+        if name == "list_assets":
+            return self._tool_list_assets()
+
         if name == "read_work_orders":
             connectors = self._registry.find_by_capability(Capability.READ_WORK_ORDERS)
             if connectors:
@@ -1988,6 +1995,48 @@ class Agent:
                 operation="get_asset_details",
             )
             return {"error": f"Asset {asset_id!r} not found"}
+
+    def _tool_list_assets(self) -> dict[str, Any] | list[dict[str, Any]]:
+        """Enumerate the full asset registry (R1.1).
+
+        A thin, authoritative read of the in-memory registry — unlike
+        reconstructing the asset list from work orders, which silently omits
+        assets that have none. For a large plant the result is bounded: above
+        :data:`_ENUM_SUMMARY_THRESHOLD` it returns a count plus a grouped
+        summary instead of every record (R1.2).
+        """
+        assets = self.plant.list_assets()
+        if len(assets) > _ENUM_SUMMARY_THRESHOLD:
+            return self._summarize_assets(assets)
+        return [
+            {
+                "id": a.id,
+                "name": a.name,
+                "type": a.type.value,
+                "location": a.location,
+                "criticality": a.criticality.value,
+            }
+            for a in assets
+        ]
+
+    @staticmethod
+    def _summarize_assets(assets: list[Any]) -> dict[str, Any]:
+        """Bounded summary of a large asset registry (R1.2)."""
+        by_criticality: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        for a in assets:
+            by_criticality[a.criticality.value] = by_criticality.get(a.criticality.value, 0) + 1
+            by_type[a.type.value] = by_type.get(a.type.value, 0) + 1
+        return {
+            "total": len(assets),
+            "note": (
+                f"{len(assets)} assets in the registry — too many to list individually. "
+                "Counts by criticality and type are below; ask about a specific area, "
+                "type, or asset ID for detail."
+            ),
+            "by_criticality": by_criticality,
+            "by_type": by_type,
+        }
 
     async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
@@ -2132,7 +2181,7 @@ class Agent:
             all_caps.update(conn.capabilities)
 
         cap_to_tool: dict[Capability, list[str]] = {
-            Capability.READ_ASSETS: ["search_assets", "get_asset_details"],
+            Capability.READ_ASSETS: ["search_assets", "list_assets", "get_asset_details"],
             Capability.READ_WORK_ORDERS: ["read_work_orders"],
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],
