@@ -17,6 +17,7 @@ def auto_work_order_id(
     wo_type: WorkOrderType | str = WorkOrderType.CORRECTIVE,
     priority: Priority | str = Priority.MEDIUM,
     description: str = "",
+    session_id: str = "",
 ) -> str:
     """Deterministic content-derived Work Order id (``WO-AUTO-<sha8>``).
 
@@ -38,15 +39,23 @@ def auto_work_order_id(
         wo_type: Maintenance type (``WorkOrderType`` enum or its string value).
         priority: Urgency level (``Priority`` enum or its string value).
         description: Free-text summary, mixed into the hash.
+        session_id: Optional troubleshooting-session scope (U7). Empty (the
+            default, and what the autonomous workflow path passes) keeps the
+            digest content-only, so the same alarm fired twice still collapses
+            to one WO. When set (the agent threads its ``chat_id``) the same
+            content in a *later* session mints a distinct WO instead of
+            colliding with a months-old incident.
 
     Returns:
         A stable ``WO-AUTO-<sha8>`` identifier string.
     """
-    digest = (
-        hashlib.sha256(f"{asset_id}|{wo_type}|{priority}|{description}".encode())
-        .hexdigest()[:8]
-        .upper()
-    )
+    base = f"{asset_id}|{wo_type}|{priority}|{description}"
+    # Prepend the session scope only when supplied — an empty session_id
+    # reproduces the pre-U7 content-only digest byte-for-byte (the autonomous
+    # dedup invariant depends on that).
+    if session_id:
+        base = f"{session_id}|{base}"
+    digest = hashlib.sha256(base.encode()).hexdigest()[:8].upper()
     return f"WO-AUTO-{digest}"
 
 

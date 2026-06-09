@@ -61,10 +61,13 @@ alarm_to_workorder = Workflow(
             description="Create a work order with auto-populated fields",
             inputs={
                 "asset_id": "{trigger.asset_id}",
-                # `analyze_alarm` returns a DiagnosisResult; .primary_code
-                # extracts the top-ranked failure mode as a plain str —
-                # what `WorkOrder.failure_mode: str | None` expects.
-                "failure_mode": "{analyze_alarm.primary_code}",
+                # `analyze_alarm` returns a DiagnosisResult; .failure_mode_for_write
+                # extracts the top-ranked code ONLY when the diagnosis is at least
+                # medium-confidence, else None (U6) — so a low-confidence guess is
+                # never stamped onto the WO as fact. `WorkOrder.failure_mode` is
+                # `str | None`; the notification still surfaces the full ranked
+                # diagnosis with its confidence labels via `{analyze_alarm}`.
+                "failure_mode": "{analyze_alarm.failure_mode_for_write}",
                 "description": (
                     "Auto-generated from alarm {trigger.alarm_id} on {trigger.asset_id}. "
                     "Diagnosis: {analyze_alarm}"
@@ -76,6 +79,7 @@ alarm_to_workorder = Workflow(
             "notify_technician",
             action="channels.send_message",
             description="Send notification to the assigned technician",
+            is_write=True,  # external side effect — gate explicitly, never via heuristic (U11)
             template=(
                 "⚠️ New Work Order — {trigger.asset_id}\n\n"
                 "Diagnosis: {analyze_alarm}\n"
@@ -88,6 +92,7 @@ alarm_to_workorder = Workflow(
             "submit_work_order",
             action="cmms.create_work_order",
             description="Submit the confirmed work order to the CMMS",
+            is_write=True,  # the real external CMMS write — gate explicitly (U11)
             inputs={"work_order": "{generate_work_order}"},
             on_error=ErrorPolicy.STOP,
         ),

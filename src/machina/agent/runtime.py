@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.citations import parse_response
-from machina.agent.entity_resolver import EntityResolver
+from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
 from machina.agent.prompts import (
     build_context_message,
     build_system_prompt,
@@ -49,6 +49,12 @@ logger = structlog.get_logger(__name__)
 # co-located with the tool definitions) to prevent drift between the dispatch
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
+
+# Every builtin tool name — used to recognise a tool/function call the model
+# emitted as plain-text content instead of a structured tool_call (weak local
+# models do this). Sourced from BUILTIN_TOOLS so it can never drift from the
+# real dispatch surface. See _detect_leaked_tool_call (U3 — output validity).
+_KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
 
 # Lifetime of a stored pending write-confirmation (seconds). A pending
 # confirmation is meant for the IMMEDIATE next message; an hour is
@@ -98,6 +104,10 @@ _DUPLICATE_READ_NOTE = (
 # annotated duplicate result is only a cooperative hint; a model that ignores it
 # would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
 _MAX_DUPLICATE_SUPPRESSIONS = 2
+
+# Above this many assets, ``list_assets`` returns a count plus a grouped summary
+# instead of every record, so a large plant cannot flood the prompt/answer (R1.2).
+_ENUM_SUMMARY_THRESHOLD = 50
 
 # Prefix of the grounding note appended to a stored assistant reply. Single
 # source of truth shared by _HISTORY_SOURCES_TEMPLATE (which writes the note)
@@ -153,6 +163,43 @@ _REPEATED_RESPONSE_FALLBACK = (
     "question, or switch to a more capable model? The current model may be "
     "struggling to follow this conversation."
 )
+
+# Appended to a real answer when the runtime had to force the turn to finalize
+# before the agent confirmed it had retrieved everything (a no-progress or
+# suppressed-read break). The answer stands, but the user is told it may be
+# incomplete rather than letting an unverified "that's everything" claim go
+# unqualified (R1.3 / R1.4). Paired with ``AgentResponse.completeness="partial"``.
+_PARTIAL_COMPLETENESS_HEDGE = (
+    "\n\n_Note: I stopped before confirming I'd retrieved everything here, so this "
+    "may be incomplete — ask me to re-check a specific item if you need certainty._"
+)
+
+# Substituted (and flagged via ``AgentResponse.is_fallback``) when the model
+# emitted a tool/function call as its final answer text and the runtime could
+# not safely recover it (an unknown tool, a leaked write that must not be
+# auto-executed, or a repeated leak). Guarantees raw tool-call JSON never
+# reaches the user. See _detect_leaked_tool_call and the _finalize_turn backstop.
+_TOOL_CALL_LEAK_FALLBACK = (
+    "I couldn't complete that request properly — the model returned an internal "
+    "tool instruction instead of an answer. Please rephrase, or switch to a more "
+    "capable model."
+)
+
+# Fed back to the model (as the tool result) when it supplies a non-empty but
+# unparseable arguments blob, so it can retry with valid JSON instead of the
+# error being silently swallowed as ``{}`` and crashing a downstream tool that
+# needs required keys. FIXED text — never the raw exception, which echoes the
+# offending (possibly injected) argument bytes back into the prompt (H1).
+_INVALID_ARGS_MESSAGE = (
+    "Arguments could not be parsed as valid JSON. Retry this call with valid JSON arguments."
+)
+
+# Hard cap on how many unparseable-argument retries one turn may feed back
+# before the loop stops offering tools and forces a final answer. The fed-back
+# error is "progress" to the no-progress guard, so a model that emits *different*
+# junk every iteration would otherwise loop to max_iterations — this counter is
+# the real bound (H1).
+_MAX_ARG_CORRECTION_ATTEMPTS = 2
 
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
@@ -394,6 +441,12 @@ class Agent:
         # ``enumerate(results[:5], 1)`` the prompt rendering uses — never from
         # the filtered registry, which would drift off-by-k.
         self._turn_ordered: dict[str, list[str]] = {}
+        # Per-turn, chat-scoped completeness marker. The LLM loop sets
+        # ``"partial"`` when it force-finalizes a turn (no-progress / suppression
+        # / iteration-exhaustion break) so _finalize_turn can hedge the answer
+        # and flag ``AgentResponse.completeness``. Absent → complete. Popped in
+        # _finalize_turn (and the error path), like the chunk registries.
+        self._turn_completeness: dict[str, Literal["partial"]] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -805,6 +858,7 @@ class Agent:
             # unchanged. The success path's cleanup lives in _finalize_turn.
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
             raise
 
         # 5/6. Parse citations, update history, clean up the per-turn registry,
@@ -892,6 +946,24 @@ class Agent:
         }
 
         if not resolved:
+            return context
+
+        # Resolution-confidence gate (U5): the top match is selected here and its
+        # data prefetched as THE asset for the turn. A weak guess must not be
+        # treated as authoritative — withhold the commit (no prefetch, no
+        # ``context["asset"]``) and let the agent ask which asset is meant. The
+        # candidates stay in ``resolved_entities`` (with their confidence) so the
+        # prompt can render them for disambiguation (R3.1/R3.2).
+        top = resolved[0]
+        if getattr(top, "confidence", 1.0) < RESOLUTION_MIN_CONFIDENCE:
+            logger.info(
+                "low_confidence_resolution_withheld",
+                agent=self.name,
+                asset_id=top.asset.id,
+                confidence=top.confidence,
+                operation="gather_context",
+            )
+            context["resolution_uncertain"] = True
             return context
 
         asset = resolved[0].asset
@@ -1056,6 +1128,7 @@ class Agent:
             The rendered :class:`AgentResponse` with parsed citations.
         """
         is_fallback = False
+        completeness: Literal["complete", "partial"] = "complete"
         # Assistant text to record in history, when it must differ from the
         # user-facing ``rendered`` (set only on the echo path — see below).
         history_override: str | None = None
@@ -1109,6 +1182,26 @@ class Agent:
                 rendered = _REPEATED_RESPONSE_FALLBACK
                 citations = []
                 is_fallback = True
+            # Backstop (U3): a tool/function call that reached finalize as the
+            # answer text (e.g. the forced-final ``complete()`` returned one, or a
+            # leak slipped past the loop seam) must never be shown raw. Store the
+            # fallback in history too (no override) so the JSON cannot re-prime
+            # the next turn. Uses the write-aware ``fallback_text`` on the
+            # narration path, the specific leak message on the normal path.
+            elif self._detect_leaked_tool_call(rendered) is not None:
+                logger.warning(
+                    "tool_call_leak_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                )
+                rendered = (
+                    _TOOL_CALL_LEAK_FALLBACK
+                    if fallback_text is _EMPTY_RESPONSE_FALLBACK
+                    else fallback_text
+                )
+                citations = []
+                is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -1118,9 +1211,23 @@ class Agent:
                 else _history_text(rendered, citations)
             )
             self._add_to_history(chat_id, "assistant", stored)
+            # A real answer the loop was forced to finalize early may be missing
+            # data. Hedge the USER-facing text only — ``stored`` above already
+            # captured the clean answer so echo detection and source follow-ups
+            # stay accurate — and flag it structurally (R1.3/R1.4/R5). Gated to
+            # the normal turn path (default fallback) so the post-write narration
+            # path is never hedged.
+            if (
+                not is_fallback
+                and fallback_text is _EMPTY_RESPONSE_FALLBACK
+                and self._turn_completeness.get(chat_id) == "partial"
+            ):
+                completeness = "partial"
+                rendered = rendered + _PARTIAL_COMPLETENESS_HEDGE
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
 
         logger.info(
             "response_generated",
@@ -1129,8 +1236,14 @@ class Agent:
             response_length=len(rendered),
             citation_count=len(citations),
             is_fallback=is_fallback,
+            completeness=completeness,
         )
-        return AgentResponse(text=rendered, citations=citations, is_fallback=is_fallback)
+        return AgentResponse(
+            text=rendered,
+            citations=citations,
+            is_fallback=is_fallback,
+            completeness=completeness,
+        )
 
     def _is_echo_of_previous(self, chat_id: str, user_text: str, rendered: str) -> bool:
         """Whether ``rendered`` merely repeats the previous turn's answer.
@@ -1285,6 +1398,11 @@ class Agent:
         # answer — guaranteeing quick termination regardless of model behaviour.
         suppression_counts: dict[str, int] = {}
 
+        # Per-turn count of unparseable-argument retries fed back for
+        # self-correction. Bounds the worst case independently of the
+        # no-progress guard (see _MAX_ARG_CORRECTION_ATTEMPTS).
+        arg_error_count = 0
+
         # Per-turn memo of READ-ONLY tool results (keyed by name + args) and the
         # set of every tool-call key seen this turn. An identical read is
         # replayed from cache instead of re-querying the connector; an iteration
@@ -1311,7 +1429,12 @@ class Agent:
             tool_calls = result.get("tool_calls")
 
             if not tool_calls:
-                return content or ""
+                should_return, value = await self._handle_text_only_completion(
+                    content, seen_call_keys, messages, chat_id
+                )
+                if should_return:
+                    return value
+                continue
 
             # Process tool calls
             span.output_summary = f"{len(tool_calls)} tool calls"
@@ -1327,13 +1450,47 @@ class Agent:
             # already seen. If every call is a verbatim repeat, the model is
             # looping without making progress and we break after the loop.
             iteration_made_progress = False
+            iteration_had_arg_error = False
 
             for tc in tool_calls:
                 func_name = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, AttributeError):
+                raw_arguments = getattr(tc.function, "arguments", None)
+                if raw_arguments is None or not str(raw_arguments).strip():
+                    # No arguments supplied — a valid no-arg call (e.g.
+                    # list_assets), not a parse failure.
                     args = {}
+                else:
+                    try:
+                        args = json.loads(raw_arguments)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        # Genuinely malformed args. Instead of silently coercing to
+                        # {} (which masks the error and crashes a tool that needs
+                        # required keys like asset_id), feed a FIXED error back so
+                        # the model self-corrects. Bounded by
+                        # _MAX_ARG_CORRECTION_ATTEMPTS so persistent junk still
+                        # terminates (H1). The counter advances once per
+                        # ITERATION (below), not once per bad call, so a single
+                        # iteration emitting several malformed calls still leaves
+                        # the model its full quota of correction rounds.
+                        iteration_had_arg_error = True
+                        logger.warning(
+                            "invalid_tool_arguments",
+                            agent=self.name,
+                            tool=func_name,
+                            operation="llm_loop",
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
+                                "tool_call_id": tc.id,
+                            }
+                        )
+                        # The fed-back error is new information; mark progress so a
+                        # single bad call doesn't trip the no-progress guard — the
+                        # dedicated counter is the real bound.
+                        iteration_made_progress = True
+                        continue
 
                 # Canonical key for EVERY call (read or write), used for both the
                 # read-replay cache and the no-progress detector.
@@ -1462,6 +1619,13 @@ class Agent:
                     }
                 )
 
+            # Count this iteration (not each malformed call) toward the
+            # correction budget, so the model gets _MAX_ARG_CORRECTION_ATTEMPTS
+            # full rounds to recover regardless of how many bad calls it packed
+            # into any single iteration.
+            if iteration_had_arg_error:
+                arg_error_count += 1
+
             # If this whole iteration only re-issued calls already made this turn
             # (read or write), the model is looping without asking for anything
             # new. Stop offering tools and force a final answer — this is the
@@ -1490,7 +1654,26 @@ class Agent:
                 )
                 break
 
-        # Exhausted iterations — get final response without tools
+            # The model kept emitting unparseable arguments past the correction
+            # budget. Each fed-back error counts as "progress", so only this
+            # dedicated counter bounds it — stop offering tools and force a final
+            # answer (H1).
+            if arg_error_count >= _MAX_ARG_CORRECTION_ATTEMPTS:
+                logger.info(
+                    "arg_correction_limit_reached",
+                    agent=self.name,
+                    operation="llm_loop",
+                )
+                break
+
+        # Reached only by force-finalization: a no-progress break, the
+        # duplicate-suppression limit, or iteration exhaustion. The agent was
+        # cut off before it signalled it was done, so the answer may be
+        # incomplete — mark the turn partial so _finalize_turn hedges it (R1.4).
+        # The natural returns above (model produced its own final answer) leave
+        # the marker unset, i.e. complete.
+        self._turn_completeness[chat_id] = "partial"
+        # Exhausted/forced — get final response without tools
         return await self._llm.complete(messages)
 
     # ------------------------------------------------------------------
@@ -1834,9 +2017,12 @@ class Agent:
             # Drop the per-turn registry on any failure during execution or
             # narration so a long-lived agent does not accumulate orphan slots,
             # then re-raise unchanged. The success path's cleanup lives in
-            # _finalize_turn.
+            # _finalize_turn. All three per-turn dicts are cleared in lockstep
+            # (the marker is unused on this path today, but keeping the cleanup
+            # symmetric means a future loop here can't leak a stale "partial").
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
             raise
 
         # Parse citations, update history, clean up the per-turn registry, and
@@ -1872,6 +2058,9 @@ class Agent:
         if name == "get_asset_details":
             return self._tool_get_asset_details(args.get("asset_id", ""))
 
+        if name == "list_assets":
+            return self._tool_list_assets()
+
         if name == "read_work_orders":
             connectors = self._registry.find_by_capability(Capability.READ_WORK_ORDERS)
             if connectors:
@@ -1884,7 +2073,7 @@ class Agent:
             return {"error": "No CMMS connector available"}
 
         if name == "create_work_order":
-            return await self._tool_create_work_order(args)
+            return await self._tool_create_work_order(args, chat_id=chat_id)
 
         if name == "search_documents":
             connectors = self._registry.find_by_capability(Capability.SEARCH_DOCUMENTS)
@@ -1989,7 +2178,160 @@ class Agent:
             )
             return {"error": f"Asset {asset_id!r} not found"}
 
-    async def _tool_create_work_order(self, args: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_text_only_completion(
+        self,
+        content: str,
+        seen_call_keys: set[str],
+        messages: list[dict[str, str]],
+        chat_id: str,
+    ) -> tuple[bool, str]:
+        """Handle an LLM completion that carried no structured ``tool_calls`` (U3).
+
+        The model may have emitted a tool call as plain-text content (weak local
+        models do this). Returns ``(True, value)`` when the loop should return
+        ``value`` — the plain answer, or :data:`_TOOL_CALL_LEAK_FALLBACK` for a
+        leaked write / re-leak — or ``(False, "")`` when the loop should
+        ``continue`` after this method has recovered a leaked READ, mutating
+        ``messages`` and ``seen_call_keys`` in place. Behaviour-preserving
+        extraction of the former inline seam (U12).
+        """
+        leaked = self._detect_leaked_tool_call(content)
+        if leaked is None:
+            return True, content or ""
+        leaked_name, leaked_args = leaked
+        if leaked_name in _SIDE_EFFECTING_TOOLS:
+            # A write emitted as prose is exactly the low-trust output the gate
+            # withholds — never auto-execute it off the dedup/confirm path.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
+        leaked_key = f"{leaked_name}:{json.dumps(leaked_args, sort_keys=True, default=str)}"
+        if leaked_key in seen_call_keys:
+            # Already recovered this exact call once — a re-leak means the model
+            # is stuck; stop rather than loop on it.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
+        # Recover a leaked READ: run it once and feed the result back so the
+        # model answers from it next iteration. Recording the key lets the check
+        # above (and the no-progress guard) bound any re-leak.
+        logger.warning(
+            "tool_call_leak_recovered",
+            agent=self.name,
+            tool=leaked_name,
+            operation="llm_loop",
+        )
+        seen_call_keys.add(leaked_key)
+        leaked_result = await self._execute_tool(leaked_name, leaked_args, chat_id=chat_id)
+        messages.append({"role": "assistant", "content": content or ""})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"That last message was an internal {leaked_name} tool "
+                    "request, not an answer. Here is its result: "
+                    f"{json.dumps(leaked_result, default=str)}. "
+                    "Now answer my question in plain language."
+                ),
+            }
+        )
+        return False, ""
+
+    @staticmethod
+    def _detect_leaked_tool_call(content: str) -> tuple[str, dict[str, Any]] | None:
+        """Recognise a tool/function call the model emitted as plain text (U3).
+
+        Weak models sometimes serialize a tool call into the message *content*
+        instead of producing a structured ``tool_call``. Returns ``(name, args)``
+        when ``content`` is such a call naming a known builtin tool, otherwise
+        ``None``. Tolerant by design — anything that does not cleanly parse as a
+        known tool-call shape is treated as ordinary prose so a normal answer is
+        never misclassified.
+        """
+        text = (content or "").strip()
+        if not (text.startswith("{") and text.endswith("}")):
+            return None
+        try:
+            obj = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        fn = obj.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            # Shape A: {"type":"function","function":{"name":..,"arguments":..}}
+            name = fn["name"]
+            raw_args: Any = fn.get("arguments", fn.get("parameters", {}))
+        elif isinstance(obj.get("name"), str) and ("arguments" in obj or "parameters" in obj):
+            # Shape B: {"name":.., "arguments":..}
+            name = obj["name"]
+            raw_args = obj.get("arguments", obj.get("parameters", {}))
+        else:
+            return None
+        if name not in _KNOWN_TOOL_NAMES:
+            return None
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                raw_args = {}
+        if not isinstance(raw_args, dict):
+            raw_args = {}
+        return name, raw_args
+
+    def _tool_list_assets(self) -> dict[str, Any] | list[dict[str, Any]]:
+        """Enumerate the full asset registry (R1.1).
+
+        A thin, authoritative read of the in-memory registry — unlike
+        reconstructing the asset list from work orders, which silently omits
+        assets that have none. For a large plant the result is bounded: above
+        :data:`_ENUM_SUMMARY_THRESHOLD` it returns a count plus a grouped
+        summary instead of every record (R1.2).
+        """
+        assets = self.plant.list_assets()
+        if len(assets) > _ENUM_SUMMARY_THRESHOLD:
+            return self._summarize_assets(assets)
+        return [
+            {
+                "id": a.id,
+                "name": a.name,
+                "type": a.type.value,
+                "location": a.location,
+                "criticality": a.criticality.value,
+            }
+            for a in assets
+        ]
+
+    @staticmethod
+    def _summarize_assets(assets: list[Any]) -> dict[str, Any]:
+        """Bounded summary of a large asset registry (R1.2)."""
+        by_criticality: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        for a in assets:
+            by_criticality[a.criticality.value] = by_criticality.get(a.criticality.value, 0) + 1
+            by_type[a.type.value] = by_type.get(a.type.value, 0) + 1
+        return {
+            "total": len(assets),
+            "note": (
+                f"{len(assets)} assets in the registry — too many to list individually. "
+                "Counts by criticality and type are below; ask about a specific area, "
+                "type, or asset ID for detail."
+            ),
+            "by_criticality": by_criticality,
+            "by_type": by_type,
+        }
+
+    async def _tool_create_work_order(
+        self, args: dict[str, Any], *, chat_id: str = "default"
+    ) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
         if self.sandbox:
             logger.info(
@@ -2017,7 +2359,12 @@ class Agent:
         # ``id(args) % 10000`` scheme used the memory address of a per-call
         # dict — non-deterministic, dedup-proof, prone to cross-turn collisions.
         wo = WorkOrder(
-            id=auto_work_order_id(asset_id, wo_type, priority, description),
+            # Scope the dedup hash by chat_id (U7): a reworded retry in the same
+            # conversation still collapses to one WO, but the same content in a
+            # later session is a new WO, not a months-old collision. The
+            # autonomous workflow path (WorkOrderFactory) passes no session and
+            # keeps the content-only hash.
+            id=auto_work_order_id(asset_id, wo_type, priority, description, session_id=chat_id),
             type=WorkOrderType(wo_type),
             priority=Priority(priority),
             asset_id=asset_id,
@@ -2132,7 +2479,7 @@ class Agent:
             all_caps.update(conn.capabilities)
 
         cap_to_tool: dict[Capability, list[str]] = {
-            Capability.READ_ASSETS: ["search_assets", "get_asset_details"],
+            Capability.READ_ASSETS: ["search_assets", "list_assets", "get_asset_details"],
             Capability.READ_WORK_ORDERS: ["read_work_orders"],
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],

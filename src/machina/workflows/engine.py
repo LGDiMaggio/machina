@@ -238,7 +238,13 @@ class WorkflowEngine:
                     attempt=attempt,
                     timeout=step.timeout_seconds,
                 )
-                if attempt < attempts:
+                # A timed-out WRITE may have already been applied before
+                # ``wait_for`` cancelled it — retrying a non-idempotent write
+                # would duplicate it. Never retry write steps on timeout,
+                # regardless of remaining attempts (U10); reads are safe to retry.
+                # (An external CancelledError is *not* caught here, so it still
+                # propagates and unwinds the connector's ``async with`` cleanly.)
+                if attempt < attempts and not self._is_write_action(step.action, step=step):
                     continue
                 return self._handle_step_failure(step, error_msg, elapsed)
 
@@ -251,7 +257,13 @@ class WorkflowEngine:
                     attempt=attempt,
                     error=error_msg,
                 )
-                if attempt < attempts:
+                # Same idempotency hazard as the timeout branch (U10): a write
+                # that raises *after* the server already applied it (e.g. a SAP
+                # ConnectorError on HTTP 500 post-create, or a transport error
+                # after the POST landed) would be duplicated by a retry. This
+                # layer cannot tell "failed before apply" from "failed after
+                # apply", so never retry a write step on any error; reads retry.
+                if attempt < attempts and not self._is_write_action(step.action, step=step):
                     continue
                 return self._handle_step_failure(step, error_msg, elapsed)
 
@@ -494,10 +506,18 @@ class WorkflowEngine:
 
         When the step defines ``is_write`` explicitly (``True`` or
         ``False``), that value is authoritative.  Otherwise, a keyword
-        heuristic is used — this can miss custom write actions or
-        false-positive on reads whose names contain write-like words
-        (e.g. ``get_update_history``).  Prefer setting ``is_write=True``
-        on steps that modify state.
+        heuristic is used.
+
+        The heuristic is deliberately biased to **over-gate**: a
+        false-positive (a read wrongly gated) only yields a harmless sandbox
+        no-op, whereas a false-negative (a real write not detected) is a
+        sandbox escape — the connector would mutate live state during a
+        sandbox run. Every write the framework knows about (the write members
+        of :class:`~machina.connectors.capabilities.Capability`) MUST match a
+        keyword here; ``tests/unit/test_workflow_engine.py`` locks that
+        direction. A read whose name contains a write-like word (e.g.
+        ``get_update_history``) is the acceptable cost — set ``is_write=False``
+        on such a step to opt out.
         """
         if step is not None and step.is_write is not None:
             return step.is_write
@@ -506,6 +526,7 @@ class WorkflowEngine:
             "update",
             "delete",
             "send",
+            "publish",
             "submit",
             "write",
             "notify",

@@ -67,6 +67,17 @@ def _require_httpx() -> Any:
     return httpx
 
 
+def _is_csrf_challenge(resp: Any) -> bool:
+    """Whether a 403 response is SAP signalling an expired/invalid CSRF token.
+
+    SAP's gateway answers a stale-token write with HTTP 403 and the header
+    ``x-csrf-token: Required``. That means the write was **rejected before being
+    applied** — distinct from an auth (401) failure — so re-fetching the token
+    and retrying the write once is safe and cannot duplicate the order.
+    """
+    return bool(resp.headers.get("x-csrf-token", "").lower() == "required")
+
+
 class SapPmConnector:
     """Connector for SAP Plant Maintenance (S/4HANA).
 
@@ -128,6 +139,11 @@ class SapPmConnector:
 
     _PAGE_SIZE: ClassVar[int] = 100
 
+    # Defense-in-depth cap on rows accumulated across all pages of one read.
+    # Pagination chunks the fetch but does NOT bound memory — a missing $filter
+    # would otherwise page an entire S/4HANA table into RAM. Raises instead (H3).
+    _MAX_ODATA_ROWS: ClassVar[int] = 50_000
+
     def __init__(
         self,
         *,
@@ -180,6 +196,20 @@ class SapPmConnector:
             raise ConnectorError(f"SAP PM health check failed: HTTP {resp.status_code}")
         self._connected = True
         logger.info("connected", connector="SapPmConnector", url=self.url)
+        if not self._bom_equipment_field:
+            # Surface the misconfiguration once, loudly, at connect time rather
+            # than only on each read: asset-scoped spare-part reads cannot be
+            # server-side filtered and will return empty instead of OOMing (H3).
+            logger.warning(
+                "bom_equipment_field_unconfigured",
+                connector="SapPmConnector",
+                bom_entity_set=self._bom_entity_set,
+                message=(
+                    "bom_equipment_field is not set — asset-scoped spare-part reads "
+                    "will return empty (no unbounded BOM fetch). Set bom_equipment_field "
+                    "to enable them."
+                ),
+            )
 
     async def disconnect(self) -> None:
         """Close the connector."""
@@ -398,15 +428,34 @@ class SapPmConnector:
         if asset_id:
             if self._bom_equipment_field:
                 filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
-            else:
+            elif not sku:
+                # asset_id requested, but it cannot be filtered server-side
+                # (bom_equipment_field unset — the default) and there is no sku to
+                # narrow the query. Issuing this read would page the ENTIRE BOM
+                # into memory (OOM on a real S/4HANA). Refuse it (H3).
                 logger.warning(
                     "bom_asset_filter_unsupported",
                     connector="SapPmConnector",
                     asset_id=asset_id,
                     bom_entity_set=self._bom_entity_set,
                     message=(
-                        "asset_id filter ignored: bom_equipment_field is not "
-                        "configured for this BOM service"
+                        "asset_id filter ignored and no sku to narrow the query: "
+                        "refusing an unbounded BOM fetch. Configure bom_equipment_field "
+                        "for asset-scoped spare-part reads."
+                    ),
+                )
+                return []
+            else:
+                # asset_id cannot be filtered, but the sku below will keep the
+                # query bounded — proceed with the sku filter only.
+                logger.warning(
+                    "bom_asset_filter_unsupported",
+                    connector="SapPmConnector",
+                    asset_id=asset_id,
+                    bom_entity_set=self._bom_entity_set,
+                    message=(
+                        "asset_id filter ignored (bom_equipment_field unset); "
+                        "narrowing by sku instead"
                     ),
                 )
         if sku:
@@ -464,38 +513,58 @@ class SapPmConnector:
         write within a **single** ``httpx.AsyncClient`` context so that
         the session cookies are shared.
 
+        On a stale-token rejection (HTTP 403 with a CSRF challenge — the write
+        did NOT apply) the token is re-fetched and the write retried exactly
+        once. A 401 or any other status is **not** retried: POST/PATCH are
+        non-idempotent, so retrying after a possible apply would duplicate the
+        order (mirrors the non-idempotent-method policy in ``cmms/retry.py``).
+        The token value is never logged.
+
         Raises:
-            ConnectorAuthError: If the CSRF fetch or the write returns 401.
+            ConnectorAuthError: If the CSRF fetch returns 401.
             ConnectorError: If the CSRF fetch fails or returns no token.
         """
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Step 1: Fetch CSRF token
-            csrf_resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
-                headers={**self._headers(), "X-CSRF-Token": "Fetch"},
-            )
-            if csrf_resp.status_code == 401:
-                raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
-            if csrf_resp.status_code not in (200, 204):
-                raise ConnectorError(
-                    f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}"
+            token = await self._fetch_csrf_token(client)
+            resp = await self._csrf_write(client, method, url, payload, token)
+            if resp.status_code == 403 and _is_csrf_challenge(resp):
+                logger.warning(
+                    "sap_csrf_token_refresh",
+                    connector="SapPmConnector",
+                    method=method,
                 )
-            token = csrf_resp.headers.get("x-csrf-token", "")
-            if not token:
-                raise ConnectorError(
-                    "SAP PM CSRF token fetch did not return an x-csrf-token header"
-                )
+                token = await self._fetch_csrf_token(client)
+                resp = await self._csrf_write(client, method, url, payload, token)
+            return resp
 
-            # Step 2: Write with same client (session cookies shared)
-            headers = {
-                **self._headers(),
-                "Content-Type": "application/json",
-                "X-CSRF-Token": str(token),
-            }
-            return await request_with_retry(client, method, url, headers=headers, json=payload)
+    async def _fetch_csrf_token(self, client: Any) -> str:
+        """Fetch a fresh CSRF token (a safe, idempotent GET)."""
+        csrf_resp = await request_with_retry(
+            client,
+            "GET",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={**self._headers(), "X-CSRF-Token": "Fetch"},
+        )
+        if csrf_resp.status_code == 401:
+            raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
+        if csrf_resp.status_code not in (200, 204):
+            raise ConnectorError(f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}")
+        token = csrf_resp.headers.get("x-csrf-token", "")
+        if not token:
+            raise ConnectorError("SAP PM CSRF token fetch did not return an x-csrf-token header")
+        return str(token)
+
+    async def _csrf_write(
+        self, client: Any, method: str, url: str, payload: dict[str, Any], token: str
+    ) -> Any:
+        """Issue the write with the session's CSRF token (same client/cookies)."""
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+        }
+        return await request_with_retry(client, method, url, headers=headers, json=payload)
 
     async def _odata_get(
         self,
@@ -566,6 +635,12 @@ class SapPmConnector:
                     # Single entity returned (not a list)
                     results = [results]
                 all_items.extend(results)
+                if len(all_items) > self._MAX_ODATA_ROWS:
+                    raise ConnectorError(
+                        f"SAP PM GET {service}/{entity_set} exceeded the "
+                        f"{self._MAX_ODATA_ROWS}-row safety cap — refusing to load an "
+                        "unbounded result set into memory. Narrow the query with a $filter."
+                    )
 
                 # Server-driven pagination
                 next_link = d.get("__next", body.get("@odata.nextLink"))
