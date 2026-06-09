@@ -566,6 +566,63 @@ class TestTimeoutCancellationSafety:
 
 
 # ---------------------------------------------------------------------------
+# Tests — sandbox write detection (U11)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteDetection:
+    """Every known write is detected (no sandbox escape); reads stay ungated."""
+
+    def test_all_write_capabilities_classify_as_write(self) -> None:
+        from machina.connectors.capabilities import Capability
+
+        write_caps = [
+            Capability.CREATE_WORK_ORDER,
+            Capability.UPDATE_WORK_ORDER,
+            Capability.CLOSE_WORK_ORDER,
+            Capability.CANCEL_WORK_ORDER,
+            Capability.PUBLISH_MESSAGE,
+            Capability.SEND_MESSAGE,
+            Capability.CREATE_CALENDAR_EVENT,
+            Capability.DELETE_CALENDAR_EVENT,
+        ]
+        for cap in write_caps:
+            assert WorkflowEngine._is_write_action(cap.value) is True, cap
+
+    def test_publish_message_is_detected(self) -> None:
+        # Regression: "publish_message" matched no keyword before U11 — an MQTT
+        # publish would have executed during a sandbox run (a sandbox escape).
+        assert WorkflowEngine._is_write_action("publish_message") is True
+
+    def test_read_actions_are_not_gated(self) -> None:
+        # Genuinely keyword-free reads. (Note: the over-gate bias means some
+        # reads collide harmlessly — e.g. "read_assets" contains "set" — which
+        # is the accepted fail-safe cost, not a bug.)
+        for action in ("cmms.read_work_orders", "cmms.get_work_order", "docs.search_documents"):
+            assert WorkflowEngine._is_write_action(action) is False
+
+    def test_is_write_override_forces_both_directions(self) -> None:
+        write_step = Step("x", action="cmms.read_assets", is_write=True)
+        assert WorkflowEngine._is_write_action("cmms.read_assets", step=write_step) is True
+        read_step = Step("y", action="cmms.create_work_order", is_write=False)
+        assert WorkflowEngine._is_write_action("cmms.create_work_order", step=read_step) is False
+
+    def test_write_named_read_can_opt_out(self) -> None:
+        # The documented false-positive (get_update_history): without an override
+        # it stays gated (fail-safe over-gating); is_write=False opts out.
+        assert WorkflowEngine._is_write_action("cmms.get_update_history") is True
+        opted_out = Step("h", action="cmms.get_update_history", is_write=False)
+        assert WorkflowEngine._is_write_action("cmms.get_update_history", step=opted_out) is False
+
+    def test_builtin_mutating_steps_are_marked_write(self) -> None:
+        from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
+
+        steps = {s.name: s for s in alarm_to_workorder.steps}
+        assert steps["submit_work_order"].is_write is True
+        assert steps["notify_technician"].is_write is True
+
+
+# ---------------------------------------------------------------------------
 # Tests — guard conditions
 # ---------------------------------------------------------------------------
 

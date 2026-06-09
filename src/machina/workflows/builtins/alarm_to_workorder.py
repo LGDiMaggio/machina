@@ -79,6 +79,7 @@ alarm_to_workorder = Workflow(
             "notify_technician",
             action="channels.send_message",
             description="Send notification to the assigned technician",
+            is_write=True,  # external side effect — gate explicitly, never via heuristic (U11)
             template=(
                 "⚠️ New Work Order — {trigger.asset_id}\n\n"
                 "Diagnosis: {analyze_alarm}\n"
@@ -91,6 +92,7 @@ alarm_to_workorder = Workflow(
             "submit_work_order",
             action="cmms.create_work_order",
             description="Submit the confirmed work order to the CMMS",
+            is_write=True,  # the real external CMMS write — gate explicitly (U11)
             inputs={"work_order": "{generate_work_order}"},
             on_error=ErrorPolicy.STOP,
         ),

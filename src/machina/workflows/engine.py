@@ -500,10 +500,18 @@ class WorkflowEngine:
 
         When the step defines ``is_write`` explicitly (``True`` or
         ``False``), that value is authoritative.  Otherwise, a keyword
-        heuristic is used — this can miss custom write actions or
-        false-positive on reads whose names contain write-like words
-        (e.g. ``get_update_history``).  Prefer setting ``is_write=True``
-        on steps that modify state.
+        heuristic is used.
+
+        The heuristic is deliberately biased to **over-gate**: a
+        false-positive (a read wrongly gated) only yields a harmless sandbox
+        no-op, whereas a false-negative (a real write not detected) is a
+        sandbox escape — the connector would mutate live state during a
+        sandbox run. Every write the framework knows about (the write members
+        of :class:`~machina.connectors.capabilities.Capability`) MUST match a
+        keyword here; ``tests/unit/test_workflow_engine.py`` locks that
+        direction. A read whose name contains a write-like word (e.g.
+        ``get_update_history``) is the acceptable cost — set ``is_write=False``
+        on such a step to opt out.
         """
         if step is not None and step.is_write is not None:
             return step.is_write
@@ -512,6 +520,7 @@ class WorkflowEngine:
             "update",
             "delete",
             "send",
+            "publish",
             "submit",
             "write",
             "notify",
