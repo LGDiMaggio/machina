@@ -42,8 +42,26 @@ class DiagnosisResult:
 
     @property
     def primary_code(self) -> str | None:
-        """``str`` code of the top-ranked failure mode, suitable for ``WorkOrder.failure_mode``."""
+        """``str`` code of the top-ranked failure mode (display/read, ungated)."""
         return self.matches[0]["code"] if self.matches else None
+
+    @property
+    def failure_mode_for_write(self) -> str | None:
+        """Top failure-mode code, gated for writing onto a work order (U6).
+
+        Returns the top-ranked code only when the diagnosis is confident enough
+        (``medium`` or ``high``); a ``low``-confidence diagnosis returns ``None``
+        so the workflow does not stamp a guessed cause onto a work order. Unlike
+        :attr:`primary_code` / :attr:`codes` — which stay ungated for display and
+        audit — this is the write-path accessor. Confidence is the categorical
+        label set in :meth:`FailureAnalyzer.diagnose`, not a numeric score.
+        """
+        if not self.matches:
+            return None
+        if self.matches[0].get("confidence") == "low":
+            return None
+        code: str = self.matches[0]["code"]
+        return code
 
     @property
     def codes(self) -> list[str]:

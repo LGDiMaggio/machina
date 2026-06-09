@@ -61,10 +61,13 @@ alarm_to_workorder = Workflow(
             description="Create a work order with auto-populated fields",
             inputs={
                 "asset_id": "{trigger.asset_id}",
-                # `analyze_alarm` returns a DiagnosisResult; .primary_code
-                # extracts the top-ranked failure mode as a plain str —
-                # what `WorkOrder.failure_mode: str | None` expects.
-                "failure_mode": "{analyze_alarm.primary_code}",
+                # `analyze_alarm` returns a DiagnosisResult; .failure_mode_for_write
+                # extracts the top-ranked code ONLY when the diagnosis is at least
+                # medium-confidence, else None (U6) — so a low-confidence guess is
+                # never stamped onto the WO as fact. `WorkOrder.failure_mode` is
+                # `str | None`; the notification still surfaces the full ranked
+                # diagnosis with its confidence labels via `{analyze_alarm}`.
+                "failure_mode": "{analyze_alarm.failure_mode_for_write}",
                 "description": (
                     "Auto-generated from alarm {trigger.alarm_id} on {trigger.asset_id}. "
                     "Diagnosis: {analyze_alarm}"

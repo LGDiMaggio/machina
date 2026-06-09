@@ -475,3 +475,48 @@ class TestAlarmToWorkorderLiveIntegration:
         assert policies["check_history"] == ErrorPolicy.SKIP
         assert policies["check_spare_parts"] == ErrorPolicy.SKIP
         assert policies["notify_technician"] == ErrorPolicy.NOTIFY
+
+
+class TestDiagnosisConfidenceGate:
+    """U6 — a low-confidence diagnosis is not stamped onto the work order."""
+
+    def _engine(self, diagnose: Any, wo_factory: _FakeWoFactory) -> WorkflowEngine:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _FakeCmmsConnector())
+        registry.register("comms", _FakeCommsConnector())
+        return WorkflowEngine(
+            registry=registry,
+            tracer=ActionTracer(),
+            services={"failure_analyzer": diagnose, "work_order_factory": wo_factory},
+            sandbox=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_diagnosis_not_written(self) -> None:
+        from machina.domain.services.failure_analyzer import DiagnosisResult
+
+        diagnose = _FakeDiagnoseService(
+            result=DiagnosisResult(
+                matches=[{"code": "VIB", "name": "vibration", "confidence": "low"}]
+            )
+        )
+        wo_factory = _FakeWoFactory()
+        result = await self._engine(diagnose, wo_factory).execute(
+            alarm_to_workorder,
+            {"asset_id": "P-201", "alarm_id": "ALM-1", "severity": "warning"},
+        )
+        assert result.success is True
+        # The low-confidence code is NOT recorded as the failure mode.
+        assert wo_factory.last_kwargs.get("failure_mode") is None
+        # The diagnosis is still visible to the technician (with its confidence).
+        assert wo_factory.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_confident_diagnosis_is_written(self) -> None:
+        wo_factory = _FakeWoFactory()  # default fake diagnoses BEAR-WEAR-01 / high
+        result = await self._engine(_FakeDiagnoseService(), wo_factory).execute(
+            alarm_to_workorder,
+            {"asset_id": "P-201", "alarm_id": "ALM-2", "severity": "warning"},
+        )
+        assert result.success is True
+        assert wo_factory.last_kwargs.get("failure_mode") == "BEAR-WEAR-01"
