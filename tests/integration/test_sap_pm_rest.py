@@ -585,14 +585,14 @@ class TestReadSpareParts:
     async def test_read_spare_parts_asset_filter_ignored_by_default(
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
-        """Without bom_equipment_field, asset_id is dropped with a warning."""
+        """Without bom_equipment_field and no sku, the unbounded BOM read is refused.
+
+        asset_id cannot be filtered server-side and there is no sku to narrow
+        the query, so issuing the read would page the entire BOM into memory
+        (U9 OOM guard). The connector returns ``[]`` and issues NO request — the
+        only mocked response here is the connect handshake from ``_connect``.
+        """
         await _connect(httpx_mock, connector)
-        # No $filter expected: asset_id is ignored, no sku supplied.
-        httpx_mock.add_response(
-            method="GET",
-            url=_odata_url("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem"),
-            json={"d": {"results": []}},
-        )
         parts = await connector.read_spare_parts(asset_id="10000001")
         assert parts == []
 
