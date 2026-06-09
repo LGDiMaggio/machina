@@ -448,3 +448,81 @@ class TestOdataRowCap:
         conn._connected = True
         with pytest.raises(ConnectorError, match="safety cap"):
             await conn._odata_get("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem")
+
+
+class TestCsrfWriteRecovery:
+    """U9 — CSRF desync recovery is idempotency-safe: retry only on a 403 CSRF
+    challenge (write rejected, not applied), never on a 401 or any other status
+    (a non-idempotent POST retried after a possible apply would duplicate)."""
+
+    def _conn(self) -> SapPmConnector:
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+        conn._connected = True
+        return conn
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, responses: list):
+        from unittest.mock import AsyncMock
+
+        from machina.connectors.cmms import sap_pm as sap_mod
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _FakeHttpx:
+            def AsyncClient(self, **kwargs):  # noqa: N802 — mimics httpx.AsyncClient
+                return _FakeClient()
+
+        rwr = AsyncMock(side_effect=responses)
+        monkeypatch.setattr(sap_mod, "_require_httpx", lambda: _FakeHttpx())
+        monkeypatch.setattr(sap_mod, "request_with_retry", rwr)
+        return rwr
+
+    @staticmethod
+    def _resp(status: int, headers: dict):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(status_code=status, headers=headers)
+
+    @pytest.mark.asyncio
+    async def test_csrf_403_refreshes_token_and_retries_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rwr = self._patch(
+            monkeypatch,
+            [
+                self._resp(200, {"x-csrf-token": "TOK1"}),  # fetch
+                self._resp(403, {"x-csrf-token": "Required"}),  # write rejected pre-apply
+                self._resp(200, {"x-csrf-token": "TOK2"}),  # re-fetch
+                self._resp(201, {}),  # write succeeds
+            ],
+        )
+        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        assert resp.status_code == 201
+        assert rwr.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_401_write_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rwr = self._patch(
+            monkeypatch,
+            [self._resp(200, {"x-csrf-token": "TOK1"}), self._resp(401, {})],
+        )
+        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        assert resp.status_code == 401
+        assert rwr.await_count == 2  # non-idempotent POST is not retried
+
+    @pytest.mark.asyncio
+    async def test_non_csrf_403_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rwr = self._patch(
+            monkeypatch,
+            [self._resp(200, {"x-csrf-token": "TOK1"}), self._resp(403, {})],
+        )
+        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        assert resp.status_code == 403
+        assert rwr.await_count == 2

@@ -67,6 +67,17 @@ def _require_httpx() -> Any:
     return httpx
 
 
+def _is_csrf_challenge(resp: Any) -> bool:
+    """Whether a 403 response is SAP signalling an expired/invalid CSRF token.
+
+    SAP's gateway answers a stale-token write with HTTP 403 and the header
+    ``x-csrf-token: Required``. That means the write was **rejected before being
+    applied** — distinct from an auth (401) failure — so re-fetching the token
+    and retrying the write once is safe and cannot duplicate the order.
+    """
+    return bool(resp.headers.get("x-csrf-token", "").lower() == "required")
+
+
 class SapPmConnector:
     """Connector for SAP Plant Maintenance (S/4HANA).
 
@@ -502,38 +513,58 @@ class SapPmConnector:
         write within a **single** ``httpx.AsyncClient`` context so that
         the session cookies are shared.
 
+        On a stale-token rejection (HTTP 403 with a CSRF challenge — the write
+        did NOT apply) the token is re-fetched and the write retried exactly
+        once. A 401 or any other status is **not** retried: POST/PATCH are
+        non-idempotent, so retrying after a possible apply would duplicate the
+        order (mirrors the non-idempotent-method policy in ``cmms/retry.py``).
+        The token value is never logged.
+
         Raises:
-            ConnectorAuthError: If the CSRF fetch or the write returns 401.
+            ConnectorAuthError: If the CSRF fetch returns 401.
             ConnectorError: If the CSRF fetch fails or returns no token.
         """
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Step 1: Fetch CSRF token
-            csrf_resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
-                headers={**self._headers(), "X-CSRF-Token": "Fetch"},
-            )
-            if csrf_resp.status_code == 401:
-                raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
-            if csrf_resp.status_code not in (200, 204):
-                raise ConnectorError(
-                    f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}"
+            token = await self._fetch_csrf_token(client)
+            resp = await self._csrf_write(client, method, url, payload, token)
+            if resp.status_code == 403 and _is_csrf_challenge(resp):
+                logger.warning(
+                    "sap_csrf_token_refresh",
+                    connector="SapPmConnector",
+                    method=method,
                 )
-            token = csrf_resp.headers.get("x-csrf-token", "")
-            if not token:
-                raise ConnectorError(
-                    "SAP PM CSRF token fetch did not return an x-csrf-token header"
-                )
+                token = await self._fetch_csrf_token(client)
+                resp = await self._csrf_write(client, method, url, payload, token)
+            return resp
 
-            # Step 2: Write with same client (session cookies shared)
-            headers = {
-                **self._headers(),
-                "Content-Type": "application/json",
-                "X-CSRF-Token": str(token),
-            }
-            return await request_with_retry(client, method, url, headers=headers, json=payload)
+    async def _fetch_csrf_token(self, client: Any) -> str:
+        """Fetch a fresh CSRF token (a safe, idempotent GET)."""
+        csrf_resp = await request_with_retry(
+            client,
+            "GET",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={**self._headers(), "X-CSRF-Token": "Fetch"},
+        )
+        if csrf_resp.status_code == 401:
+            raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
+        if csrf_resp.status_code not in (200, 204):
+            raise ConnectorError(f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}")
+        token = csrf_resp.headers.get("x-csrf-token", "")
+        if not token:
+            raise ConnectorError("SAP PM CSRF token fetch did not return an x-csrf-token header")
+        return str(token)
+
+    async def _csrf_write(
+        self, client: Any, method: str, url: str, payload: dict[str, Any], token: str
+    ) -> Any:
+        """Issue the write with the session's CSRF token (same client/cookies)."""
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+        }
+        return await request_with_retry(client, method, url, headers=headers, json=payload)
 
     async def _odata_get(
         self,
