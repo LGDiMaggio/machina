@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.citations import parse_response
-from machina.agent.entity_resolver import EntityResolver
+from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
 from machina.agent.prompts import (
     build_context_message,
     build_system_prompt,
@@ -946,6 +946,24 @@ class Agent:
         }
 
         if not resolved:
+            return context
+
+        # Resolution-confidence gate (U5): the top match is selected here and its
+        # data prefetched as THE asset for the turn. A weak guess must not be
+        # treated as authoritative — withhold the commit (no prefetch, no
+        # ``context["asset"]``) and let the agent ask which asset is meant. The
+        # candidates stay in ``resolved_entities`` (with their confidence) so the
+        # prompt can render them for disambiguation (R3.1/R3.2).
+        top = resolved[0]
+        if getattr(top, "confidence", 1.0) < RESOLUTION_MIN_CONFIDENCE:
+            logger.info(
+                "low_confidence_resolution_withheld",
+                agent=self.name,
+                asset_id=top.asset.id,
+                confidence=top.confidence,
+                operation="gather_context",
+            )
+            context["resolution_uncertain"] = True
             return context
 
         asset = resolved[0].asset

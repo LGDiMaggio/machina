@@ -260,11 +260,19 @@ def format_resolved_entities(entities: list[ResolvedEntity]) -> str:
     if not entities:
         return ""
 
+    from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE
+
     lines = ["**Resolved assets from your question:**"]
     for ent in entities[:3]:
         lines.append(
             f"  - {ent.asset.name} (ID: {ent.asset.id}) "
             f"[confidence: {ent.confidence:.0%}, match: {ent.match_reason}]"
+        )
+    # When even the best match is a weak guess, tell the agent to confirm rather
+    # than act on it — the runtime has withheld committing to this asset (U5).
+    if entities[0].confidence < RESOLUTION_MIN_CONFIDENCE:
+        lines.append(
+            "  ⚠️ Low confidence — ask the user which asset they mean before relying on this match."
         )
     return "\n".join(lines)
 

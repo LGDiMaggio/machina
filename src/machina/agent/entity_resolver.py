@@ -20,6 +20,15 @@ logger = structlog.get_logger(__name__)
 
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
+# Below this confidence, a resolved asset is treated as a weak guess rather than
+# the definitive referent: the runtime does not commit to it (no prefetch, no
+# ``context["asset"]``) and the agent is nudged to ask the user which asset is
+# meant instead of acting on it (U5 — resolution-confidence gate). The bands the
+# resolver emits: exact_id=1.0, name=0.9, name_keywords≤0.7, location≤0.6,
+# fuzzy_keyword≤0.4 — so this floor admits id/name/strong matches and withholds
+# the weakest keyword guesses (e.g. the 0.16 fuzzy match from dogfooding).
+RESOLUTION_MIN_CONFIDENCE = 0.4
+
 
 def _tokenise(text: str) -> set[str]:
     """Tokenise text into lowercase words with punctuation stripped."""
