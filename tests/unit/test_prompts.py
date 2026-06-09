@@ -32,6 +32,14 @@ class TestBuildSystemPrompt:
         assert "maintenance assistant" in prompt.lower()
         assert "No plant configured" in prompt
 
+    def test_followup_guideline_forbids_verbatim_repeat(self) -> None:
+        # Guideline #9 must explicitly forbid repeating a previous answer
+        # verbatim — weak models otherwise degenerate the "answer from the
+        # conversation" instruction into echoing the prior turn.
+        prompt = build_system_prompt().lower()
+        assert "never repeat" in prompt
+        assert "verbatim" in prompt
+
     def test_with_plant_context(self) -> None:
         prompt = build_system_prompt(
             plant_name="North Plant",

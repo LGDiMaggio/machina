@@ -70,6 +70,13 @@ _CITATIONS_BLOCK_RE = re.compile(
     r"<citations>\s*\n(.*?)\n?</citations>\s*", re.DOTALL | re.IGNORECASE
 )
 
+# A ``<citations>`` opener with no closing tag. Weak models sometimes open the
+# block but never close it; without this the literal ``<citations>`` tag leaks
+# into the rendered answer. Applied only AFTER the closed-block pattern above,
+# so it can match a genuinely dangling opener — everything from the tag to the
+# end of the text is consumed and any entries it contains are still parsed.
+_UNTERMINATED_CITATIONS_RE = re.compile(r"<citations>[^\S\n]*\n?(.*)\Z", re.DOTALL | re.IGNORECASE)
+
 
 def parse_response(
     text: str,
@@ -99,16 +106,28 @@ def parse_response(
     seen_ids: set[str] = set()
     ordered = ordered_chunks or []
 
-    def _consume(match: re.Match[str]) -> str:
-        for citation in _parse_block(match.group(1), available_chunks, ordered):
+    def _absorb(block: str) -> None:
+        for citation in _parse_block(block, available_chunks, ordered):
             if citation.chunk_id in seen_ids:
                 continue
             seen_ids.add(citation.chunk_id)
             citations.append(citation)
+
+    def _consume(match: re.Match[str]) -> str:
+        _absorb(match.group(1))
         return ""
 
-    cleaned = _CITATIONS_BLOCK_RE.sub(_consume, text).rstrip()
-    return cleaned, citations
+    cleaned = _CITATIONS_BLOCK_RE.sub(_consume, text)
+
+    # Tolerate an unterminated block (opener with no closing tag) so the literal
+    # ``<citations>`` tag never reaches the user. Runs after the closed-block
+    # substitution above, so it only fires on a genuinely dangling opener.
+    unterminated = _UNTERMINATED_CITATIONS_RE.search(cleaned)
+    if unterminated is not None:
+        _absorb(unterminated.group(1))
+        cleaned = cleaned[: unterminated.start()]
+
+    return cleaned.rstrip(), citations
 
 
 # A leading visible index, optionally bracketed: ``[1]``, ``1``.

@@ -10,7 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from machina.agent.runtime import Agent, _format_response_for_channel, _history_text
+from machina.agent.runtime import (
+    _REPEATED_RESPONSE_FALLBACK,
+    Agent,
+    _format_response_for_channel,
+    _history_text,
+    _is_echo,
+    _strip_history_note,
+)
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
@@ -795,6 +802,155 @@ class TestHistoryTextHelper:
         out = _history_text("answer", cites)
         # b.md appears once, in first-seen position, before a.md.
         assert out == "answer\n\n[Sources used in this answer: b.md, a.md]"
+
+    def test_note_written_by_template_is_stripped_for_echo(self) -> None:
+        # Couples _history_text's note format to _strip_history_note: a note
+        # produced by the template must be fully removed before echo comparison.
+        # If the wording drifts in only one place, this round-trip fails.
+        body = "answer text"
+        with_note = _history_text(body, [self._cite("pump.md")])
+        assert with_note != body
+        assert _strip_history_note(with_note) == body
+
+
+class TestRepeatedResponseSuppressed:
+    """A turn must not deliver the previous turn's answer verbatim.
+
+    Weak local models routinely copy the prior assistant message straight out
+    of conversation history, so the user sees the same long canned paragraph on
+    every follow-up. The within-turn dedup guards in ``_llm_loop`` reset each
+    turn and cannot catch this — the cross-turn guard in ``_finalize_turn`` does.
+    """
+
+    # A realistic, >200-char canned answer of the kind weak models echo.
+    _LONG = (
+        "I'm a specialized maintenance assistant powered by the Machina "
+        "framework. I can help you with equipment information, maintenance "
+        "history, procedures and manuals, failure diagnosis, spare parts, work "
+        "orders, and maintenance schedules. What would you like to accomplish?"
+    )
+
+    def test_first_long_answer_delivered_normally(self) -> None:
+        agent = Agent()
+        r = agent._finalize_turn(chat_id="c", user_text="q1", raw_response=self._LONG)
+        assert r.text == self._LONG
+        assert not r.is_fallback
+
+    def test_repeat_on_different_question_is_suppressed(self) -> None:
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="chi sei?", raw_response=self._LONG)
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="sei sicuro esista questa pompa?", raw_response=self._LONG
+        )
+        # The user sees an honest, distinct fallback instead of the repeat...
+        assert r2.is_fallback
+        assert r2.text == _REPEATED_RESPONSE_FALLBACK
+        assert r2.text != self._LONG
+        # ...but history records the REAL echoed text, so it stays the
+        # comparison baseline for the next turn (storing the fallback instead
+        # would let the echo leak again on turn 3 — see the three-turn test).
+        assert agent._histories["c"][-1]["content"] == self._LONG
+
+    def test_three_consecutive_echoes_all_suppressed(self) -> None:
+        # Regression for the alternating-leak bug: if history stored the
+        # fallback rather than the real echo, turn 3 would compare against the
+        # short fallback, miss, and leak the long answer again.
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="q1", raw_response=self._LONG)
+        r2 = agent._finalize_turn(chat_id="c", user_text="q2", raw_response=self._LONG)
+        r3 = agent._finalize_turn(chat_id="c", user_text="q3", raw_response=self._LONG)
+        assert r2.is_fallback and r2.text == _REPEATED_RESPONSE_FALLBACK
+        assert r3.is_fallback and r3.text == _REPEATED_RESPONSE_FALLBACK
+        assert r3.text != self._LONG
+
+    def test_echo_guard_skipped_on_post_write_narration_path(self) -> None:
+        # The two-turn post-write narration passes a write-aware fallback_text.
+        # A write has already executed, so the echo guard must NOT replace the
+        # narration with the "rephrase / switch model" message (which could
+        # imply failure and invite a duplicate write).
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="create a WO", raw_response=self._LONG)
+        write_fallback = "Done — the create_work_order action completed (WO-123)."
+        r2 = agent._finalize_turn(
+            chat_id="c",
+            user_text="yes",
+            raw_response=self._LONG,
+            fallback_text=write_fallback,
+        )
+        # Narration delivered as-is; echo guard did not fire on this path.
+        assert not r2.is_fallback
+        assert r2.text == self._LONG
+        assert r2.text != _REPEATED_RESPONSE_FALLBACK
+
+    def test_suppresses_when_only_assistant_in_history(self) -> None:
+        # prev_user is None (e.g. a seeded assistant turn or history truncated
+        # mid-pair): the same-question short-circuit is skipped and the content
+        # comparison still runs.
+        agent = Agent()
+        agent._histories["c"] = [{"role": "assistant", "content": self._LONG}]
+        r = agent._finalize_turn(chat_id="c", user_text="q", raw_response=self._LONG)
+        assert r.is_fallback
+        assert r.text == _REPEATED_RESPONSE_FALLBACK
+
+    def test_identical_answer_to_identical_question_is_allowed(self) -> None:
+        # Asking the SAME question twice and getting the same answer is
+        # legitimate, not a degenerate echo — must NOT be suppressed.
+        agent = Agent()
+        agent._finalize_turn(
+            chat_id="c", user_text="list critical assets", raw_response=self._LONG
+        )
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="list critical assets", raw_response=self._LONG
+        )
+        assert not r2.is_fallback
+        assert r2.text == self._LONG
+
+    def test_short_identical_answers_not_suppressed(self) -> None:
+        # Short generic answers ("Yes.") legitimately recur; the guard only
+        # targets long canned paragraphs.
+        agent = Agent()
+        agent._finalize_turn(chat_id="c", user_text="q1", raw_response="Yes, that is correct.")
+        r2 = agent._finalize_turn(
+            chat_id="c", user_text="q2", raw_response="Yes, that is correct."
+        )
+        assert not r2.is_fallback
+        assert r2.text == "Yes, that is correct."
+
+    def test_guard_is_per_chat(self) -> None:
+        # An echo in one conversation must not suppress the same text as a
+        # first answer in a different conversation.
+        agent = Agent()
+        agent._finalize_turn(chat_id="a", user_text="q1", raw_response=self._LONG)
+        r = agent._finalize_turn(chat_id="b", user_text="q1", raw_response=self._LONG)
+        assert not r.is_fallback
+        assert r.text == self._LONG
+
+
+class TestIsEchoHelper:
+    """Pure-function tests for the cross-turn echo detector."""
+
+    _LONG = "x" * 250
+
+    def test_below_min_length_never_echo(self) -> None:
+        assert _is_echo("short", "short") is False
+
+    def test_identical_long_text_is_echo(self) -> None:
+        assert _is_echo(self._LONG, self._LONG) is True
+
+    def test_whitespace_and_case_normalized(self) -> None:
+        a = "  The  Bearing   Needs Replacement. " + "y" * 220
+        b = "the bearing needs replacement. " + "y" * 220
+        assert _is_echo(a, b) is True
+
+    def test_history_source_note_ignored_when_comparing(self) -> None:
+        body = "Replace the bearing every 2000 hours of operation. " + "z" * 200
+        stored = body + "\n\n[Sources used in this answer: pump.md]"
+        assert _is_echo(body, stored) is True
+
+    def test_distinct_long_answers_not_echo(self) -> None:
+        a = "The cooling pump P-201 is criticality A and located in Building A. " + "a" * 200
+        b = "Spare bearing SKF-6205 is out of stock; lead time is six weeks. " + "b" * 200
+        assert _is_echo(a, b) is False
 
 
 class _FakeLLMDoubleCreate:
