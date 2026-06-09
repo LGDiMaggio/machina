@@ -11,6 +11,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from machina.agent.citations import CITATION_PROMPT
+from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE
 
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
@@ -259,8 +260,6 @@ def format_resolved_entities(entities: list[ResolvedEntity]) -> str:
     """
     if not entities:
         return ""
-
-    from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE
 
     lines = ["**Resolved assets from your question:**"]
     for ent in entities[:3]:

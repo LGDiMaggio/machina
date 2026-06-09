@@ -107,6 +107,37 @@ class _AlwaysMalformedLLM:
         return {"content": "", "tool_calls": [_tc("read_work_orders", "{still bad", "b1")]}
 
 
+class _TwoBadThenAnswerLLM:
+    """Iteration 1 emits TWO malformed calls; iteration 2 answers cleanly.
+
+    With per-call counting and ``_MAX_ARG_CORRECTION_ATTEMPTS == 2``, the two
+    bad calls in a single iteration would exhaust the budget and force-finalize
+    before the model ever got a correction round. Per-iteration counting must
+    let iteration 2 run.
+    """
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "forced-final"
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    _tc("read_work_orders", "{bad one", "b1"),
+                    _tc("read_work_orders", "{bad two", "b2"),
+                ],
+            }
+        return {"content": "Recovered and answered.", "tool_calls": None}
+
+
 class _NoArgEmptyLLM:
     def __init__(self) -> None:
         self.model = "fake:model"
@@ -145,6 +176,28 @@ class TestInvalidArgs:
         text = await agent._llm_loop([{"role": "user", "content": "read WOs"}], "c1")
         # Bounded by the dedicated counter — forced final answer, no infinite loop.
         assert text == "forced-final after junk"
+
+    @pytest.mark.asyncio
+    async def test_persistent_malformed_marks_turn_partial(self) -> None:
+        # The arg-correction break is a force-finalization path, so the turn must
+        # be flagged partial (so _finalize_turn hedges it) — same contract as the
+        # no-progress and duplicate-suppression breaks.
+        agent = Agent(
+            plant=_plant(), llm=_AlwaysMalformedLLM(), connectors=[_SpyReadWOConnector()]
+        )
+        await agent._llm_loop([{"role": "user", "content": "read WOs"}], "c1")
+        assert agent._turn_completeness.get("c1") == "partial"
+
+    @pytest.mark.asyncio
+    async def test_multiple_bad_calls_in_one_iteration_still_allow_correction(self) -> None:
+        # Two malformed calls in a single iteration count as ONE correction
+        # round, so the model still gets a later iteration to recover instead of
+        # being force-finalized mid-stream.
+        llm = _TwoBadThenAnswerLLM()
+        agent = Agent(plant=_plant(), llm=llm, connectors=[_SpyReadWOConnector()])
+        text = await agent._llm_loop([{"role": "user", "content": "read WOs"}], "c1")
+        assert text == "Recovered and answered."
+        assert agent._turn_completeness.get("c1") is None  # natural (complete) finish
 
     @pytest.mark.asyncio
     async def test_valid_no_arg_call_is_not_an_error(self) -> None:

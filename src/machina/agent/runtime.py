@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -446,7 +446,7 @@ class Agent:
         # / iteration-exhaustion break) so _finalize_turn can hedge the answer
         # and flag ``AgentResponse.completeness``. Absent → complete. Popped in
         # _finalize_turn (and the error path), like the chunk registries.
-        self._turn_completeness: dict[str, str] = {}
+        self._turn_completeness: dict[str, Literal["partial"]] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -1128,7 +1128,7 @@ class Agent:
             The rendered :class:`AgentResponse` with parsed citations.
         """
         is_fallback = False
-        completeness = "complete"
+        completeness: Literal["complete", "partial"] = "complete"
         # Assistant text to record in history, when it must differ from the
         # user-facing ``rendered`` (set only on the echo path — see below).
         history_override: str | None = None
@@ -1450,6 +1450,7 @@ class Agent:
             # already seen. If every call is a verbatim repeat, the model is
             # looping without making progress and we break after the loop.
             iteration_made_progress = False
+            iteration_had_arg_error = False
 
             for tc in tool_calls:
                 func_name = tc.function.name
@@ -1467,8 +1468,11 @@ class Agent:
                         # required keys like asset_id), feed a FIXED error back so
                         # the model self-corrects. Bounded by
                         # _MAX_ARG_CORRECTION_ATTEMPTS so persistent junk still
-                        # terminates (H1).
-                        arg_error_count += 1
+                        # terminates (H1). The counter advances once per
+                        # ITERATION (below), not once per bad call, so a single
+                        # iteration emitting several malformed calls still leaves
+                        # the model its full quota of correction rounds.
+                        iteration_had_arg_error = True
                         logger.warning(
                             "invalid_tool_arguments",
                             agent=self.name,
@@ -1614,6 +1618,13 @@ class Agent:
                         "tool_call_id": tc.id,
                     }
                 )
+
+            # Count this iteration (not each malformed call) toward the
+            # correction budget, so the model gets _MAX_ARG_CORRECTION_ATTEMPTS
+            # full rounds to recover regardless of how many bad calls it packed
+            # into any single iteration.
+            if iteration_had_arg_error:
+                arg_error_count += 1
 
             # If this whole iteration only re-issued calls already made this turn
             # (read or write), the model is looping without asking for anything
@@ -2006,9 +2017,12 @@ class Agent:
             # Drop the per-turn registry on any failure during execution or
             # narration so a long-lived agent does not accumulate orphan slots,
             # then re-raise unchanged. The success path's cleanup lives in
-            # _finalize_turn.
+            # _finalize_turn. All three per-turn dicts are cleared in lockstep
+            # (the marker is unused on this path today, but keeping the cleanup
+            # symmetric means a future loop here can't leak a stale "partial").
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
+            self._turn_completeness.pop(chat_id, None)
             raise
 
         # Parse citations, update history, clean up the per-turn registry, and

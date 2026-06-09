@@ -55,10 +55,14 @@ class DiagnosisResult:
         :attr:`primary_code` / :attr:`codes` — which stay ungated for display and
         audit — this is the write-path accessor. Confidence is the categorical
         label set in :meth:`FailureAnalyzer.diagnose`, not a numeric score.
+
+        The gate fails CLOSED: anything other than an explicit ``medium`` /
+        ``high`` label (a missing key, or an unexpected value from a future
+        producer) withholds the code rather than writing an unvetted guess.
         """
         if not self.matches:
             return None
-        if self.matches[0].get("confidence") == "low":
+        if self.matches[0].get("confidence") not in ("medium", "high"):
             return None
         code: str = self.matches[0]["code"]
         return code

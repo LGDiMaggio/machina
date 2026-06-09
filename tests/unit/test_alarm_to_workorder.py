@@ -520,3 +520,34 @@ class TestDiagnosisConfidenceGate:
         )
         assert result.success is True
         assert wo_factory.last_kwargs.get("failure_mode") == "BEAR-WEAR-01"
+
+
+class TestFailureModeForWriteFailsClosed:
+    """U6 — the write-path accessor withholds the code on anything but medium/high."""
+
+    def _result(self, match: dict[str, Any]) -> Any:
+        from machina.domain.services.failure_analyzer import DiagnosisResult
+
+        return DiagnosisResult(matches=[match])
+
+    def test_high_and_medium_are_written(self) -> None:
+        assert self._result({"code": "VIB", "confidence": "high"}).failure_mode_for_write == "VIB"
+        assert (
+            self._result({"code": "VIB", "confidence": "medium"}).failure_mode_for_write == "VIB"
+        )
+
+    def test_low_is_withheld(self) -> None:
+        assert self._result({"code": "VIB", "confidence": "low"}).failure_mode_for_write is None
+
+    def test_missing_confidence_key_is_withheld(self) -> None:
+        # Fail closed: a match dict lacking the confidence key (a future/foreign
+        # producer) must NOT be treated as confident enough to write.
+        assert self._result({"code": "VIB"}).failure_mode_for_write is None
+
+    def test_unknown_confidence_value_is_withheld(self) -> None:
+        assert self._result({"code": "VIB", "confidence": "maybe"}).failure_mode_for_write is None
+
+    def test_display_accessor_stays_ungated(self) -> None:
+        # primary_code must still surface the code regardless of confidence.
+        assert self._result({"code": "VIB"}).primary_code == "VIB"
+        assert self._result({"code": "VIB", "confidence": "low"}).primary_code == "VIB"
