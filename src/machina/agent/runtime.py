@@ -1429,60 +1429,11 @@ class Agent:
             tool_calls = result.get("tool_calls")
 
             if not tool_calls:
-                # The model may have emitted a tool call as plain-text content
-                # instead of a structured tool_call (weak local models do this).
-                # Never surface that raw JSON as the answer (R2.1).
-                leaked = self._detect_leaked_tool_call(content)
-                if leaked is None:
-                    return content or ""
-                leaked_name, leaked_args = leaked
-                if leaked_name in _SIDE_EFFECTING_TOOLS:
-                    # A write emitted as prose is exactly the low-trust output the
-                    # gate withholds — never auto-execute it off the dedup/confirm
-                    # path. Fall back instead of recovering it.
-                    logger.warning(
-                        "tool_call_leak_suppressed",
-                        agent=self.name,
-                        tool=leaked_name,
-                        operation="llm_loop",
-                    )
-                    return _TOOL_CALL_LEAK_FALLBACK
-                leaked_key = (
-                    f"{leaked_name}:{json.dumps(leaked_args, sort_keys=True, default=str)}"
+                should_return, value = await self._handle_text_only_completion(
+                    content, seen_call_keys, messages, chat_id
                 )
-                if leaked_key in seen_call_keys:
-                    # Already recovered this exact call once — a re-leak means the
-                    # model is stuck; stop rather than loop on it.
-                    logger.warning(
-                        "tool_call_leak_suppressed",
-                        agent=self.name,
-                        tool=leaked_name,
-                        operation="llm_loop",
-                    )
-                    return _TOOL_CALL_LEAK_FALLBACK
-                # Recover a leaked READ: run it once and feed the result back so
-                # the model answers from it next iteration. Recording the key lets
-                # the check above (and the no-progress guard) bound any re-leak.
-                logger.warning(
-                    "tool_call_leak_recovered",
-                    agent=self.name,
-                    tool=leaked_name,
-                    operation="llm_loop",
-                )
-                seen_call_keys.add(leaked_key)
-                leaked_result = await self._execute_tool(leaked_name, leaked_args, chat_id=chat_id)
-                messages.append({"role": "assistant", "content": content or ""})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"That last message was an internal {leaked_name} tool "
-                            "request, not an answer. Here is its result: "
-                            f"{json.dumps(leaked_result, default=str)}. "
-                            "Now answer my question in plain language."
-                        ),
-                    }
-                )
+                if should_return:
+                    return value
                 continue
 
             # Process tool calls
@@ -2212,6 +2163,73 @@ class Agent:
                 operation="get_asset_details",
             )
             return {"error": f"Asset {asset_id!r} not found"}
+
+    async def _handle_text_only_completion(
+        self,
+        content: str,
+        seen_call_keys: set[str],
+        messages: list[dict[str, str]],
+        chat_id: str,
+    ) -> tuple[bool, str]:
+        """Handle an LLM completion that carried no structured ``tool_calls`` (U3).
+
+        The model may have emitted a tool call as plain-text content (weak local
+        models do this). Returns ``(True, value)`` when the loop should return
+        ``value`` — the plain answer, or :data:`_TOOL_CALL_LEAK_FALLBACK` for a
+        leaked write / re-leak — or ``(False, "")`` when the loop should
+        ``continue`` after this method has recovered a leaked READ, mutating
+        ``messages`` and ``seen_call_keys`` in place. Behaviour-preserving
+        extraction of the former inline seam (U12).
+        """
+        leaked = self._detect_leaked_tool_call(content)
+        if leaked is None:
+            return True, content or ""
+        leaked_name, leaked_args = leaked
+        if leaked_name in _SIDE_EFFECTING_TOOLS:
+            # A write emitted as prose is exactly the low-trust output the gate
+            # withholds — never auto-execute it off the dedup/confirm path.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
+        leaked_key = f"{leaked_name}:{json.dumps(leaked_args, sort_keys=True, default=str)}"
+        if leaked_key in seen_call_keys:
+            # Already recovered this exact call once — a re-leak means the model
+            # is stuck; stop rather than loop on it.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
+        # Recover a leaked READ: run it once and feed the result back so the
+        # model answers from it next iteration. Recording the key lets the check
+        # above (and the no-progress guard) bound any re-leak.
+        logger.warning(
+            "tool_call_leak_recovered",
+            agent=self.name,
+            tool=leaked_name,
+            operation="llm_loop",
+        )
+        seen_call_keys.add(leaked_key)
+        leaked_result = await self._execute_tool(leaked_name, leaked_args, chat_id=chat_id)
+        messages.append({"role": "assistant", "content": content or ""})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"That last message was an internal {leaked_name} tool "
+                    "request, not an answer. Here is its result: "
+                    f"{json.dumps(leaked_result, default=str)}. "
+                    "Now answer my question in plain language."
+                ),
+            }
+        )
+        return False, ""
 
     @staticmethod
     def _detect_leaked_tool_call(content: str) -> tuple[str, dict[str, Any]] | None:
