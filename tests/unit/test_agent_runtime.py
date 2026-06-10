@@ -3271,3 +3271,208 @@ class TestListenConfirmerWiring:
 
         assert captured.get("confirmer") is None
         assert captured.get("user_id") == "userZ"
+
+
+# ---------------------------------------------------------------------------
+# U7 — sole-egress gate (R8/R10)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLMNovelToolCallEachIteration:
+    """Issues a DIFFERENT read each iteration and never answers on its own.
+
+    Every iteration makes progress (a novel call), so no in-loop break fires
+    and the loop genuinely exhausts ``max_iterations`` before force-finalizing
+    via ``complete()`` — unlike :class:`_FakeLLMAlwaysToolCall`, whose verbatim
+    repeat trips the no-progress break at iteration 2. ``final_text`` scripts
+    what the forced ``complete()`` call returns (a clean answer, leaked
+    tool-call JSON, or a ``<think>``-wrapped answer).
+    """
+
+    def __init__(self, final_text: str = "Exhausted-iterations final answer.") -> None:
+        self.model = "fake:model"
+        self._final_text = final_text
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return self._final_text
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        tc = MagicMock()
+        tc.function.name = "search_assets"
+        tc.function.arguments = json.dumps({"query": f"pump-{self._n}"})
+        tc.id = f"call_{self._n:03d}"
+        return {"content": "", "tool_calls": [tc]}
+
+
+class _FakeLLMInterleavedDuplicateWrite:
+    """Pairs a novel read with the SAME re-issued write, every iteration.
+
+    The novel read keeps ``iteration_made_progress`` alive each round, so the
+    duplicate-suppression LIMIT — not the no-progress guard — is what breaks
+    the loop: the exit path the sole-egress matrix must drive distinctly.
+    """
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Suppression-limit final answer."
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        fresh = MagicMock()
+        fresh.function.name = "search_assets"
+        fresh.function.arguments = json.dumps({"query": f"area-{self._n}"})
+        fresh.id = f"fresh_{self._n:03d}"
+        write = MagicMock()
+        write.function.name = "create_work_order"
+        write.function.arguments = json.dumps(
+            {"asset_id": "P-201", "type": "corrective", "description": "Replace bearing"}
+        )
+        write.id = f"write_{self._n:03d}"
+        return {"content": "", "tool_calls": [fresh, write]}
+
+
+class TestSoleEgressGate:
+    """R8/R10 — ``_finalize_turn`` is the sole egress for agent-loop text.
+
+    Each of the four ``_llm_loop`` exit paths (natural text-only return,
+    no-progress break, duplicate-suppression limit, max-iterations exhaustion)
+    is driven end-to-end through ``handle_message_full`` with a scripted fake.
+    A spy wrapping the bound ``_finalize_turn`` records every gate pass; the
+    matrix asserts the gate ran exactly once per turn and the
+    ``AgentResponse`` the caller received IS the object the gate returned —
+    sole egress asserted by a test, not left as a convention.
+    """
+
+    @staticmethod
+    def _spy_finalize(agent: Agent) -> list[AgentResponse]:
+        """Wrap the bound ``_finalize_turn`` to record every gate pass."""
+        recorded: list[AgentResponse] = []
+        original = agent._finalize_turn
+
+        def wrapper(**kwargs: Any) -> AgentResponse:
+            resp = original(**kwargs)
+            recorded.append(resp)
+            return resp
+
+        agent._finalize_turn = wrapper  # type: ignore[method-assign]
+        return recorded
+
+    @pytest.mark.parametrize(
+        ("make_llm", "make_connector", "agent_kwargs", "forced", "final_text"),
+        [
+            (
+                lambda: _FakeLLM("Natural final answer."),
+                _FakeConnector,
+                {},
+                False,
+                "Natural final answer.",
+            ),
+            (
+                _FakeLLMRepeatRead,
+                _FakeConnector,
+                {},
+                True,
+                "Final answer.",
+            ),
+            (
+                _FakeLLMInterleavedDuplicateWrite,
+                _CountingCreateWoConnector,
+                {"confirmations": False},
+                True,
+                "Suppression-limit final answer.",
+            ),
+            (
+                _FakeLLMNovelToolCallEachIteration,
+                _FakeConnector,
+                {},
+                True,
+                "Exhausted-iterations final answer.",
+            ),
+        ],
+        ids=[
+            "natural-return",
+            "no-progress-break",
+            "duplicate-suppression-limit",
+            "max-iterations",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_every_exit_path_passes_the_gate(
+        self,
+        make_llm: Any,
+        make_connector: Any,
+        agent_kwargs: dict[str, Any],
+        forced: bool,
+        final_text: str,
+    ) -> None:
+        from machina.agent.runtime import _PARTIAL_COMPLETENESS_HEDGE
+
+        agent = Agent(plant=_make_plant(), connectors=[make_connector()], **agent_kwargs)
+        agent._llm = make_llm()  # type: ignore[assignment]
+        recorded = self._spy_finalize(agent)
+
+        resp = await agent.handle_message_full("Tell me about P-201")
+
+        # Exactly one gate pass for the turn, and the response the caller got
+        # is the very object the gate produced — no side door.
+        assert len(recorded) == 1
+        assert resp is recorded[0]
+        # Forced paths are hedged as partial (R1.4); the natural return is not.
+        expected = final_text + (_PARTIAL_COMPLETENESS_HEDGE if forced else "")
+        assert resp.text == expected
+        assert resp.completeness == ("partial" if forced else "complete")
+
+    @pytest.mark.asyncio
+    async def test_forced_final_leaked_tool_call_is_suppressed(self) -> None:
+        """Force-finalization returning tool-call JSON → the gate's leak backstop.
+
+        Locks in the topology claim: even text produced by the forced
+        ``complete()`` call cannot reach the user without passing the gate, so
+        a leak there is suppressed exactly like one on the natural path.
+        """
+        from machina.agent.runtime import _TOOL_CALL_LEAK_FALLBACK
+
+        leak = json.dumps({"name": "create_work_order", "arguments": {"asset_id": "P-201"}})
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMNovelToolCallEachIteration(final_text=leak)  # type: ignore[assignment]
+        recorded = self._spy_finalize(agent)
+
+        resp = await agent.handle_message_full("Tell me about P-201")
+
+        assert len(recorded) == 1
+        assert resp is recorded[0]
+        assert resp.text == _TOOL_CALL_LEAK_FALLBACK
+        assert resp.is_fallback is True
+        assert "create_work_order" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_forced_final_think_block_never_reaches_user(self) -> None:
+        """Force-finalization returning a ``<think>``-wrapped answer → scrubbed.
+
+        The U7 scrub covers the force-finalization path too: the reasoning
+        block never reaches the user, the surviving answer is delivered (with
+        the forced-path hedge), and nothing falls back.
+        """
+        raw = "<think>secret chain of thought</think>The pump needs a new bearing."
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMNovelToolCallEachIteration(final_text=raw)  # type: ignore[assignment]
+        recorded = self._spy_finalize(agent)
+
+        resp = await agent.handle_message_full("Tell me about P-201")
+
+        assert len(recorded) == 1
+        assert resp is recorded[0]
+        assert "secret chain of thought" not in resp.text
+        assert "<think" not in resp.text
+        assert resp.text.startswith("The pump needs a new bearing.")
+        assert resp.is_fallback is False
+        assert resp.completeness == "partial"

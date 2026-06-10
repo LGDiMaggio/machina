@@ -1,4 +1,4 @@
-"""U3/U6 — Output-validity gate (leaked tool-call detection).
+"""U3/U6/U7 — Output-validity gate (leaked tool calls, reasoning-block scrub).
 
 A model that emits a tool/function call as plain-text content (weak local
 models) must never have that raw JSON shown as the answer. Leaked reads are
@@ -8,6 +8,10 @@ U6 makes detection shape-based: any tool-call-shaped payload is intercepted
 regardless of whether the tool name is a known builtin (R9). Hallucinated
 tools (e.g. llama3's ``get_bearing_replacement_procedure``) are suppressed to
 the fallback — never shown raw, never executed, never re-entered.
+
+U7 prepends a ``<think>...</think>`` scrub to the gate's validator chain:
+reasoning models (deepseek-r1) emit their chain of thought in content, and it
+must never reach the user (see :class:`TestThinkBlockScrub`).
 """
 
 from __future__ import annotations
@@ -17,7 +21,12 @@ from typing import Any, ClassVar
 
 import pytest
 
-from machina.agent.runtime import _TOOL_CALL_LEAK_FALLBACK, Agent
+from machina.agent.runtime import (
+    _EMPTY_RESPONSE_FALLBACK,
+    _REPEATED_RESPONSE_FALLBACK,
+    _TOOL_CALL_LEAK_FALLBACK,
+    Agent,
+)
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 
@@ -306,4 +315,102 @@ class TestFinalizeBackstop:
             chat_id="c1", user_text="q", raw_response="P-201 is a cooling pump."
         )
         assert resp.text == "P-201 is a cooling pump."
+        assert resp.is_fallback is False
+
+
+class TestThinkBlockScrub:
+    """U7 — the gate scrubs reasoning-model ``<think>`` blocks before validating.
+
+    deepseek-r1-style models emit their chain of thought as
+    ``<think>...</think>`` inside message content. The scrub is
+    strip-and-keep-remainder: every think block is removed (case-insensitive,
+    spanning newlines) and any surviving answer proceeds through the normal
+    validator chain; a think-only response strips to empty and falls into the
+    existing empty-response fallback. Pinned choice: an UNCLOSED ``<think>``
+    swallows everything to end-of-string — a weak model that truncates
+    mid-reasoning produced no answer, so text after the opener is reasoning,
+    never answer.
+    """
+
+    _ANSWER = "Replace the bearing on P-201 within 48 hours."
+
+    def test_think_block_plus_answer_keeps_answer(self) -> None:
+        agent = Agent()
+        raw = f"<think>User asks about P-201. Check the bearing history.</think>\n{self._ANSWER}"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == self._ANSWER
+        assert "<think" not in resp.text
+        assert resp.is_fallback is False
+
+    def test_scrub_is_case_insensitive_and_spans_newlines(self) -> None:
+        agent = Agent()
+        raw = f"<THINK>line one\nline two\nline three</THINK>{self._ANSWER}"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == self._ANSWER
+        assert "line two" not in resp.text
+
+    def test_multiple_think_blocks_all_removed(self) -> None:
+        agent = Agent()
+        raw = f"<think>first</think>{self._ANSWER}<think>second</think>"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == self._ANSWER
+        assert "first" not in resp.text
+        assert "second" not in resp.text
+
+    def test_think_only_response_falls_back(self) -> None:
+        agent = Agent()
+        raw = "<think>only reasoning in here, never an answer</think>"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.is_fallback is True
+        assert "reasoning" not in resp.text
+
+    def test_unclosed_think_block_scrubs_to_end_of_string(self) -> None:
+        """Pinned: an unclosed ``<think>`` means everything after it is reasoning.
+
+        Weak models truncate mid-reasoning; the text after the opener — even
+        if it reads like an answer — is chain-of-thought, so the whole tail is
+        scrubbed and the empty-response fallback fires.
+        """
+        agent = Agent()
+        raw = f"<think>reasoning that never closes. {self._ANSWER}"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.is_fallback is True
+        assert self._ANSWER not in resp.text
+
+    def test_think_plus_echo_resolves_to_one_fallback(self) -> None:
+        """Validator short-circuit: scrub then echo → exactly ONE fallback."""
+        long_answer = (
+            "I'm a specialized maintenance assistant powered by the Machina "
+            "framework. I can help with equipment information, maintenance "
+            "history, procedures and manuals, failure diagnosis, spare parts, "
+            "work orders, and maintenance schedules. What shall we do today?"
+        )
+        agent = Agent()
+        agent._finalize_turn(chat_id="c1", user_text="q1", raw_response=long_answer)
+        r2 = agent._finalize_turn(
+            chat_id="c1",
+            user_text="q2 — a different question",
+            raw_response=f"<think>they asked again, reuse my intro</think>{long_answer}",
+        )
+        # One fallback, not stacked: the scrubbed remainder is the echo, so the
+        # echo guard fires once and its message is delivered verbatim.
+        assert r2.is_fallback is True
+        assert r2.text == _REPEATED_RESPONSE_FALLBACK
+
+    def test_clean_output_byte_identical(self) -> None:
+        """No spurious stripping: a normal answer passes through unchanged.
+
+        Includes near-miss angle-bracket tags (``<thinking>``, ``<b>``) and
+        leading whitespace to pin that the scrub only fires on real
+        ``<think>`` blocks and never trims an untouched answer.
+        """
+        agent = Agent()
+        text = (
+            "  I think P-201's impeller is fine — my <thinking aloud> note "
+            "stays.\nUse <b>bold</b> markup if needed."
+        )
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=text)
+        assert resp.text == text
         assert resp.is_fallback is False

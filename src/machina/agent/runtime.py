@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -203,6 +204,14 @@ _INVALID_ARGS_MESSAGE = (
 # junk every iteration would otherwise loop to max_iterations — this counter is
 # the real bound (H1).
 _MAX_ARG_CORRECTION_ATTEMPTS = 2
+
+# Reasoning models (e.g. deepseek-r1) emit their chain of thought as
+# <think>...</think> blocks inside message content (U7/R10). Matched
+# case-insensitively and across newlines. An UNCLOSED <think> matches to
+# end-of-string: weak models truncate mid-reasoning, and everything after the
+# opener is reasoning, never answer — so the whole tail is scrubbed and the
+# empty-response fallback fires. Near-miss tags (<thinking>, <b>) never match.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.IGNORECASE | re.DOTALL)
 
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
@@ -1111,11 +1120,20 @@ class Agent:
         1. Parse citations against the per-turn chunk registry (the ordered
            index map resolves visible ``[n]`` markers; the registry backs the
            source/page fallback).
-        2. Append the user message and the rendered assistant reply to history.
-        3. In a ``finally``, always drop the per-turn chunk registry and ordered
+        2. Run the validator chain on the rendered text, in order: think-tag
+           scrub → empty-response fallback → echo guard → leaked-tool-call
+           backstop → completeness hedge. The scrub (U7) removes reasoning-model
+           ``<think>...</think>`` blocks (case-insensitive, spans newlines;
+           an UNCLOSED ``<think>`` swallows to end-of-string — truncated
+           reasoning is still reasoning, never answer). Strip-and-keep-remainder
+           semantics: meaningful text surviving the scrub proceeds through the
+           rest of the chain; a think-only response strips to empty and the
+           empty-response fallback fires naturally.
+        3. Append the user message and the rendered assistant reply to history.
+        4. In a ``finally``, always drop the per-turn chunk registry and ordered
            index map for ``chat_id`` — even on error — so a long-lived agent
            does not accumulate orphan slots from failed turns.
-        4. Log ``response_generated`` and return the :class:`AgentResponse`.
+        5. Log ``response_generated`` and return the :class:`AgentResponse`.
 
         Args:
             chat_id: Conversation identifier.
@@ -1141,6 +1159,22 @@ class Agent:
                 self._turn_chunks.get(chat_id, {}),
                 self._turn_ordered.get(chat_id, []),
             )
+            # Scrub reasoning-model <think> blocks FIRST (U7), so a think-only
+            # response strips to empty and falls into the empty-response
+            # fallback below naturally. When the scrub removed nothing, the
+            # rendered text is left byte-identical (no spurious trimming of
+            # clean answers). Never log the scrubbed content itself.
+            scrubbed = _THINK_BLOCK_RE.sub("", rendered)
+            if scrubbed != rendered:
+                cleaned = scrubbed.strip()
+                logger.info(
+                    "think_block_scrubbed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                    scrubbed_chars=len(rendered) - len(cleaned),
+                )
+                rendered = cleaned
             # A model that returns nothing (empty completion) or only a
             # citations block leaves an empty rendered answer. Surface an
             # explicit fallback instead of delivering blank output — weak
