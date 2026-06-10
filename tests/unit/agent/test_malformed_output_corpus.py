@@ -344,13 +344,12 @@ def _assert_disposition(response: Any, expected: dict[str, Any], spy: _SpyWriteC
     )
 
     if disposition in ("fallback_leak", "fallback_leak_write"):
-        # The user-facing text is the leak fallback on BOTH suppression paths.
-        # ``is_fallback`` is deliberately NOT asserted here: a loop-seam
-        # suppression returns the fallback TEXT but the structured flag stays
-        # False today (only the _finalize_turn backstop sets it) — a pinned
-        # inconsistency; each fixture pins its path's flag via expected
-        # ``is_fallback`` (see corpus/README.md, Behavior notes).
+        # The user-facing text AND the structured flag agree on BOTH
+        # suppression paths: a loop-seam suppression substitutes the fallback
+        # text and _finalize_turn recognises the sentinel and sets
+        # ``is_fallback``; the gate's own backstop sets both directly.
         assert response.text == _TOOL_CALL_LEAK_FALLBACK
+        assert response.is_fallback is True
     elif disposition == "fallback_empty":
         assert response.text == _EMPTY_RESPONSE_FALLBACK
         assert response.is_fallback is True
