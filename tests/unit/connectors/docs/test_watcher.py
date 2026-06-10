@@ -37,10 +37,11 @@ def _recording_factory(record: list[FakeTimer]):
     return factory
 
 
-def _file_event(path) -> MagicMock:
+def _file_event(path, event_type: str = "modified") -> MagicMock:
     event = MagicMock()
     event.is_directory = False
     event.src_path = str(path)
+    event.event_type = event_type
     return event
 
 
@@ -155,6 +156,30 @@ class TestDebouncedHandler:
 
         timers[1].fire()
         cb.assert_called_once()
+
+    def test_ignores_read_only_events(self, tmp_path):
+        """opened/closed_no_write (Linux inotify read events) must arm nothing.
+
+        The refresh callback itself reads the watched file; on Linux that
+        read emits these events, so reacting to them would re-arm the timer
+        and self-trigger an endless refresh loop (seen on CI as the debounce
+        test observing [7, 7, 7]).
+        """
+        target = tmp_path / "test.xlsx"
+        target.touch()
+        cb = MagicMock()
+        timers: list[FakeTimer] = []
+        handler = self._handler(target, cb, timers)
+
+        handler.dispatch(_file_event(target, event_type="opened"))
+        handler.dispatch(_file_event(target, event_type="closed_no_write"))
+
+        assert timers == []
+        cb.assert_not_called()
+
+        # A real write event still arms normally afterwards.
+        handler.dispatch(_file_event(target, event_type="modified"))
+        assert len(timers) == 1
 
     def test_ignores_non_matching_path(self, tmp_path):
         target = tmp_path / "test.xlsx"

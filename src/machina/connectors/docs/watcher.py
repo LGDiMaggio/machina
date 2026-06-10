@@ -98,8 +98,17 @@ class _DebouncedHandler:
         self._idle.set()
 
     def dispatch(self, event: Any) -> None:
-        """Handle a watchdog event: (re)arm the trailing-edge debounce timer."""
+        """Handle a watchdog event: (re)arm the trailing-edge debounce timer.
+
+        Read-only events are ignored: on Linux, inotify reports ``opened``
+        and ``closed_no_write`` for every read of the watched file, so the
+        refresh callback's own read would otherwise re-arm the timer and
+        feed back into an endless refresh loop (Windows backends never emit
+        these, which is why the loop only reproduces on Linux CI).
+        """
         if event.is_directory:
+            return
+        if event.event_type in ("opened", "closed_no_write"):
             return
         src = str(Path(event.src_path).resolve())
         if src not in self._paths:
