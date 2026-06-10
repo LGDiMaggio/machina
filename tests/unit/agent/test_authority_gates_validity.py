@@ -9,6 +9,11 @@ regardless of whether the tool name is a known builtin (R9). Hallucinated
 tools (e.g. llama3's ``get_bearing_replacement_procedure``) are suppressed to
 the fallback — never shown raw, never executed, never re-entered.
 
+Disposition is per-agent: "known" means on THIS agent instance's tool surface
+(``_known_tool_names``, derived from the same ``_get_available_tools`` source
+dispatch uses), so capability-derived reads like ``get_work_order`` recover,
+while the same name with no enabling connector stays suppressed.
+
 U7 prepends a ``<think>...</think>`` scrub to the gate's validator chain:
 reasoning models (deepseek-r1) emit their chain of thought in content, and it
 must never reach the user (see :class:`TestThinkBlockScrub`).
@@ -29,6 +34,7 @@ from machina.agent.runtime import (
 )
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
+from machina.domain.work_order import WorkOrder, WorkOrderType
 
 
 def _plant() -> Plant:
@@ -59,6 +65,33 @@ class _ReadAssetsConnector:
 
     async def read_assets(self, **kwargs: Any) -> list[Asset]:
         return list(_plant().assets.values())
+
+
+class _WorkOrderReadConnector:
+    """GET_WORK_ORDER connector — puts the capability-derived read tool on the surface."""
+
+    capabilities: ClassVar[list[str]] = ["get_work_order"]
+
+    def __init__(self) -> None:
+        self.fetched = 0
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        self.fetched += 1
+        return WorkOrder(
+            id=work_order_id,
+            type=WorkOrderType.CORRECTIVE,
+            asset_id="P-201",
+            description="Bearing replacement",
+        )
 
 
 class _SpyWriteConnector:
@@ -135,6 +168,36 @@ class _AlwaysLeaksReadLLM:
         self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
     ) -> dict[str, Any]:
         return {"content": _leak("search_assets", {"query": "pump"}), "tool_calls": None}
+
+
+class _LeakedCapabilityReadLLM:
+    """Emits a get_work_order call as content once, then answers normally.
+
+    ``get_work_order`` is a capability-derived tool (Capability.GET_WORK_ORDER),
+    NOT one of the always-on builtins — the leak the 2026-06-10 eval baseline
+    showed being misclassified as hallucinated by the static known-name set.
+    """
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "complete-path"
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n == 1:
+            return {
+                "content": _leak("get_work_order", {"work_order_id": "WO-001"}),
+                "tool_calls": None,
+            }
+        return {
+            "content": "WO-001 is a corrective bearing replacement on P-201.",
+            "tool_calls": None,
+        }
 
 
 # The verbatim payload llama3 emitted as content (hallucinated tool name not in
@@ -377,6 +440,36 @@ class TestLoopLeakHandling:
         )
         text = await agent._llm_loop([{"role": "user", "content": "list assets"}], "c1")
         assert text == _TOOL_CALL_LEAK_FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_leaked_capability_read_is_recovered_on_surface(self) -> None:
+        """A leaked capability-derived READ (get_work_order) recovers.
+
+        Disposition derives from the agent INSTANCE's tool surface — the same
+        ``_get_available_tools`` source dispatch uses — so a tool enabled by a
+        connector capability is "known" even though it is not an always-on
+        builtin. Pins the 2026-06-10 eval-baseline fix (the static
+        ``BUILTIN_TOOLS`` set misclassified this leak as hallucinated).
+        """
+        conn = _WorkOrderReadConnector()
+        agent = Agent(plant=_plant(), llm=_LeakedCapabilityReadLLM(), connectors=[conn])
+        text = await agent._llm_loop([{"role": "user", "content": "status of WO-001?"}], "c1")
+        assert text == "WO-001 is a corrective bearing replacement on P-201."
+        assert conn.fetched == 1  # the read executed exactly once (bounded re-entry)
+
+    @pytest.mark.asyncio
+    async def test_leaked_capability_read_off_surface_is_suppressed(self) -> None:
+        """The SAME leak with no GET_WORK_ORDER connector is suppressed.
+
+        Without the capability the tool is not on this agent's surface, so the
+        leak dispositions as hallucinated: fallback, never executed, never
+        re-entered — per-instance, fail-closed.
+        """
+        llm = _LeakedCapabilityReadLLM()
+        agent = Agent(plant=_plant(), llm=llm, connectors=[_ReadAssetsConnector()])
+        text = await agent._llm_loop([{"role": "user", "content": "status of WO-001?"}], "c1")
+        assert text == _TOOL_CALL_LEAK_FALLBACK
+        assert llm._n == 1  # suppressed immediately, never re-entered
 
     @pytest.mark.asyncio
     async def test_hallucinated_tool_is_suppressed_never_executed(self) -> None:

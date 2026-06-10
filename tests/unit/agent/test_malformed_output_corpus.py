@@ -33,6 +33,7 @@ from machina.agent.runtime import (
 )
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
+from machina.domain.work_order import WorkOrder, WorkOrderStatus, WorkOrderType
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
 FIXTURE_PATHS = sorted(CORPUS_DIR.glob("*.json"))
@@ -240,6 +241,38 @@ class _ReadAssetsConnector:
         return list(_plant().assets.values())
 
 
+class _WorkOrderReadConnector:
+    """GET_WORK_ORDER connector — a capability-derived READ on the tool surface.
+
+    Leak disposition derives from the agent instance's tool surface (the same
+    ``_get_available_tools`` source dispatch uses), so a leaked
+    ``get_work_order`` READ must RECOVER, not be suppressed as hallucinated —
+    see ``leaked-capability-read-recovered.json``.
+    """
+
+    capabilities: ClassVar[list[str]] = ["get_work_order"]
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        if work_order_id != "WO-001":
+            return None
+        return WorkOrder(
+            id="WO-001",
+            type=WorkOrderType.CORRECTIVE,
+            status=WorkOrderStatus.IN_PROGRESS,
+            asset_id="P-201",
+            description="Bearing replacement on P-201",
+        )
+
+
 class _SpyWriteConnector:
     """CREATE_WORK_ORDER connector recording whether any write ever executed.
 
@@ -393,7 +426,11 @@ async def test_malformed_output_case(fixture_path: Path) -> None:
 
     llm = _ScriptedLLM(case["turns"])
     spy = _SpyWriteConnector()
-    agent = Agent(plant=_plant(), llm=llm, connectors=[_ReadAssetsConnector(), spy])
+    agent = Agent(
+        plant=_plant(),
+        llm=llm,
+        connectors=[_ReadAssetsConnector(), _WorkOrderReadConnector(), spy],
+    )
 
     response: Any = None
     for message in case.get("user_messages") or [_DEFAULT_USER_MESSAGE]:

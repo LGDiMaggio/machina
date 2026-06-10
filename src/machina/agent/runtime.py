@@ -52,15 +52,6 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
-# Every builtin tool name — used to disposition a tool/function call the model
-# emitted as plain-text content instead of a structured tool_call (weak local
-# models do this): known read → recover, known write / unknown name → suppress.
-# Detection itself is shape-based and name-agnostic (U6/R9); this set is the
-# post-detection lookup in the callers, NOT a filter inside the detector.
-# Sourced from BUILTIN_TOOLS so it can never drift from the real dispatch
-# surface. See _detect_leaked_tool_call and _handle_text_only_completion.
-_KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
-
 # Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
 # payloads that are recognisably tool-call-shaped but do NOT parse — truncated
 # JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
@@ -1314,7 +1305,7 @@ class Agent:
                     agent=self.name,
                     chat_id=chat_id,
                     tool=leaked[0],
-                    known=leaked[0] in _KNOWN_TOOL_NAMES,
+                    known=leaked[0] in self._known_tool_names(),
                     operation="finalize_turn",
                 )
                 rendered = (
@@ -2215,6 +2206,17 @@ class Agent:
                 return [wo.model_dump(mode="json") for wo in wos]
             return {"error": "No CMMS connector available"}
 
+        if name == "get_work_order":
+            connectors = self._registry.find_by_capability(Capability.GET_WORK_ORDER)
+            if connectors:
+                _, conn = connectors[0]
+                work_order_id = args.get("work_order_id", "")
+                wo = await conn.get_work_order(work_order_id)  # type: ignore[attr-defined]
+                if wo is None:
+                    return {"error": f"Work order {work_order_id!r} not found"}
+                return wo.model_dump(mode="json")
+            return {"error": "No CMMS connector available"}
+
         if name == "create_work_order":
             return await self._tool_create_work_order(args, chat_id=chat_id)
 
@@ -2337,15 +2339,20 @@ class Agent:
         ``(False, "")`` when the loop should ``continue`` after this method has
         recovered a leaked KNOWN READ, mutating ``messages`` and
         ``seen_call_keys`` in place. Detection is shape-based (U6/R9); the
-        known/unknown name lookup happens here, as disposition.
+        known/unknown name lookup happens here, as disposition, against THIS
+        agent's tool surface (:meth:`_known_tool_names`) — the same
+        capability-derived set the loop offers and dispatch executes, so a
+        leaked capability-derived READ (e.g. ``get_work_order``) recovers
+        instead of being misclassified as hallucinated.
         """
         leaked = self._detect_leaked_tool_call(content)
         if leaked is None:
             return True, content or ""
         leaked_name, leaked_args = leaked
-        if leaked_name not in _KNOWN_TOOL_NAMES:
-            # A hallucinated tool (U6/R9): not on the dispatch surface, so it
-            # can neither be executed nor recovered — suppress, never re-enter.
+        if leaked_name not in self._known_tool_names():
+            # A hallucinated tool (U6/R9): not on this agent's tool surface, so
+            # it can neither be executed nor recovered — suppress, never
+            # re-enter.
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
@@ -2684,6 +2691,7 @@ class Agent:
         cap_to_tool: dict[Capability, list[str]] = {
             Capability.READ_ASSETS: ["search_assets", "list_assets", "get_asset_details"],
             Capability.READ_WORK_ORDERS: ["read_work_orders"],
+            Capability.GET_WORK_ORDER: ["get_work_order"],
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],
             Capability.READ_SPARE_PARTS: ["check_spare_parts"],
@@ -2703,6 +2711,24 @@ class Agent:
             enabled_tool_names.add("execute_workflow")
 
         return [tool for tool in BUILTIN_TOOLS if tool["function"]["name"] in enabled_tool_names]
+
+    def _known_tool_names(self) -> frozenset[str]:
+        """Names on THIS agent's dispatchable tool surface (leak disposition).
+
+        Used to disposition a tool/function call the model emitted as
+        plain-text content instead of a structured ``tool_call`` (weak local
+        models do this): known read → recover via bounded re-entry, known
+        write → suppress, unknown → suppress. Derived from the SAME
+        :meth:`_get_available_tools` list the loop offers to the model and
+        ``_execute_tool`` dispatches, so the disposition can never drift from
+        dispatch — a module-level set built from ``BUILTIN_TOOLS`` would
+        misclassify capability-derived tools (e.g. ``get_work_order``) as
+        hallucinated and degrade recoverable reads to the leak fallback.
+        Detection itself stays shape-based and name-agnostic (U6/R9); this is
+        the post-detection lookup in the callers, NOT a filter inside the
+        detector.
+        """
+        return frozenset(t["function"]["name"] for t in self._get_available_tools())
 
     def _add_to_history(self, chat_id: str, role: str, content: str) -> None:
         """Add a message to the conversation history."""

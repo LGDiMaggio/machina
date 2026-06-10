@@ -98,6 +98,27 @@ class _FakeCreateWoConnector(_FakeConnector):
         return work_order
 
 
+class _FakeGetWoConnector(_FakeConnector):
+    """Connector that also supports the get_work_order single fetch."""
+
+    capabilities: ClassVar[list[str]] = [
+        "read_assets",
+        "read_work_orders",
+        "get_work_order",
+    ]
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        if work_order_id != "WO-001":
+            return None
+        return WorkOrder(
+            id="WO-001",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="P-201",
+            description="Replace bearing",
+        )
+
+
 class _FakeDocConnector:
     """Connector stub for document search."""
 
@@ -503,6 +524,30 @@ class TestExecuteTool:
     async def test_read_work_orders_no_connector(self) -> None:
         agent = Agent()
         result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_tool(self) -> None:
+        conn = _FakeGetWoConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        result = await agent._execute_tool("get_work_order", {"work_order_id": "WO-001"})
+        assert result["id"] == "WO-001"
+        assert result["asset_id"] == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_not_found(self) -> None:
+        conn = _FakeGetWoConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        result = await agent._execute_tool("get_work_order", {"work_order_id": "WO-MISSING"})
+        assert "error" in result
+        assert "WO-MISSING" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_no_connector(self) -> None:
+        agent = Agent()
+        result = await agent._execute_tool("get_work_order", {"work_order_id": "WO-001"})
         assert "error" in result
 
     @pytest.mark.asyncio
