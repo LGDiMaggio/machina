@@ -1,0 +1,22 @@
+{
+  "id": "leaked-capability-read-recovered",
+  "description": "Capability-derived READ tool call (get_work_order, enabled by Capability.GET_WORK_ORDER) emitted as plain-text content. Provenance: conversational eval baseline 2026-06-10 -- 'executing_tool tool=get_work_order' showed the tool dispatches for real, yet the leak disposition logged 'tool_call_leak_suppressed known=False' because the known set was a module-level frozenset of BUILTIN_TOOLS, not the agent instance's tool surface. The fix derives disposition from the same _get_available_tools() source dispatch uses, so this leak now recovers via the bounded re-entry path: the read executes once, its result is fed back, and the model's next completion is the real answer.",
+  "user_messages": ["What's the status of work order WO-001?"],
+  "turns": [
+    {
+      "content": "{\"name\": \"get_work_order\", \"arguments\": {\"work_order_id\": \"WO-001\"}}",
+      "tool_calls": null
+    },
+    {
+      "content": "Work order WO-001 is in progress: a corrective bearing replacement on pump P-201.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "recovered_read",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["WO-001 is in progress"],
+    "user_text_excludes": ["get_work_order", "\"arguments\""]
+  }
+}

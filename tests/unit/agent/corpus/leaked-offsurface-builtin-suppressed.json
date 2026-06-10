@@ -1,0 +1,17 @@
+{
+  "id": "leaked-offsurface-builtin-suppressed",
+  "description": "Builtin-named READ leaked as content for a tool NOT on this agent's surface: search_documents is a real BUILTIN_TOOLS entry, but the harness wires no SEARCH_DOCUMENTS connector, so the tool was never offered to the model. Provenance: the 2026-06-10 per-agent disposition fix (companion to leaked-capability-read-recovered) -- 'known' now means THIS agent instance's tool surface, not the static builtin list, so an off-surface builtin name dispositions exactly like a hallucinated name: suppressed at the loop seam, never executed, never re-entered (fail-closed, R9/U6).",
+  "user_messages": ["Find the bearing replacement procedure for P-201"],
+  "turns": [
+    {
+      "content": "{\"name\": \"search_documents\", \"arguments\": {\"query\": \"bearing replacement procedure P-201\"}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["search_documents", "\"arguments\""]
+  }
+}

@@ -9,6 +9,11 @@ regardless of whether the tool name is a known builtin (R9). Hallucinated
 tools (e.g. llama3's ``get_bearing_replacement_procedure``) are suppressed to
 the fallback — never shown raw, never executed, never re-entered.
 
+Disposition is per-agent: "known" means on THIS agent instance's tool surface
+(``_known_tool_names``, derived from the same ``_get_available_tools`` source
+dispatch uses), so capability-derived reads like ``get_work_order`` recover,
+while the same name with no enabling connector stays suppressed.
+
 U7 prepends a ``<think>...</think>`` scrub to the gate's validator chain:
 reasoning models (deepseek-r1) emit their chain of thought in content, and it
 must never reach the user (see :class:`TestThinkBlockScrub`).
@@ -27,8 +32,10 @@ from machina.agent.runtime import (
     _TOOL_CALL_LEAK_FALLBACK,
     Agent,
 )
+from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
+from machina.domain.work_order import WorkOrder, WorkOrderType
 
 
 def _plant() -> Plant:
@@ -61,6 +68,33 @@ class _ReadAssetsConnector:
         return list(_plant().assets.values())
 
 
+class _WorkOrderReadConnector:
+    """GET_WORK_ORDER connector — puts the capability-derived read tool on the surface."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.GET_WORK_ORDER})
+
+    def __init__(self) -> None:
+        self.fetched = 0
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        self.fetched += 1
+        return WorkOrder(
+            id=work_order_id,
+            type=WorkOrderType.CORRECTIVE,
+            asset_id="P-201",
+            description="Bearing replacement",
+        )
+
+
 class _SpyWriteConnector:
     """CREATE_WORK_ORDER connector that records whether a write executed."""
 
@@ -86,6 +120,8 @@ class _SpyWriteConnector:
 def _leak(name: str, args: dict[str, Any], *, shape: str = "A") -> str:
     if shape == "A":
         return json.dumps({"type": "function", "function": {"name": name, "arguments": args}})
+    if shape == "C":
+        return json.dumps({"function": name, "arguments": args})
     return json.dumps({"name": name, "arguments": args})
 
 
@@ -135,6 +171,36 @@ class _AlwaysLeaksReadLLM:
         return {"content": _leak("search_assets", {"query": "pump"}), "tool_calls": None}
 
 
+class _LeakedCapabilityReadLLM:
+    """Emits a get_work_order call as content once, then answers normally.
+
+    ``get_work_order`` is a capability-derived tool (Capability.GET_WORK_ORDER),
+    NOT one of the always-on builtins — the leak the 2026-06-10 eval baseline
+    showed being misclassified as hallucinated by the static known-name set.
+    """
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self._n = 0
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "complete-path"
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self._n += 1
+        if self._n == 1:
+            return {
+                "content": _leak("get_work_order", {"work_order_id": "WO-001"}),
+                "tool_calls": None,
+            }
+        return {
+            "content": "WO-001 is a corrective bearing replacement on P-201.",
+            "tool_calls": None,
+        }
+
+
 # The verbatim payload llama3 emitted as content (hallucinated tool name not in
 # the dispatch surface) — the leak U6 fixes. Includes the extra "id" key.
 _HALLUCINATED_LEAK = json.dumps(
@@ -174,6 +240,52 @@ class TestDetectLeakedToolCall:
     def test_shape_b_bare_name(self) -> None:
         out = Agent._detect_leaked_tool_call(_leak("search_assets", {"query": "x"}, shape="B"))
         assert out == ("search_assets", {"query": "x"})
+
+    def test_shape_c_function_string_key(self) -> None:
+        """Gap family 6: the tool name is the string VALUE of a "function" key.
+
+        The verbatim family the deepseek-r1:8b conversational eval baseline
+        (2026-06-10) leaked as user-facing answer text — neither shape A
+        (nested function object) nor shape B (top-level name key) matched it.
+        """
+        out = Agent._detect_leaked_tool_call(
+            _leak("get_asset_details", {"asset_id": "P-201"}, shape="C")
+        )
+        assert out == ("get_asset_details", {"asset_id": "P-201"})
+
+    def test_shape_c_parameters_key(self) -> None:
+        raw = json.dumps({"function": "search_assets", "parameters": {"query": "pump"}})
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "pump"})
+
+    def test_shape_c_string_arguments_are_parsed(self) -> None:
+        raw = json.dumps(
+            {"function": "get_asset_details", "arguments": json.dumps({"asset_id": "P-201"})}
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_unknown_tool_is_detected(self) -> None:
+        out = Agent._detect_leaked_tool_call(_leak("totally_made_up", {"x": 1}, shape="C"))
+        assert out == ("totally_made_up", {"x": 1})
+
+    def test_shape_c_empty_function_string_is_detected(self) -> None:
+        """An EMPTY-string "function" value is still a detector hit (not prose).
+
+        Matches shapes A/B, which accept empty names via ``isinstance``: the
+        empty name then dispositions as unknown in the callers and is
+        suppressed fail-closed — `{"function": "", "arguments": {...}}` must
+        never reach the user raw.
+        """
+        raw = json.dumps({"function": "", "arguments": {"x": 1}})
+        assert Agent._detect_leaked_tool_call(raw) == ("", {"x": 1})
+
+    def test_function_string_without_call_marker_is_not_a_leak(self) -> None:
+        # A plain-data JSON answer with a string "function" field but no
+        # arguments/parameters key is an answer, not a call (shape-based, R9).
+        raw = json.dumps({"function": "pumping", "note": "centrifugal"})
+        assert Agent._detect_leaked_tool_call(raw) is None
 
     def test_string_arguments_are_parsed(self) -> None:
         raw = json.dumps({"name": "search_assets", "arguments": json.dumps({"query": "x"})})
@@ -275,6 +387,45 @@ class TestDetectLeakedToolCallNormalization:
     def test_single_quoted_non_call_dict_is_not_a_leak(self) -> None:
         assert Agent._detect_leaked_tool_call("{'id': 'P-201', 'name': 'Pump'}") is None
 
+    # Shape C (gap family 6) x the PR #55 normalization combos: each
+    # pre-detection normalization must compose with the string-valued
+    # "function" key, not just with shapes A/B.
+
+    def test_shape_c_markdown_fenced_json_is_detected(self) -> None:
+        raw = "```json\n" + _leak("get_asset_details", {"asset_id": "P-201"}, shape="C") + "\n```"
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_top_level_array_first_call_wins(self) -> None:
+        raw = json.dumps(
+            [
+                {"function": "get_asset_details", "arguments": {"asset_id": "P-201"}},
+                {"function": "search_assets", "arguments": {"query": "pump"}},
+            ]
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_tool_calls_wrapper_is_unwrapped(self) -> None:
+        raw = json.dumps(
+            {"tool_calls": [{"function": "get_asset_details", "arguments": {"asset_id": "P-201"}}]}
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_single_quoted_pseudo_json_is_detected(self) -> None:
+        raw = "{'function': 'get_asset_details', 'arguments': {'asset_id': 'P-201'}}"
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
 
 class TestLeakedToolCallFragmentTripwire:
     """PR #55 detector-gap family (5): truncated/partial tool-call JSON.
@@ -289,6 +440,12 @@ class TestLeakedToolCallFragmentTripwire:
 
     def test_truncated_shape_b_call_trips(self) -> None:
         raw = '{"name": "search_assets", "arguments": {"query": "pu'
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
+
+    def test_truncated_shape_c_call_trips(self) -> None:
+        # Gap family 6, truncated: the string-valued "function" key counts as
+        # the name marker, "arguments" as the call marker.
+        raw = '{"function": "create_work_order", "arguments": {"asset_id": "P-2'
         assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
 
     def test_parsable_call_does_not_trip(self) -> None:
@@ -334,6 +491,36 @@ class TestLoopLeakHandling:
         )
         text = await agent._llm_loop([{"role": "user", "content": "list assets"}], "c1")
         assert text == _TOOL_CALL_LEAK_FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_leaked_capability_read_is_recovered_on_surface(self) -> None:
+        """A leaked capability-derived READ (get_work_order) recovers.
+
+        Disposition derives from the agent INSTANCE's tool surface — the same
+        ``_get_available_tools`` source dispatch uses — so a tool enabled by a
+        connector capability is "known" even though it is not an always-on
+        builtin. Pins the 2026-06-10 eval-baseline fix (the static
+        ``BUILTIN_TOOLS`` set misclassified this leak as hallucinated).
+        """
+        conn = _WorkOrderReadConnector()
+        agent = Agent(plant=_plant(), llm=_LeakedCapabilityReadLLM(), connectors=[conn])
+        text = await agent._llm_loop([{"role": "user", "content": "status of WO-001?"}], "c1")
+        assert text == "WO-001 is a corrective bearing replacement on P-201."
+        assert conn.fetched == 1  # the read executed exactly once (bounded re-entry)
+
+    @pytest.mark.asyncio
+    async def test_leaked_capability_read_off_surface_is_suppressed(self) -> None:
+        """The SAME leak with no GET_WORK_ORDER connector is suppressed.
+
+        Without the capability the tool is not on this agent's surface, so the
+        leak dispositions as hallucinated: fallback, never executed, never
+        re-entered — per-instance, fail-closed.
+        """
+        llm = _LeakedCapabilityReadLLM()
+        agent = Agent(plant=_plant(), llm=llm, connectors=[_ReadAssetsConnector()])
+        text = await agent._llm_loop([{"role": "user", "content": "status of WO-001?"}], "c1")
+        assert text == _TOOL_CALL_LEAK_FALLBACK
+        assert llm._n == 1  # suppressed immediately, never re-entered
 
     @pytest.mark.asyncio
     async def test_hallucinated_tool_is_suppressed_never_executed(self) -> None:

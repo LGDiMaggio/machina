@@ -52,23 +52,15 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
-# Every builtin tool name — used to disposition a tool/function call the model
-# emitted as plain-text content instead of a structured tool_call (weak local
-# models do this): known read → recover, known write / unknown name → suppress.
-# Detection itself is shape-based and name-agnostic (U6/R9); this set is the
-# post-detection lookup in the callers, NOT a filter inside the detector.
-# Sourced from BUILTIN_TOOLS so it can never drift from the real dispatch
-# surface. See _detect_leaked_tool_call and _handle_text_only_completion.
-_KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
-
 # Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
 # payloads that are recognisably tool-call-shaped but do NOT parse — truncated
 # JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
-# BOTH regexes must hit: a string-valued name key AND a call-marker key
+# BOTH regexes must hit: a string-valued name key (a "name" key, or shape C's
+# string-valued "function" key — gap family 6) AND a call-marker key
 # (arguments/parameters/tool_calls, or a function key opening an object).
 # Truncated plain-data JSON carries a name key but no call marker, so it is
 # not suppressed. See _looks_like_leaked_tool_call_fragment.
-_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"']name[\"']\s*:\s*[\"']")
+_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"'](?:name|function)[\"']\s*:\s*[\"']")
 _LEAK_FRAGMENT_MARKER_RE = re.compile(
     r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
 )
@@ -1313,7 +1305,9 @@ class Agent:
                     agent=self.name,
                     chat_id=chat_id,
                     tool=leaked[0],
-                    known=leaked[0] in _KNOWN_TOOL_NAMES,
+                    # known= is log-only; suppression at the egress gate is
+                    # unconditional.
+                    known=leaked[0] in self._known_tool_names(),
                     operation="finalize_turn",
                 )
                 rendered = (
@@ -2214,6 +2208,37 @@ class Agent:
                 return [wo.model_dump(mode="json") for wo in wos]
             return {"error": "No CMMS connector available"}
 
+        if name == "get_work_order":
+            connectors = self._registry.find_by_capability(Capability.GET_WORK_ORDER)
+            if connectors:
+                _, conn = connectors[0]
+                work_order_id = args.get("work_order_id", "")
+                # Args can arrive from the leak-recovery path (model text, no
+                # provider schema enforcement), so validate before dispatch.
+                if not isinstance(work_order_id, str) or not work_order_id:
+                    return {"error": "work_order_id must be a non-empty string"}
+                try:
+                    wo = await conn.get_work_order(  # type: ignore[attr-defined]
+                        work_order_id
+                    )
+                except Exception as exc:
+                    # A connector failure (ConnectorError/timeout) must degrade
+                    # to a tool-level error the model can react to, not kill the
+                    # whole turn — including the recovered-read re-entry path.
+                    logger.warning(
+                        "work_order_lookup_failed",
+                        agent=self.name,
+                        tool=name,
+                        work_order_id=work_order_id,
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
+                if wo is None:
+                    return {"error": f"Work order {work_order_id!r} not found"}
+                return wo.model_dump(mode="json")
+            return {"error": "No CMMS connector available"}
+
         if name == "create_work_order":
             return await self._tool_create_work_order(args, chat_id=chat_id)
 
@@ -2336,18 +2361,24 @@ class Agent:
         ``(False, "")`` when the loop should ``continue`` after this method has
         recovered a leaked KNOWN READ, mutating ``messages`` and
         ``seen_call_keys`` in place. Detection is shape-based (U6/R9); the
-        known/unknown name lookup happens here, as disposition.
+        known/unknown name lookup happens here, as disposition, against THIS
+        agent's tool surface (:meth:`_known_tool_names`) — the same
+        capability-derived set the loop offers and dispatch executes, so a
+        leaked capability-derived READ (e.g. ``get_work_order``) recovers
+        instead of being misclassified as hallucinated.
         """
         leaked = self._detect_leaked_tool_call(content)
         if leaked is None:
             return True, content or ""
         leaked_name, leaked_args = leaked
-        if leaked_name not in _KNOWN_TOOL_NAMES:
-            # A hallucinated tool (U6/R9): not on the dispatch surface, so it
-            # can neither be executed nor recovered — suppress, never re-enter.
+        if leaked_name not in self._known_tool_names():
+            # A hallucinated tool (U6/R9): not on this agent's tool surface, so
+            # it can neither be executed nor recovered — suppress, never
+            # re-enter.
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=False,
                 operation="llm_loop",
@@ -2359,6 +2390,7 @@ class Agent:
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=True,
                 operation="llm_loop",
@@ -2371,6 +2403,7 @@ class Agent:
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=True,
                 operation="llm_loop",
@@ -2382,6 +2415,7 @@ class Agent:
         logger.warning(
             "tool_call_leak_recovered",
             agent=self.name,
+            chat_id=chat_id,
             tool=leaked_name,
             operation="llm_loop",
         )
@@ -2424,6 +2458,12 @@ class Agent:
         parsed via a safe Python-literal fallback. Truncated/partial payloads
         (family 5) never parse and are handled by the finalize-only
         :meth:`_looks_like_leaked_tool_call_fragment` tripwire instead.
+
+        Three parsed shapes are recognised: A — ``"function"`` is a nested
+        object carrying ``"name"``; B — a top-level ``"name"`` key; C — the
+        tool name is the string VALUE of a ``"function"`` key alongside an
+        ``arguments``/``parameters`` key (gap family 6, deepseek-r1:8b eval
+        baseline 2026-06-10).
         """
         text = _strip_code_fence((content or "").strip())
         if not text or text[0] not in "{[":
@@ -2437,6 +2477,9 @@ class Agent:
         if not isinstance(obj, dict):
             return None
         fn = obj.get("function")
+        # Shapes B and C read their args from the top-level object; shape A
+        # reads from the nested function object instead.
+        obj_args: Any = obj.get("arguments", obj.get("parameters", {}))
         if isinstance(fn, dict) and isinstance(fn.get("name"), str):
             # Shape A: {"type":"function","function":{"name":..,"arguments":..}}
             name = fn["name"]
@@ -2444,7 +2487,15 @@ class Agent:
         elif isinstance(obj.get("name"), str) and ("arguments" in obj or "parameters" in obj):
             # Shape B: {"name":.., "arguments":..}
             name = obj["name"]
-            raw_args = obj.get("arguments", obj.get("parameters", {}))
+            raw_args = obj_args
+        elif isinstance(fn, str) and ("arguments" in obj or "parameters" in obj):
+            # Shape C: {"function":"<name>", "arguments":..} — the tool name is
+            # the string VALUE of the function key (deepseek-r1 eval baseline
+            # 2026-06-10), not a nested object (A) or a "name" key (B). An
+            # EMPTY string is still detected (matching shapes A/B): the empty
+            # name dispositions as unknown → suppressed fail-closed.
+            name = fn
+            raw_args = obj_args
         else:
             return None
         if isinstance(raw_args, str):
@@ -2671,6 +2722,7 @@ class Agent:
         cap_to_tool: dict[Capability, list[str]] = {
             Capability.READ_ASSETS: ["search_assets", "list_assets", "get_asset_details"],
             Capability.READ_WORK_ORDERS: ["read_work_orders"],
+            Capability.GET_WORK_ORDER: ["get_work_order"],
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],
             Capability.READ_SPARE_PARTS: ["check_spare_parts"],
@@ -2690,6 +2742,24 @@ class Agent:
             enabled_tool_names.add("execute_workflow")
 
         return [tool for tool in BUILTIN_TOOLS if tool["function"]["name"] in enabled_tool_names]
+
+    def _known_tool_names(self) -> frozenset[str]:
+        """Names on THIS agent's dispatchable tool surface (leak disposition).
+
+        Used to disposition a tool/function call the model emitted as
+        plain-text content instead of a structured ``tool_call`` (weak local
+        models do this): known read → recover via bounded re-entry, known
+        write → suppress, unknown → suppress. Derived from the SAME
+        :meth:`_get_available_tools` list the loop offers to the model and
+        ``_execute_tool`` dispatches, so the disposition can never drift from
+        dispatch — a module-level set built from ``BUILTIN_TOOLS`` would
+        misclassify capability-derived tools (e.g. ``get_work_order``) as
+        hallucinated and degrade recoverable reads to the leak fallback.
+        Detection itself stays shape-based and name-agnostic (U6/R9); this is
+        the post-detection lookup in the callers, NOT a filter inside the
+        detector.
+        """
+        return frozenset(t["function"]["name"] for t in self._get_available_tools())
 
     def _add_to_history(self, chat_id: str, role: str, content: str) -> None:
         """Add a message to the conversation history."""

@@ -45,6 +45,7 @@ class TestBuiltinTools:
             "list_assets",
             "get_asset_details",
             "read_work_orders",
+            "get_work_order",
             "create_work_order",
             "search_documents",
             "check_spare_parts",
@@ -55,4 +56,4 @@ class TestBuiltinTools:
         assert expected == names
 
     def test_tool_count(self) -> None:
-        assert len(BUILTIN_TOOLS) == 10
+        assert len(BUILTIN_TOOLS) == 11

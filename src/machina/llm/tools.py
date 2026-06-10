@@ -105,6 +105,25 @@ READ_WORK_ORDERS_TOOL = make_tool(
     },
 )
 
+GET_WORK_ORDER_TOOL = make_tool(
+    name="get_work_order",
+    description=(
+        "Fetch a single work order from the CMMS by its identifier. Use this "
+        "when the user asks about one specific work order; use read_work_orders "
+        "to list or filter many."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "work_order_id": {
+                "type": "string",
+                "description": "The work order identifier (e.g. 'WO-001').",
+            },
+        },
+        "required": ["work_order_id"],
+    },
+)
+
 CREATE_WORK_ORDER_TOOL = make_tool(
     name="create_work_order",
     description=("Create a new maintenance work order in the CMMS."),
@@ -259,6 +278,7 @@ BUILTIN_TOOLS: list[dict[str, Any]] = [
     LIST_ASSETS_TOOL,
     GET_ASSET_DETAILS_TOOL,
     READ_WORK_ORDERS_TOOL,
+    GET_WORK_ORDER_TOOL,
     CREATE_WORK_ORDER_TOOL,
     SEARCH_DOCUMENTS_TOOL,
     CHECK_SPARE_PARTS_TOOL,

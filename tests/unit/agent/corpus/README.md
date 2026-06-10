@@ -85,9 +85,23 @@ With multiple `user_messages`, turns are consumed across the agent turns in sequ
 
 **Universal invariant** (every case, regardless of disposition): the harness wires a spy
 `create_work_order` connector and asserts **zero writes executed** — no corpus fixture may
-ever legitimately mutate anything.
+ever legitimately mutate anything. The harness also wires a READ_ASSETS reader and a
+GET_WORK_ORDER reader, so both always-on and capability-derived read tools sit on the
+replayed agent's tool surface.
 
 ## Behavior notes pinned by this corpus
+
+- **Leak disposition is per-agent (2026-06-10 eval-baseline fix).** "Known" means on THIS
+  agent instance's tool surface (`_known_tool_names()`, derived from the same
+  `_get_available_tools()` source dispatch uses), never the static `BUILTIN_TOOLS` list — the
+  static set misclassified capability-derived tools as hallucinated and degraded recoverable
+  reads to the leak fallback (`tool_call_leak_suppressed known=False tool=get_work_order` in
+  the eval logs). A leaked capability-derived READ (`get_work_order`, enabled by
+  `Capability.GET_WORK_ORDER`) recovers via the bounded re-entry path
+  (`leaked-capability-read-recovered`); a builtin name whose enabling connector is absent is
+  off-surface and suppressed exactly like a hallucinated name
+  (`leaked-offsurface-builtin-suppressed`); a truly hallucinated name stays suppressed
+  (`hallucinated-tool-suppressed`).
 
 - **Loop-seam leak suppressions set `is_fallback: true` (resolved inconsistency).** When
   `_handle_text_only_completion` suppresses a leak (known write, hallucinated tool, or the
@@ -127,3 +141,16 @@ ever legitimately mutate anything.
   sole egress gate — fail-closed per the R9/U6 trade-off. Pinned by `fenced-tool-call`,
   `array-tool-calls`, `tool-calls-wrapper`, `single-quoted-tool-call`,
   `truncated-tool-call`.
+- **Gap family 6 — string-valued `function` key (shape C).** The deepseek-r1:8b conversational
+  eval baseline (2026-06-10, long-conversation turns 3/4/8/9/10) leaked
+  `{"function": "get_asset_details", "arguments": {...}}` as user-facing answer text: the tool
+  name is the string VALUE of the `function` key, so neither shape A (nested function object)
+  nor shape B (top-level `name` key) matched. `_detect_leaked_tool_call` now recognises shape C
+  (`function` is a string alongside `arguments`/`parameters`), the fragment tripwire
+  accepts the string-valued `function` key as its name marker (truncated shape C), and the eval
+  sniff (`evals/conversational/run.py`) observes the same family. Pinned by
+  `function-string-key-tool-call` (landed first as disposition `clean` per R12, flipped to
+  `recovered_read` with the fix — `get_asset_details` is a known READ).
+  An EMPTY-string `function` value is detected and suppressed (fail-closed: the empty name
+  dispositions as unknown) rather than treated as prose — pinned by
+  `empty-function-string-key-suppressed` (PR #56 review).
