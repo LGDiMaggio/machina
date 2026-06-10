@@ -145,3 +145,58 @@ async def test_reranker_runs_on_top_of_hybrid_fusion(tmp_path: Path) -> None:
     assert results, "reranker path should still surface a match"
     # Parent expansion preserved.
     assert "Step 1" in results[0].content
+
+
+async def test_connect_resets_collection_so_stale_corpus_never_leaks(
+    tmp_path: Path,
+) -> None:
+    """Reusing a collection name must not serve the previous corpus.
+
+    Chroma's default ephemeral client shares one in-process system, so
+    ``from_texts`` on an existing collection ADDs to it. Before the
+    connect()-time reset, a second connector (or a reconnect after the
+    corpus changed) inherited the old vectors, and ``_expand_to_parents``
+    returned them raw as orphan match-chunks — deleted/foreign documents
+    leaking into results with valid-looking citations (the root cause of
+    the order-dependent ``test_every_chunk_carries_source_citation``
+    flake).
+    """
+    shared_name = f"integ_reset_{uuid.uuid4().hex[:8]}"
+
+    corpus_a = tmp_path / "corpus_a"
+    corpus_a.mkdir()
+    (corpus_a / "P-201_pump.md").write_text(
+        "# Pump P-201 Manual\n\n"
+        "## Bearing Replacement\n\n"
+        "Replace SKF 6310 bearings on pump P-201 every 8000 hours.\n",
+        encoding="utf-8",
+    )
+
+    corpus_b = tmp_path / "corpus_b"
+    corpus_b.mkdir()
+    (corpus_b / "COMP-301_compressor.md").write_text(
+        "# Compressor COMP-301 Manual\n\n"
+        "## Filter Replacement\n\n"
+        "Replace the COMP-301 intake air filter every 2000 hours.\n",
+        encoding="utf-8",
+    )
+
+    conn_a = DocumentStoreConnector(paths=[corpus_a], collection_name=shared_name)
+    await conn_a.connect()
+    health = await conn_a.health_check()
+    assert health.details.get("mode") == "rag", health.details
+
+    conn_b = DocumentStoreConnector(paths=[corpus_b], collection_name=shared_name)
+    await conn_b.connect()
+
+    # Query for corpus-A content through the corpus-B connector. Without
+    # the reset, Chroma would surface the stale P-201 chunks as orphan
+    # matches; with it, every result must come from corpus B.
+    results = await conn_b.search("SKF 6310 bearing replacement pump P-201", top_k=5)
+    sources = [(r.source, r.content[:80]) for r in results]
+    assert all("P-201" not in r.source for r in results), (
+        f"stale corpus-A chunks leaked through the shared collection: {sources}"
+    )
+    assert all("SKF 6310" not in r.content for r in results), (
+        f"stale corpus-A content leaked through the shared collection: {sources}"
+    )
