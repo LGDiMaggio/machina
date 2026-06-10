@@ -158,9 +158,9 @@ arbitrary Python logic in YAML would be fragile and hard to debug.
 |-|-------------|--------|
 | **Agent type** | Knowledge-base / Q&A | Workflow automation |
 | **What you configure** | Connectors, LLM, channels, plant | Everything + workflows with guards, lambdas |
-| **Workflows** | Not supported | Full DSL ([examples 01-04](../examples/)) |
+| **Workflows** | Not supported | Full DSL ([examples 01-04](https://github.com/LGDiMaggio/machina/tree/main/examples/)) |
 | **Best for** | Standard deployments, Docker, ops teams | Complex agents, custom integrations |
-| **Example** | [yaml_config/](../examples/reference/yaml_config/) | [quickstart/](../examples/quickstart/), [alarm_to_workorder/](../examples/alarm_to_workorder/) |
+| **Example** | [yaml_config/](https://github.com/LGDiMaggio/machina/tree/main/examples/reference/yaml_config/) | [quickstart/](https://github.com/LGDiMaggio/machina/tree/main/examples/quickstart/), [alarm_to_workorder/](https://github.com/LGDiMaggio/machina/tree/main/examples/alarm_to_workorder/) |
 
 !!! note "Hybrid approach"
     You can combine both: configure connectors and LLM via YAML, then

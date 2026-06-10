@@ -1,0 +1,16 @@
+{
+  "id": "tool-calls-wrapper",
+  "description": "The provider-frame {\"tool_calls\": [...]} wrapper serialized whole into content, carrying a hallucinated (unknown-name) shape-A call with string-encoded arguments. Provenance: PR #55 code review, detector-gap family (3) verified by execution -- the wrapper key hid the inner call from shape A/B matching, so the frame passed both seams raw. Fixed by unwrapping the tool_calls list before detection; the unknown tool can neither execute nor recover, so the leak is suppressed to the fallback.",
+  "turns": [
+    {
+      "content": "{\"tool_calls\": [{\"type\": \"function\", \"function\": {\"name\": \"get_bearing_replacement_procedure\", \"arguments\": \"{\\\"asset_id\\\": \\\"P-201\\\"}\"}}]}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["get_bearing_replacement_procedure", "tool_calls"]
+  }
+}

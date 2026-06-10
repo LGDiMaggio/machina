@@ -8,8 +8,10 @@ prompts, and executes tool calls.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import re
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -50,11 +52,64 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
-# Every builtin tool name — used to recognise a tool/function call the model
+# Every builtin tool name — used to disposition a tool/function call the model
 # emitted as plain-text content instead of a structured tool_call (weak local
-# models do this). Sourced from BUILTIN_TOOLS so it can never drift from the
-# real dispatch surface. See _detect_leaked_tool_call (U3 — output validity).
+# models do this): known read → recover, known write / unknown name → suppress.
+# Detection itself is shape-based and name-agnostic (U6/R9); this set is the
+# post-detection lookup in the callers, NOT a filter inside the detector.
+# Sourced from BUILTIN_TOOLS so it can never drift from the real dispatch
+# surface. See _detect_leaked_tool_call and _handle_text_only_completion.
 _KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
+
+# Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
+# payloads that are recognisably tool-call-shaped but do NOT parse — truncated
+# JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
+# BOTH regexes must hit: a string-valued name key AND a call-marker key
+# (arguments/parameters/tool_calls, or a function key opening an object).
+# Truncated plain-data JSON carries a name key but no call marker, so it is
+# not suppressed. See _looks_like_leaked_tool_call_fragment.
+_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"']name[\"']\s*:\s*[\"']")
+_LEAK_FRAGMENT_MARKER_RE = re.compile(
+    r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
+)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip one surrounding markdown code fence (``` / ```json), if present.
+
+    The closing fence is optional — weak models drop it routinely. A fence
+    whose payload shares the opener line is left untouched; the stripped body
+    must still parse as a tool-call shape downstream, so leniency here cannot
+    misclassify prose.
+    """
+    if not text.startswith("```"):
+        return text
+    first_nl = text.find("\n")
+    if first_nl == -1:
+        return text
+    inner = text[first_nl + 1 :]
+    if inner.endswith("```"):
+        inner = inner[:-3]
+    return inner.strip()
+
+
+def _parse_leak_payload(text: str) -> dict[str, Any] | list[Any] | None:
+    """Parse candidate leak text as JSON, falling back to a Python literal.
+
+    The literal fallback (``ast.literal_eval`` — safe, no code execution)
+    accepts the single-quoted pseudo-JSON some models emit
+    (PR #55 gap family 4): ``{'name': ..., 'arguments': {...}}``. Only dict
+    or list results are meaningful as tool-call candidates.
+    """
+    try:
+        obj: Any = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            obj = ast.literal_eval(text)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return None
+    return obj if isinstance(obj, dict | list) else None
+
 
 # Lifetime of a stored pending write-confirmation (seconds). A pending
 # confirmation is meant for the IMMEDIATE next message; an hour is
@@ -201,6 +256,25 @@ _INVALID_ARGS_MESSAGE = (
 # the real bound (H1).
 _MAX_ARG_CORRECTION_ATTEMPTS = 2
 
+# Reasoning models (e.g. deepseek-r1) emit their chain of thought as
+# <think>...</think> blocks inside message content (U7/R10). Matched
+# case-insensitively and across newlines. An UNCLOSED <think> matches to
+# end-of-string: weak models truncate mid-reasoning, and everything after the
+# opener is reasoning, never answer — so the whole tail is scrubbed and the
+# empty-response fallback fires. Near-miss tags (<thinking>, <b>) never match.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.IGNORECASE | re.DOTALL)
+
+# Orphan closers the regex above cannot reach: some serving stacks emit
+# deepseek-r1 reasoning WITHOUT the opener (the content ends the chain of
+# thought with a bare "</think>" before the answer), and nested openers
+# leave a stray closer behind the non-greedy sub. _finalize_turn therefore
+# runs a second pass: while a closer remains, drop everything up to and
+# including the FIRST one — pre-closer text is reasoning by construction.
+# Fail-closed trade-off (same family as R9): a legit literal "</think>"
+# inside an answer is sacrificed rather than ever showing reasoning.
+# Near-miss tags ("<thinking>", "<b>") still never match.
+_THINK_CLOSE_TAG = "</think>"
+
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
 # the degenerate-echo failure mode is always a long canned paragraph, so the
@@ -317,7 +391,7 @@ class Agent:
         ```python
         from machina import Agent, Plant
         from machina.connectors.cmms import GenericCmmsConnector
-        from machina.connectors.comms.telegram import CliChannel
+        from machina.connectors.comms.cli import CliChannel
 
         plant = Plant(name="Demo Plant")
         cmms = GenericCmmsConnector(data_dir="sample_data/cmms")
@@ -555,7 +629,7 @@ class Agent:
         if config.channels:
             channels = [create_channel(ch.type, ch.settings) for ch in config.channels]
         else:
-            from machina.connectors.comms.telegram import CliChannel
+            from machina.connectors.comms.cli import CliChannel
 
             channels = [CliChannel()]
 
@@ -1108,11 +1182,20 @@ class Agent:
         1. Parse citations against the per-turn chunk registry (the ordered
            index map resolves visible ``[n]`` markers; the registry backs the
            source/page fallback).
-        2. Append the user message and the rendered assistant reply to history.
-        3. In a ``finally``, always drop the per-turn chunk registry and ordered
+        2. Run the validator chain on the rendered text, in order: think-tag
+           scrub → empty-response fallback → echo guard → leaked-tool-call
+           backstop → completeness hedge. The scrub (U7) removes reasoning-model
+           ``<think>...</think>`` blocks (case-insensitive, spans newlines;
+           an UNCLOSED ``<think>`` swallows to end-of-string — truncated
+           reasoning is still reasoning, never answer). Strip-and-keep-remainder
+           semantics: meaningful text surviving the scrub proceeds through the
+           rest of the chain; a think-only response strips to empty and the
+           empty-response fallback fires naturally.
+        3. Append the user message and the rendered assistant reply to history.
+        4. In a ``finally``, always drop the per-turn chunk registry and ordered
            index map for ``chat_id`` — even on error — so a long-lived agent
            does not accumulate orphan slots from failed turns.
-        4. Log ``response_generated`` and return the :class:`AgentResponse`.
+        5. Log ``response_generated`` and return the :class:`AgentResponse`.
 
         Args:
             chat_id: Conversation identifier.
@@ -1138,6 +1221,29 @@ class Agent:
                 self._turn_chunks.get(chat_id, {}),
                 self._turn_ordered.get(chat_id, []),
             )
+            # Scrub reasoning-model <think> blocks FIRST (U7), so a think-only
+            # response strips to empty and falls into the empty-response
+            # fallback below naturally. When the scrub removed nothing, the
+            # rendered text is left byte-identical (no spurious trimming of
+            # clean answers). Never log the scrubbed content itself.
+            scrubbed = _THINK_BLOCK_RE.sub("", rendered)
+            # Orphan-closer pass: a bare "</think>" surviving the sub means
+            # the opener was never emitted (r1 via some serving stacks) or was
+            # nested — either way, everything before the FIRST remaining
+            # closer is reasoning. Drop it, repeatedly, case-insensitively.
+            # See _THINK_CLOSE_TAG for the fail-closed trade-off.
+            while (closer_at := scrubbed.lower().find(_THINK_CLOSE_TAG)) != -1:
+                scrubbed = scrubbed[closer_at + len(_THINK_CLOSE_TAG) :]
+            if scrubbed != rendered:
+                cleaned = scrubbed.strip()
+                logger.info(
+                    "think_block_scrubbed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                    scrubbed_chars=len(rendered) - len(scrubbed),
+                )
+                rendered = cleaned
             # A model that returns nothing (empty completion) or only a
             # citations block leaves an empty rendered answer. Surface an
             # explicit fallback instead of delivering blank output — weak
@@ -1153,6 +1259,17 @@ class Agent:
                     raw_response_length=len(raw_response),
                 )
                 rendered = fallback_text
+                citations = []
+                is_fallback = True
+            # A loop-seam leak suppression (_handle_text_only_completion)
+            # substituted the fallback text BEFORE the gate ran, so by itself it
+            # would read as ordinary prose here and leave the structured flag
+            # unset. Recognise the sentinel and flag it — orchestrators and
+            # monitors must distinguish a leak fallback from a real answer via
+            # ``is_fallback``, never by string-matching the text. The leak was
+            # already logged at the seam (operation="llm_loop"), so no second
+            # warning is emitted here.
+            elif rendered == _TOOL_CALL_LEAK_FALLBACK:
                 citations = []
                 is_fallback = True
             # The echo guard applies only to the normal turn path (identified by
@@ -1182,17 +1299,42 @@ class Agent:
                 rendered = _REPEATED_RESPONSE_FALLBACK
                 citations = []
                 is_fallback = True
-            # Backstop (U3): a tool/function call that reached finalize as the
-            # answer text (e.g. the forced-final ``complete()`` returned one, or a
-            # leak slipped past the loop seam) must never be shown raw. Store the
-            # fallback in history too (no override) so the JSON cannot re-prime
-            # the next turn. Uses the write-aware ``fallback_text`` on the
-            # narration path, the specific leak message on the normal path.
-            elif self._detect_leaked_tool_call(rendered) is not None:
+            # Backstop (U3/U6): a tool/function call that reached finalize as
+            # the answer text (e.g. the forced-final ``complete()`` returned
+            # one, or a leak slipped past the loop seam) must never be shown
+            # raw — ANY detector hit is suppressed, hallucinated names
+            # included (R9). Store the fallback in history too (no override)
+            # so the JSON cannot re-prime the next turn. Uses the write-aware
+            # ``fallback_text`` on the narration path, the specific leak
+            # message on the normal path.
+            elif (leaked := self._detect_leaked_tool_call(rendered)) is not None:
                 logger.warning(
                     "tool_call_leak_suppressed",
                     agent=self.name,
                     chat_id=chat_id,
+                    tool=leaked[0],
+                    known=leaked[0] in _KNOWN_TOOL_NAMES,
+                    operation="finalize_turn",
+                )
+                rendered = (
+                    _TOOL_CALL_LEAK_FALLBACK
+                    if fallback_text is _EMPTY_RESPONSE_FALLBACK
+                    else fallback_text
+                )
+                citations = []
+                is_fallback = True
+            # Fragment tripwire (PR #55 gap family 5): a truncated/partial
+            # tool call never parses, so the detector above cannot return
+            # (name, args) for it — but it is still a leak, not an answer.
+            # Finalize-only by design: there is no call to recover, so the
+            # loop seam has nothing to do with it.
+            elif self._looks_like_leaked_tool_call_fragment(rendered):
+                logger.warning(
+                    "tool_call_leak_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    tool=None,
+                    known=False,
                     operation="finalize_turn",
                 )
                 rendered = (
@@ -2190,15 +2332,27 @@ class Agent:
         The model may have emitted a tool call as plain-text content (weak local
         models do this). Returns ``(True, value)`` when the loop should return
         ``value`` — the plain answer, or :data:`_TOOL_CALL_LEAK_FALLBACK` for a
-        leaked write / re-leak — or ``(False, "")`` when the loop should
-        ``continue`` after this method has recovered a leaked READ, mutating
-        ``messages`` and ``seen_call_keys`` in place. Behaviour-preserving
-        extraction of the former inline seam (U12).
+        leaked write, a hallucinated (unknown-name) tool, or a re-leak — or
+        ``(False, "")`` when the loop should ``continue`` after this method has
+        recovered a leaked KNOWN READ, mutating ``messages`` and
+        ``seen_call_keys`` in place. Detection is shape-based (U6/R9); the
+        known/unknown name lookup happens here, as disposition.
         """
         leaked = self._detect_leaked_tool_call(content)
         if leaked is None:
             return True, content or ""
         leaked_name, leaked_args = leaked
+        if leaked_name not in _KNOWN_TOOL_NAMES:
+            # A hallucinated tool (U6/R9): not on the dispatch surface, so it
+            # can neither be executed nor recovered — suppress, never re-enter.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                known=False,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
         if leaked_name in _SIDE_EFFECTING_TOOLS:
             # A write emitted as prose is exactly the low-trust output the gate
             # withholds — never auto-execute it off the dedup/confirm path.
@@ -2206,6 +2360,7 @@ class Agent:
                 "tool_call_leak_suppressed",
                 agent=self.name,
                 tool=leaked_name,
+                known=True,
                 operation="llm_loop",
             )
             return True, _TOOL_CALL_LEAK_FALLBACK
@@ -2217,6 +2372,7 @@ class Agent:
                 "tool_call_leak_suppressed",
                 agent=self.name,
                 tool=leaked_name,
+                known=True,
                 operation="llm_loop",
             )
             return True, _TOOL_CALL_LEAK_FALLBACK
@@ -2247,22 +2403,37 @@ class Agent:
 
     @staticmethod
     def _detect_leaked_tool_call(content: str) -> tuple[str, dict[str, Any]] | None:
-        """Recognise a tool/function call the model emitted as plain text (U3).
+        """Recognise a tool/function call the model emitted as plain text (U3/U6).
 
         Weak models sometimes serialize a tool call into the message *content*
         instead of producing a structured ``tool_call``. Returns ``(name, args)``
-        when ``content`` is such a call naming a known builtin tool, otherwise
-        ``None``. Tolerant by design — anything that does not cleanly parse as a
-        known tool-call shape is treated as ordinary prose so a normal answer is
-        never misclassified.
+        for EVERY payload that parses as a tool-call shape, regardless of
+        whether the name is a known builtin (R9) — models also hallucinate
+        tools that do not exist, and such a leak must still be intercepted.
+        Disposition (recover a known read, suppress a known write or an
+        unknown/hallucinated tool) is the caller's job, not a filter here.
+        Anything that does not cleanly parse as a tool-call shape is treated
+        as ordinary prose so a normal answer is never misclassified.
+
+        The payload is normalized before shape matching (PR #55 gap families
+        1-4): a surrounding markdown code fence is stripped, a
+        ``{"tool_calls": [...]}`` provider frame is unwrapped, a top-level
+        array of call objects resolves to its FIRST call (recovery of a known
+        read stays bounded by ``seen_call_keys``; a write never executes off
+        the structured path regardless), and single-quoted pseudo-JSON is
+        parsed via a safe Python-literal fallback. Truncated/partial payloads
+        (family 5) never parse and are handled by the finalize-only
+        :meth:`_looks_like_leaked_tool_call_fragment` tripwire instead.
         """
-        text = (content or "").strip()
-        if not (text.startswith("{") and text.endswith("}")):
+        text = _strip_code_fence((content or "").strip())
+        if not text or text[0] not in "{[":
             return None
-        try:
-            obj = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            return None
+        obj = _parse_leak_payload(text)
+        if isinstance(obj, dict) and isinstance(obj.get("tool_calls"), list):
+            # The provider-frame wrapper serialized whole into content.
+            obj = obj["tool_calls"]
+        if isinstance(obj, list):
+            obj = obj[0] if obj and isinstance(obj[0], dict) else None
         if not isinstance(obj, dict):
             return None
         fn = obj.get("function")
@@ -2276,8 +2447,6 @@ class Agent:
             raw_args = obj.get("arguments", obj.get("parameters", {}))
         else:
             return None
-        if name not in _KNOWN_TOOL_NAMES:
-            return None
         if isinstance(raw_args, str):
             try:
                 raw_args = json.loads(raw_args)
@@ -2286,6 +2455,27 @@ class Agent:
         if not isinstance(raw_args, dict):
             raw_args = {}
         return name, raw_args
+
+    @staticmethod
+    def _looks_like_leaked_tool_call_fragment(content: str) -> bool:
+        """Whether ``content`` is an UNPARSABLE tool-call-shaped fragment.
+
+        Covers truncated/partial tool-call JSON (PR #55 gap family 5 — the
+        model ran out of tokens mid-call) that shape-based detection cannot
+        return ``(name, args)`` for. Used ONLY by the ``_finalize_turn``
+        backstop: a fragment carries no recoverable call, so suppression is
+        the only disposition, and it must happen at the sole egress gate.
+        Payloads that parse cleanly are never flagged here — the full
+        detector owns them, so a deliberate JSON answer that merely contains
+        a ``name`` field is not suppressed (fail-closed only on the
+        unparsable, marker-bearing shape; R9/U6 trade-off).
+        """
+        text = _strip_code_fence((content or "").strip())
+        if not text or text[0] not in "{[":
+            return False
+        if _parse_leak_payload(text) is not None:
+            return False
+        return bool(_LEAK_FRAGMENT_NAME_RE.search(text) and _LEAK_FRAGMENT_MARKER_RE.search(text))
 
     def _tool_list_assets(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Enumerate the full asset registry (R1.1).

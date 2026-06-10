@@ -1,0 +1,18 @@
+{
+  "id": "nested-think-blocks",
+  "description": "Nested <think> openers: the non-greedy <think>...</think> sub removes up to the FIRST closer only, leaving trailing reasoning plus a stray closer in the output. The gate's orphan-closer pass then drops everything up to and including each remaining closer, so neither reasoning fragment nor any think tag reaches the user and the surviving answer is delivered untouched. Pinned by tests/unit/agent/test_authority_gates_validity.py::TestThinkBlockScrub.",
+  "user_messages": ["When should the bearing on P-201 be replaced?"],
+  "turns": [
+    {
+      "content": "<think>outer reasoning about the pump<think>inner digression</think>more outer reasoning</think>Replace the bearing on P-201 within 48 hours.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Replace the bearing on P-201 within 48 hours."],
+    "user_text_excludes": ["<think>", "</think>", "outer reasoning", "inner digression"]
+  }
+}

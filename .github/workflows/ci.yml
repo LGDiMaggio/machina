@@ -41,8 +41,9 @@ jobs:
       - name: Per-module coverage floors (core modules)
         # Floors set below the measured baseline with a ~5% buffer so
         # refactors have headroom but a silent regression in any core
-        # module fails CI. MCP/Excel tests skipped when optional deps
-        # absent — floors exclude those modules (tested locally with extras).
+        # module fails CI. Floors cover core modules only; optional-dep
+        # modules (excel, calendar, litellm, mcp) are exercised by the
+        # ci-extras job below without floors.
         run: |
           coverage report --include='src/machina/agent/**'         --fail-under=88
           coverage report --include='src/machina/config/**'        --fail-under=95
@@ -56,6 +57,25 @@ jobs:
         with:
           file: ./coverage.xml
           fail_ci_if_error: false
+
+  ci-extras:
+    name: Tests with optional extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (targeted extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,excel,calendar,litellm,mcp]"
+
+      - name: Tests (incl. previously-skipped optional-dep suites)
+        run: pytest tests/ -v
 
   validate-examples:
     name: Validate examples & doc snippets

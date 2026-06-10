@@ -137,7 +137,12 @@ class DocumentStoreConnector:
 
     Args:
         paths: List of directories or files to ingest.
-        collection_name: Name for the ChromaDB collection.
+        collection_name: Name for the ChromaDB collection. ``connect()``
+            resets this collection so it contains exactly the connector's
+            corpus — pointing two live connector instances at the same
+            collection name (in one process, or via a shared persistent
+            client) is unsupported: whichever connects last wipes and
+            replaces the other's vectors.
         chunk_size: Target size for text chunks (in characters).
         chunk_overlap: Overlap between consecutive chunks.
         reranker_model: Optional ``sentence-transformers`` cross-encoder
@@ -473,10 +478,34 @@ class DocumentStoreConnector:
         return out
 
     def _build_rag_index(self, documents: list[dict[str, Any]]) -> None:
-        """Build a ChromaDB vector store from parsed documents."""
+        """Build a ChromaDB vector store from parsed documents.
+
+        Drops any pre-existing collection with our name first:
+        ``Chroma.from_texts`` get-or-creates and ADDs, and Chroma clients
+        share state by collection name (one in-process system for the
+        default ephemeral client, on-disk state for persistent ones), so
+        without the reset a reconnect after a corpus change — or a second
+        connector instance reusing the name — would serve stale or
+        foreign vectors that ``_expand_to_parents`` then returns as
+        orphan match-chunks with valid-looking citations. connect() must
+        establish the invariant: the collection contains exactly this
+        corpus.
+        """
         from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
             Chroma,
         )
+
+        try:
+            # The bare constructor get-or-creates the collection, so
+            # delete_collection() always has something to delete. A
+            # failed reset would silently break the exactly-this-corpus
+            # invariant, so it is fatal — except ImportError (chromadb
+            # missing), which must propagate for the keyword fallback.
+            Chroma(collection_name=self._collection_name).delete_collection()
+        except ImportError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(f"Chroma collection reset failed: {exc!r}") from exc
 
         indexed = self._iter_doc_chunks(documents)
         if not indexed:

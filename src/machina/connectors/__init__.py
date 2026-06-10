@@ -19,9 +19,10 @@ from machina.connectors.cmms import (
     SapPmConnector,
     UpKeepConnector,
 )
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.comms.email import EmailConnector
 from machina.connectors.comms.slack import SlackConnector
-from machina.connectors.comms.telegram import CliChannel, TelegramConnector
+from machina.connectors.comms.telegram import TelegramConnector
 from machina.connectors.docs.document_store import DocumentStoreConnector
 from machina.connectors.iot import MqttConnector, OpcUaConnector
 

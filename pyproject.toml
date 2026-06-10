@@ -173,6 +173,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra -q"
+# Repo root on sys.path so the CI schema test can import evals.conversational.
+# Collection stays scoped to tests/ via testpaths — evals/ is never collected.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["machina"]

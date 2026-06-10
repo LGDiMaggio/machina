@@ -1,0 +1,18 @@
+# EXAMPLE scenario — demonstrates the schema and gives the CI loader test a
+# real file to validate. The real scenario suite arrives in a later unit (U10).
+#
+# Schema reference: evals/README.md ("Adding a scenario").
+id: example-smoke
+description: >
+  Minimal smoke scenario: one grounded procedure question (retrieval +
+  citation + golden) and one tool-driven enumeration (runtime + golden).
+turns:
+  - user: "What is the bearing replacement procedure for pump P-201?"
+    assertions:
+      expect_retrieval_source: "pump_p201_manual"
+      expect_citation: true
+      golden_contains: ["P-201"]
+  - user: "List all assets in the plant."
+    assertions:
+      expect_tool_invoked: "list_assets"
+      golden_contains: ["P-201", "P-202"]

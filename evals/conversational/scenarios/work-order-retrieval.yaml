@@ -1,0 +1,13 @@
+# Goldens hand-derived from examples/sample_data/cmms/work_orders.json:
+# WO-2026-1842 = corrective, high priority, asset P-201, "Excessive vibration
+# detected on bearing DE side — probable bearing wear" (BEAR-WEAR-01).
+id: work-order-retrieval
+description: >
+  Tripwires work-order fabrication: a specific WO lookup where the model must
+  report the real record (asset P-201, bearing-vibration description) instead
+  of inventing plausible fields. Goldens are exact tokens from WO-2026-1842
+  in work_orders.json.
+turns:
+  - user: "Give me the details of work order WO-2026-1842: which asset is it for and what is it about?"
+    assertions:
+      golden_contains: ["WO-2026-1842", "P-201", "bearing"]

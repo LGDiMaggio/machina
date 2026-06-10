@@ -1,0 +1,17 @@
+{
+  "id": "hallucinated-tool-suppressed",
+  "description": "Hallucinated (unknown-name) tool call emitted as content -- the VERBATIM payload llama3:8b leaked to the user on 2026-06-09 (get_bearing_replacement_procedure is not on the dispatch surface). Provenance: U6/R9 shape-based detection, pinned by tests/unit/agent/test_authority_gates_validity.py::TestLoopLeakHandling::test_hallucinated_tool_is_suppressed_never_executed. Suppressed immediately at the loop seam: never shown raw, never executed, never re-entered.",
+  "user_messages": ["How do I replace the bearing on P-201?"],
+  "turns": [
+    {
+      "content": "{\"id\": \"call_8h2k\", \"type\": \"function\", \"function\": {\"name\": \"get_bearing_replacement_procedure\", \"arguments\": {\"asset_id\": \"P-201\"}}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["get_bearing_replacement_procedure", "call_8h2k", "\"function\""]
+  }
+}

@@ -47,7 +47,7 @@ from pathlib import Path
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
 from machina.connectors.docs import DocumentStoreConnector
-from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.comms.cli import CliChannel
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 

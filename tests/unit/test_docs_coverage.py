@@ -94,7 +94,7 @@ _ALLOWLIST: dict[str, str] = {
     # via ::: would duplicate without adding signal.
     "machina.connectors.iot.simulated.SimulatedSensorConnector": "Reference example used by examples/reference/predictive_pipeline; not a production connector and intentionally kept out of API ref to avoid recommending it as a runtime choice.",
     "machina.connectors.comms.telegram.TelegramConnector": "Covered by quickstart and examples; narrative pattern, not API ref.",
-    "machina.connectors.comms.telegram.CliChannel": "Covered by quickstart and examples; narrative pattern, not API ref.",
+    "machina.connectors.comms.cli.CliChannel": "Covered by quickstart and examples; narrative pattern, not API ref.",
     "machina.connectors.docs.excel.ExcelCsvConnector": "Covered by connectors/excel.md narrative.",
     "machina.connectors.sql.generic.GenericSqlConnector": "Covered by connectors/sql.md narrative.",
     # ---- Other internals ---------------------------------------------------

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
-from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
 # Point at the sample data that ships with the examples folder

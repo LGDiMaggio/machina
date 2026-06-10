@@ -119,7 +119,7 @@ python agent.py --llm ollama:mistral
 ```python
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
-from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
 agent = Agent(

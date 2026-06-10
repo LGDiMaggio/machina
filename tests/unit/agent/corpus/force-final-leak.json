@@ -1,0 +1,22 @@
+{
+  "id": "force-final-leak",
+  "description": "Force-finalization leak: five novel read calls exhaust max_iterations, and the forced no-tools complete() returns leaked tool-call JSON (a write payload). The _finalize_turn backstop suppresses it -- even the forced exit path cannot show raw JSON or execute the write. Provenance: U7 topology claim, pinned by tests/unit/test_agent_runtime.py::TestSoleEgressGate::test_forced_final_leaked_tool_call_is_suppressed. NOTE: completeness stays 'complete' -- the partial hedge applies only to non-fallback answers, so the leak fallback short-circuits it (see corpus README).",
+  "user_messages": ["Tell me about P-201"],
+  "turns": [
+    {"content": "", "tool_calls": [{"name": "search_assets", "arguments": "{\"query\": \"pump-1\"}"}]},
+    {"content": "", "tool_calls": [{"name": "search_assets", "arguments": "{\"query\": \"pump-2\"}"}]},
+    {"content": "", "tool_calls": [{"name": "search_assets", "arguments": "{\"query\": \"pump-3\"}"}]},
+    {"content": "", "tool_calls": [{"name": "search_assets", "arguments": "{\"query\": \"pump-4\"}"}]},
+    {"content": "", "tool_calls": [{"name": "search_assets", "arguments": "{\"query\": \"pump-5\"}"}]},
+    {
+      "content": "{\"name\": \"create_work_order\", \"arguments\": {\"asset_id\": \"P-201\"}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak_write",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["create_work_order", "\"arguments\""]
+  }
+}

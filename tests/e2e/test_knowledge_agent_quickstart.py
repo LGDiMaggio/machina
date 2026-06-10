@@ -17,7 +17,7 @@ import pytest
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
-from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent

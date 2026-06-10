@@ -1,0 +1,18 @@
+{
+  "id": "unclosed-citations-tag",
+  "description": "Answer ending in a dangling <citations> opener with no closing tag (weak models open the block and truncate). The citation parser's unterminated-block tolerance consumes from the opener to end-of-string, so the literal tag never reaches the user; the prose before it is delivered. With no chunks registered this turn, the [1] entry inside the block cannot resolve and is dropped (no citations). Pinned by the parser contract in src/machina/agent/citations.py (_UNTERMINATED_CITATIONS_RE).",
+  "user_messages": ["How often should the bearing be replaced?"],
+  "turns": [
+    {
+      "content": "Replace the bearing every 6 months and grease it quarterly [1].\n\n<citations>\n[1]\n",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Replace the bearing every 6 months"],
+    "user_text_excludes": ["<citations>"]
+  }
+}

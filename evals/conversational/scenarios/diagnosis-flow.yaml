@@ -1,0 +1,15 @@
+# Symptom matches examples/sample_data/cmms/failure_modes.json BEAR-WEAR-01
+# ("Bearing Wear — Drive End", detected via vibration_analysis), which is
+# listed under P-201 in assets.json and mirrors WO-2026-1842's description.
+id: diagnosis-flow
+description: >
+  Tripwires the tool-call-contract breaks documented for the 3B class
+  (qwen2.5) during multi-step diagnosis: the symptom must route through the
+  diagnose_failure tool and the answer must stay clean prose — no leaked
+  tool-call JSON or raw tags on any exit path.
+turns:
+  - user: "Pump P-201 is showing high vibration on the drive-end bearing. What is the probable failure mode?"
+    assertions:
+      expect_tool_invoked: "diagnose_failure"
+      expect_no_malformed: true
+      golden_contains: ["bearing"]
