@@ -50,10 +50,13 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
-# Every builtin tool name — used to recognise a tool/function call the model
+# Every builtin tool name — used to disposition a tool/function call the model
 # emitted as plain-text content instead of a structured tool_call (weak local
-# models do this). Sourced from BUILTIN_TOOLS so it can never drift from the
-# real dispatch surface. See _detect_leaked_tool_call (U3 — output validity).
+# models do this): known read → recover, known write / unknown name → suppress.
+# Detection itself is shape-based and name-agnostic (U6/R9); this set is the
+# post-detection lookup in the callers, NOT a filter inside the detector.
+# Sourced from BUILTIN_TOOLS so it can never drift from the real dispatch
+# surface. See _detect_leaked_tool_call and _handle_text_only_completion.
 _KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
 
 # Lifetime of a stored pending write-confirmation (seconds). A pending
@@ -1182,17 +1185,21 @@ class Agent:
                 rendered = _REPEATED_RESPONSE_FALLBACK
                 citations = []
                 is_fallback = True
-            # Backstop (U3): a tool/function call that reached finalize as the
-            # answer text (e.g. the forced-final ``complete()`` returned one, or a
-            # leak slipped past the loop seam) must never be shown raw. Store the
-            # fallback in history too (no override) so the JSON cannot re-prime
-            # the next turn. Uses the write-aware ``fallback_text`` on the
-            # narration path, the specific leak message on the normal path.
-            elif self._detect_leaked_tool_call(rendered) is not None:
+            # Backstop (U3/U6): a tool/function call that reached finalize as
+            # the answer text (e.g. the forced-final ``complete()`` returned
+            # one, or a leak slipped past the loop seam) must never be shown
+            # raw — ANY detector hit is suppressed, hallucinated names
+            # included (R9). Store the fallback in history too (no override)
+            # so the JSON cannot re-prime the next turn. Uses the write-aware
+            # ``fallback_text`` on the narration path, the specific leak
+            # message on the normal path.
+            elif (leaked := self._detect_leaked_tool_call(rendered)) is not None:
                 logger.warning(
                     "tool_call_leak_suppressed",
                     agent=self.name,
                     chat_id=chat_id,
+                    tool=leaked[0],
+                    known=leaked[0] in _KNOWN_TOOL_NAMES,
                     operation="finalize_turn",
                 )
                 rendered = (
@@ -2190,15 +2197,27 @@ class Agent:
         The model may have emitted a tool call as plain-text content (weak local
         models do this). Returns ``(True, value)`` when the loop should return
         ``value`` — the plain answer, or :data:`_TOOL_CALL_LEAK_FALLBACK` for a
-        leaked write / re-leak — or ``(False, "")`` when the loop should
-        ``continue`` after this method has recovered a leaked READ, mutating
-        ``messages`` and ``seen_call_keys`` in place. Behaviour-preserving
-        extraction of the former inline seam (U12).
+        leaked write, a hallucinated (unknown-name) tool, or a re-leak — or
+        ``(False, "")`` when the loop should ``continue`` after this method has
+        recovered a leaked KNOWN READ, mutating ``messages`` and
+        ``seen_call_keys`` in place. Detection is shape-based (U6/R9); the
+        known/unknown name lookup happens here, as disposition.
         """
         leaked = self._detect_leaked_tool_call(content)
         if leaked is None:
             return True, content or ""
         leaked_name, leaked_args = leaked
+        if leaked_name not in _KNOWN_TOOL_NAMES:
+            # A hallucinated tool (U6/R9): not on the dispatch surface, so it
+            # can neither be executed nor recovered — suppress, never re-enter.
+            logger.warning(
+                "tool_call_leak_suppressed",
+                agent=self.name,
+                tool=leaked_name,
+                known=False,
+                operation="llm_loop",
+            )
+            return True, _TOOL_CALL_LEAK_FALLBACK
         if leaked_name in _SIDE_EFFECTING_TOOLS:
             # A write emitted as prose is exactly the low-trust output the gate
             # withholds — never auto-execute it off the dedup/confirm path.
@@ -2206,6 +2225,7 @@ class Agent:
                 "tool_call_leak_suppressed",
                 agent=self.name,
                 tool=leaked_name,
+                known=True,
                 operation="llm_loop",
             )
             return True, _TOOL_CALL_LEAK_FALLBACK
@@ -2217,6 +2237,7 @@ class Agent:
                 "tool_call_leak_suppressed",
                 agent=self.name,
                 tool=leaked_name,
+                known=True,
                 operation="llm_loop",
             )
             return True, _TOOL_CALL_LEAK_FALLBACK
@@ -2247,14 +2268,17 @@ class Agent:
 
     @staticmethod
     def _detect_leaked_tool_call(content: str) -> tuple[str, dict[str, Any]] | None:
-        """Recognise a tool/function call the model emitted as plain text (U3).
+        """Recognise a tool/function call the model emitted as plain text (U3/U6).
 
         Weak models sometimes serialize a tool call into the message *content*
         instead of producing a structured ``tool_call``. Returns ``(name, args)``
-        when ``content`` is such a call naming a known builtin tool, otherwise
-        ``None``. Tolerant by design — anything that does not cleanly parse as a
-        known tool-call shape is treated as ordinary prose so a normal answer is
-        never misclassified.
+        for EVERY payload that parses as a tool-call shape, regardless of
+        whether the name is a known builtin (R9) — models also hallucinate
+        tools that do not exist, and such a leak must still be intercepted.
+        Disposition (recover a known read, suppress a known write or an
+        unknown/hallucinated tool) is the caller's job, not a filter here.
+        Anything that does not cleanly parse as a tool-call shape is treated
+        as ordinary prose so a normal answer is never misclassified.
         """
         text = (content or "").strip()
         if not (text.startswith("{") and text.endswith("}")):
@@ -2275,8 +2299,6 @@ class Agent:
             name = obj["name"]
             raw_args = obj.get("arguments", obj.get("parameters", {}))
         else:
-            return None
-        if name not in _KNOWN_TOOL_NAMES:
             return None
         if isinstance(raw_args, str):
             try:
