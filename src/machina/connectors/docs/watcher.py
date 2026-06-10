@@ -2,13 +2,15 @@
 
 Uses watchdog's native observer when available (inotify/FSEvents/ReadDirectoryChanges),
 falling back to PollingObserver for SMB/CIFS mounts where native events don't fire.
-Debounces rapid save-then-reload patterns typical of Excel.
+Debounces rapid save-then-reload patterns typical of Excel with a trailing-edge
+timer: the callback fires once, after a full quiet period, so it always observes
+the final on-disk state of a save burst.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -26,6 +28,21 @@ class RefreshableConnector(Protocol):
     def refresh(self) -> None: ...
 
 
+class _TimerLike(Protocol):
+    """Minimal timer surface required by ``_DebouncedHandler`` (threading.Timer-shaped)."""
+
+    def start(self) -> None: ...
+
+    def cancel(self) -> None: ...
+
+
+def _default_timer_factory(delay: float, fn: Callable[[], None]) -> _TimerLike:
+    """Create a daemon ``threading.Timer`` so pending timers never block interpreter exit."""
+    timer = threading.Timer(delay, fn)
+    timer.daemon = True
+    return timer
+
+
 def _require_watchdog() -> Any:
     try:
         import watchdog  # type: ignore[import-not-found,unused-ignore]
@@ -39,31 +56,73 @@ def _require_watchdog() -> Any:
 
 
 class _DebouncedHandler:
-    """watchdog event handler that coalesces rapid events into a single callback."""
+    """watchdog event handler with trailing-edge debounce.
+
+    Every matching event cancels any pending timer and arms a new one for
+    ``debounce_sec``; the callback fires only when a timer expires with no
+    further events — i.e. once per burst, after a full quiet period, observing
+    the final on-disk state. Runs on the watchdog observer thread, so arm/cancel
+    is guarded by a lock and a generation counter discards stale timers whose
+    expiry races a cancel.
+
+    Args:
+        paths: Absolute file paths to react to.
+        callback: Invoked once per coalesced burst, after the quiet period.
+        debounce_sec: Quiet period in seconds. ``0.0`` still fires on a
+            (zero-delay) timer, never synchronously from ``dispatch``.
+        timer_factory: Injection point for tests — ``(delay, fn) -> timer``
+            with ``start()``/``cancel()``. Defaults to a daemon
+            ``threading.Timer``.
+    """
 
     def __init__(
         self,
         paths: set[str],
         callback: Callable[[], None],
         debounce_sec: float,
+        *,
+        timer_factory: Callable[[float, Callable[[], None]], _TimerLike] | None = None,
     ) -> None:
         self._paths = {str(Path(p).resolve()) for p in paths}
         self._callback = callback
         self._debounce_sec = debounce_sec
-        self._last_event: float = 0.0
-        self._pending = False
+        self._timer_factory = (
+            timer_factory if timer_factory is not None else _default_timer_factory
+        )
+        self._lock = threading.Lock()
+        self._timer: _TimerLike | None = None
+        self._generation = 0
 
     def dispatch(self, event: Any) -> None:
+        """Handle a watchdog event: (re)arm the trailing-edge debounce timer."""
         if event.is_directory:
             return
         src = str(Path(event.src_path).resolve())
         if src not in self._paths:
             return
-        now = time.monotonic()
-        if now - self._last_event < self._debounce_sec:
-            return
-        self._last_event = now
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._generation += 1
+            generation = self._generation
+            timer = self._timer_factory(self._debounce_sec, lambda: self._fire(generation))
+            self._timer = timer
+            timer.start()
+
+    def _fire(self, generation: int) -> None:
+        """Timer expiry: invoke the callback unless this timer was superseded or cancelled."""
+        with self._lock:
+            if generation != self._generation or self._timer is None:
+                return
+            self._timer = None
         self._callback()
+
+    def cancel(self) -> None:
+        """Cancel any pending timer so the callback can no longer fire."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
 
 
 class FileWatcher:
@@ -71,8 +130,9 @@ class FileWatcher:
 
     Args:
         paths: File paths to watch.
-        callback: Called when a watched file changes.
-        debounce_ms: Minimum interval between callback invocations.
+        callback: Called once per change burst, after the debounce quiet period.
+        debounce_ms: Trailing-edge quiet period — the callback fires this long
+            after the *last* event of a burst.
         poll_fallback_sec: Polling interval for PollingObserver fallback.
 
     Example:
@@ -101,6 +161,7 @@ class FileWatcher:
         self._debounce_ms = debounce_ms
         self._poll_fallback_sec = poll_fallback_sec
         self._observer: Any = None
+        self._handler: _DebouncedHandler | None = None
         self._running = False
 
     async def start(self) -> None:
@@ -120,6 +181,7 @@ class FileWatcher:
             callback=self._callback,
             debounce_sec=self._debounce_ms / 1000.0,
         )
+        self._handler = handler
 
         # Wrap _DebouncedHandler so watchdog recognizes it
         class _WatchdogAdapter(FileSystemEventHandler):  # type: ignore[misc,unused-ignore]
@@ -160,11 +222,17 @@ class FileWatcher:
             )
 
     async def stop(self) -> None:
-        """Stop the watcher."""
+        """Stop the watcher and cancel any pending debounce timer.
+
+        After the observer thread is joined, the pending trailing-edge timer
+        (if any) is cancelled so the callback cannot fire after stop.
+        """
         if self._observer and self._running:
             self._observer.stop()
             await asyncio.to_thread(self._observer.join, 5.0)
             self._running = False
+            if self._handler is not None:
+                self._handler.cancel()
             logger.info("watcher_stopped")
 
     @property

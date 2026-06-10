@@ -6,6 +6,7 @@ Uses real temporary directories and real file-system events.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -44,6 +45,15 @@ def _append_asset_row(path: Path, row: tuple[str, str]) -> None:
     wb.close()
 
 
+def _count_asset_rows(path: Path) -> int:
+    """Return the number of rows (including header) currently on disk."""
+    wb = openpyxl.load_workbook(str(path), read_only=True)
+    try:
+        return int(wb["Assets"].max_row)
+    finally:
+        wb.close()
+
+
 def _asset_schema(path: Path) -> SheetSchema:
     return SheetSchema(
         path=str(path),
@@ -69,12 +79,13 @@ class TestWatcherIntegration:
         await conn.connect()
         assert len(await conn.read_assets()) == 1
 
-        refresh_event = asyncio.Event()
+        # The callback runs on the debounce timer thread — use a threading.Event.
+        refresh_done = threading.Event()
         original_refresh = conn.refresh
 
         def _tracked_refresh() -> None:
             original_refresh()
-            refresh_event.set()
+            refresh_done.set()
 
         watcher = FileWatcher(
             paths=[str(asset_file)],
@@ -90,10 +101,11 @@ class TestWatcherIntegration:
             _append_asset_row(asset_file, ("P-002", "Pompa 2"))
 
             # Wait for the watcher to fire (up to 10s for polling fallback)
-            try:
-                await asyncio.wait_for(refresh_event.wait(), timeout=10.0)
-            except TimeoutError:
-                pytest.skip("Watcher did not fire in time (CI/SMB environment)")
+            if not await asyncio.to_thread(refresh_done.wait, 10.0):
+                pytest.fail(
+                    "Watcher did not fire within 10s after the file changed — "
+                    "the observer or the trailing-edge debounce timer is broken"
+                )
 
             assets = await conn.read_assets()
             assert len(assets) == 2
@@ -104,35 +116,44 @@ class TestWatcherIntegration:
 
     @pytest.mark.asyncio
     async def test_watcher_debounce(self, tmp_path: Path) -> None:
-        """Rapid saves should be coalesced into fewer callbacks."""
+        """A rapid save burst coalesces into exactly one trailing-edge callback
+        that observes the final on-disk state."""
         asset_file = tmp_path / "assets.xlsx"
         _create_asset_file(asset_file, [("P-001", "Pompa 1")])
 
-        call_count = 0
+        observed_rows: list[int] = []
+        fired = threading.Event()
 
-        def _counting_callback() -> None:
-            nonlocal call_count
-            call_count += 1
+        def _recording_callback() -> None:
+            observed_rows.append(_count_asset_rows(asset_file))
+            fired.set()
 
         watcher = FileWatcher(
             paths=[str(asset_file)],
-            callback=_counting_callback,
+            callback=_recording_callback,
             debounce_ms=500,
             poll_fallback_sec=5,
         )
         await watcher.start()
 
         try:
-            # Rapid successive writes
+            # Rapid successive writes, all inside the 500 ms debounce window
             for i in range(5):
                 _append_asset_row(asset_file, (f"P-{i:03d}", f"Pompa {i}"))
                 await asyncio.sleep(0.05)
 
-            # Wait for debounce + polling to settle
-            await asyncio.sleep(2.0)
+            if not await asyncio.to_thread(fired.wait, 10.0):
+                pytest.fail(
+                    "Watcher did not fire within 10s after the save burst — "
+                    "the observer or the trailing-edge debounce timer is broken"
+                )
 
-            # With 500ms debounce, 5 writes in ~250ms should produce fewer than 5 callbacks
-            assert call_count < 5
+            # Let a full extra quiet period elapse: no further callback may arrive.
+            await asyncio.sleep(1.5)
+
+            # Trailing edge: exactly one callback, observing the final on-disk
+            # state (header + 1 initial row + 5 appended rows).
+            assert observed_rows == [7]
         finally:
             await watcher.stop()
 
