@@ -173,6 +173,12 @@ def evaluate_assertions(assertions: TurnAssertions, signals: TurnSignals) -> lis
             passed = diagnosis is None
             expected = "no malformed output (tool JSON / <think> / <citations>)"
             actual = (diagnosis or "clean") + fallback_note
+        elif name == "expect_not_fallback":
+            # True -> the turn must be a real answer (is_fallback False);
+            # False -> the turn must be a runtime fallback.
+            passed = signals.is_fallback is (not value)
+            expected = "no runtime fallback" if value else "runtime fallback"
+            actual = f"is_fallback={signals.is_fallback}"
         elif name == "expect_retrieval_source":
             passed = any(value.lower() in s.lower() for s in signals.citation_sources)
             expected = f"retrieved source contains '{value}'"
@@ -251,6 +257,19 @@ def preflight_model(model: str) -> str | None:
         return "OPENAI_API_KEY is not set (required for the cloud reference model)"
     if provider == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         return "ANTHROPIC_API_KEY is not set (required for the cloud reference model)"
+    if ":" not in model:
+        # Colon-less cloud tags (the documented MACHINA_EVAL_CLOUD_MODEL form,
+        # e.g. "gpt-4o" or "claude-sonnet-4-5") carry no explicit provider;
+        # infer it from the model-name prefix so a missing API key yields the
+        # same actionable skip row as a missing Ollama model instead of
+        # per-turn ERROR spam.
+        name_lower = model.lower()
+        if name_lower.startswith(("gpt", "o1", "o3", "o4")) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            return "OPENAI_API_KEY is not set (required for the cloud reference model)"
+        if name_lower.startswith("claude") and not os.environ.get("ANTHROPIC_API_KEY"):
+            return "ANTHROPIC_API_KEY is not set (required for the cloud reference model)"
     return None
 
 
@@ -465,7 +484,21 @@ async def _run_matrix(
         report = ModelReport(model=model)
         for scenario in scenarios:
             print(f"  running {model} x {scenario.id} ...", file=sys.stderr)
-            report.outcomes.extend(await _run_scenario(model, scenario))
+            try:
+                report.outcomes.extend(await _run_scenario(model, scenario))
+            except Exception as exc:
+                # One scenario blowing up (e.g. agent.start() failing) must
+                # not abort the whole matrix: record a single scenario-level
+                # ERROR row (turn 0) and move on.
+                report.outcomes.append(
+                    TurnOutcome(
+                        scenario_id=scenario.id,
+                        turn_index=0,
+                        status="ERROR",
+                        layer="error",
+                        evidence=f"{type(exc).__name__}: {str(exc)[:120]}",
+                    )
+                )
         reports.append(report)
     return reports
 

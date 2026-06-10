@@ -11,8 +11,10 @@ turns:
   - user: "chi sei?"
     assertions:
       expect_no_malformed: true
+      expect_not_fallback: true
       golden_excludes: ["call_", "function"]
   - user: "What can you help me with?"
     assertions:
       expect_no_malformed: true
+      expect_not_fallback: true
       golden_excludes: ["call_", "function"]

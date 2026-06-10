@@ -92,6 +92,10 @@ class _DebouncedHandler:
         self._lock = threading.Lock()
         self._timer: _TimerLike | None = None
         self._generation = 0
+        # Set while no callback is executing; cleared for the duration of a
+        # callback so ``drain`` can wait for an in-flight refresh to finish.
+        self._idle = threading.Event()
+        self._idle.set()
 
     def dispatch(self, event: Any) -> None:
         """Handle a watchdog event: (re)arm the trailing-edge debounce timer."""
@@ -110,12 +114,30 @@ class _DebouncedHandler:
             timer.start()
 
     def _fire(self, generation: int) -> None:
-        """Timer expiry: invoke the callback unless this timer was superseded or cancelled."""
+        """Timer expiry: invoke the callback unless this timer was superseded or cancelled.
+
+        Runs on a ``threading.Timer`` thread, where an uncaught exception goes
+        to ``threading.excepthook`` (stderr) — invisible in structured logs
+        while the watcher silently keeps looking alive. The callback is
+        therefore wrapped: failures are logged via structlog and swallowed, so
+        the next burst still re-arms and fires.
+        """
         with self._lock:
             if generation != self._generation or self._timer is None:
                 return
             self._timer = None
-        self._callback()
+            self._idle.clear()
+        try:
+            self._callback()
+        except Exception as exc:
+            logger.error(
+                "debounce_callback_error",
+                operation="debounce_callback",
+                exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+        finally:
+            self._idle.set()
 
     def cancel(self) -> None:
         """Cancel any pending timer so the callback can no longer fire."""
@@ -123,6 +145,22 @@ class _DebouncedHandler:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+
+    def drain(self, timeout: float) -> bool:
+        """Wait for an in-flight callback (if any) to finish.
+
+        ``cancel`` only prevents PENDING timers from firing; a callback
+        already executing cannot be cancelled. ``drain`` blocks until the
+        handler is idle again (or immediately, when no callback is running).
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            ``True`` when the handler is idle, ``False`` on timeout (a
+            callback is still executing).
+        """
+        return self._idle.wait(timeout)
 
 
 class FileWatcher:
@@ -222,10 +260,14 @@ class FileWatcher:
             )
 
     async def stop(self) -> None:
-        """Stop the watcher and cancel any pending debounce timer.
+        """Stop the watcher, cancel pending timers, and drain an in-flight callback.
 
         After the observer thread is joined, the pending trailing-edge timer
-        (if any) is cancelled so the callback cannot fire after stop.
+        (if any) is cancelled so a PENDING callback can no longer fire. A
+        callback already in flight cannot be cancelled: stop() waits for it
+        (up to 5 seconds) and logs a warning if it is still running when the
+        wait times out — in that case the refresh may complete after stop()
+        returns.
         """
         if self._observer and self._running:
             self._observer.stop()
@@ -233,6 +275,12 @@ class FileWatcher:
             self._running = False
             if self._handler is not None:
                 self._handler.cancel()
+                if not await asyncio.to_thread(self._handler.drain, 5.0):
+                    logger.warning(
+                        "watcher_callback_still_running",
+                        operation="stop",
+                        timeout_sec=5.0,
+                    )
             logger.info("watcher_stopped")
 
     @property

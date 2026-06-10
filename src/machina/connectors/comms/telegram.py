@@ -14,15 +14,26 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.comms.cli import CliChannel
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
 
-# Re-export for backwards compatibility (CliChannel moved to
-# machina.connectors.comms.cli; the published import path keeps working).
-__all__ = ["CliChannel", "IncomingMessage", "MessageHandler", "TelegramConnector"]
+# "CliChannel" stays in __all__ for backwards compatibility (it moved to
+# machina.connectors.comms.cli; the published import path keeps working) but
+# resolves lazily via __getattr__ below, so importing telegram.py does not
+# force cli.py to load.
+
+__all__ = ["CliChannel", "IncomingMessage", "MessageHandler", "TelegramConnector"]  # noqa: F822
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy back-compat re-export of ``CliChannel`` (PEP 562)."""
+    if name == "CliChannel":
+        from machina.connectors.comms.cli import CliChannel
+
+        return CliChannel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class TelegramConnector:

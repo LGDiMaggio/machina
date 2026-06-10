@@ -379,6 +379,30 @@ class TestThinkBlockScrub:
         assert resp.is_fallback is True
         assert self._ANSWER not in resp.text
 
+    def test_orphan_closer_without_opener_drops_reasoning(self) -> None:
+        """deepseek-r1 via some serving stacks emits reasoning WITHOUT the
+        opener, ending with a bare ``</think>`` before the answer — the
+        pre-closer text is reasoning by construction and must be dropped."""
+        agent = Agent()
+        raw = f"The user asks about P-201. Check the bearing history.</think>{self._ANSWER}"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == self._ANSWER
+        assert "</think>" not in resp.text
+        assert "bearing history" not in resp.text
+        assert resp.is_fallback is False
+
+    def test_nested_openers_leave_no_stray_closer(self) -> None:
+        """Nested ``<think>`` openers leave a stray closer after the
+        non-greedy sub; the orphan-closer pass removes it AND the trailing
+        reasoning before it."""
+        agent = Agent()
+        raw = f"<think>outer<think>inner</think>more outer</think>{self._ANSWER}"
+        resp = agent._finalize_turn(chat_id="c1", user_text="q", raw_response=raw)
+        assert resp.text == self._ANSWER
+        assert "think" not in resp.text
+        assert "outer" not in resp.text
+        assert resp.is_fallback is False
+
     def test_think_plus_echo_resolves_to_one_fallback(self) -> None:
         """Validator short-circuit: scrub then echo → exactly ONE fallback."""
         long_answer = (

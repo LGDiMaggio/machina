@@ -13,12 +13,15 @@ turns:
   - user: "Hello! Good morning."
     assertions:
       expect_no_malformed: true
+      expect_not_fallback: true
       golden_excludes: ["call_"]
   - user: "What is preventive maintenance?"
     assertions:
       expect_no_malformed: true
+      expect_not_fallback: true
       golden_contains: ["maintenance"]
   - user: "Thanks, that's all for now."
     assertions:
       expect_no_malformed: true
+      expect_not_fallback: true
       golden_excludes: ["call_"]

@@ -213,6 +213,17 @@ _MAX_ARG_CORRECTION_ATTEMPTS = 2
 # empty-response fallback fires. Near-miss tags (<thinking>, <b>) never match.
 _THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.IGNORECASE | re.DOTALL)
 
+# Orphan closers the regex above cannot reach: some serving stacks emit
+# deepseek-r1 reasoning WITHOUT the opener (the content ends the chain of
+# thought with a bare "</think>" before the answer), and nested openers
+# leave a stray closer behind the non-greedy sub. _finalize_turn therefore
+# runs a second pass: while a closer remains, drop everything up to and
+# including the FIRST one — pre-closer text is reasoning by construction.
+# Fail-closed trade-off (same family as R9): a legit literal "</think>"
+# inside an answer is sacrificed rather than ever showing reasoning.
+# Near-miss tags ("<thinking>", "<b>") still never match.
+_THINK_CLOSE_TAG = "</think>"
+
 # Minimum rendered length (characters) before the cross-turn echo guard applies.
 # Short generic replies ("Yes.", "In stock.") legitimately recur across turns;
 # the degenerate-echo failure mode is always a long canned paragraph, so the
@@ -1165,6 +1176,13 @@ class Agent:
             # rendered text is left byte-identical (no spurious trimming of
             # clean answers). Never log the scrubbed content itself.
             scrubbed = _THINK_BLOCK_RE.sub("", rendered)
+            # Orphan-closer pass: a bare "</think>" surviving the sub means
+            # the opener was never emitted (r1 via some serving stacks) or was
+            # nested — either way, everything before the FIRST remaining
+            # closer is reasoning. Drop it, repeatedly, case-insensitively.
+            # See _THINK_CLOSE_TAG for the fail-closed trade-off.
+            while (closer_at := scrubbed.lower().find(_THINK_CLOSE_TAG)) != -1:
+                scrubbed = scrubbed[closer_at + len(_THINK_CLOSE_TAG) :]
             if scrubbed != rendered:
                 cleaned = scrubbed.strip()
                 logger.info(

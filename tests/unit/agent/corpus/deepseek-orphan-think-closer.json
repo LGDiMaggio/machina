@@ -1,0 +1,18 @@
+{
+  "id": "deepseek-orphan-think-closer",
+  "description": "Reasoning emitted WITHOUT the opener: deepseek-r1 served via some stacks puts the chain of thought first and ends it with a bare </think> before the answer, so the <think>...</think> regex never matches. The gate's orphan-closer pass drops everything up to and including the FIRST remaining closer (pre-closer text is reasoning by construction); the surviving answer is delivered untouched. Fail-closed trade-off (R9 family): a legit literal </think> in an answer is sacrificed. Pinned by tests/unit/agent/test_authority_gates_validity.py::TestThinkBlockScrub.",
+  "user_messages": ["When should the bearing on P-201 be replaced?"],
+  "turns": [
+    {
+      "content": "The user asks about the pump bearing. I should check the maintenance interval in the manual before answering.</think>Replace the bearing on P-201 within 48 hours.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Replace the bearing on P-201 within 48 hours."],
+    "user_text_excludes": ["</think>", "check the maintenance interval"]
+  }
+}

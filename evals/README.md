@@ -75,6 +75,7 @@ turns:
     assertions:            # OPTIONAL mapping — every key below is optional
       expect_tool_invoked: "list_assets"        # runtime: traced tool_call op
       expect_no_malformed: true                 # runtime: default true; set false to disable
+      expect_not_fallback: true                 # runtime: response must not be a runtime fallback
       expect_retrieval_source: "pump_p201"      # retrieval: substring of a citation source
       expect_citation: true                     # citations: require (true) / forbid (false)
       golden_contains: ["P-201", "bearing"]     # golden: case-insensitive substrings
@@ -97,6 +98,7 @@ Every assertion type maps to exactly **one** layer:
 |---|---|---|
 | `expect_tool_invoked` | runtime | `agent.tracer` entries with action `tool_call` recorded during the turn |
 | `expect_no_malformed` | runtime | lightweight sniff of `AgentResponse.text` (tool-call-shaped JSON, raw `<think>` / `<citations>` tags) |
+| `expect_not_fallback` | runtime | `AgentResponse.is_fallback` (`true` requires a real answer; `false` requires a fallback) |
 | `expect_retrieval_source` | retrieval | `Citation.source` values on `AgentResponse.citations` |
 | `expect_citation` | citations | `len(AgentResponse.citations)` |
 | `golden_contains` / `golden_excludes` | golden | `AgentResponse.text` |

@@ -234,6 +234,68 @@ class TestDebouncedHandler:
         timers[1].fire()
         assert cb.call_count == 2
 
+    def test_raising_callback_is_swallowed_and_next_burst_fires(self, tmp_path):
+        """A raising connector.refresh() must not propagate off the timer thread,
+        and the handler must stay alive: the next burst re-arms and fires."""
+        target = tmp_path / "test.xlsx"
+        target.touch()
+        calls: list[int] = []
+
+        def flaky_cb() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("refresh exploded")
+
+        timers: list[FakeTimer] = []
+        handler = self._handler(target, flaky_cb, timers)
+
+        handler.dispatch(_file_event(target))
+        timers[0].fire()  # must NOT raise despite the callback raising
+        assert len(calls) == 1
+
+        handler.dispatch(_file_event(target))
+        assert len(timers) == 2
+        timers[1].fire()
+        assert len(calls) == 2
+
+    def test_drain_waits_for_in_flight_callback(self, tmp_path):
+        """cancel() cannot stop a callback already executing; drain() reports it.
+
+        While the callback blocks, drain(short) returns False; once released,
+        drain() returns True.
+        """
+        import threading
+
+        target = tmp_path / "test.xlsx"
+        target.touch()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_cb() -> None:
+            started.set()
+            release.wait(5.0)
+
+        timers: list[FakeTimer] = []
+        handler = self._handler(target, blocking_cb, timers)
+        handler.dispatch(_file_event(target))
+
+        worker = threading.Thread(target=timers[0].fire, daemon=True)
+        worker.start()
+        assert started.wait(5.0), "callback never started"
+
+        handler.cancel()  # cannot affect the in-flight callback
+        assert handler.drain(0.05) is False
+
+        release.set()
+        assert handler.drain(5.0) is True
+        worker.join(5.0)
+
+    def test_drain_returns_true_when_idle(self, tmp_path):
+        target = tmp_path / "test.xlsx"
+        target.touch()
+        handler = self._handler(target, MagicMock(), [])
+        assert handler.drain(0.0) is True
+
     def test_zero_debounce_is_still_trailing_edge(self, tmp_path):
         """debounce_sec=0.0 arms a zero-delay timer — never fires synchronously."""
         target = tmp_path / "test.xlsx"

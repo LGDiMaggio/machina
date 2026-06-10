@@ -9,6 +9,7 @@ Assertion                   Layer
 ==========================  ==========
 ``expect_tool_invoked``     runtime
 ``expect_no_malformed``     runtime
+``expect_not_fallback``     runtime
 ``expect_retrieval_source``  retrieval
 ``expect_citation``         citations
 ``golden_contains``         golden
@@ -43,6 +44,7 @@ LAYER_ORDER: tuple[str, ...] = ("runtime", "retrieval", "citations", "golden")
 ASSERTION_LAYERS: dict[str, str] = {
     "expect_tool_invoked": "runtime",
     "expect_no_malformed": "runtime",
+    "expect_not_fallback": "runtime",
     "expect_retrieval_source": "retrieval",
     "expect_citation": "citations",
     "golden_contains": "golden",
@@ -53,6 +55,7 @@ ASSERTION_LAYERS: dict[str, str] = {
 ASSERTION_ORDER: tuple[str, ...] = (
     "expect_tool_invoked",
     "expect_no_malformed",
+    "expect_not_fallback",
     "expect_retrieval_source",
     "expect_citation",
     "golden_contains",
@@ -81,6 +84,10 @@ class TurnAssertions:
         expect_no_malformed: When ``True`` (the default), the response
             text must not contain tool-call-shaped JSON or raw
             ``<think>``/``<citations>`` tags (runtime layer).
+        expect_not_fallback: When ``True``, the response must be a real
+            answer, not a runtime fallback (``AgentResponse.is_fallback``
+            must be ``False``); ``False`` requires a fallback (runtime
+            layer).
         expect_retrieval_source: Substring that must appear in at least
             one citation source for the turn (retrieval layer).
         expect_citation: When set, requires (``True``) or forbids
@@ -93,6 +100,7 @@ class TurnAssertions:
 
     expect_tool_invoked: str | None = None
     expect_no_malformed: bool = True
+    expect_not_fallback: bool | None = None
     expect_retrieval_source: str | None = None
     expect_citation: bool | None = None
     golden_contains: tuple[str, ...] = ()
@@ -209,6 +217,10 @@ def _parse_assertions(raw: Any, *, source: str) -> TurnAssertions:
     if "expect_no_malformed" in raw:
         kwargs["expect_no_malformed"] = _require_bool(
             raw["expect_no_malformed"], source=source, fieldname="expect_no_malformed"
+        )
+    if "expect_not_fallback" in raw:
+        kwargs["expect_not_fallback"] = _require_bool(
+            raw["expect_not_fallback"], source=source, fieldname="expect_not_fallback"
         )
     if "expect_retrieval_source" in raw:
         kwargs["expect_retrieval_source"] = _require_str(

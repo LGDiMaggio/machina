@@ -104,6 +104,22 @@ class TestValidation:
         with pytest.raises(ScenarioSchemaError, match="expect_citation"):
             parse_scenario(data)
 
+    def test_expect_not_fallback_parses(self) -> None:
+        data = _valid_data(turns=[{"user": "hi", "assertions": {"expect_not_fallback": True}}])
+        scenario = parse_scenario(data)
+        assertions = scenario.turns[0].assertions
+        assert assertions.expect_not_fallback is True
+        assert ("expect_not_fallback", True) in assertions.active_assertions()
+        # Inactive by default: a turn that never mentions it asserts nothing.
+        default = parse_scenario(_valid_data()).turns[0].assertions
+        assert default.expect_not_fallback is None
+        assert all(n != "expect_not_fallback" for n, _ in default.active_assertions())
+
+    def test_expect_not_fallback_must_be_boolean(self) -> None:
+        data = _valid_data(turns=[{"user": "hi", "assertions": {"expect_not_fallback": "yes"}}])
+        with pytest.raises(ScenarioSchemaError, match="expect_not_fallback"):
+            parse_scenario(data)
+
     def test_golden_contains_must_be_string_list(self) -> None:
         data = _valid_data(turns=[{"user": "hi", "assertions": {"golden_contains": "P-201"}}])
         with pytest.raises(ScenarioSchemaError, match="golden_contains"):
@@ -152,6 +168,7 @@ class TestLayerMapping:
         expected = {
             "expect_tool_invoked": "runtime",
             "expect_no_malformed": "runtime",
+            "expect_not_fallback": "runtime",
             "expect_retrieval_source": "retrieval",
             "expect_citation": "citations",
             "golden_contains": "golden",
@@ -180,6 +197,7 @@ class TestLayerMapping:
                         "assertions": {
                             "golden_contains": ["x"],
                             "expect_citation": True,
+                            "expect_not_fallback": True,
                             "expect_tool_invoked": "list_assets",
                             "expect_retrieval_source": "manual",
                         },
@@ -191,6 +209,7 @@ class TestLayerMapping:
         assert names == [
             "expect_tool_invoked",
             "expect_no_malformed",
+            "expect_not_fallback",
             "expect_retrieval_source",
             "expect_citation",
             "golden_contains",
