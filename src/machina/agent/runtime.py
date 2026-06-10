@@ -1172,7 +1172,7 @@ class Agent:
                     agent=self.name,
                     chat_id=chat_id,
                     operation="finalize_turn",
-                    scrubbed_chars=len(rendered) - len(cleaned),
+                    scrubbed_chars=len(rendered) - len(scrubbed),
                 )
                 rendered = cleaned
             # A model that returns nothing (empty completion) or only a

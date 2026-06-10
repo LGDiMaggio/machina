@@ -115,6 +115,16 @@ class TestValidation:
         with pytest.raises(ScenarioSchemaError, match="YAML"):
             load_scenario(bad)
 
+    def test_unreadable_file_raises_schema_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An OSError while reading is re-raised as ScenarioSchemaError."""
+
+        def _raise_oserror(*args: object, **kwargs: object) -> str:
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "read_text", _raise_oserror)
+        with pytest.raises(ScenarioSchemaError, match="cannot read file"):
+            load_scenario(SCENARIOS_DIR / "example_smoke.yaml")
+
     def test_non_mapping_root_rejected(self, tmp_path: Path) -> None:
         bad = tmp_path / "list.yaml"
         bad.write_text("- just\n- a\n- list\n", encoding="utf-8")

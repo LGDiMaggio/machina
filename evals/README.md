@@ -127,6 +127,6 @@ evals/
 └── conversational/
     ├── run.py                     # async runner + report (python -m evals.conversational.run)
     ├── schema.py                  # scenario schema + loader (CI-tested, dependency-light)
-    └── scenarios/                 # one YAML per scenario (suite arrives in U10)
-        └── example_smoke.yaml
+    └── scenarios/                 # one YAML per scenario
+        └── *.yaml                 # smoke example + 9 scenarios
 ```

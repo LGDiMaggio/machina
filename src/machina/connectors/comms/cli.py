@@ -1,8 +1,9 @@
 """CliChannel — interactive command-line channel for local agent sessions.
 
-Provides the same interface as :class:`~machina.connectors.comms.telegram.TelegramConnector`
-so the agent runtime can use it as a drop-in replacement without any
-external messaging service.
+A lightweight local substitute for
+:class:`~machina.connectors.comms.telegram.TelegramConnector`: it exposes the
+same channel interface (``send_message``, ``listen``, ``request_confirmation``)
+over stdin/stdout so agents can be tested without a Telegram bot token.
 """
 
 from __future__ import annotations
@@ -50,12 +51,12 @@ class CliChannel:
     async def connect(self) -> None:
         """No-op for CLI mode."""
         self._connected = True
-        logger.info("connected", connector="CliChannel")
+        logger.info("connected", connector="CliChannel", operation="connect")
 
     async def disconnect(self) -> None:
         """No-op for CLI mode."""
         self._connected = False
-        logger.info("disconnected", connector="CliChannel")
+        logger.info("disconnected", connector="CliChannel", operation="disconnect")
 
     async def health_check(self) -> ConnectorHealth:
         """Always healthy."""

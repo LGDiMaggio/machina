@@ -257,9 +257,10 @@ def preflight_model(model: str) -> str | None:
 def normalize_model(tag: str) -> str:
     """Normalize a CLI model tag to ``provider:model`` form.
 
-    Bare Ollama tags get the ``ollama:`` prefix (``llama3:8b`` ->
-    ``ollama:llama3:8b``); tags without a colon (e.g. ``gpt-4o``) and
-    tags already carrying a known provider pass through unchanged.
+    Only tags containing a colon whose head is not a known provider get
+    the ``ollama:`` prefix (``llama3:8b`` -> ``ollama:llama3:8b``); tags
+    without a colon (e.g. ``gpt-4o`` or ``llama3``) and tags already
+    carrying a known provider pass through unchanged.
 
     Args:
         tag: Raw model tag from ``--models`` or the cloud env var.

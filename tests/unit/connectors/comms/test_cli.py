@@ -117,7 +117,9 @@ class TestCliChannel:
         assert cli._prompt == ">>> "
 
     @pytest.mark.asyncio
-    async def test_listen_handler_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_listen_handler_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Handler returning empty string should not call send_message."""
         inputs = iter(["hello", "exit"])
         monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
@@ -128,6 +130,25 @@ class TestCliChannel:
         handler = AsyncMock(return_value="")
         await cli.listen(handler)
         handler.assert_awaited_once()
+        # send_message prints responses with the robot prefix — an empty
+        # response must not produce one.
+        captured = capsys.readouterr()
+        assert "🤖" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_listen_keyboard_interrupt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """listen handles KeyboardInterrupt (Ctrl+C) gracefully."""
+
+        def _raise_interrupt(_prompt: str = "") -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", _raise_interrupt)
+
+        cli = CliChannel()
+        await cli.connect()
+
+        handler = AsyncMock(return_value="response")
+        await cli.listen(handler)  # Should not raise
 
 
 class TestCliChannelConfirmation:
