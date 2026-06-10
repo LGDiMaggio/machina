@@ -27,7 +27,7 @@ from _preflight import check  # noqa: E402
 
 from machina import Agent, Plant
 from machina.connectors.cmms import GenericCmmsConnector
-from machina.connectors.comms.telegram import CliChannel
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 
 SAMPLE_DIR = _examples_dir / "sample_data"

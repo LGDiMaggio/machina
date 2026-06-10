@@ -19,9 +19,10 @@ import pytest
 
 from machina.connectors.base import set_sandbox_mode
 from machina.connectors.calendar.connector import CalendarConnector
+from machina.connectors.comms.cli import CliChannel
 from machina.connectors.comms.email import EmailConnector
 from machina.connectors.comms.slack import SlackConnector
-from machina.connectors.comms.telegram import CliChannel, TelegramConnector
+from machina.connectors.comms.telegram import TelegramConnector
 from machina.connectors.iot.mqtt import MqttConnector
 from machina.exceptions import SandboxViolationError
 

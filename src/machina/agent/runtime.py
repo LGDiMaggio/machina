@@ -317,7 +317,7 @@ class Agent:
         ```python
         from machina import Agent, Plant
         from machina.connectors.cmms import GenericCmmsConnector
-        from machina.connectors.comms.telegram import CliChannel
+        from machina.connectors.comms.cli import CliChannel
 
         plant = Plant(name="Demo Plant")
         cmms = GenericCmmsConnector(data_dir="sample_data/cmms")
@@ -555,7 +555,7 @@ class Agent:
         if config.channels:
             channels = [create_channel(ch.type, ch.settings) for ch in config.channels]
         else:
-            from machina.connectors.comms.telegram import CliChannel
+            from machina.connectors.comms.cli import CliChannel
 
             channels = [CliChannel()]
 

@@ -25,7 +25,8 @@ def _connector_registry() -> dict[str, type]:
         SapPmConnector,
         UpKeepConnector,
     )
-    from machina.connectors.comms.telegram import CliChannel, TelegramConnector
+    from machina.connectors.comms.cli import CliChannel
+    from machina.connectors.comms.telegram import TelegramConnector
     from machina.connectors.docs import DocumentStoreConnector
     from machina.connectors.iot import MqttConnector, OpcUaConnector, SimulatedSensorConnector
 
@@ -74,7 +75,8 @@ def _connector_registry() -> dict[str, type]:
 
 def _channel_registry() -> dict[str, type]:
     """Channel types for communication channels."""
-    from machina.connectors.comms.telegram import CliChannel, TelegramConnector
+    from machina.connectors.comms.cli import CliChannel
+    from machina.connectors.comms.telegram import TelegramConnector
 
     registry: dict[str, type] = {
         "cli": CliChannel,
