@@ -1,0 +1,23 @@
+# Paired control — keep the turns IDENTICAL to smalltalk-with-connectors.yaml;
+# only id/description/connectors differ. This half runs the agent with NO
+# connectors attached (run.py builds it with an empty connector list).
+id: smalltalk-no-connectors
+description: >
+  No-connector half of the paired small-talk control: the same three turns
+  as smalltalk-with-connectors against a bare agent. A failure that appears
+  only in the connector-attached twin isolates attachment-induced
+  degradation by construction.
+connectors: false
+turns:
+  - user: "Hello! Good morning."
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_"]
+  - user: "What is preventive maintenance?"
+    assertions:
+      expect_no_malformed: true
+      golden_contains: ["maintenance"]
+  - user: "Thanks, that's all for now."
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_"]

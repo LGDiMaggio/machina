@@ -1,0 +1,57 @@
+# 12 turns (>= LONG_SCENARIO_MIN_TURNS=10) so the runner's truncated-history
+# replay arms: a golden-only failure here is re-run in a fresh conversation
+# and attributed to conversation-length when the replay passes (R16).
+# Every turn is self-contained (R13): each user message names its subject,
+# never "the second one" or "that pump". Goldens hand-derived from
+# examples/sample_data (assets.json, work_orders.json, spare_parts.json,
+# manuals/pump_p201_manual.md).
+id: long-conversation
+description: >
+  Measures conversation-length degradation (R16): 12 self-contained turns
+  mixing asset lookups, a work-order query, a manual procedure question,
+  a stock check, a diagnosis, and the meta-identity bait against one agent
+  instance. Tripwires late-turn quality collapse — goldens that pass in the
+  short scenarios but fail here isolate history length by construction.
+turns:
+  - user: "Hello! I'm starting my shift in the plant."
+    assertions:
+      expect_no_malformed: true
+  - user: "List all assets in the plant."
+    assertions:
+      expect_tool_invoked: "list_assets"
+      golden_contains: ["P-202", "MOT-201A"]
+  - user: "Give me the details of asset COMP-301."
+    assertions:
+      golden_contains: ["COMP-301", "Atlas Copco"]
+  - user: "Show me work order WO-2026-1842: which asset is it for and what is it about?"
+    assertions:
+      golden_contains: ["WO-2026-1842", "P-201"]
+  - user: "What is the bearing replacement procedure for pump P-201?"
+    assertions:
+      expect_retrieval_source: "pump_p201_manual"
+      expect_citation: true
+      golden_contains: ["6310"]
+  - user: "How many SKF 6310 bearings for pump P-201 do we currently have in stock?"
+    assertions:
+      expect_tool_invoked: "check_spare_parts"
+      golden_contains: ["6310"]
+  - user: "Pump P-201 is showing high vibration on the drive-end bearing. What is the probable failure mode?"
+    assertions:
+      expect_tool_invoked: "diagnose_failure"
+      expect_no_malformed: true
+  - user: "Where is the heat exchanger HX-401 located?"
+    assertions:
+      golden_contains: ["HX-401", "Thermal"]
+  - user: "Which work order covers the intake filter replacement on compressor COMP-301?"
+    assertions:
+      golden_contains: ["WO-2026-1841"]
+  - user: "What is the model of the drive motor MOT-201A?"
+    assertions:
+      golden_contains: ["M3BP"]
+  - user: "chi sei?"
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_"]
+  - user: "Thanks, end of shift. Goodbye!"
+    assertions:
+      expect_no_malformed: true

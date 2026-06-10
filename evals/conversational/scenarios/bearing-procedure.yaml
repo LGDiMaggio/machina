@@ -1,0 +1,16 @@
+# Goldens hand-derived from examples/sample_data/manuals/pump_p201_manual.md,
+# section "3. Bearing Replacement Procedure": parts "SKF 6310 deep groove ball
+# bearing (qty: 2)"; step 6 "Heat new bearings to 110°C using induction heater".
+id: bearing-procedure
+description: >
+  The exact question from the field transcript that made llama3 leak a
+  hallucinated get_bearing_replacement_procedure tool call. Tripwires two
+  failures: answering from parametric knowledge instead of retrieving the
+  P-201 manual (retrieval + citation layers), and uncited synthesis. Goldens
+  are distinctive tokens from the manual's bearing section.
+turns:
+  - user: "What is the bearing replacement procedure for pump P-201?"
+    assertions:
+      expect_retrieval_source: "pump_p201_manual"
+      expect_citation: true
+      golden_contains: ["6310", "induction heater"]

@@ -1,0 +1,18 @@
+# The hallucination bait from the field transcript: meta/identity questions
+# have no matching tool, which is exactly when llama3 emitted a raw
+# hallucinated tool call as content.
+id: meta-identity
+description: >
+  Tripwires the hallucinated-tool leak from the field transcript: identity
+  and capability questions ("chi sei?") that map to no tool historically
+  made llama3 answer with raw tool-call JSON. Both turns must stay clean
+  prose with no tool-call fragments (call_ ids, "function" payload keys).
+turns:
+  - user: "chi sei?"
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_", "function"]
+  - user: "What can you help me with?"
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_", "function"]

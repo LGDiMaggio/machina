@@ -1,0 +1,12 @@
+# Goldens hand-derived from examples/sample_data/cmms/assets.json (6 assets).
+id: asset-enumeration
+description: >
+  Tripwires the incomplete-enumeration failure from the origin field test
+  ("4 of 6 assets"): the model invokes list_assets but renders only part of
+  the result, historically dropping P-202 and MOT-201A. Golden requires all
+  6 asset IDs from assets.json and the traced list_assets call (AE6).
+turns:
+  - user: "List all assets in the plant."
+    assertions:
+      expect_tool_invoked: "list_assets"
+      golden_contains: ["P-201", "P-202", "COMP-301", "CONV-101", "HX-401", "MOT-201A"]

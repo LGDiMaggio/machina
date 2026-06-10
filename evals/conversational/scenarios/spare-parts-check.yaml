@@ -1,0 +1,14 @@
+# Goldens hand-derived from examples/sample_data/cmms/spare_parts.json:
+# SKU SKF-6310 "Deep Groove Ball Bearing 6310", compatible with P-201,
+# stock_quantity: 4. ("4" alone is a weak token; the traced
+# check_spare_parts call plus "6310" carry the discrimination.)
+id: spare-parts-check
+description: >
+  Tripwires stock fabrication: a stock-level question about a real P-201
+  part where the model must call check_spare_parts and report the actual
+  quantity (4) instead of guessing or claiming no inventory access.
+turns:
+  - user: "How many SKF 6310 bearings for pump P-201 do we currently have in stock?"
+    assertions:
+      expect_tool_invoked: "check_spare_parts"
+      golden_contains: ["6310", "4"]

@@ -1,0 +1,24 @@
+# Paired control — keep the turns IDENTICAL to smalltalk-no-connectors.yaml;
+# only id/description/connectors differ. Comparing the two rows measures
+# attachment-induced degradation (does merely wiring tools make small talk
+# leak tool-call JSON?).
+id: smalltalk-with-connectors
+description: >
+  Connector-attached half of the paired small-talk control. Tripwires
+  attachment-induced degradation: with CMMS/DocumentStore tools wired,
+  weak models historically answered plain conversation with malformed
+  tool-call output. Compare against smalltalk-no-connectors.
+connectors: true
+turns:
+  - user: "Hello! Good morning."
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_"]
+  - user: "What is preventive maintenance?"
+    assertions:
+      expect_no_malformed: true
+      golden_contains: ["maintenance"]
+  - user: "Thanks, that's all for now."
+    assertions:
+      expect_no_malformed: true
+      golden_excludes: ["call_"]
