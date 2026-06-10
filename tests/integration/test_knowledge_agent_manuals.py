@@ -11,6 +11,7 @@ page-reference half of R4.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -27,8 +28,20 @@ MANUALS_DIR = (
 
 @pytest.fixture
 async def doc_store() -> DocumentStoreConnector:
-    """A connected DocumentStoreConnector pointing at the real sample manuals."""
-    store = DocumentStoreConnector(paths=[MANUALS_DIR])
+    """A connected DocumentStoreConnector pointing at the real sample manuals.
+
+    Unique collection name per test: with ``chromadb`` installed the
+    connector runs in RAG mode, and Chroma's default ephemeral client
+    shares collections by name across the whole pytest process — a
+    default-named collection would serve orphan chunks indexed by any
+    earlier default-named connector in the run (the historical cause of
+    order-dependent flakiness in ``test_every_chunk_carries_source_citation``).
+    Same pattern as test_document_store_extras.py / _golden.py.
+    """
+    store = DocumentStoreConnector(
+        paths=[MANUALS_DIR],
+        collection_name=f"manuals_{uuid.uuid4().hex[:8]}",
+    )
     await store.connect()
     return store
 

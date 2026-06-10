@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
@@ -519,12 +520,30 @@ class TestEmbedderConfig:
         assert out is fake_embedding
 
 
+def _isolated_docstore(*paths: Path) -> DocumentStoreConnector:
+    """A connector with a per-test unique collection name.
+
+    Unlike the other classes in this file, ``TestMetadataFiltering`` does
+    not force keyword mode, so with ``chromadb`` installed it builds a
+    real Chroma index. Chroma's default ephemeral client shares one
+    in-process system: every connector using the default collection name
+    reads (and pollutes) the same collection, leaking chunks into any
+    other default-named connector in the same pytest process — this is
+    what made ``test_every_chunk_carries_source_citation`` order-dependent
+    flaky. Same pattern as tests/integration/test_document_store_extras.py.
+    """
+    return DocumentStoreConnector(
+        paths=list(paths),
+        collection_name=f"unit_meta_{uuid.uuid4().hex[:8]}",
+    )
+
+
 class TestMetadataFiltering:
     """Pre-retrieval filtering via the new metadata schema (Unit 1)."""
 
     @pytest.mark.asyncio
     async def test_chunks_carry_inferred_asset_id(self, sample_docs_dir: Path) -> None:
-        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn = _isolated_docstore(sample_docs_dir)
         await conn.connect()
         # P-201 manual chunks should be tagged via filename inference,
         # COMP-301 manual via frontmatter.
@@ -535,7 +554,7 @@ class TestMetadataFiltering:
 
     @pytest.mark.asyncio
     async def test_asset_filter_excludes_other_assets(self, sample_docs_dir: Path) -> None:
-        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn = _isolated_docstore(sample_docs_dir)
         await conn.connect()
         results = await conn.search("filter replacement", asset_id="COMP-301")
         # No P-201 results when filter is COMP-301.
@@ -544,7 +563,7 @@ class TestMetadataFiltering:
 
     @pytest.mark.asyncio
     async def test_filters_kwarg_with_doc_type(self, sample_docs_dir: Path) -> None:
-        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn = _isolated_docstore(sample_docs_dir)
         await conn.connect()
         results = await conn.search("filter replacement", filters={"doc_type": "manual"})
         # Both fixtures resolve to doc_type == "manual" (one via inference,
@@ -554,15 +573,15 @@ class TestMetadataFiltering:
 
     @pytest.mark.asyncio
     async def test_unknown_filter_value_returns_empty(self, sample_docs_dir: Path) -> None:
-        conn = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn = _isolated_docstore(sample_docs_dir)
         await conn.connect()
         results = await conn.search("anything", filters={"asset_id": "NOT-EXISTING"})
         assert results == []
 
     @pytest.mark.asyncio
     async def test_chunk_id_is_deterministic(self, sample_docs_dir: Path) -> None:
-        conn_a = DocumentStoreConnector(paths=[sample_docs_dir])
-        conn_b = DocumentStoreConnector(paths=[sample_docs_dir])
+        conn_a = _isolated_docstore(sample_docs_dir)
+        conn_b = _isolated_docstore(sample_docs_dir)
         await conn_a.connect()
         await conn_b.connect()
         ids_a = sorted(c.chunk_id for c in conn_a._chunks)
@@ -581,7 +600,7 @@ class TestMetadataFiltering:
         sidecar = docs_dir / "P-105_notes.txt.meta.yaml"
         sidecar.write_text("asset_id: P-999\ndoc_type: procedure\n", encoding="utf-8")
 
-        conn = DocumentStoreConnector(paths=[docs_dir])
+        conn = _isolated_docstore(docs_dir)
         await conn.connect()
         assert all(c.asset_id == "P-999" for c in conn._chunks)
         assert all(c.doc_type == "procedure" for c in conn._chunks)
@@ -593,7 +612,7 @@ class TestMetadataFiltering:
         (docs_dir / "guide.md").write_text("# Guide body\n", encoding="utf-8")
         # Sidecar should be loaded as metadata, not indexed as a document.
         (docs_dir / "guide.md.meta.yaml").write_text("asset_id: P-1\n", encoding="utf-8")
-        conn = DocumentStoreConnector(paths=[docs_dir])
+        conn = _isolated_docstore(docs_dir)
         await conn.connect()
         sources = {c.source for c in conn._chunks}
         assert not any(s.endswith(".meta.yaml") for s in sources)
