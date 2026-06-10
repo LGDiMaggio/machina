@@ -1,16 +1,21 @@
 {
   "id": "function-string-key-tool-call",
-  "description": "Shape-C leak: the tool name is the STRING VALUE of a top-level 'function' key -- {\"function\": \"get_asset_details\", \"arguments\": {...}} -- distinct from shape A (where 'function' is a nested object carrying 'name') and shape B (top-level 'name' key). Provenance: deepseek-r1:8b conversational eval baseline 2026-06-10, long-conversation turns 3/4/8/9/10 -- the raw JSON reached the user as the answer text, attributed 'unattributed' because no observable signal claimed it. KNOWN GAP pinned per R12: shape detection matches neither A nor B, so the payload passes the loop seam and the finalize gate raw. The fix flips this fixture to recovered_read (get_asset_details is a known READ).",
+  "description": "Shape-C leak: the tool name is the STRING VALUE of a top-level 'function' key -- {\"function\": \"get_asset_details\", \"arguments\": {...}} -- distinct from shape A (where 'function' is a nested object carrying 'name') and shape B (top-level 'name' key). Provenance: deepseek-r1:8b conversational eval baseline 2026-06-10, long-conversation turns 3/4/8/9/10 -- the raw JSON reached the user as the answer text, attributed 'unattributed' because no observable signal claimed it (gap family 6). Originally pinned as disposition 'clean' per R12; the detector now recognises shape C, and get_asset_details is a known READ, so the loop seam recovers it exactly once and the model's next completion is the real answer.",
   "turns": [
     {
       "content": "{\"function\": \"get_asset_details\", \"arguments\": {\"asset_id\": \"P-201\"}}",
       "tool_calls": null
+    },
+    {
+      "content": "P-201 is the Cooling Water Pump in Building A, criticality A.",
+      "tool_calls": null
     }
   ],
   "expected": {
-    "disposition": "clean",
+    "disposition": "recovered_read",
     "is_fallback": false,
     "completeness": "complete",
-    "user_text_contains": ["\"function\"", "get_asset_details"]
+    "user_text_contains": ["Cooling Water Pump"],
+    "user_text_excludes": ["get_asset_details", "\"function\"", "arguments"]
   }
 }

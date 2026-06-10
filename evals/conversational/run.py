@@ -74,8 +74,12 @@ _KNOWN_PROVIDERS = frozenset(
 # ---------------------------------------------------------------------------
 
 _RAW_TAG_RE = re.compile(r"</?\s*(think|citations)\b", re.IGNORECASE)
+# Two name spellings: a "name" key (shapes A/B), or the tool name as the
+# string VALUE of a "function" key (shape C, deepseek-r1:8b baseline
+# 2026-06-10) — either alongside an arguments-like key.
 _TOOL_JSON_RE = re.compile(
-    r"\{[^{}]*\"name\"\s*:\s*\"[^\"]+\"[^{}]*\"(?:arguments|parameters|args|tool_input)\"\s*:"
+    r"\{[^{}]*\"(?:name|function)\"\s*:\s*\"[^\"]+\""
+    r"[^{}]*\"(?:arguments|parameters|args|tool_input)\"\s*:"
 )
 
 
@@ -106,7 +110,10 @@ def find_malformed(text: str) -> str | None:
         has_args = isinstance(payload, dict) and any(
             k in payload for k in ("arguments", "parameters", "args", "tool_input")
         )
-        if has_args and isinstance(payload, dict) and "name" in payload:
+        has_name = isinstance(payload, dict) and (
+            "name" in payload or isinstance(payload.get("function"), str)
+        )
+        if has_args and has_name:
             return "response is a bare tool-call JSON object"
     return None
 

@@ -64,11 +64,12 @@ _KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUI
 # Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
 # payloads that are recognisably tool-call-shaped but do NOT parse — truncated
 # JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
-# BOTH regexes must hit: a string-valued name key AND a call-marker key
+# BOTH regexes must hit: a string-valued name key (a "name" key, or shape C's
+# string-valued "function" key — gap family 6) AND a call-marker key
 # (arguments/parameters/tool_calls, or a function key opening an object).
 # Truncated plain-data JSON carries a name key but no call marker, so it is
 # not suppressed. See _looks_like_leaked_tool_call_fragment.
-_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"']name[\"']\s*:\s*[\"']")
+_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"'](?:name|function)[\"']\s*:\s*[\"']")
 _LEAK_FRAGMENT_MARKER_RE = re.compile(
     r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
 )
@@ -2424,6 +2425,12 @@ class Agent:
         parsed via a safe Python-literal fallback. Truncated/partial payloads
         (family 5) never parse and are handled by the finalize-only
         :meth:`_looks_like_leaked_tool_call_fragment` tripwire instead.
+
+        Three parsed shapes are recognised: A — ``"function"`` is a nested
+        object carrying ``"name"``; B — a top-level ``"name"`` key; C — the
+        tool name is the string VALUE of a ``"function"`` key alongside an
+        ``arguments``/``parameters`` key (gap family 6, deepseek-r1:8b eval
+        baseline 2026-06-10).
         """
         text = _strip_code_fence((content or "").strip())
         if not text or text[0] not in "{[":
@@ -2444,6 +2451,12 @@ class Agent:
         elif isinstance(obj.get("name"), str) and ("arguments" in obj or "parameters" in obj):
             # Shape B: {"name":.., "arguments":..}
             name = obj["name"]
+            raw_args = obj.get("arguments", obj.get("parameters", {}))
+        elif isinstance(fn, str) and fn and ("arguments" in obj or "parameters" in obj):
+            # Shape C: {"function":"<name>", "arguments":..} — the tool name is
+            # the string VALUE of the function key (deepseek-r1 eval baseline
+            # 2026-06-10), not a nested object (A) or a "name" key (B).
+            name = fn
             raw_args = obj.get("arguments", obj.get("parameters", {}))
         else:
             return None

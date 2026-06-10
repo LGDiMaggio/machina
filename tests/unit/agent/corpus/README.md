@@ -127,3 +127,13 @@ ever legitimately mutate anything.
   sole egress gate — fail-closed per the R9/U6 trade-off. Pinned by `fenced-tool-call`,
   `array-tool-calls`, `tool-calls-wrapper`, `single-quoted-tool-call`,
   `truncated-tool-call`.
+- **Gap family 6 — string-valued `function` key (shape C).** The deepseek-r1:8b conversational
+  eval baseline (2026-06-10, long-conversation turns 3/4/8/9/10) leaked
+  `{"function": "get_asset_details", "arguments": {...}}` as user-facing answer text: the tool
+  name is the string VALUE of the `function` key, so neither shape A (nested function object)
+  nor shape B (top-level `name` key) matched. `_detect_leaked_tool_call` now recognises shape C
+  (`function` is a non-empty string alongside `arguments`/`parameters`), the fragment tripwire
+  accepts the string-valued `function` key as its name marker (truncated shape C), and the eval
+  sniff (`evals/conversational/run.py`) observes the same family. Pinned by
+  `function-string-key-tool-call` (landed first as disposition `clean` per R12, flipped to
+  `recovered_read` with the fix — `get_asset_details` is a known READ).

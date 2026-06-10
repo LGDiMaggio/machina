@@ -86,6 +86,8 @@ class _SpyWriteConnector:
 def _leak(name: str, args: dict[str, Any], *, shape: str = "A") -> str:
     if shape == "A":
         return json.dumps({"type": "function", "function": {"name": name, "arguments": args}})
+    if shape == "C":
+        return json.dumps({"function": name, "arguments": args})
     return json.dumps({"name": name, "arguments": args})
 
 
@@ -174,6 +176,41 @@ class TestDetectLeakedToolCall:
     def test_shape_b_bare_name(self) -> None:
         out = Agent._detect_leaked_tool_call(_leak("search_assets", {"query": "x"}, shape="B"))
         assert out == ("search_assets", {"query": "x"})
+
+    def test_shape_c_function_string_key(self) -> None:
+        """Gap family 6: the tool name is the string VALUE of a "function" key.
+
+        The verbatim family the deepseek-r1:8b conversational eval baseline
+        (2026-06-10) leaked as user-facing answer text — neither shape A
+        (nested function object) nor shape B (top-level name key) matched it.
+        """
+        out = Agent._detect_leaked_tool_call(
+            _leak("get_asset_details", {"asset_id": "P-201"}, shape="C")
+        )
+        assert out == ("get_asset_details", {"asset_id": "P-201"})
+
+    def test_shape_c_parameters_key(self) -> None:
+        raw = json.dumps({"function": "search_assets", "parameters": {"query": "pump"}})
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "pump"})
+
+    def test_shape_c_string_arguments_are_parsed(self) -> None:
+        raw = json.dumps(
+            {"function": "get_asset_details", "arguments": json.dumps({"asset_id": "P-201"})}
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_unknown_tool_is_detected(self) -> None:
+        out = Agent._detect_leaked_tool_call(_leak("totally_made_up", {"x": 1}, shape="C"))
+        assert out == ("totally_made_up", {"x": 1})
+
+    def test_function_string_without_call_marker_is_not_a_leak(self) -> None:
+        # A plain-data JSON answer with a string "function" field but no
+        # arguments/parameters key is an answer, not a call (shape-based, R9).
+        raw = json.dumps({"function": "pumping", "note": "centrifugal"})
+        assert Agent._detect_leaked_tool_call(raw) is None
 
     def test_string_arguments_are_parsed(self) -> None:
         raw = json.dumps({"name": "search_assets", "arguments": json.dumps({"query": "x"})})
@@ -289,6 +326,12 @@ class TestLeakedToolCallFragmentTripwire:
 
     def test_truncated_shape_b_call_trips(self) -> None:
         raw = '{"name": "search_assets", "arguments": {"query": "pu'
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
+
+    def test_truncated_shape_c_call_trips(self) -> None:
+        # Gap family 6, truncated: the string-valued "function" key counts as
+        # the name marker, "arguments" as the call marker.
+        raw = '{"function": "create_work_order", "arguments": {"asset_id": "P-2'
         assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
 
     def test_parsable_call_does_not_trip(self) -> None:
