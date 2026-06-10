@@ -1,0 +1,17 @@
+{
+  "id": "empty-completion",
+  "description": "Empty completion: the model returns no text and no tool calls (observed routinely with qwen2.5:3b, see docs/solutions weak-model-runtime-robustness-2026-06-07 pattern 1). The gate substitutes _EMPTY_RESPONSE_FALLBACK instead of delivering blank output. Pinned by tests/unit/test_agent_runtime.py::TestEmptyResponseFallback.",
+  "user_messages": ["hello?"],
+  "turns": [
+    {
+      "content": "",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_empty",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_contains": ["couldn't produce a response"]
+  }
+}

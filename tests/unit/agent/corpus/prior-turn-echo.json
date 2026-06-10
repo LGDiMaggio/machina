@@ -1,0 +1,22 @@
+{
+  "id": "prior-turn-echo",
+  "description": "Cross-turn echo: on the second user turn the model re-emits the first turn's long answer verbatim (weak models copy the prior assistant message out of history; observed with qwen2.5:3b, see docs/solutions weak-model-runtime-robustness-2026-06-07). The answer is >= 200 chars so the echo guard is armed (_MIN_ECHO_LENGTH); the second delivery is suppressed to _REPEATED_RESPONSE_FALLBACK. Pinned by tests/unit/test_agent_runtime.py::TestRepeatedResponseSuppressed.",
+  "user_messages": ["chi sei?", "what else can you help me with?"],
+  "turns": [
+    {
+      "content": "I'm a specialized maintenance assistant powered by the Machina framework. I can help with equipment information, maintenance history, procedures and manuals, failure diagnosis, spare parts, work orders, and maintenance schedules. What shall we do today?",
+      "tool_calls": null
+    },
+    {
+      "content": "I'm a specialized maintenance assistant powered by the Machina framework. I can help with equipment information, maintenance history, procedures and manuals, failure diagnosis, spare parts, work orders, and maintenance schedules. What shall we do today?",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_echo",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_contains": ["repeating my previous answer"],
+    "user_text_excludes": ["Machina framework"]
+  }
+}

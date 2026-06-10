@@ -1,0 +1,17 @@
+{
+  "id": "leaked-known-write-suppressed",
+  "description": "Known WRITE tool call (create_work_order) emitted as plain-text content. Provenance: PR #54 output-authority-gates invariant (never auto-execute a leaked write), pinned by tests/unit/agent/test_authority_gates_validity.py::TestLoopLeakHandling::test_leaked_write_is_suppressed_not_executed. The leak is suppressed to the fallback and the write NEVER executes (spy connector count stays 0 -- the fallback_leak_write disposition makes the spy assertion explicit). NOTE: is_fallback is false -- the loop-seam suppression returns the fallback TEXT, and the structured flag is set only when the _finalize_turn backstop itself substitutes the text (pinned inconsistency, see corpus README).",
+  "user_messages": ["create a work order for P-201"],
+  "turns": [
+    {
+      "content": "{\"type\": \"function\", \"function\": {\"name\": \"create_work_order\", \"arguments\": {\"asset_id\": \"P-201\", \"type\": \"corrective\", \"priority\": \"high\", \"description\": \"Replace bearing\"}}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak_write",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_excludes": ["create_work_order", "\"function\"", "P-201"]
+  }
+}

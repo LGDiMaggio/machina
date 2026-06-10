@@ -1,0 +1,18 @@
+{
+  "id": "deepseek-think-block",
+  "description": "Reasoning-model chain of thought: deepseek-r1-style models emit <think>...</think> inside message content (U7/R10). The gate's scrub runs FIRST in the validator chain, strip-and-keep-remainder: the reasoning block never reaches the user, the surviving answer is delivered untouched. Pinned by tests/unit/agent/test_authority_gates_validity.py::TestThinkBlockScrub.",
+  "user_messages": ["When should the bearing on P-201 be replaced?"],
+  "turns": [
+    {
+      "content": "<think>The user asks about the pump bearing. I should check the maintenance interval in the manual before answering.</think>Replace the bearing on P-201 within 48 hours.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Replace the bearing on P-201 within 48 hours."],
+    "user_text_excludes": ["<think", "check the maintenance interval"]
+  }
+}

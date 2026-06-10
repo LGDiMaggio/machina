@@ -1,0 +1,23 @@
+{
+  "id": "tool-result-echo",
+  "description": "KNOWN GAP (pinned for visibility, per the R12 rule): raw tool-result echo -- the model's final text is a verbatim dump of the tool-result JSON it received instead of a synthesis (the raw-context echo mode from docs/solutions weak-model-runtime-robustness-2026-06-07, observed with qwen2.5:3b). NO guard catches this today: the dump is not tool-call-shaped, not empty, and not a prior-turn echo, so it reaches the user raw -- the honest disposition is therefore 'clean'. A future guard flips this fixture's expected block.",
+  "user_messages": ["search for the pump"],
+  "turns": [
+    {
+      "content": "",
+      "tool_calls": [
+        {"name": "search_assets", "arguments": "{\"query\": \"pump\"}"}
+      ]
+    },
+    {
+      "content": "[{\"citation_index\": 1, \"id\": \"P-201\", \"name\": \"Cooling Water Pump\", \"location\": \"Building A\", \"criticality\": \"A\", \"confidence\": 1.0}]",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["\"citation_index\": 1"]
+  }
+}

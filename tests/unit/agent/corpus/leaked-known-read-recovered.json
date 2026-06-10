@@ -1,0 +1,22 @@
+{
+  "id": "leaked-known-read-recovered",
+  "description": "Known READ tool call (search_assets) emitted as plain-text content instead of a structured tool_call. Provenance: U3 weak-model leak handling, pinned end-to-end by tests/unit/agent/test_authority_gates_validity.py::TestLoopLeakHandling::test_leaked_read_is_recovered_not_shown. The loop seam recovers it exactly once: the read executes, its result is fed back, and the model's next completion is the real answer the user sees.",
+  "user_messages": ["list assets"],
+  "turns": [
+    {
+      "content": "{\"type\": \"function\", \"function\": {\"name\": \"search_assets\", \"arguments\": {\"query\": \"pump\"}}}",
+      "tool_calls": null
+    },
+    {
+      "content": "Here are the assets you asked about: P-201, the cooling water pump in Building A.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "recovered_read",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Here are the assets you asked about"],
+    "user_text_excludes": ["search_assets", "\"function\""]
+  }
+}

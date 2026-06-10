@@ -1,0 +1,17 @@
+{
+  "id": "legit-json-answer-pin",
+  "description": "False-positive pin (ACCEPTED fail-closed trade-off, R9/U6): the user asks for an example tool-call payload and the model answers with a bare JSON object that matches the tool-call shape. Shape-based detection cannot distinguish a quoted example from a real leak, so it is suppressed to the fallback -- strictly safer than ever showing a leaked call raw. Pinned by tests/unit/agent/test_authority_gates_validity.py::TestLoopLeakHandling::test_tool_shaped_json_answer_is_suppressed_fail_closed. NOTE: is_fallback is false -- the loop-seam suppression returns the fallback TEXT, and the structured flag is set only when the _finalize_turn backstop itself substitutes the text (pinned inconsistency, see corpus README).",
+  "user_messages": ["show me an example tool-call payload"],
+  "turns": [
+    {
+      "content": "{\"name\": \"example_tool\", \"arguments\": {\"x\": 1}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_excludes": ["example_tool"]
+  }
+}
