@@ -1,0 +1,17 @@
+{
+  "id": "fenced-tool-call",
+  "description": "Known WRITE tool call (create_work_order) emitted inside a markdown code fence (```json ... ```) instead of a structured tool_call. Provenance: PR #55 code review, detector-gap family (1) verified by execution -- the fence made the payload invisible to _detect_leaked_tool_call, so it passed both the loop seam and the _finalize_turn backstop raw. Fixed by stripping a surrounding fence before detection; the leak is suppressed and the write NEVER executes.",
+  "user_messages": ["create a work order for P-201"],
+  "turns": [
+    {
+      "content": "```json\n{\"name\": \"create_work_order\", \"arguments\": {\"asset_id\": \"P-201\", \"type\": \"corrective\", \"priority\": \"high\", \"description\": \"Replace bearing\"}}\n```",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak_write",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["create_work_order", "```", "P-201"]
+  }
+}

@@ -207,6 +207,110 @@ class TestDetectLeakedToolCall:
         assert Agent._detect_leaked_tool_call('Config is {"x": 1} for now.') is None
 
 
+class TestDetectLeakedToolCallNormalization:
+    """PR #55 detector-gap families (1)-(4): payloads normalized before detection."""
+
+    def test_markdown_fenced_json_is_detected(self) -> None:
+        raw = "```json\n" + _leak("search_assets", {"query": "x"}, shape="B") + "\n```"
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "x"})
+
+    def test_bare_fence_without_language_tag_is_detected(self) -> None:
+        raw = "```\n" + _leak("search_assets", {"query": "x"}, shape="A") + "\n```"
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "x"})
+
+    def test_fence_with_missing_closer_is_detected(self) -> None:
+        raw = "```json\n" + _leak("search_assets", {"query": "x"}, shape="B")
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "x"})
+
+    def test_fenced_non_call_json_is_not_a_leak(self) -> None:
+        raw = '```json\n{"id": "P-201", "name": "Cooling Water Pump"}\n```'
+        assert Agent._detect_leaked_tool_call(raw) is None
+
+    def test_fenced_code_that_is_not_json_is_not_a_leak(self) -> None:
+        raw = "```python\nprint('hello')\n```"
+        assert Agent._detect_leaked_tool_call(raw) is None
+
+    def test_top_level_array_first_call_wins(self) -> None:
+        raw = json.dumps(
+            [
+                {"name": "search_assets", "arguments": {"query": "pump"}},
+                {"name": "get_asset_details", "arguments": {"asset_id": "P-201"}},
+            ]
+        )
+        assert Agent._detect_leaked_tool_call(raw) == ("search_assets", {"query": "pump"})
+
+    def test_array_of_non_call_objects_is_not_a_leak(self) -> None:
+        raw = json.dumps([{"id": "P-201", "name": "Cooling Water Pump"}])
+        assert Agent._detect_leaked_tool_call(raw) is None
+
+    def test_tool_calls_wrapper_is_unwrapped(self) -> None:
+        raw = json.dumps(
+            {
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_bearing_replacement_procedure",
+                            "arguments": json.dumps({"asset_id": "P-201"}),
+                        },
+                    }
+                ]
+            }
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_bearing_replacement_procedure",
+            {"asset_id": "P-201"},
+        )
+
+    def test_empty_tool_calls_wrapper_is_not_a_leak(self) -> None:
+        assert Agent._detect_leaked_tool_call('{"tool_calls": []}') is None
+
+    def test_single_quoted_pseudo_json_is_detected(self) -> None:
+        raw = "{'name': 'create_work_order', 'arguments': {'asset_id': 'P-201'}}"
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "create_work_order",
+            {"asset_id": "P-201"},
+        )
+
+    def test_single_quoted_non_call_dict_is_not_a_leak(self) -> None:
+        assert Agent._detect_leaked_tool_call("{'id': 'P-201', 'name': 'Pump'}") is None
+
+
+class TestLeakedToolCallFragmentTripwire:
+    """PR #55 detector-gap family (5): truncated/partial tool-call JSON.
+
+    The fragment never parses, so the full detector cannot return (name, args);
+    the finalize-only tripwire suppresses it instead (fail-closed, R9/U6).
+    """
+
+    def test_truncated_shape_a_call_trips(self) -> None:
+        raw = '{"type": "function", "function": {"name": "create_work_order", "arguments": {"asset_id": "P-2'
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
+
+    def test_truncated_shape_b_call_trips(self) -> None:
+        raw = '{"name": "search_assets", "arguments": {"query": "pu'
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is True
+
+    def test_parsable_call_does_not_trip(self) -> None:
+        # A payload the full detector owns must never be double-handled here.
+        raw = _leak("search_assets", {"query": "x"}, shape="B")
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is False
+
+    def test_parsable_non_call_json_does_not_trip(self) -> None:
+        # A deliberate JSON answer that merely contains a "name" field parses
+        # cleanly, so the tripwire (unparsable-only) leaves it alone.
+        raw = json.dumps({"name": "P-201", "arguments_note": "none", "function": "pumping"})
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is False
+
+    def test_ordinary_prose_does_not_trip(self) -> None:
+        assert Agent._looks_like_leaked_tool_call_fragment("The pump needs a bearing.") is False
+
+    def test_truncated_plain_data_json_does_not_trip(self) -> None:
+        # Truncated JSON WITHOUT a call-marker key is not a tool call.
+        raw = '{"id": "P-201", "name": "Cooling Water Pump", "location": "Buil'
+        assert Agent._looks_like_leaked_tool_call_fragment(raw) is False
+
+
 class TestLoopLeakHandling:
     @pytest.mark.asyncio
     async def test_leaked_read_is_recovered_not_shown(self) -> None:

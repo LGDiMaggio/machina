@@ -115,3 +115,15 @@ ever legitimately mutate anything.
   safer than ever showing a leaked call raw.
 - The cross-turn echo guard arms only at `>= 200` rendered characters
   (`_MIN_ECHO_LENGTH`) — `prior-turn-echo.json` uses a long canned paragraph for that reason.
+- **PR #55 detector-gap families (fenced / array / wrapper / single-quoted / truncated).**
+  `_detect_leaked_tool_call` normalizes before shape matching: it strips one surrounding
+  markdown code fence (closing fence optional), unwraps the `{"tool_calls": [...]}` provider
+  frame, resolves a top-level JSON array to its FIRST call (a known-read recovery stays
+  bounded by `seen_call_keys`; trailing calls are dropped, never executed), and parses
+  single-quoted pseudo-JSON via a safe Python-literal fallback (`ast.literal_eval`).
+  Truncated/partial payloads never parse, so the finalize-only tripwire
+  (`_looks_like_leaked_tool_call_fragment`) suppresses an unparsable payload bearing both a
+  name key and a call-marker key (`arguments`/`parameters`/`tool_calls`/`function`) at the
+  sole egress gate — fail-closed per the R9/U6 trade-off. Pinned by `fenced-tool-call`,
+  `array-tool-calls`, `tool-calls-wrapper`, `single-quoted-tool-call`,
+  `truncated-tool-call`.

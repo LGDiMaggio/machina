@@ -1,0 +1,17 @@
+{
+  "id": "truncated-tool-call",
+  "description": "Truncated/partial tool-call JSON (a shape-A create_work_order cut mid-arguments, e.g. the model ran out of tokens) emitted as plain-text content. Provenance: PR #55 code review, detector-gap family (5) verified by execution -- the fragment never parses, so shape-based detection cannot return (name, args) and the payload passed both seams raw. Fixed by the finalize-only regex tripwire (_looks_like_leaked_tool_call_fragment): an UNPARSABLE payload bearing both a name key and a call-marker key is suppressed at the gate. Fail-closed per the R9/U6 trade-off; the write NEVER executes.",
+  "user_messages": ["create a work order for P-201"],
+  "turns": [
+    {
+      "content": "{\"type\": \"function\", \"function\": {\"name\": \"create_work_order\", \"arguments\": {\"asset_id\": \"P-201\", \"type\": \"corrective\", \"priority\": \"high\", \"descri",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak_write",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["create_work_order", "\"function\""]
+  }
+}

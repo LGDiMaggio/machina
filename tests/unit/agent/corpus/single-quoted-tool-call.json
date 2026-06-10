@@ -1,0 +1,17 @@
+{
+  "id": "single-quoted-tool-call",
+  "description": "Known WRITE tool call (create_work_order) emitted as single-quoted Python-repr pseudo-JSON ({'name': ..., 'arguments': {...}}), which json.loads rejects. Provenance: PR #55 code review, detector-gap family (4) verified by execution -- the payload passed both seams raw because it never parsed. Fixed by an ast.literal_eval fallback parse (safe, no code execution) before shape matching; the leak is suppressed and the write NEVER executes.",
+  "user_messages": ["create a work order for P-201"],
+  "turns": [
+    {
+      "content": "{'name': 'create_work_order', 'arguments': {'asset_id': 'P-201', 'type': 'corrective', 'priority': 'high', 'description': 'Replace bearing'}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak_write",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["create_work_order", "P-201"]
+  }
+}

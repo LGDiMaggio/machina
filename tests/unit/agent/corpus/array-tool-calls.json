@@ -1,0 +1,22 @@
+{
+  "id": "array-tool-calls",
+  "description": "Top-level JSON ARRAY of tool-call objects emitted as plain-text content. Provenance: PR #55 code review, detector-gap family (2) verified by execution -- the detector required a top-level object, so the array passed both seams raw. Fixed by unwrapping a top-level array; disposition follows the FIRST call (here a known READ, search_assets), which is recovered exactly once -- bounded by seen_call_keys -- and the trailing call is dropped, never executed. The model's next completion is the real answer the user sees.",
+  "user_messages": ["list assets"],
+  "turns": [
+    {
+      "content": "[{\"name\": \"search_assets\", \"arguments\": {\"query\": \"pump\"}}, {\"name\": \"get_asset_details\", \"arguments\": {\"asset_id\": \"P-201\"}}]",
+      "tool_calls": null
+    },
+    {
+      "content": "Here are the assets you asked about: P-201, the cooling water pump in Building A.",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "recovered_read",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Here are the assets you asked about"],
+    "user_text_excludes": ["search_assets", "\"arguments\""]
+  }
+}

@@ -8,6 +8,7 @@ prompts, and executes tool calls.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import re
@@ -59,6 +60,56 @@ _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 # Sourced from BUILTIN_TOOLS so it can never drift from the real dispatch
 # surface. See _detect_leaked_tool_call and _handle_text_only_completion.
 _KNOWN_TOOL_NAMES: frozenset[str] = frozenset(t["function"]["name"] for t in BUILTIN_TOOLS)
+
+# Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
+# payloads that are recognisably tool-call-shaped but do NOT parse — truncated
+# JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
+# BOTH regexes must hit: a string-valued name key AND a call-marker key
+# (arguments/parameters/tool_calls, or a function key opening an object).
+# Truncated plain-data JSON carries a name key but no call marker, so it is
+# not suppressed. See _looks_like_leaked_tool_call_fragment.
+_LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"']name[\"']\s*:\s*[\"']")
+_LEAK_FRAGMENT_MARKER_RE = re.compile(
+    r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
+)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip one surrounding markdown code fence (``` / ```json), if present.
+
+    The closing fence is optional — weak models drop it routinely. A fence
+    whose payload shares the opener line is left untouched; the stripped body
+    must still parse as a tool-call shape downstream, so leniency here cannot
+    misclassify prose.
+    """
+    if not text.startswith("```"):
+        return text
+    first_nl = text.find("\n")
+    if first_nl == -1:
+        return text
+    inner = text[first_nl + 1 :]
+    if inner.endswith("```"):
+        inner = inner[:-3]
+    return inner.strip()
+
+
+def _parse_leak_payload(text: str) -> dict[str, Any] | list[Any] | None:
+    """Parse candidate leak text as JSON, falling back to a Python literal.
+
+    The literal fallback (``ast.literal_eval`` — safe, no code execution)
+    accepts the single-quoted pseudo-JSON some models emit
+    (PR #55 gap family 4): ``{'name': ..., 'arguments': {...}}``. Only dict
+    or list results are meaningful as tool-call candidates.
+    """
+    try:
+        obj: Any = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            obj = ast.literal_eval(text)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return None
+    return obj if isinstance(obj, dict | list) else None
+
 
 # Lifetime of a stored pending write-confirmation (seconds). A pending
 # confirmation is meant for the IMMEDIATE next message; an hour is
@@ -1272,6 +1323,27 @@ class Agent:
                 )
                 citations = []
                 is_fallback = True
+            # Fragment tripwire (PR #55 gap family 5): a truncated/partial
+            # tool call never parses, so the detector above cannot return
+            # (name, args) for it — but it is still a leak, not an answer.
+            # Finalize-only by design: there is no call to recover, so the
+            # loop seam has nothing to do with it.
+            elif self._looks_like_leaked_tool_call_fragment(rendered):
+                logger.warning(
+                    "tool_call_leak_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    tool=None,
+                    known=False,
+                    operation="finalize_turn",
+                )
+                rendered = (
+                    _TOOL_CALL_LEAK_FALLBACK
+                    if fallback_text is _EMPTY_RESPONSE_FALLBACK
+                    else fallback_text
+                )
+                citations = []
+                is_fallback = True
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -2342,14 +2414,26 @@ class Agent:
         unknown/hallucinated tool) is the caller's job, not a filter here.
         Anything that does not cleanly parse as a tool-call shape is treated
         as ordinary prose so a normal answer is never misclassified.
+
+        The payload is normalized before shape matching (PR #55 gap families
+        1-4): a surrounding markdown code fence is stripped, a
+        ``{"tool_calls": [...]}`` provider frame is unwrapped, a top-level
+        array of call objects resolves to its FIRST call (recovery of a known
+        read stays bounded by ``seen_call_keys``; a write never executes off
+        the structured path regardless), and single-quoted pseudo-JSON is
+        parsed via a safe Python-literal fallback. Truncated/partial payloads
+        (family 5) never parse and are handled by the finalize-only
+        :meth:`_looks_like_leaked_tool_call_fragment` tripwire instead.
         """
-        text = (content or "").strip()
-        if not (text.startswith("{") and text.endswith("}")):
+        text = _strip_code_fence((content or "").strip())
+        if not text or text[0] not in "{[":
             return None
-        try:
-            obj = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            return None
+        obj = _parse_leak_payload(text)
+        if isinstance(obj, dict) and isinstance(obj.get("tool_calls"), list):
+            # The provider-frame wrapper serialized whole into content.
+            obj = obj["tool_calls"]
+        if isinstance(obj, list):
+            obj = obj[0] if obj and isinstance(obj[0], dict) else None
         if not isinstance(obj, dict):
             return None
         fn = obj.get("function")
@@ -2371,6 +2455,27 @@ class Agent:
         if not isinstance(raw_args, dict):
             raw_args = {}
         return name, raw_args
+
+    @staticmethod
+    def _looks_like_leaked_tool_call_fragment(content: str) -> bool:
+        """Whether ``content`` is an UNPARSABLE tool-call-shaped fragment.
+
+        Covers truncated/partial tool-call JSON (PR #55 gap family 5 — the
+        model ran out of tokens mid-call) that shape-based detection cannot
+        return ``(name, args)`` for. Used ONLY by the ``_finalize_turn``
+        backstop: a fragment carries no recoverable call, so suppression is
+        the only disposition, and it must happen at the sole egress gate.
+        Payloads that parse cleanly are never flagged here — the full
+        detector owns them, so a deliberate JSON answer that merely contains
+        a ``name`` field is not suppressed (fail-closed only on the
+        unparsable, marker-bearing shape; R9/U6 trade-off).
+        """
+        text = _strip_code_fence((content or "").strip())
+        if not text or text[0] not in "{[":
+            return False
+        if _parse_leak_payload(text) is not None:
+            return False
+        return bool(_LEAK_FRAGMENT_NAME_RE.search(text) and _LEAK_FRAGMENT_MARKER_RE.search(text))
 
     def _tool_list_assets(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Enumerate the full asset registry (R1.1).
