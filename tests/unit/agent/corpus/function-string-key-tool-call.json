@@ -1,0 +1,16 @@
+{
+  "id": "function-string-key-tool-call",
+  "description": "Shape-C leak: the tool name is the STRING VALUE of a top-level 'function' key -- {\"function\": \"get_asset_details\", \"arguments\": {...}} -- distinct from shape A (where 'function' is a nested object carrying 'name') and shape B (top-level 'name' key). Provenance: deepseek-r1:8b conversational eval baseline 2026-06-10, long-conversation turns 3/4/8/9/10 -- the raw JSON reached the user as the answer text, attributed 'unattributed' because no observable signal claimed it. KNOWN GAP pinned per R12: shape detection matches neither A nor B, so the payload passes the loop seam and the finalize gate raw. The fix flips this fixture to recovered_read (get_asset_details is a known READ).",
+  "turns": [
+    {
+      "content": "{\"function\": \"get_asset_details\", \"arguments\": {\"asset_id\": \"P-201\"}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["\"function\"", "get_asset_details"]
+  }
+}
