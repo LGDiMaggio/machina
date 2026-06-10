@@ -78,7 +78,7 @@ With multiple `user_messages`, turns are consumed across the agent turns in sequ
 |-----------------------|--------------------------------------------------------------------------------|
 | `clean`               | `is_fallback is False` (text checks via contains/excludes)                      |
 | `recovered_read`      | `is_fallback is False`; the leaked READ was recovered and the real answer shown |
-| `fallback_leak`       | `text == _TOOL_CALL_LEAK_FALLBACK` (`is_fallback` pinned per fixture — see note) |
+| `fallback_leak`       | `text == _TOOL_CALL_LEAK_FALLBACK`, `is_fallback is True`                       |
 | `fallback_leak_write` | as `fallback_leak`, plus an explicit spy assertion: the write never executed    |
 | `fallback_empty`      | `text == _EMPTY_RESPONSE_FALLBACK`, `is_fallback is True`                       |
 | `fallback_echo`       | `text == _REPEATED_RESPONSE_FALLBACK`, `is_fallback is True`                    |
@@ -89,16 +89,15 @@ ever legitimately mutate anything.
 
 ## Behavior notes pinned by this corpus
 
-- **KNOWN INCONSISTENCY — loop-seam leak suppressions have `is_fallback: false`.** When
+- **Loop-seam leak suppressions set `is_fallback: true` (resolved inconsistency).** When
   `_handle_text_only_completion` suppresses a leak (known write, hallucinated tool, or the
-  tool-shaped JSON answer), it returns `_TOOL_CALL_LEAK_FALLBACK` as the loop's *text*; by the
-  time `_finalize_turn` runs, that text looks like ordinary prose, so the structured
-  `AgentResponse.is_fallback` flag stays `False`. Only a leak that reaches the gate's own
-  backstop (e.g. `force-final-leak.json`) sets the flag. The user-facing text is identical on
-  both paths; the structured flag is not. Pinned honestly here
-  (`leaked-known-write-suppressed`, `hallucinated-tool-suppressed`, `legit-json-answer-pin`
-  pin `false`; `force-final-leak` pins `true`); a future fix that propagates the flag from the
-  loop seam flips those three fixtures per the R12 rule.
+  tool-shaped JSON answer), it returns `_TOOL_CALL_LEAK_FALLBACK` as the loop's *text*;
+  `_finalize_turn` recognises that sentinel and sets the structured
+  `AgentResponse.is_fallback` flag, so callers can distinguish a leak fallback from a real
+  answer without string-matching. This corpus originally pinned the flag as `false` on the
+  three loop-seam cases (the gate saw the substituted text as ordinary prose); the fix landed
+  per the R12 rule and `leaked-known-write-suppressed`, `hallucinated-tool-suppressed`,
+  `legit-json-answer-pin`, and `force-final-leak` now all pin `true`.
 - **KNOWN GAP — `tool-result-echo.json` is disposition `clean`.** A model whose final text is
   a verbatim dump of the raw tool-result JSON it received (the "raw-context echo" mode from
   `docs/solutions/architecture-patterns/weak-model-runtime-robustness-2026-06-07.md`) is caught

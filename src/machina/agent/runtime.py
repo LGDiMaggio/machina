@@ -1192,6 +1192,17 @@ class Agent:
                 rendered = fallback_text
                 citations = []
                 is_fallback = True
+            # A loop-seam leak suppression (_handle_text_only_completion)
+            # substituted the fallback text BEFORE the gate ran, so by itself it
+            # would read as ordinary prose here and leave the structured flag
+            # unset. Recognise the sentinel and flag it — orchestrators and
+            # monitors must distinguish a leak fallback from a real answer via
+            # ``is_fallback``, never by string-matching the text. The leak was
+            # already logged at the seam (operation="llm_loop"), so no second
+            # warning is emitted here.
+            elif rendered == _TOOL_CALL_LEAK_FALLBACK:
+                citations = []
+                is_fallback = True
             # The echo guard applies only to the normal turn path (identified by
             # the default empty-response fallback). The two-turn post-write
             # narration path passes a write-aware ``fallback_text``; a write has
