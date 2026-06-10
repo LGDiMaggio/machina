@@ -1,9 +1,11 @@
-"""CI tests for the eval scenario schema/loader.
+"""CI tests for the eval scenario schema/loader and the pure sniff helper.
 
-Only the schema/loader is CI-tested — the runner itself needs real
-Ollama models and is exercised manually (see ``evals/README.md``).
-No litellm/Ollama/machina imports anywhere in this module; the loader
-is dependency-light by design (stdlib + PyYAML, a core dependency).
+Only the schema/loader and the runner's pure ``find_malformed`` sniff are
+CI-tested — the runner itself needs real Ollama models and is exercised
+manually (see ``evals/README.md``). No litellm/Ollama/machina imports
+anywhere in this module (``evals.conversational.run`` imports machina only
+under ``TYPE_CHECKING``); the loader is dependency-light by design
+(stdlib + PyYAML, a core dependency).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from evals.conversational.run import find_malformed
 from evals.conversational.schema import (
     ASSERTION_LAYERS,
     ASSERTION_ORDER,
@@ -238,3 +241,55 @@ class TestConnectorsFlagAndLength:
         short_scenario = parse_scenario(_valid_data())
         assert isinstance(short_scenario, Scenario)
         assert short_scenario.is_long is False
+
+
+class TestFindMalformed:
+    """The runner's malformed-output sniff covers all three leak shapes.
+
+    ``find_malformed`` is a pure helper (regex + ``json.loads``) — it needs
+    no Ollama model, so it IS CI-testable even though the runner is not.
+    Shape C (string-valued ``"function"`` key, deepseek-r1:8b baseline
+    2026-06-10) is covered both inline (``_TOOL_JSON_RE``) and as a bare
+    whole-response object (the ``has_name`` branch).
+    """
+
+    def test_inline_shape_c_json_in_prose_is_flagged(self) -> None:
+        text = (
+            "Let me check that for you: "
+            '{"function": "get_asset_details", "arguments": {"asset_id": "P-201"}} '
+            "and I will report back."
+        )
+        assert find_malformed(text) == "tool-call-shaped JSON in output"
+
+    def test_bare_shape_c_object_function_key_first_is_flagged(self) -> None:
+        # With the name key BEFORE the arguments key the inline regex already
+        # matches, so the whole-response payload is flagged by that check.
+        text = '{"function": "get_asset_details", "arguments": {"asset_id": "P-201"}}'
+        assert find_malformed(text) == "tool-call-shaped JSON in output"
+
+    def test_bare_shape_c_object_arguments_key_first_is_flagged(self) -> None:
+        # Arguments-first key order defeats the inline regex (which requires
+        # name-before-arguments), so this exercises the bare-object
+        # ``json.loads`` branch and its shape-C ``has_name`` arm.
+        text = '{"arguments": {"asset_id": "P-201"}, "function": "get_asset_details"}'
+        assert find_malformed(text) == "response is a bare tool-call JSON object"
+
+    def test_plain_data_json_with_function_string_but_no_args_is_clean(self) -> None:
+        # A string "function" key WITHOUT an arguments-like key is data, not a
+        # call — must not be flagged (mirrors the runtime detector's R9 rule).
+        text = '{"function": "filtering", "description": "how the filter stage works"}'
+        assert find_malformed(text) is None
+
+    def test_ordinary_prose_is_clean(self) -> None:
+        assert find_malformed("P-201 needs a bearing replacement within 48 hours.") is None
+
+    def test_shape_a_payload_still_detected(self) -> None:
+        text = (
+            '{"type": "function", "function": '
+            '{"name": "search_assets", "arguments": {"query": "pump"}}}'
+        )
+        assert find_malformed(text) == "tool-call-shaped JSON in output"
+
+    def test_shape_b_payload_still_detected(self) -> None:
+        text = '{"name": "search_assets", "arguments": {"query": "pump"}}'
+        assert find_malformed(text) == "tool-call-shaped JSON in output"

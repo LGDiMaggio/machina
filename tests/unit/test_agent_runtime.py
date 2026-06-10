@@ -745,6 +745,26 @@ class TestAvailableTools:
         # Should NOT include connector-dependent tools
         assert "search_assets" not in names
 
+    def test_known_tool_names_no_connectors(self) -> None:
+        """Leak-disposition surface with ZERO connectors: always-on tools only.
+
+        ``_known_tool_names`` derives from the same ``_get_available_tools``
+        source dispatch uses, so without connectors the capability-derived
+        tools must NOT be "known" (a leaked ``get_work_order`` then
+        dispositions as off-surface and is suppressed, never recovered).
+        """
+        agent = Agent()
+        known = agent._known_tool_names()
+        assert "diagnose_failure" in known
+        assert "get_maintenance_schedule" in known
+        assert "get_work_order" not in known
+        assert "create_work_order" not in known
+
+    def test_known_tool_names_with_work_order_read_connector(self) -> None:
+        """A GET_WORK_ORDER connector puts get_work_order on the known surface."""
+        agent = Agent(connectors=[_FakeGetWoConnector()])
+        assert "get_work_order" in agent._known_tool_names()
+
     def test_with_doc_connector(self) -> None:
         conn = _FakeDocConnector()
         agent = Agent(connectors=[conn])

@@ -31,6 +31,7 @@ from machina.agent.runtime import (
     _TOOL_CALL_LEAK_FALLBACK,
     Agent,
 )
+from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 from machina.domain.work_order import WorkOrder, WorkOrderStatus, WorkOrderType
@@ -250,7 +251,7 @@ class _WorkOrderReadConnector:
     see ``leaked-capability-read-recovered.json``.
     """
 
-    capabilities: ClassVar[list[str]] = ["get_work_order"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.GET_WORK_ORDER})
 
     async def connect(self) -> None:  # pragma: no cover
         pass

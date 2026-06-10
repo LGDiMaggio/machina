@@ -1305,6 +1305,8 @@ class Agent:
                     agent=self.name,
                     chat_id=chat_id,
                     tool=leaked[0],
+                    # known= is log-only; suppression at the egress gate is
+                    # unconditional.
                     known=leaked[0] in self._known_tool_names(),
                     operation="finalize_turn",
                 )
@@ -2211,7 +2213,27 @@ class Agent:
             if connectors:
                 _, conn = connectors[0]
                 work_order_id = args.get("work_order_id", "")
-                wo = await conn.get_work_order(work_order_id)  # type: ignore[attr-defined]
+                # Args can arrive from the leak-recovery path (model text, no
+                # provider schema enforcement), so validate before dispatch.
+                if not isinstance(work_order_id, str) or not work_order_id:
+                    return {"error": "work_order_id must be a non-empty string"}
+                try:
+                    wo = await conn.get_work_order(  # type: ignore[attr-defined]
+                        work_order_id
+                    )
+                except Exception as exc:
+                    # A connector failure (ConnectorError/timeout) must degrade
+                    # to a tool-level error the model can react to, not kill the
+                    # whole turn — including the recovered-read re-entry path.
+                    logger.warning(
+                        "work_order_lookup_failed",
+                        agent=self.name,
+                        tool=name,
+                        work_order_id=work_order_id,
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
                 if wo is None:
                     return {"error": f"Work order {work_order_id!r} not found"}
                 return wo.model_dump(mode="json")
@@ -2356,6 +2378,7 @@ class Agent:
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=False,
                 operation="llm_loop",
@@ -2367,6 +2390,7 @@ class Agent:
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=True,
                 operation="llm_loop",
@@ -2379,6 +2403,7 @@ class Agent:
             logger.warning(
                 "tool_call_leak_suppressed",
                 agent=self.name,
+                chat_id=chat_id,
                 tool=leaked_name,
                 known=True,
                 operation="llm_loop",
@@ -2390,6 +2415,7 @@ class Agent:
         logger.warning(
             "tool_call_leak_recovered",
             agent=self.name,
+            chat_id=chat_id,
             tool=leaked_name,
             operation="llm_loop",
         )
@@ -2451,6 +2477,9 @@ class Agent:
         if not isinstance(obj, dict):
             return None
         fn = obj.get("function")
+        # Shapes B and C read their args from the top-level object; shape A
+        # reads from the nested function object instead.
+        obj_args: Any = obj.get("arguments", obj.get("parameters", {}))
         if isinstance(fn, dict) and isinstance(fn.get("name"), str):
             # Shape A: {"type":"function","function":{"name":..,"arguments":..}}
             name = fn["name"]
@@ -2458,13 +2487,15 @@ class Agent:
         elif isinstance(obj.get("name"), str) and ("arguments" in obj or "parameters" in obj):
             # Shape B: {"name":.., "arguments":..}
             name = obj["name"]
-            raw_args = obj.get("arguments", obj.get("parameters", {}))
-        elif isinstance(fn, str) and fn and ("arguments" in obj or "parameters" in obj):
+            raw_args = obj_args
+        elif isinstance(fn, str) and ("arguments" in obj or "parameters" in obj):
             # Shape C: {"function":"<name>", "arguments":..} — the tool name is
             # the string VALUE of the function key (deepseek-r1 eval baseline
-            # 2026-06-10), not a nested object (A) or a "name" key (B).
+            # 2026-06-10), not a nested object (A) or a "name" key (B). An
+            # EMPTY string is still detected (matching shapes A/B): the empty
+            # name dispositions as unknown → suppressed fail-closed.
             name = fn
-            raw_args = obj.get("arguments", obj.get("parameters", {}))
+            raw_args = obj_args
         else:
             return None
         if isinstance(raw_args, str):

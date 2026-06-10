@@ -1,0 +1,17 @@
+{
+  "id": "empty-function-string-key-suppressed",
+  "description": "Shape-C leaked tool call with an EMPTY-string \"function\" value: {\"function\": \"\", \"arguments\": {...}} emitted as content. Provenance: PR #56 review, adversarial finding -- empty-name shape C escaped raw (the original shape-C guard required a NON-empty string, so the payload fell through every detector branch and reached the user verbatim). Now detected with an empty name, which is not on any agent's tool surface, so it dispositions as unknown and is suppressed fail-closed at the loop seam -- matching shapes A/B, which always accepted empty names via isinstance.",
+  "user_messages": ["Tell me about P-201"],
+  "turns": [
+    {
+      "content": "{\"function\": \"\", \"arguments\": {\"asset_id\": \"P-201\"}}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "fallback_leak",
+    "is_fallback": true,
+    "completeness": "complete",
+    "user_text_excludes": ["\"function\"", "\"arguments\""]
+  }
+}

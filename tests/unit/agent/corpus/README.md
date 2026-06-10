@@ -146,8 +146,11 @@ replayed agent's tool surface.
   `{"function": "get_asset_details", "arguments": {...}}` as user-facing answer text: the tool
   name is the string VALUE of the `function` key, so neither shape A (nested function object)
   nor shape B (top-level `name` key) matched. `_detect_leaked_tool_call` now recognises shape C
-  (`function` is a non-empty string alongside `arguments`/`parameters`), the fragment tripwire
+  (`function` is a string alongside `arguments`/`parameters`), the fragment tripwire
   accepts the string-valued `function` key as its name marker (truncated shape C), and the eval
   sniff (`evals/conversational/run.py`) observes the same family. Pinned by
   `function-string-key-tool-call` (landed first as disposition `clean` per R12, flipped to
   `recovered_read` with the fix — `get_asset_details` is a known READ).
+  An EMPTY-string `function` value is detected and suppressed (fail-closed: the empty name
+  dispositions as unknown) rather than treated as prose — pinned by
+  `empty-function-string-key-suppressed` (PR #56 review).

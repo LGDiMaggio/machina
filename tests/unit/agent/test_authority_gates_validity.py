@@ -32,6 +32,7 @@ from machina.agent.runtime import (
     _TOOL_CALL_LEAK_FALLBACK,
     Agent,
 )
+from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 from machina.domain.work_order import WorkOrder, WorkOrderType
@@ -70,7 +71,7 @@ class _ReadAssetsConnector:
 class _WorkOrderReadConnector:
     """GET_WORK_ORDER connector — puts the capability-derived read tool on the surface."""
 
-    capabilities: ClassVar[list[str]] = ["get_work_order"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.GET_WORK_ORDER})
 
     def __init__(self) -> None:
         self.fetched = 0
@@ -269,6 +270,17 @@ class TestDetectLeakedToolCall:
         out = Agent._detect_leaked_tool_call(_leak("totally_made_up", {"x": 1}, shape="C"))
         assert out == ("totally_made_up", {"x": 1})
 
+    def test_shape_c_empty_function_string_is_detected(self) -> None:
+        """An EMPTY-string "function" value is still a detector hit (not prose).
+
+        Matches shapes A/B, which accept empty names via ``isinstance``: the
+        empty name then dispositions as unknown in the callers and is
+        suppressed fail-closed — `{"function": "", "arguments": {...}}` must
+        never reach the user raw.
+        """
+        raw = json.dumps({"function": "", "arguments": {"x": 1}})
+        assert Agent._detect_leaked_tool_call(raw) == ("", {"x": 1})
+
     def test_function_string_without_call_marker_is_not_a_leak(self) -> None:
         # A plain-data JSON answer with a string "function" field but no
         # arguments/parameters key is an answer, not a call (shape-based, R9).
@@ -374,6 +386,45 @@ class TestDetectLeakedToolCallNormalization:
 
     def test_single_quoted_non_call_dict_is_not_a_leak(self) -> None:
         assert Agent._detect_leaked_tool_call("{'id': 'P-201', 'name': 'Pump'}") is None
+
+    # Shape C (gap family 6) x the PR #55 normalization combos: each
+    # pre-detection normalization must compose with the string-valued
+    # "function" key, not just with shapes A/B.
+
+    def test_shape_c_markdown_fenced_json_is_detected(self) -> None:
+        raw = "```json\n" + _leak("get_asset_details", {"asset_id": "P-201"}, shape="C") + "\n```"
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_top_level_array_first_call_wins(self) -> None:
+        raw = json.dumps(
+            [
+                {"function": "get_asset_details", "arguments": {"asset_id": "P-201"}},
+                {"function": "search_assets", "arguments": {"query": "pump"}},
+            ]
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_tool_calls_wrapper_is_unwrapped(self) -> None:
+        raw = json.dumps(
+            {"tool_calls": [{"function": "get_asset_details", "arguments": {"asset_id": "P-201"}}]}
+        )
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
+
+    def test_shape_c_single_quoted_pseudo_json_is_detected(self) -> None:
+        raw = "{'function': 'get_asset_details', 'arguments': {'asset_id': 'P-201'}}"
+        assert Agent._detect_leaked_tool_call(raw) == (
+            "get_asset_details",
+            {"asset_id": "P-201"},
+        )
 
 
 class TestLeakedToolCallFragmentTripwire:
