@@ -376,10 +376,51 @@ class TestToolResultEmptiness:
     def test_dict_without_list_payload_uses_truthiness(self) -> None:
         assert tool_result_emptiness('{"status": "ok"}') is None
 
-    def test_two_list_payload_keys_do_not_trigger_the_probe(self) -> None:
-        # Ambiguous shape (two candidate list keys): fall back to dict
-        # truthiness rather than guessing which list is THE payload.
+    def test_two_list_payload_keys_one_nonempty_is_nonempty(self) -> None:
+        # Mixed shape (two candidate list keys, one carries data): the result
+        # is meaningfully non-empty.
         raw = '{"results": [], "items": [{"id": 1}]}'
+        assert tool_result_emptiness(raw) is None
+
+    def test_multiple_list_payload_keys_all_empty_is_empty(self) -> None:
+        # More than one known list-payload key, ALL empty — must report empty,
+        # not silently fall back to dict truthiness.
+        raw = '{"results": [], "items": [], "note": "nothing"}'
+        diagnosis = tool_result_emptiness(raw)
+        assert diagnosis is not None
+        assert "results" in diagnosis and "items" in diagnosis
+
+    def test_error_key_reports_failed_call(self) -> None:
+        # A dict carrying 'error' is a FAILED call, however truthy the dict.
+        raw = '{"error": "No CMMS connector available"}'
+        diagnosis = tool_result_emptiness(raw)
+        assert diagnosis is not None
+        assert "failed" in diagnosis
+        assert "No CMMS connector available" in diagnosis
+
+    def test_replay_envelope_recurses_into_result(self) -> None:
+        # The runtime's duplicate-read replay envelope wraps the original
+        # payload under 'result' — emptiness is judged on the inner payload.
+        nonempty = (
+            '{"already_retrieved": true, "note": "duplicate read", '
+            '"result": {"probable_failures": [{"code": "BEAR-WEAR-01"}]}}'
+        )
+        assert tool_result_emptiness(nonempty) is None
+        empty = (
+            '{"already_retrieved": true, "note": "duplicate read", '
+            '"result": {"asset_id": "P-201", "probable_failures": []}}'
+        )
+        assert tool_result_emptiness(empty) == "'probable_failures' list is empty"
+
+    def test_already_executed_envelope_recurses_into_result(self) -> None:
+        # The duplicate-write envelope uses 'already_executed' instead.
+        raw = '{"already_executed": true, "note": "duplicate write", "result": {}}'
+        assert tool_result_emptiness(raw) is not None
+
+    def test_string_valued_probable_failures_counts_as_nonempty(self) -> None:
+        # Documentation case: a STRING under a known payload key does not
+        # participate in the list probe — dict truthiness decides (non-empty).
+        raw = '{"probable_failures": "see attached analysis", "asset_id": "P-201"}'
         assert tool_result_emptiness(raw) is None
 
     def test_unparseable_recording_falls_back_to_string_truthiness(self) -> None:

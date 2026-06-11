@@ -164,16 +164,23 @@ def tool_result_emptiness(raw: str) -> str | None:
     Heuristic (generic on purpose — no per-tool switch):
 
     1. Parse the recorded string as JSON when possible; an unparseable
-       recording (e.g. a truncated ``output_summary``) falls back to plain
-       string truthiness.
+       recording (e.g. a truncated ``output_summary`` or a runtime-capped
+       ``result_json``) falls back to plain string truthiness.
     2. A falsy payload (``null`` / ``{}`` / ``[]`` / ``""`` / blank string)
        is empty.
-    3. A dict containing exactly one obvious list-payload key
-       (:data:`_LIST_PAYLOAD_KEYS`) is empty when THAT list is empty, even
-       if envelope fields (ids, notes, echoes of the input) make the dict
-       itself truthy. For ``diagnose_failure`` this means: the
-       ``probable_failures`` list must be non-empty — the signal a context
-       echo cannot fake.
+    3. A dict carrying an ``error`` key is a FAILED call — reported as
+       empty regardless of the other fields.
+    4. The runtime's duplicate-call replay envelope
+       (``{"already_retrieved"/"already_executed": ..., "result": ...}``)
+       is unwrapped: emptiness is judged on the replayed ``result``.
+    5. A dict where one or more known list-payload keys
+       (:data:`_LIST_PAYLOAD_KEYS`) hold lists is empty when ALL those
+       lists are empty, even if envelope fields (ids, notes, echoes of the
+       input) make the dict itself truthy. For ``diagnose_failure`` this
+       means: the ``probable_failures`` list must be non-empty — the
+       signal a context echo cannot fake. A string-valued payload key
+       (e.g. documentation text under ``probable_failures``) does not
+       participate; the dict's own truthiness decides.
 
     Args:
         raw: The recorded tool result (JSON string or summary).
@@ -190,12 +197,30 @@ def tool_result_emptiness(raw: str) -> str | None:
     except ValueError:
         # Not JSON (legacy truncated summary) — non-blank string counts.
         return None
+    return _payload_emptiness(payload, stripped)
+
+
+def _payload_emptiness(payload: Any, stripped: str) -> str | None:
+    """Emptiness of an already-parsed tool result payload (see above)."""
     if not payload:
         return f"result payload is empty ({stripped[:40]!r})"
     if isinstance(payload, dict):
+        if "error" in payload:
+            return f"tool call failed ({str(payload['error'])[:80]!r})"
+        if "result" in payload and (
+            "already_retrieved" in payload or "already_executed" in payload
+        ):
+            # Duplicate-call replay envelope — judge the replayed result.
+            inner = payload["result"]
+            return _payload_emptiness(inner, json.dumps(inner, default=str))
         list_keys = [k for k in _LIST_PAYLOAD_KEYS if isinstance(payload.get(k), list)]
-        if len(list_keys) == 1 and not payload[list_keys[0]]:
-            return f"'{list_keys[0]}' list is empty"
+        if list_keys and all(not payload[k] for k in list_keys):
+            keys_label = ", ".join(f"'{k}'" for k in list_keys)
+            return (
+                f"{keys_label} list is empty"
+                if len(list_keys) == 1
+                else (f"{keys_label} lists are all empty")
+            )
     return None
 
 

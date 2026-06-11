@@ -9,7 +9,9 @@ dependencies are not installed.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
@@ -42,6 +44,7 @@ _PARENT_OVERFETCH_FACTOR = 6
 _SCHEMA_VERSION = "v3"
 
 
+@functools.lru_cache(maxsize=1)
 def _legacy_vectorstore_installed() -> bool:
     """Detect a legacy ``[docs-rag]`` install missing ``langchain-chroma``.
 
@@ -53,10 +56,10 @@ def _legacy_vectorstore_installed() -> bool:
     ``langchain-chroma`` is absent and vector mode silently degrades.
 
     Uses ``importlib.util.find_spec`` so detection never imports the
-    deprecated module itself.
+    deprecated module itself. Cached (``lru_cache``): ``find_spec`` does
+    filesystem I/O, which must not run on the event loop on every
+    ``connect()`` — the installed-package set cannot change mid-process.
     """
-    import importlib.util
-
     try:
         return importlib.util.find_spec("langchain_community.vectorstores") is not None
     except (ImportError, ValueError):
@@ -306,6 +309,7 @@ class DocumentStoreConnector:
             logger.warning(
                 "connected",
                 connector="DocumentStoreConnector",
+                operation="connect",
                 mode="keyword_fallback",
                 chunk_count=len(self._chunks),
                 missing_package="langchain-chroma",

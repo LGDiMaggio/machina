@@ -424,6 +424,25 @@ class TestRenormalizeMarkers:
         assert "registers[1]" in out
         assert out.startswith("Read the register [1].")
 
+    def test_marker_between_two_fenced_blocks_renormalized(self) -> None:
+        # The inter-fence region is PROSE: a real citation marker there must
+        # renormalize, while bracket literals inside BOTH fences stay
+        # byte-identical (the fence detector must not pair the first fence's
+        # close with the second fence's open and swallow the prose between).
+        ordered = ["c1", "c2", "c3"]
+        cites = [_cite("c3", "manual.md", 4)]
+        text = (
+            "```\nfirst = registers[1]\n```\n\n"
+            "The threshold is documented [3].\n\n"
+            "```\nsecond = registers[2]\n```\n"
+        )
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert "registers[1]" in out
+        assert "registers[2]" in out
+        assert "The threshold is documented [1]." in out
+        assert "[3]" not in out
+        assert [c.chunk_id for c in reordered] == ["c3"]
+
     def test_inline_backtick_literal_untouched(self) -> None:
         ordered = ["c1", "c2"]
         cites = [_cite("c2")]

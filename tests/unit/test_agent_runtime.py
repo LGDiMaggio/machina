@@ -955,6 +955,157 @@ class TestDiagnoseFailureCatalog:
         assert "bearing_temperature_c" in result["note"]
         assert "belt_speed_m_s" not in result["note"]
 
+    @pytest.mark.asyncio
+    async def test_declared_modes_absent_from_catalog_note(self) -> None:
+        """Declared-but-uncatalogued modes get an honest mismatch note.
+
+        Without the early branch, the empty candidate list would render the
+        garbled "No catalog entry matched these symptoms. Known indicators: ."
+        """
+        belt_only = [
+            FailureMode(
+                code="BELT-WEAR-01",
+                name="Conveyor Belt Wear",
+                category="mechanical",
+                typical_indicators=["belt_speed_m_s"],
+            )
+        ]
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(failure_modes=belt_only)],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["vibration"]},
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == (
+            "Asset declares 3 failure mode(s) "
+            "(BEAR-WEAR-01, IMP-EROSION-01, SEAL-LEAK-01) but none are present "
+            "in the configured catalog (possible configuration mismatch)."
+        )
+        assert "Known indicators" not in result["note"]
+
+    @pytest.mark.asyncio
+    async def test_ranked_by_matched_count_before_ratio(self) -> None:
+        """A 1/2-indicator mode must not outrank a 3/7 mode (count first)."""
+        modes = [
+            FailureMode(
+                code="FEW-01",
+                name="Few indicators",
+                category="mechanical",
+                typical_indicators=["vibration_velocity_mm_s", "noise_db"],
+            ),
+            FailureMode(
+                code="MANY-01",
+                name="Many indicators",
+                category="mechanical",
+                typical_indicators=[
+                    "vibration_velocity_mm_s",
+                    "bearing_temperature_c",
+                    "seal_pressure_bar",
+                    "flow_rate_m3h",
+                    "motor_current_a",
+                    "belt_speed_m_s",
+                    "oil_debris_ppm",
+                ],
+            ),
+        ]
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(failure_modes=modes)],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "HX-101", "symptoms": ["vibration", "temperature", "pressure"]},
+        )
+        failures = result["probable_failures"]
+        assert [f["code"] for f in failures] == ["MANY-01", "FEW-01"]
+        # MANY-01 wins on matched count (3 vs 1) despite the lower ratio.
+        assert len(failures[0]["matching_indicators"]) == 3
+        assert len(failures[1]["matching_indicators"]) == 1
+        assert failures[0]["confidence"] < failures[1]["confidence"]
+
+    @pytest.mark.asyncio
+    async def test_mode_without_indicators_skipped_no_exception(self) -> None:
+        """An empty typical_indicators list never divides by zero (skipped)."""
+        modes = [
+            FailureMode(
+                code="NO-IND-01",
+                name="No indicators declared",
+                category="mechanical",
+                typical_indicators=[],
+            ),
+            FailureMode(
+                code="VIB-01",
+                name="Vibration mode",
+                category="mechanical",
+                typical_indicators=["vibration_velocity_mm_s"],
+            ),
+        ]
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(failure_modes=modes)],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "HX-101", "symptoms": ["vibration"]},
+        )
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert codes == ["VIB-01"]
+        assert "NO-IND-01" not in codes
+
+
+class TestDiagnoseFailureArgCoercion:
+    """LLM-boundary args for diagnose_failure degrade at the tool level.
+
+    Hostile shapes (symptoms: null, bare string, mixed-type list, non-string
+    asset_id) must yield a tool-level result the model can react to — never
+    raise and escalate into a whole-turn LLMError.
+    """
+
+    @pytest.mark.asyncio
+    async def test_symptoms_none_treated_as_empty(self) -> None:
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": None},
+        )
+        assert result["symptoms"] == []
+        assert result["probable_failures"] == []
+        assert "note" in result
+
+    @pytest.mark.asyncio
+    async def test_symptoms_bare_string_treated_as_empty(self) -> None:
+        # A bare string is NOT iterated character-by-character into tokens.
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": "vibration"},
+        )
+        assert result["symptoms"] == []
+        assert result["probable_failures"] == []
+
+    @pytest.mark.asyncio
+    async def test_non_string_list_members_filtered(self) -> None:
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": [42, None, "high vibration", {"x": 1}]},
+        )
+        assert result["symptoms"] == ["high vibration"]
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert "BEAR-WEAR-01" in codes
+
+    @pytest.mark.asyncio
+    async def test_non_string_asset_id_returns_tool_error(self) -> None:
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": 123, "symptoms": ["vibration"]},
+        )
+        assert result == {"error": "asset_id must be a string"}
+
 
 class TestDeclineOffSurfaceAction:
     """A plain-prose decline of an unsupported action is a REAL answer.
@@ -1012,6 +1163,65 @@ class TestToolResultRecordedOnTrace:
         # The full structured result round-trips — not a truncated repr.
         assert payload, "recorded result must be non-empty for a successful read"
 
+    @pytest.mark.asyncio
+    async def test_result_json_capped_at_64kib(self) -> None:
+        """An oversized tool result is truncated with a visible marker.
+
+        A truncated value deliberately fails ``json.loads`` so the eval falls
+        back to ``output_summary`` instead of parsing clipped JSON.
+        """
+
+        class _HugeWoConnector(_FakeConnector):
+            async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+                return [
+                    WorkOrder(
+                        id="WO-BIG",
+                        type=WorkOrderType.CORRECTIVE,
+                        priority=Priority.HIGH,
+                        asset_id="P-201",
+                        description="x" * 80_000,
+                    )
+                ]
+
+        class _LLMReadWos:
+            model = "fake:model"
+
+            def __init__(self) -> None:
+                self._calls = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "Done."
+
+            async def complete_with_tools(
+                self,
+                messages: list[dict[str, str]],
+                tools: list[dict[str, Any]],
+                **kwargs: Any,
+            ) -> dict[str, Any]:
+                self._calls += 1
+                if self._calls == 1:
+                    tc = MagicMock()
+                    tc.function.name = "read_work_orders"
+                    tc.function.arguments = json.dumps({"asset_id": "P-201"})
+                    tc.id = "call_big"
+                    return {"content": "", "tool_calls": [tc]}
+                return {"content": "Big result handled.", "tool_calls": None}
+
+        agent = Agent(plant=_make_plant(), connectors=[_HugeWoConnector()])
+        agent._llm = _LLMReadWos()  # type: ignore[assignment]
+        await agent.start()
+
+        await agent.handle_message_full("Show work orders for P-201")
+
+        entry = next(e for e in agent.tracer.entries if e.action == "tool_call")
+        recorded = entry.metadata["result_json"]
+        assert recorded.endswith("...[truncated]")
+        assert len(recorded) == 65_536 + len("...[truncated]")
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(recorded)
+
+
+class TestAvailableTools:
     """Test _get_available_tools."""
 
     def test_with_connector(self) -> None:
@@ -1169,6 +1379,19 @@ class TestHistoryTextHelper:
         assert _strip_history_note(with_note) == body
 
 
+# Shared by TestEgressRenormalization and TestIsEchoHelper: a long multi-sentence
+# answer whose marker-dense variant exercises marker-stripping in echo comparison.
+_SENTENCES = (
+    "Replace the drive-end bearing",
+    "Grease the bearing housings",
+    "Check coupling alignment",
+    "Verify vibration levels",
+    "Record readings in the CMMS",
+    "Close out the work order",
+    "Archive the final report",
+)
+
+
 class TestEgressRenormalization:
     """U3 — _finalize_turn renormalizes citation markers at the sole egress.
 
@@ -1253,22 +1476,12 @@ class TestEgressRenormalization:
         assert stored.startswith("Heat to 110C.")
         assert "[Sources used in this answer: pump.md]" in stored
 
-    _SENTENCES = (
-        "Replace the drive-end bearing",
-        "Grease the bearing housings",
-        "Check coupling alignment",
-        "Verify vibration levels",
-        "Record readings in the CMMS",
-        "Close out the work order",
-        "Archive the final report",
-    )
-
     def test_echo_override_history_is_marker_stripped(self) -> None:
         # The echo path stores the REAL echoed text via history_override,
         # which bypasses _history_text — the marker-stripping must cover that
         # branch too, or the echoed [n] re-enters the next turn's prompt.
-        clean = ". ".join(self._SENTENCES) + "."
-        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(self._SENTENCES, 10)) + "."
+        clean = ". ".join(_SENTENCES) + "."
+        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(_SENTENCES, 10)) + "."
         agent = Agent()
         agent._add_to_history("c", "user", "first question")
         agent._add_to_history("c", "assistant", clean)
@@ -1418,16 +1631,6 @@ class TestIsEchoHelper:
         b = "Spare bearing SKF-6205 is out of stock; lead time is six weeks. " + "b" * 200
         assert _is_echo(a, b) is False
 
-    _SENTENCES = (
-        "Replace the drive-end bearing",
-        "Grease the bearing housings",
-        "Check coupling alignment",
-        "Verify vibration levels",
-        "Record readings in the CMMS",
-        "Close out the work order",
-        "Archive the final report",
-    )
-
     def test_markers_ignored_when_comparing(self) -> None:
         """Answers identical up to inline [n] markers compare as an echo (U3).
 
@@ -1439,8 +1642,8 @@ class TestIsEchoHelper:
         """
         import difflib
 
-        clean = ". ".join(self._SENTENCES) + "."
-        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(self._SENTENCES, 10)) + "."
+        clean = ". ".join(_SENTENCES) + "."
+        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(_SENTENCES, 10)) + "."
         assert len(marked) >= 200
         raw_ratio = difflib.SequenceMatcher(
             None, " ".join(marked.split()).lower(), " ".join(clean.split()).lower()

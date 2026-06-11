@@ -443,6 +443,14 @@ def safe_source(source: str) -> str:
 _safe_source = safe_source
 
 
+# How many retrieved document chunks are displayed (and citation-indexed) per
+# search — the SAME window everywhere: format_document_results' rendering,
+# the runtime's pre-fetch registration, and the search_documents tool
+# serializer. A mismatch would desynchronise visible [n] indices from the
+# server-side citation registry.
+DOC_DISPLAY_WINDOW = 5
+
+
 def format_document_results(results: list[dict[str, Any]]) -> str:
     """Format document search results for the prompt.
 
@@ -461,7 +469,7 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         return "No relevant documents found."
 
     lines = [f"**Relevant Documents ({len(results)}):**"]
-    for i, result in enumerate(results[:5], 1):
+    for i, result in enumerate(results[:DOC_DISPLAY_WINDOW], 1):
         # Defence-in-depth: sanitise here too in case an upstream caller
         # forgot to.  Idempotent for already-sanitised values.
         source = safe_source(result.get("source", "unknown"))

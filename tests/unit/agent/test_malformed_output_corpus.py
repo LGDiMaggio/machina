@@ -25,6 +25,7 @@ from typing import Any, ClassVar, NoReturn
 
 import pytest
 
+from machina.agent.prompts import DOC_DISPLAY_WINDOW
 from machina.agent.runtime import (
     _EMPTY_RESPONSE_FALLBACK,
     _REPEATED_RESPONSE_FALLBACK,
@@ -32,6 +33,7 @@ from machina.agent.runtime import (
     Agent,
     _format_response_for_channel,
 )
+from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
@@ -311,13 +313,14 @@ class _SpyDocumentConnector:
     asset) and (b) offer the ``search_documents`` tool on the loop surface.
 
     Each ``search()`` call — pre-fetch or tool dispatch alike — serves the
-    NEXT window of up to 5 chunks, mirroring the runtime's own ``[:5]``
+    NEXT window of up to ``DOC_DISPLAY_WINDOW`` chunks, the runtime's own
     display/registration window (``format_document_results`` and
-    ``_register_document_results``). A fixture with more than 5 chunks can
-    therefore script a ``search_documents`` tool call that surfaces NEW
-    chunks whose ``citation_index`` continues past the 5 pre-fetch slots
-    (6, 7, 8, ...) — the construction the citation-numbering family pins.
-    Once exhausted, further calls return an empty list.
+    ``_register_document_results``). A fixture with more chunks than the
+    window can therefore script a ``search_documents`` tool call that
+    surfaces NEW chunks whose ``citation_index`` continues past the
+    pre-fetch slots (window+1, window+2, ...) — the construction the
+    citation-numbering family pins. Once exhausted, further calls return
+    an empty list.
     """
 
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.SEARCH_DOCUMENTS})
@@ -341,14 +344,14 @@ class _SpyDocumentConnector:
     async def disconnect(self) -> None:  # pragma: no cover
         pass
 
-    async def health_check(self) -> bool:  # pragma: no cover
-        return True
+    async def health_check(self) -> ConnectorHealth:  # pragma: no cover
+        return ConnectorHealth(status=ConnectorStatus.HEALTHY)
 
     async def search(
         self, query: str, *, asset_id: str = "", filters: dict[str, Any] | None = None
     ) -> list[Any]:
         self.searches += 1
-        window = self._chunks[self._served : self._served + 5]
+        window = self._chunks[self._served : self._served + DOC_DISPLAY_WINDOW]
         self._served += len(window)
         return window
 

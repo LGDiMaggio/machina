@@ -73,6 +73,20 @@ class TestDocumentStoreConnector:
             _ds_mod.DocumentStoreConnector, "_build_rag_index", _build_rag_index_raises
         )
 
+    @pytest.fixture(autouse=True)
+    def _fresh_legacy_probe(self) -> Any:
+        """Reset the lru_cached legacy-install probe around every test.
+
+        The probe is evaluated once per process by design; tests that
+        simulate different installed-package environments need a fresh
+        evaluation, and must not leak their simulated result to others.
+        """
+        from machina.connectors.docs.document_store import _legacy_vectorstore_installed
+
+        _legacy_vectorstore_installed.cache_clear()
+        yield
+        _legacy_vectorstore_installed.cache_clear()
+
     @pytest.mark.asyncio
     async def test_connect_and_load(self, sample_docs_dir: Path) -> None:
         conn = DocumentStoreConnector(paths=[sample_docs_dir])

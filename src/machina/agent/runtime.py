@@ -24,6 +24,7 @@ import structlog
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
 from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
 from machina.agent.prompts import (
+    DOC_DISPLAY_WINDOW,
     build_context_message,
     build_system_prompt,
     safe_source,
@@ -556,8 +557,8 @@ class Agent:
         # Element ``i`` is the chunk the model saw as ``[i + 1]``; an empty
         # string marks a displayed-but-unregistered slot so the visible index
         # stays aligned with what the model saw. Built from the SAME
-        # ``enumerate(results[:5], 1)`` the prompt rendering uses — never from
-        # the filtered registry, which would drift off-by-k.
+        # ``enumerate(results[:DOC_DISPLAY_WINDOW], 1)`` the prompt rendering
+        # uses — never from the filtered registry, which would drift off-by-k.
         self._turn_ordered: dict[str, list[str]] = {}
         # Per-turn, chat-scoped completeness marker. The LLM loop sets
         # ``"partial"`` when it force-finalizes a turn (no-progress / suppression
@@ -868,10 +869,11 @@ class Agent:
         """Process a user message and return the agent's response text.
 
         This is the main entry point for programmatic usage. The returned
-        string is the rendered answer with inline ``[source:page]``
-        markers preserved but the trailing ``<citations>`` block stripped.
-        Use :meth:`handle_message_full` to also access structured
-        :class:`Citation` objects.
+        string is the rendered answer with inline ``[n]`` citation markers
+        renormalized to ``1..N`` by first appearance and the trailing
+        ``<citations>`` block stripped. Use :meth:`handle_message_full` to
+        also access structured :class:`Citation` objects —
+        ``citations[n-1]`` aligns with the inline ``[n]`` marker.
 
         Args:
             text: The user's message.
@@ -1205,12 +1207,12 @@ class Agent:
           an empty string so later indices stay aligned with the prompt and
           do not drift off-by-k.
 
-        Truncation to ``[:5]`` mirrors :func:`format_document_results`, which
-        only renders the first five results.
+        Truncation to ``[:DOC_DISPLAY_WINDOW]`` mirrors
+        :func:`format_document_results`, which only renders that window.
         """
         registry = self._turn_chunks.setdefault(chat_id, {})
         ordered = self._turn_ordered.setdefault(chat_id, [])
-        for r in results[:5]:
+        for r in results[:DOC_DISPLAY_WINDOW]:
             chunk_id = r.get("chunk_id") or ""
             ordered.append(chunk_id)
             if not chunk_id:
@@ -1851,8 +1853,13 @@ class Agent:
                     # than the truncated summary (e.g. the conversational eval
                     # asserts on tool RESULTS, not just invocation — the one
                     # signal context echo cannot fake). Recording only; no
-                    # behavioural change.
-                    tool_span.metadata["result_json"] = json.dumps(tool_result, default=str)
+                    # behavioural change. Capped at 64 KiB: a truncated value
+                    # fails json.loads downstream, so the eval falls back to
+                    # output_summary by design rather than parsing garbage.
+                    raw = json.dumps(tool_result, default=str)
+                    tool_span.metadata["result_json"] = (
+                        raw if len(raw) <= 65_536 else raw[:65_536] + "...[truncated]"
+                    )
 
                 messages.append(
                     {
@@ -2369,8 +2376,9 @@ class Agent:
                 # same index contract the pre-fetch context uses. The index
                 # is offset by any chunks already displayed this turn (e.g.
                 # from pre-fetch context) so it matches the ordered map
-                # _register_document_results builds. Only the first five are
-                # indexed, mirroring format_document_results' ``[:5]``.
+                # _register_document_results builds. Only the first
+                # DOC_DISPLAY_WINDOW results are indexed, mirroring
+                # format_document_results' display window.
                 offset = len(self._turn_ordered.get(chat_id, []))
                 serialized = [
                     {
@@ -2382,7 +2390,7 @@ class Agent:
                         "section_title": getattr(r, "section_title", ""),
                         "is_table": getattr(r, "is_table", False),
                     }
-                    for i, r in enumerate(results[:5], 1)
+                    for i, r in enumerate(results[:DOC_DISPLAY_WINDOW], 1)
                 ]
                 # Register tool-retrieved chunks against the in-flight chat
                 # only, so concurrent chats do not see each other's chunks
@@ -2403,10 +2411,18 @@ class Agent:
             return {"error": "No spare parts connector available"}
 
         if name == "diagnose_failure":
-            return self._tool_diagnose_failure(
-                args.get("asset_id", ""),
-                args.get("symptoms", []),
-            )
+            # Args can arrive from the leak-recovery path (model text, no
+            # provider schema enforcement), so coerce before dispatch — a
+            # wrong-typed arg must degrade to a tool-level error the model
+            # can react to, not raise and kill the whole turn.
+            asset_id = args.get("asset_id", "")
+            if not isinstance(asset_id, str):
+                return {"error": "asset_id must be a string"}
+            symptoms = args.get("symptoms", [])
+            if not isinstance(symptoms, list):
+                symptoms = []
+            symptoms = [s for s in symptoms if isinstance(s, str)]
+            return self._tool_diagnose_failure(asset_id, symptoms)
 
         if name == "get_maintenance_schedule":
             return {"info": "Maintenance schedule lookup not yet connected to a data source."}
@@ -2797,6 +2813,23 @@ class Agent:
         declared = set(asset.failure_modes)
         if declared:
             candidates = [fm for fm in catalog if fm.code in declared]
+            if not candidates:
+                # The asset names failure modes, but NONE of them exist in the
+                # harvested catalog — an honest configuration-mismatch note,
+                # not a garbled "nothing matched" with an empty indicator list.
+                logger.warning(
+                    "diagnose_failure_declared_modes_not_in_catalog",
+                    agent=self.name,
+                    asset_id=asset_id,
+                    operation="diagnose_failure",
+                    declared=sorted(declared),
+                )
+                result["note"] = safe_text(
+                    f"Asset declares {len(declared)} failure mode(s) "
+                    f"({', '.join(sorted(declared))}) but none are present in "
+                    "the configured catalog (possible configuration mismatch)."
+                )
+                return result
         else:
             candidates = catalog
             notes.append(
@@ -2822,13 +2855,21 @@ class Agent:
                     "code": fm.code,
                     "name": fm.name,
                     "category": fm.category,
-                    # Fraction of this mode's indicators the symptoms hit.
+                    # Numeric indicator-match ratio 0-1: the fraction of this
+                    # mode's typical_indicators the symptoms hit. Distinct from
+                    # FailureAnalyzer's CATEGORICAL confidence on the
+                    # alarm/workflow path — do not conflate the two.
                     "confidence": round(len(matched) / len(fm.typical_indicators), 2),
                     "matching_indicators": matched,
                     "recommended_actions": fm.recommended_actions,
                 }
             )
-        ranked.sort(key=lambda entry: float(entry["confidence"]), reverse=True)
+        # Rank by evidence first (matched-indicator count DESC), ratio second:
+        # a mode matching 1 of 2 indicators must not outrank one matching 3 of 6.
+        ranked.sort(
+            key=lambda entry: (len(entry["matching_indicators"]), float(entry["confidence"])),
+            reverse=True,
+        )
         result["probable_failures"] = ranked[:5]
 
         if not ranked:
