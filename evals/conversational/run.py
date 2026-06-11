@@ -373,14 +373,18 @@ def preflight_model(model: str) -> str | None:
         # e.g. "gpt-4o" or "claude-sonnet-4-5") carry no explicit provider;
         # infer it from the model-name prefix so a missing API key yields the
         # same actionable skip row as a missing Ollama model instead of
-        # per-turn ERROR spam.
+        # per-turn ERROR spam. A tag whose prefix maps to no provider at all
+        # (e.g. --models "llama3") would make litellm fail every turn with
+        # "LLM Provider NOT provided" — skip it upfront with a suggestion.
         name_lower = model.lower()
-        if name_lower.startswith(("gpt", "o1", "o3", "o4")) and not os.environ.get(
-            "OPENAI_API_KEY"
-        ):
-            return "OPENAI_API_KEY is not set (required for the cloud reference model)"
-        if name_lower.startswith("claude") and not os.environ.get("ANTHROPIC_API_KEY"):
-            return "ANTHROPIC_API_KEY is not set (required for the cloud reference model)"
+        if name_lower.startswith(("gpt", "o1", "o3", "o4")):
+            if not os.environ.get("OPENAI_API_KEY"):
+                return "OPENAI_API_KEY is not set (required for the cloud reference model)"
+        elif name_lower.startswith("claude"):
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                return "ANTHROPIC_API_KEY is not set (required for the cloud reference model)"
+        else:
+            return f"colon-less tag has no provider — did you mean ollama:{model}?"
     return None
 
 

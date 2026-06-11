@@ -18,6 +18,7 @@ from evals.conversational.run import (
     TurnSignals,
     evaluate_assertions,
     find_malformed,
+    preflight_model,
     tool_result_emptiness,
 )
 from evals.conversational.schema import (
@@ -288,6 +289,54 @@ class TestConnectorsFlagAndLength:
         short_scenario = parse_scenario(_valid_data())
         assert isinstance(short_scenario, Scenario)
         assert short_scenario.is_long is False
+
+
+class TestPreflightColonlessTags:
+    """Colon-less model tags are preflighted, never left for litellm to reject.
+
+    ``preflight_model`` on a colon-less tag is pure env-var inspection (no
+    subprocess, no network), so it IS CI-testable even though the runner is
+    not. Regression: ``--models "llama3"`` used to fall through every branch
+    and produce one litellm "LLM Provider NOT provided" ERROR row per turn
+    (observed 2026-06-10); now it skips upfront with a suggestion.
+    """
+
+    def test_unknown_colonless_tag_skipped_with_ollama_suggestion(self) -> None:
+        error = preflight_model("llama3")
+        assert error is not None
+        assert "no provider" in error
+        assert "ollama:llama3" in error
+
+    def test_gpt_tag_without_key_names_the_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        error = preflight_model("gpt-4o")
+        assert error is not None
+        assert "OPENAI_API_KEY" in error
+
+    def test_gpt_tag_with_key_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        assert preflight_model("gpt-4o") is None
+
+    def test_claude_tag_without_key_names_the_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        error = preflight_model("claude-sonnet-4-5")
+        assert error is not None
+        assert "ANTHROPIC_API_KEY" in error
+
+    def test_claude_tag_with_key_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        assert preflight_model("claude-sonnet-4-5") is None
+
+    def test_explicit_provider_prefix_is_not_affected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tags with an explicit non-ollama provider still preflight as before."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        assert preflight_model("openai:gpt-4o") is None
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert preflight_model("openai:gpt-4o") is not None
 
 
 class TestFindMalformed:
