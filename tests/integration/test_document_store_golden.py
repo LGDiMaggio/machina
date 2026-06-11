@@ -27,6 +27,7 @@ import pytest
 # module is gated on the hybrid stack. Without it, dense-only retrieval
 # cannot be expected to surface exact identifiers and the eval is invalid.
 pytest.importorskip("langchain_community")
+pytest.importorskip("langchain_chroma")
 pytest.importorskip("chromadb")
 pytest.importorskip("rank_bm25")
 

@@ -78,8 +78,9 @@ sql-jdbc = ["jaydebeapi>=1.2,<2.0", "JPype1>=1.5"]
 mcp = ["mcp>=1.27.0,<2.0"]
 cmms-rest = ["httpx>=0.27"]
 docs-rag = [
-    "langchain>=0.2",
     "langchain-community>=0.2",
+    "langchain-chroma>=0.2.3",
+    "langchain-huggingface>=0.1",
     "chromadb>=0.4",
 ]
 docs-rag-hybrid = ["rank_bm25>=0.2"]

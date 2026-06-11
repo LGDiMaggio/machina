@@ -27,7 +27,7 @@ for chunk in results:
     print(chunk.content[:200])
 ```
 
-When `langchain` + `chromadb` are not installed the connector silently falls back to an in-memory keyword search so the quickstart works without a heavy install.
+When `langchain-chroma` + `chromadb` are not installed the connector falls back to an in-memory keyword search (logging a WARNING that names the missing package) so the quickstart works without a heavy install.
 
 ## Metadata schema
 
@@ -141,7 +141,7 @@ The agent runtime registers retrieved `chunk_id`s per turn so the LLM can refere
 
 | Failure | Behavior |
 |---|---|
-| `langchain` / `chromadb` not installed | Falls back to in-memory keyword search |
+| `langchain-chroma` / `chromadb` not installed | Falls back to in-memory keyword search with a WARNING (names the `pip install -U "machina-ai[docs-rag]"` remedy on legacy installs) |
 | `rank_bm25` not installed | Dense-only retrieval |
 | Reranker model fails to load | Returns RRF order (no rerank) |
 | Layout parser fails on a file | Logs warning, falls back to `PyPDFLoader` for that file |

@@ -25,6 +25,7 @@ import pytest
 # the test invisible when any of them is missing instead of failing CI on
 # a stripped-down environment.
 pytest.importorskip("langchain_community")
+pytest.importorskip("langchain_chroma")
 pytest.importorskip("chromadb")
 pytest.importorskip("rank_bm25")
 
