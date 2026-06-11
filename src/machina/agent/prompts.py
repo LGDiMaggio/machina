@@ -79,6 +79,13 @@ named in your previous answer rather than searching again.
 
 {capabilities_context}
 
+The tools and capabilities listed above are the COMPLETE set of actions \
+available to you. If the user asks for an action they do not cover (for \
+example registering, updating, or deleting a record for which no matching \
+tool exists), say plainly that you cannot do that, then suggest what you \
+CAN do instead from the capabilities above. Never promise, simulate, or \
+imply that an unsupported action was or could be performed.
+
 ## Registered Workflows
 
 {workflows_context}

@@ -956,7 +956,62 @@ class TestDiagnoseFailureCatalog:
         assert "belt_speed_m_s" not in result["note"]
 
 
-class TestAvailableTools:
+class TestDeclineOffSurfaceAction:
+    """A plain-prose decline of an unsupported action is a REAL answer.
+
+    The system prompt (capability-honesty constraint, U5) instructs the model
+    to decline actions outside the tool/capability surface. The runtime must
+    pass that decline through every egress gate untouched: no fallback
+    substitution, no suppression — ``is_fallback`` stays ``False`` by
+    construction and the text survives intact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_decline_text_passes_gates_unchanged(self) -> None:
+        decline = (
+            "I cannot register a new failure mode in the CMMS — none of my "
+            "available tools supports that action. I can instead diagnose "
+            "probable failure modes from symptoms, search the maintenance "
+            "history, or create a corrective work order for P-201."
+        )
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLM(decline)  # type: ignore[assignment]
+        await agent.start()
+
+        resp = await agent.handle_message_full(
+            "Register a failure mode in the CMMS for pump P-201"
+        )
+
+        assert resp.text == decline
+        assert resp.is_fallback is False
+        assert resp.citations == []
+
+
+class TestToolResultRecordedOnTrace:
+    """The tool-call trace span records the FULL result as parseable JSON.
+
+    The conversational eval's ``expect_tool_result_nonempty`` assertion reads
+    ``metadata["result_json"]`` off the traced ``tool_call`` entry — the
+    truncated ``output_summary`` (repr-style, 200 chars) is not reliably
+    parseable. Recording only; no behavioural change.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_call_span_carries_result_json(self) -> None:
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector()])
+        agent._llm = _FakeLLMWithToolCalls()  # type: ignore[assignment]
+        await agent.start()
+
+        await agent.handle_message_full("Tell me about P-201")
+
+        tool_entries = [e for e in agent.tracer.entries if e.action == "tool_call"]
+        assert tool_entries, "expected at least one traced tool_call"
+        entry = tool_entries[0]
+        assert entry.operation == "search_assets"
+        payload = json.loads(entry.metadata["result_json"])
+        # The full structured result round-trips — not a truncated repr.
+        assert payload, "recorded result must be non-empty for a successful read"
+
     """Test _get_available_tools."""
 
     def test_with_connector(self) -> None:

@@ -4,17 +4,18 @@ A scenario is a YAML file describing a frozen multi-turn conversation
 plus per-turn assertions. Every assertion type maps to exactly ONE
 layer (the *layer-attribution contract*, origin requirements R13-R16):
 
-==========================  ==========
-Assertion                   Layer
-==========================  ==========
-``expect_tool_invoked``     runtime
-``expect_no_malformed``     runtime
-``expect_not_fallback``     runtime
-``expect_retrieval_source``  retrieval
-``expect_citation``         citations
-``golden_contains``         golden
-``golden_excludes``         golden
-==========================  ==========
+================================  ==========
+Assertion                         Layer
+================================  ==========
+``expect_tool_invoked``           runtime
+``expect_tool_result_nonempty``   runtime
+``expect_no_malformed``           runtime
+``expect_not_fallback``           runtime
+``expect_retrieval_source``       retrieval
+``expect_citation``               citations
+``golden_contains``               golden
+``golden_excludes``               golden
+================================  ==========
 
 Attribution = the layer of the FIRST failed assertion, evaluated in
 the fixed order runtime -> retrieval -> citations -> golden. The
@@ -43,6 +44,7 @@ LAYER_ORDER: tuple[str, ...] = ("runtime", "retrieval", "citations", "golden")
 
 ASSERTION_LAYERS: dict[str, str] = {
     "expect_tool_invoked": "runtime",
+    "expect_tool_result_nonempty": "runtime",
     "expect_no_malformed": "runtime",
     "expect_not_fallback": "runtime",
     "expect_retrieval_source": "retrieval",
@@ -54,6 +56,7 @@ ASSERTION_LAYERS: dict[str, str] = {
 
 ASSERTION_ORDER: tuple[str, ...] = (
     "expect_tool_invoked",
+    "expect_tool_result_nonempty",
     "expect_no_malformed",
     "expect_not_fallback",
     "expect_retrieval_source",
@@ -81,6 +84,10 @@ class TurnAssertions:
     Attributes:
         expect_tool_invoked: Tool name that must appear as a traced
             ``tool_call`` during the turn (runtime layer).
+        expect_tool_result_nonempty: Tool name that must have been
+            invoked this turn AND returned a meaningfully non-empty
+            result — the one signal context echo cannot fake (runtime
+            layer).
         expect_no_malformed: When ``True`` (the default), the response
             text must not contain tool-call-shaped JSON or raw
             ``<think>``/``<citations>`` tags (runtime layer).
@@ -99,6 +106,7 @@ class TurnAssertions:
     """
 
     expect_tool_invoked: str | None = None
+    expect_tool_result_nonempty: str | None = None
     expect_no_malformed: bool = True
     expect_not_fallback: bool | None = None
     expect_retrieval_source: str | None = None
@@ -213,6 +221,12 @@ def _parse_assertions(raw: Any, *, source: str) -> TurnAssertions:
     if "expect_tool_invoked" in raw:
         kwargs["expect_tool_invoked"] = _require_str(
             raw["expect_tool_invoked"], source=source, fieldname="expect_tool_invoked"
+        )
+    if "expect_tool_result_nonempty" in raw:
+        kwargs["expect_tool_result_nonempty"] = _require_str(
+            raw["expect_tool_result_nonempty"],
+            source=source,
+            fieldname="expect_tool_result_nonempty",
         )
     if "expect_no_malformed" in raw:
         kwargs["expect_no_malformed"] = _require_bool(

@@ -428,3 +428,35 @@ class TestSystemPromptFirewall:
 
     def test_clause_explicitly_calls_out_directory(self) -> None:
         assert "director" in build_system_prompt().lower()
+
+
+class TestSystemPromptCapabilityHonesty:
+    """The prompt must require declining actions outside the capability surface.
+
+    Regression for the live-testing confabulation where the agent claimed it
+    could "register a failure mode in the CMMS" — no such tool or write path
+    exists. The constraint is capability-GENERIC: it covers any off-surface
+    promise, not just failure modes.
+    """
+
+    def test_decline_clause_present_with_capabilities(self) -> None:
+        # Stable substring asserting the constraint exists. If the clause is
+        # reworded, update this deliberately — silent removal must be
+        # visible in the diff.
+        prompt = build_system_prompt(capabilities=["read_assets", "search_documents"])
+        assert "COMPLETE set of actions" in prompt
+        assert "Never promise, simulate, or imply" in prompt
+
+    def test_clause_sits_after_the_live_capability_list(self) -> None:
+        # The constraint leans on the live capability list injected just
+        # above it — "what you CAN do instead" must refer to that list.
+        prompt = build_system_prompt(capabilities=["read_assets"])
+        assert prompt.index("read_assets") < prompt.index("COMPLETE set of actions")
+
+    def test_clause_is_capability_generic(self) -> None:
+        # No hardcoded mention of the incident's specifics: the constraint
+        # must cover ANY unsupported action, so it never names failure modes.
+        prompt = build_system_prompt()
+        start = prompt.index("COMPLETE set of actions")
+        end = prompt.index("## Registered Workflows")
+        assert "failure mode" not in prompt[start:end].lower()

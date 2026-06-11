@@ -125,7 +125,7 @@ def find_malformed(text: str) -> str | None:
 
 @dataclass(frozen=True)
 class TurnSignals:
-    """Observable signals collected for one turn (no new runtime code).
+    """Observable signals collected for one turn.
 
     Attributes:
         text: ``AgentResponse.text``.
@@ -133,6 +133,11 @@ class TurnSignals:
         citation_count: ``len(AgentResponse.citations)``.
         invoked_tools: ``operation`` of every traced ``tool_call`` entry
             recorded during the turn.
+        tool_results: ``(tool_name, recorded_result)`` per traced
+            ``tool_call``, aligned with ``invoked_tools``. The result is
+            the entry's ``metadata["result_json"]`` (full JSON, recorded
+            by the runtime tool-call span) falling back to the truncated
+            ``output_summary`` for older traces.
         is_fallback: ``AgentResponse.is_fallback``.
     """
 
@@ -140,7 +145,58 @@ class TurnSignals:
     citation_sources: tuple[str, ...] = ()
     citation_count: int = 0
     invoked_tools: tuple[str, ...] = ()
+    tool_results: tuple[tuple[str, str], ...] = ()
     is_fallback: bool = False
+
+
+# Keys a tool result dict uses for its main list payload. When the parsed
+# result is a dict containing EXACTLY ONE of these keys with a list value,
+# that list decides emptiness (e.g. diagnose_failure always returns
+# ``{"asset_id": ..., "symptoms": [...], "probable_failures": []}`` — truthy
+# as a dict even when the diagnosis found nothing).
+_LIST_PAYLOAD_KEYS: tuple[str, ...] = ("probable_failures", "results", "items", "matches")
+
+
+def tool_result_emptiness(raw: str) -> str | None:
+    """Return a short diagnosis when a recorded tool result is meaningfully
+    empty, else ``None``.
+
+    Heuristic (generic on purpose — no per-tool switch):
+
+    1. Parse the recorded string as JSON when possible; an unparseable
+       recording (e.g. a truncated ``output_summary``) falls back to plain
+       string truthiness.
+    2. A falsy payload (``null`` / ``{}`` / ``[]`` / ``""`` / blank string)
+       is empty.
+    3. A dict containing exactly one obvious list-payload key
+       (:data:`_LIST_PAYLOAD_KEYS`) is empty when THAT list is empty, even
+       if envelope fields (ids, notes, echoes of the input) make the dict
+       itself truthy. For ``diagnose_failure`` this means: the
+       ``probable_failures`` list must be non-empty — the signal a context
+       echo cannot fake.
+
+    Args:
+        raw: The recorded tool result (JSON string or summary).
+
+    Returns:
+        A human-readable description of what was empty, or ``None`` when
+        the result is meaningfully non-empty.
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return "recorded result is empty"
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        # Not JSON (legacy truncated summary) — non-blank string counts.
+        return None
+    if not payload:
+        return f"result payload is empty ({stripped[:40]!r})"
+    if isinstance(payload, dict):
+        list_keys = [k for k in _LIST_PAYLOAD_KEYS if isinstance(payload.get(k), list)]
+        if len(list_keys) == 1 and not payload[list_keys[0]]:
+            return f"'{list_keys[0]}' list is empty"
+    return None
 
 
 @dataclass(frozen=True)
@@ -175,6 +231,29 @@ def evaluate_assertions(assertions: TurnAssertions, signals: TurnSignals) -> lis
             passed = value in signals.invoked_tools
             expected = f"tool '{value}' invoked"
             actual = "invoked: " + (", ".join(signals.invoked_tools) or "(none)")
+        elif name == "expect_tool_result_nonempty":
+            # Passes when the named tool ran this turn AND at least one of
+            # its recorded results is meaningfully non-empty (see
+            # tool_result_emptiness). Unlike golden_contains, a context echo
+            # (e.g. "Known failure modes: ..." injected into the prompt)
+            # cannot satisfy this — only a working tool can.
+            recorded = [res for tool, res in signals.tool_results if tool == value]
+            expected = f"tool '{value}' invoked with a non-empty result"
+            if not recorded:
+                passed = False
+                actual = (
+                    f"tool '{value}' not invoked (invoked: "
+                    + (", ".join(signals.invoked_tools) or "(none)")
+                    + ")"
+                )
+            else:
+                diagnoses = [tool_result_emptiness(res) for res in recorded]
+                passed = any(d is None for d in diagnoses)
+                actual = (
+                    "non-empty result"
+                    if passed
+                    else f"tool '{value}': " + "; ".join(d for d in diagnoses if d)
+                )
         elif name == "expect_no_malformed":
             diagnosis = find_malformed(signals.text)
             passed = diagnosis is None
@@ -375,13 +454,21 @@ async def _run_turn(agent: Agent, turn: Turn, *, chat_id: str) -> TurnSignals:
     before = len(agent.tracer.entries)
     response = await agent.handle_message_full(turn.user, chat_id=chat_id)
     new_entries = agent.tracer.entries[before:]
-    invoked = tuple(e.operation for e in new_entries if e.action == "tool_call")
+    tool_entries = [e for e in new_entries if e.action == "tool_call"]
+    invoked = tuple(e.operation for e in tool_entries)
+    # Prefer the full JSON recording (runtime tool-call span metadata);
+    # fall back to the truncated output_summary for older traces.
+    results = tuple(
+        (e.operation, str(e.metadata.get("result_json", "") or e.output_summary))
+        for e in tool_entries
+    )
     sources = tuple(c.source for c in response.citations if c.source)
     return TurnSignals(
         text=response.text,
         citation_sources=sources,
         citation_count=len(response.citations),
         invoked_tools=invoked,
+        tool_results=results,
         is_fallback=response.is_fallback,
     )
 

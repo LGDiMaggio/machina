@@ -1847,6 +1847,12 @@ class Agent:
                             # served from here instead of re-querying.
                             executed_reads[call_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
+                    # Full result, JSON-encoded, for consumers that need more
+                    # than the truncated summary (e.g. the conversational eval
+                    # asserts on tool RESULTS, not just invocation — the one
+                    # signal context echo cannot fake). Recording only; no
+                    # behavioural change.
+                    tool_span.metadata["result_json"] = json.dumps(tool_result, default=str)
 
                 messages.append(
                     {
