@@ -1,0 +1,24 @@
+{
+  "id": "citation-block-only-no-inline",
+  "description": "Pinned presentation (citation-numbering family, per the R12 rule; fix is a later unit): a citation listed only in the <citations> block, with no inline [n] marker in the prose, still resolves. Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads 2 chunks; the pre-fetch (P-201 exact-id resolution) registers them as [1]..[2]. The single scripted completion's prose contains NO bracketed index at all, but its block cites [2]. TODAY the block is stripped, the citation resolves, and the channel footer shows the [source:page] entry -- so the user sees a sourced answer whose prose never points at the source. The future fix decides the prose<->footer linking presentation; flipping this fixture's expected block is part of that fix.",
+  "user_messages": ["How should I grease P-201?"],
+  "document_chunks": [
+    {"chunk_id": "chunk-motor-001", "source": "motor_maintenance.md", "page": 6, "content": "Motor maintenance: megger test windings annually."},
+    {"chunk_id": "chunk-grease-002", "source": "greasing_schedule.md", "page": 2, "content": "Grease the motor bearings every three months with lithium-based NLGI 2 grease."}
+  ],
+  "turns": [
+    {
+      "content": "Grease the motor bearings every three months using a lithium-based NLGI 2 grease, and wipe the fittings clean before applying the grease gun.\n\n<citations>\n[2]\n</citations>",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Grease the motor bearings every three months"],
+    "user_text_excludes": ["[1]", "[2]", "<citations>"],
+    "channel_text_contains": ["Sources:", "[greasing_schedule.md:2]"],
+    "channel_text_excludes": ["[motor_maintenance.md:6]"]
+  }
+}

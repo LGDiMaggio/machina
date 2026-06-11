@@ -1,0 +1,36 @@
+{
+  "id": "citation-rawindex-markers",
+  "description": "KNOWN GAP (pinned for visibility, per the R12 rule; fix is a later unit): raw-index citation markers reach the user verbatim while the channel footer speaks a different language. Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads the spy document connector with 8 chunks served in display windows of 5 -- the pre-fetch (P-201 resolves at confidence 1.0, so _gather_context searches documents) registers chunks 1-5 as visible [1]..[5]; the scripted search_documents tool call retrieves the next window, serialized with citation_index 6..8 (offset = the 5 already-registered slots) and registered at those positions. The model's final answer cites [6] and [8] inline with a proper <citations> block. TODAY both resolve (the registry continues past the pre-fetch slots), the block is stripped, but the raw [6]/[8] markers survive in the user text while the channel footer renders the same two citations as [source:page] entries -- visually unrelated numbering. The future fix rewrites this presentation; flipping this fixture's expected block is part of that fix.",
+  "user_messages": ["What is the bearing maintenance plan for P-201?"],
+  "document_chunks": [
+    {"chunk_id": "chunk-manual-001", "source": "pump_p201_manual.md", "page": 1, "content": "P-201 overview: single-stage centrifugal cooling water pump."},
+    {"chunk_id": "chunk-manual-002", "source": "pump_p201_manual.md", "page": 2, "content": "Operating envelope: 45 m3/h nominal flow at 2950 rpm."},
+    {"chunk_id": "chunk-manual-003", "source": "pump_p201_manual.md", "page": 3, "content": "Mechanical seal: cartridge type, plan 11 flush."},
+    {"chunk_id": "chunk-manual-004", "source": "pump_p201_manual.md", "page": 4, "content": "Coupling: spacer type, laser alignment required after seal work."},
+    {"chunk_id": "chunk-manual-005", "source": "pump_p201_manual.md", "page": 5, "content": "Baseplate and grouting inspection notes."},
+    {"chunk_id": "chunk-bearing-006", "source": "bearing_guide.md", "page": 12, "content": "Replace the drive-end bearing every 8000 operating hours."},
+    {"chunk_id": "chunk-seal-007", "source": "seal_replacement.md", "page": 3, "content": "Seal replacement procedure: depressurize, drain, pull cartridge."},
+    {"chunk_id": "chunk-lube-008", "source": "lubrication_schedule.md", "page": 7, "content": "Grease the bearing housings with NLGI 2 grease every 500 hours."}
+  ],
+  "turns": [
+    {
+      "content": "",
+      "tool_calls": [
+        {"name": "search_documents", "arguments": "{\"query\": \"bearing replacement and lubrication interval\", \"asset_id\": \"P-201\"}"}
+      ]
+    },
+    {
+      "content": "Replace the drive-end bearing every 8000 operating hours [6]. Between replacements, grease the bearing housings with NLGI 2 grease every 500 hours [8].\n\n<citations>\n[6]\n[8]\n</citations>",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["[6]", "[8]"],
+    "user_text_excludes": ["<citations>"],
+    "channel_text_contains": ["Sources:", "[bearing_guide.md:12]", "[lubrication_schedule.md:7]"],
+    "channel_text_excludes": ["[seal_replacement.md:3]", "[pump_p201_manual.md:1]"]
+  }
+}

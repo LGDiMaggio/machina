@@ -30,6 +30,7 @@ from machina.agent.runtime import (
     _REPEATED_RESPONSE_FALLBACK,
     _TOOL_CALL_LEAK_FALLBACK,
     Agent,
+    _format_response_for_channel,
 )
 from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -66,16 +67,21 @@ _INITIAL_CASE_IDS = frozenset(
 # ---------------------------------------------------------------------------
 
 _TOP_LEVEL_REQUIRED = frozenset({"id", "description", "turns", "expected"})
-_TOP_LEVEL_ALLOWED = _TOP_LEVEL_REQUIRED | {"user_messages"}
+_TOP_LEVEL_ALLOWED = _TOP_LEVEL_REQUIRED | {"user_messages", "document_chunks"}
 _EXPECTED_REQUIRED = frozenset({"disposition"})
 _EXPECTED_ALLOWED = _EXPECTED_REQUIRED | {
     "user_text_contains",
     "user_text_excludes",
+    "channel_text_contains",
+    "channel_text_excludes",
     "is_fallback",
     "completeness",
 }
 _TURN_ALLOWED = frozenset({"content", "tool_calls"})
 _TOOL_CALL_KEYS = frozenset({"name", "arguments"})
+# A scripted document chunk (the ``document_chunks`` top-level key) — exactly
+# these keys, mirroring what the runtime reads off a retrieval result.
+_CHUNK_KEYS = frozenset({"chunk_id", "source", "page", "content"})
 _DISPOSITIONS = frozenset(
     {
         "clean",
@@ -124,6 +130,23 @@ def _validate_fixture(data: Any, name: str) -> dict[str, Any]:
         or not all(isinstance(m, str) and m for m in user_messages)
     ):
         _fail(name, "'user_messages' must be a non-empty list of non-empty strings")
+
+    document_chunks = data.get("document_chunks")
+    if document_chunks is not None:
+        if not isinstance(document_chunks, list) or not document_chunks:
+            _fail(name, "'document_chunks' must be a non-empty list or absent")
+        for i, chunk in enumerate(document_chunks):
+            if not isinstance(chunk, dict) or set(chunk) != _CHUNK_KEYS:
+                _fail(
+                    name,
+                    f"document_chunks[{i}] must be an object with exactly "
+                    f"the keys {sorted(_CHUNK_KEYS)}",
+                )
+            for key in ("chunk_id", "source", "content"):
+                if not isinstance(chunk[key], str) or not chunk[key]:
+                    _fail(name, f"document_chunks[{i}].{key} must be a non-empty string")
+            if not isinstance(chunk["page"], int) or isinstance(chunk["page"], bool):
+                _fail(name, f"document_chunks[{i}].page must be an integer")
 
     turns = data["turns"]
     if not isinstance(turns, list) or not turns:
@@ -179,7 +202,12 @@ def _validate_fixture(data: Any, name: str) -> dict[str, Any]:
             name,
             f"unknown disposition {expected['disposition']!r}; allowed: {sorted(_DISPOSITIONS)}",
         )
-    for key in ("user_text_contains", "user_text_excludes"):
+    for key in (
+        "user_text_contains",
+        "user_text_excludes",
+        "channel_text_contains",
+        "channel_text_excludes",
+    ):
         value = expected.get(key)
         if value is not None and (
             not isinstance(value, list) or not all(isinstance(s, str) and s for s in value)
@@ -272,6 +300,57 @@ class _WorkOrderReadConnector:
             asset_id="P-201",
             description="Bearing replacement on P-201",
         )
+
+
+class _SpyDocumentConnector:
+    """SEARCH_DOCUMENTS connector replaying a fixture's ``document_chunks``.
+
+    Wired **opt-in** — only when a fixture carries the ``document_chunks``
+    top-level key. Attaching it makes the runtime (a) pre-fetch document
+    context during ``_gather_context`` (when the user message resolves an
+    asset) and (b) offer the ``search_documents`` tool on the loop surface.
+
+    Each ``search()`` call — pre-fetch or tool dispatch alike — serves the
+    NEXT window of up to 5 chunks, mirroring the runtime's own ``[:5]``
+    display/registration window (``format_document_results`` and
+    ``_register_document_results``). A fixture with more than 5 chunks can
+    therefore script a ``search_documents`` tool call that surfaces NEW
+    chunks whose ``citation_index`` continues past the 5 pre-fetch slots
+    (6, 7, 8, ...) — the construction the citation-numbering family pins.
+    Once exhausted, further calls return an empty list.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.SEARCH_DOCUMENTS})
+
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self._chunks = [
+            SimpleNamespace(
+                chunk_id=c["chunk_id"],
+                source=c["source"],
+                page=c["page"],
+                content=c["content"],
+            )
+            for c in chunks
+        ]
+        self._served = 0
+        self.searches = 0
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def search(
+        self, query: str, *, asset_id: str = "", filters: dict[str, Any] | None = None
+    ) -> list[Any]:
+        self.searches += 1
+        window = self._chunks[self._served : self._served + 5]
+        self._served += len(window)
+        return window
 
 
 class _SpyWriteConnector:
@@ -402,6 +481,18 @@ def _assert_disposition(response: Any, expected: dict[str, Any], spy: _SpyWriteC
     for needle in expected.get("user_text_excludes", []):
         assert needle not in response.text, f"expected {needle!r} NOT in user text"
 
+    # Channel-rendered assertions: run the final AgentResponse through the
+    # real channel formatting path (_format_response_for_channel), the only
+    # place the "Sources" footer — Citation.inline_marker() per resolved
+    # citation — becomes observable text. This is how the citation-numbering
+    # fixtures pin WHICH citations resolved without log capture.
+    if "channel_text_contains" in expected or "channel_text_excludes" in expected:
+        channel_text = _format_response_for_channel(response)
+        for needle in expected.get("channel_text_contains", []):
+            assert needle in channel_text, f"expected {needle!r} in channel text"
+        for needle in expected.get("channel_text_excludes", []):
+            assert needle not in channel_text, f"expected {needle!r} NOT in channel text"
+
 
 # ---------------------------------------------------------------------------
 # The corpus test — one parametrized replay per fixture file.
@@ -427,10 +518,17 @@ async def test_malformed_output_case(fixture_path: Path) -> None:
 
     llm = _ScriptedLLM(case["turns"])
     spy = _SpyWriteConnector()
+    connectors: list[Any] = [_ReadAssetsConnector(), _WorkOrderReadConnector(), spy]
+    # Opt-in document retrieval: only fixtures carrying ``document_chunks``
+    # get a SEARCH_DOCUMENTS connector (pre-fetch + the search_documents
+    # tool). Absent the key, nothing changes for existing fixtures.
+    document_chunks = case.get("document_chunks")
+    if document_chunks:
+        connectors.append(_SpyDocumentConnector(document_chunks))
     agent = Agent(
         plant=_plant(),
         llm=llm,
-        connectors=[_ReadAssetsConnector(), _WorkOrderReadConnector(), spy],
+        connectors=connectors,
     )
 
     response: Any = None
@@ -514,4 +612,48 @@ class TestSchemaGuard:
     def test_id_filename_mismatch_fails_loudly(self, tmp_path: Path) -> None:
         path = self._write(tmp_path, _minimal_fixture(), stem="another-name")
         with pytest.raises(CorpusFixtureError, match="filename stem"):
+            _load_fixture(path)
+
+    def test_valid_document_chunks_load(self, tmp_path: Path) -> None:
+        good = _minimal_fixture(
+            document_chunks=[
+                {"chunk_id": "chunk-001", "source": "manual.md", "page": 3, "content": "Text."}
+            ]
+        )
+        path = self._write(tmp_path, good)
+        case = _load_fixture(path)
+        assert case["document_chunks"][0]["chunk_id"] == "chunk-001"
+
+    def test_unknown_document_chunk_key_fails_loudly(self, tmp_path: Path) -> None:
+        bad = _minimal_fixture(
+            document_chunks=[
+                {
+                    "chunk_id": "chunk-001",
+                    "source": "manual.md",
+                    "page": 3,
+                    "content": "Text.",
+                    "score": 0.9,
+                }
+            ]
+        )
+        path = self._write(tmp_path, bad)
+        with pytest.raises(CorpusFixtureError, match="document_chunks"):
+            _load_fixture(path)
+
+    def test_non_integer_chunk_page_fails_loudly(self, tmp_path: Path) -> None:
+        bad = _minimal_fixture(
+            document_chunks=[
+                {"chunk_id": "chunk-001", "source": "manual.md", "page": "3", "content": "Text."}
+            ]
+        )
+        path = self._write(tmp_path, bad)
+        with pytest.raises(CorpusFixtureError, match="page must be an integer"):
+            _load_fixture(path)
+
+    def test_non_list_channel_text_contains_fails_loudly(self, tmp_path: Path) -> None:
+        bad = _minimal_fixture(
+            expected={"disposition": "clean", "channel_text_contains": "Sources:"}
+        )
+        path = self._write(tmp_path, bad)
+        with pytest.raises(CorpusFixtureError, match="channel_text_contains"):
             _load_fixture(path)
