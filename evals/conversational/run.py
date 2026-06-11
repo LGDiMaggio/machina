@@ -86,8 +86,9 @@ _TOOL_JSON_RE = re.compile(
 def find_malformed(text: str) -> str | None:
     """Return a short diagnosis when the text looks malformed, else ``None``.
 
-    Checks for raw ``<think>``/``<citations>`` tags and tool-call-shaped
-    JSON (inline or as the whole response).
+    Checks for raw ``<think>``/``<citations>`` tags, tool-call-shaped JSON
+    (inline or as the whole response), and a degenerate empty-JSON answer
+    (the whole response parses to ``{}`` or ``[]``).
 
     Args:
         text: The agent's rendered answer text.
@@ -102,11 +103,18 @@ def find_malformed(text: str) -> str | None:
     if _TOOL_JSON_RE.search(text):
         return "tool-call-shaped JSON in output"
     stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
+    if stripped.startswith(("{", "[")):
         try:
             payload = json.loads(stripped)
         except ValueError:
             payload = None
+        # Degenerate empty-JSON answer ("{}" / "[]"): zero-information output
+        # the runtime substitutes with the empty-response fallback
+        # (2026-06-10 post-fix deepseek-r1:8b eval — 7 turns answered
+        # literally "{}" after a leaked-read recovery). Observing it here
+        # attributes the mode to the runtime layer instead of golden.
+        if isinstance(payload, dict | list) and not payload:
+            return "degenerate empty-JSON answer"
         has_args = isinstance(payload, dict) and any(
             k in payload for k in ("arguments", "parameters", "args", "tool_input")
         )
@@ -282,7 +290,7 @@ def evaluate_assertions(assertions: TurnAssertions, signals: TurnSignals) -> lis
         elif name == "expect_no_malformed":
             diagnosis = find_malformed(signals.text)
             passed = diagnosis is None
-            expected = "no malformed output (tool JSON / <think> / <citations>)"
+            expected = "no malformed output (tool JSON / <think> / <citations> / empty JSON)"
             actual = (diagnosis or "clean") + fallback_note
         elif name == "expect_not_fallback":
             # True -> the turn must be a real answer (is_fallback False);
