@@ -21,9 +21,10 @@ if TYPE_CHECKING:
 
 import structlog
 
-from machina.agent.citations import parse_response
+from machina.agent.citations import parse_response, renormalize_markers, strip_markers
 from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
 from machina.agent.prompts import (
+    DOC_DISPLAY_WINDOW,
     build_context_message,
     build_system_prompt,
     safe_source,
@@ -41,6 +42,7 @@ from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
+    from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +66,41 @@ _LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"'](?:name|function)[\"']\s*:\s*[\"']")
 _LEAK_FRAGMENT_MARKER_RE = re.compile(
     r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
 )
+
+
+# Trivial English stopwords dropped when tokenizing LLM free-text symptoms at
+# the ``diagnose_failure`` tool boundary. Deliberately tiny: only glue words
+# that carry no diagnostic signal. Modifiers like "high"/"low" are kept — they
+# simply never overlap an indicator token, so they cannot cause false hits.
+_SYMPTOM_STOPWORDS: frozenset[str] = frozenset(
+    {"a", "an", "and", "are", "at", "for", "in", "is", "of", "on", "or", "the", "to", "with"}
+)
+
+_SYMPTOM_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _symptom_tokens(text: str) -> set[str]:
+    """Normalize free text into matchable tokens for ``diagnose_failure``.
+
+    Lowercases, splits on non-alphanumerics, drops stopwords and
+    single-character tokens (unit suffixes such as the ``s`` in ``mm_s``
+    or the ``c`` in ``temperature_c`` would otherwise create spurious
+    cross-mode matches).
+
+    This tokenization lives at the LLM tool boundary ONLY: it lets
+    "high vibration" match the canonical indicator
+    ``vibration_velocity_mm_s`` via the shared token ``vibration``.
+    Because indicators are tokenized with the same function, passing an
+    exact canonical indicator name as a symptom still matches — the
+    fuzzy matching is a strict superset of exact matching. The
+    alarm/workflow path (:class:`FailureAnalyzer.diagnose`) keeps its
+    exact-set-intersection semantics untouched.
+    """
+    return {
+        tok
+        for tok in _SYMPTOM_TOKEN_SPLIT_RE.split(text.lower())
+        if len(tok) > 1 and tok not in _SYMPTOM_STOPWORDS
+    }
 
 
 def _strip_code_fence(text: str) -> str:
@@ -301,9 +338,12 @@ def _is_echo(rendered: str, previous: str) -> bool:
 
     Only substantial answers (``len(rendered) >= _MIN_ECHO_LENGTH``) are
     considered — short replies legitimately recur across turns. Comparison is
-    whitespace/case-insensitive and ignores any trailing grounding note on the
-    stored ``previous`` text. Returns ``True`` when normalised character
-    similarity meets :data:`_ECHO_SIMILARITY_THRESHOLD`.
+    whitespace/case-insensitive, ignores any trailing grounding note on the
+    stored ``previous`` text, and runs over the MARKER-STRIPPED representation
+    of both sides: stored history is marker-stripped (U3), so two near-identical
+    answers differing only in inline ``[n]`` markers must still compare equal.
+    Returns ``True`` when normalised character similarity meets
+    :data:`_ECHO_SIMILARITY_THRESHOLD`.
 
     Args:
         rendered: This turn's freshly rendered answer.
@@ -317,24 +357,37 @@ def _is_echo(rendered: str, previous: str) -> bool:
         return False
     import difflib
 
-    current = _normalized_for_echo(rendered)
-    prior = _normalized_for_echo(_strip_history_note(previous))
+    current = _normalized_for_echo(strip_markers(rendered))
+    prior = _normalized_for_echo(strip_markers(_strip_history_note(previous)))
     if not current or not prior:
         return False
     return difflib.SequenceMatcher(None, current, prior).ratio() >= _ECHO_SIMILARITY_THRESHOLD
 
 
+def _footer_source(citation: Citation) -> str:
+    """``source:page`` body for one Sources-footer entry."""
+    if citation.page > 0 and citation.source:
+        return f"{citation.source}:{citation.page}"
+    return citation.source or citation.chunk_id
+
+
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
 
-    Inline ``[source:page]`` markers are already in ``response.text``.
-    When citations are present, a compact ``Sources`` footer is appended
-    so the operator can trace the answer back to its origin in chat
-    surfaces that don't expose the structured field.
+    ``response.text`` carries renormalized inline ``[n]`` markers (1..N by
+    first appearance — see :func:`machina.agent.citations.renormalize_markers`).
+    When citations are present, a compact ``Sources`` footer is appended whose
+    entries are numbered by 1-based position in ``response.citations`` — the
+    *citations list order == displayed number order* invariant — so every
+    inline ``[n]`` lines up with footer entry ``[n] source:page`` and the
+    operator can trace the answer back to its origin in chat surfaces that
+    don't expose the structured field.
     """
     if not response.citations:
         return response.text
-    sources = "\n".join(f"  • {c.inline_marker()}" for c in response.citations)
+    sources = "\n".join(
+        f"  • [{i}] {_footer_source(c)}" for i, c in enumerate(response.citations, 1)
+    )
     return f"{response.text}\n\n— Sources:\n{sources}"
 
 
@@ -504,8 +557,8 @@ class Agent:
         # Element ``i`` is the chunk the model saw as ``[i + 1]``; an empty
         # string marks a displayed-but-unregistered slot so the visible index
         # stays aligned with what the model saw. Built from the SAME
-        # ``enumerate(results[:5], 1)`` the prompt rendering uses — never from
-        # the filtered registry, which would drift off-by-k.
+        # ``enumerate(results[:DOC_DISPLAY_WINDOW], 1)`` the prompt rendering
+        # uses — never from the filtered registry, which would drift off-by-k.
         self._turn_ordered: dict[str, list[str]] = {}
         # Per-turn, chat-scoped completeness marker. The LLM loop sets
         # ``"partial"`` when it force-finalizes a turn (no-progress / suppression
@@ -736,11 +789,9 @@ class Agent:
         from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
         from machina.domain.services.work_order_factory import WorkOrderFactory
 
-        # Collect failure modes from connectors that provide them
-        all_failure_modes = []
-        for _name, conn in self._registry.all().items():
-            if hasattr(conn, "_failure_modes"):
-                all_failure_modes.extend(conn._failure_modes)
+        # Collect failure modes from connectors that provide them (shared
+        # with the diagnose_failure tool so the two sites cannot drift).
+        all_failure_modes = self._collect_failure_modes()
 
         # Collect maintenance plans from connectors that provide them
         all_plans = []
@@ -773,6 +824,25 @@ class Agent:
                 failure_modes=len(all_failure_modes),
             )
 
+    def _collect_failure_modes(self) -> list[FailureMode]:
+        """Harvest failure modes from every registered connector, deduped by code.
+
+        Single source for both the workflow path
+        (:meth:`_build_domain_services`) and the ``diagnose_failure`` tool —
+        factored out so the two sites cannot drift. Derives from each
+        connector's ``_failure_modes`` at call time, so it works on agents
+        that were never :meth:`start`\\ ed and never serves a stale snapshot.
+        Duplicate codes across connectors keep the first occurrence
+        (registration order).
+        """
+        by_code: dict[str, FailureMode] = {}
+        for _name, conn in self._registry.all().items():
+            if hasattr(conn, "_failure_modes"):
+                for fm in conn._failure_modes:
+                    if fm.code not in by_code:
+                        by_code[fm.code] = fm
+        return list(by_code.values())
+
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""
         channel_ids = {id(ch) for ch in self._channels}
@@ -799,10 +869,11 @@ class Agent:
         """Process a user message and return the agent's response text.
 
         This is the main entry point for programmatic usage. The returned
-        string is the rendered answer with inline ``[source:page]``
-        markers preserved but the trailing ``<citations>`` block stripped.
-        Use :meth:`handle_message_full` to also access structured
-        :class:`Citation` objects.
+        string is the rendered answer with inline ``[n]`` citation markers
+        renormalized to ``1..N`` by first appearance and the trailing
+        ``<citations>`` block stripped. Use :meth:`handle_message_full` to
+        also access structured :class:`Citation` objects —
+        ``citations[n-1]`` aligns with the inline ``[n]`` marker.
 
         Args:
             text: The user's message.
@@ -1136,12 +1207,12 @@ class Agent:
           an empty string so later indices stay aligned with the prompt and
           do not drift off-by-k.
 
-        Truncation to ``[:5]`` mirrors :func:`format_document_results`, which
-        only renders the first five results.
+        Truncation to ``[:DOC_DISPLAY_WINDOW]`` mirrors
+        :func:`format_document_results`, which only renders that window.
         """
         registry = self._turn_chunks.setdefault(chat_id, {})
         ordered = self._turn_ordered.setdefault(chat_id, [])
-        for r in results[:5]:
+        for r in results[:DOC_DISPLAY_WINDOW]:
             chunk_id = r.get("chunk_id") or ""
             ordered.append(chunk_id)
             if not chunk_id:
@@ -1183,11 +1254,22 @@ class Agent:
            semantics: meaningful text surviving the scrub proceeds through the
            rest of the chain; a think-only response strips to empty and the
            empty-response fallback fires naturally.
-        3. Append the user message and the rendered assistant reply to history.
-        4. In a ``finally``, always drop the per-turn chunk registry and ordered
+        3. Renormalize inline citation markers (U3) — runs AFTER the full
+           validator chain and only when the surviving text is the parsed
+           prose with at least one resolved citation: raw per-turn indices
+           (``[6]``, ``[8]``) are rewritten to ``1..N`` by first appearance,
+           unresolvable markers are stripped fail-closed, and ``citations``
+           is reordered to match the displayed numbering. Every fallback
+           branch zeroes ``citations``, so the pass no-ops on degraded paths.
+        4. Append the user message and the rendered assistant reply to
+           history. The stored assistant text is MARKER-STRIPPED on both
+           branches (the echo-path override included) — a kept ``[1]`` would
+           always be in-range against the next turn's fresh registry and
+           silently resolve to a different chunk if echoed.
+        5. In a ``finally``, always drop the per-turn chunk registry and ordered
            index map for ``chat_id`` — even on error — so a long-lived agent
            does not accumulate orphan slots from failed turns.
-        5. Log ``response_generated`` and return the :class:`AgentResponse`.
+        6. Log ``response_generated`` and return the :class:`AgentResponse`.
 
         Args:
             chat_id: Conversation identifier.
@@ -1338,6 +1420,19 @@ class Agent:
                 )
                 citations = []
                 is_fallback = True
+            # Egress renormalization (U3): the surviving text is the parsed
+            # prose and at least one citation resolved — rewrite raw per-turn
+            # indices ([6], [8], ...) to a clean 1..N by first appearance,
+            # strip unresolvable markers fail-closed, and reorder ``citations``
+            # to match the displayed numbering (the *list order == displayed
+            # number order* invariant the channel footer enumerates). Every
+            # fallback branch above zeroed ``citations``, so this is a no-op
+            # on all degraded paths; with zero parsed citations the text stays
+            # byte-identical (no renumbering, no stripping).
+            if not is_fallback and citations:
+                rendered, citations = renormalize_markers(
+                    rendered, citations, self._turn_ordered.get(chat_id, [])
+                )
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -1346,6 +1441,14 @@ class Agent:
                 if history_override is not None
                 else _history_text(rendered, citations)
             )
+            # History fail-closed (U3): strip inline [n] markers from the
+            # stored text on BOTH branches — _history_text's result AND the
+            # echo-path override (which bypasses _history_text). A renormalized
+            # [1] kept in history would always be in-range against the NEXT
+            # turn's fresh registry, so an echoed marker would silently resolve
+            # to a different chunk. The source note _history_text appends never
+            # matches the marker pattern and survives intact.
+            stored = strip_markers(stored)
             self._add_to_history(chat_id, "assistant", stored)
             # A real answer the loop was forced to finalize early may be missing
             # data. Hedge the USER-facing text only — ``stored`` above already
@@ -1746,6 +1849,17 @@ class Agent:
                             # served from here instead of re-querying.
                             executed_reads[call_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
+                    # Full result, JSON-encoded, for consumers that need more
+                    # than the truncated summary (e.g. the conversational eval
+                    # asserts on tool RESULTS, not just invocation — the one
+                    # signal context echo cannot fake). Recording only; no
+                    # behavioural change. Capped at 64 KiB: a truncated value
+                    # fails json.loads downstream, so the eval falls back to
+                    # output_summary by design rather than parsing garbage.
+                    raw = json.dumps(tool_result, default=str)
+                    tool_span.metadata["result_json"] = (
+                        raw if len(raw) <= 65_536 else raw[:65_536] + "...[truncated]"
+                    )
 
                 messages.append(
                     {
@@ -2262,8 +2376,9 @@ class Agent:
                 # same index contract the pre-fetch context uses. The index
                 # is offset by any chunks already displayed this turn (e.g.
                 # from pre-fetch context) so it matches the ordered map
-                # _register_document_results builds. Only the first five are
-                # indexed, mirroring format_document_results' ``[:5]``.
+                # _register_document_results builds. Only the first
+                # DOC_DISPLAY_WINDOW results are indexed, mirroring
+                # format_document_results' display window.
                 offset = len(self._turn_ordered.get(chat_id, []))
                 serialized = [
                     {
@@ -2275,7 +2390,7 @@ class Agent:
                         "section_title": getattr(r, "section_title", ""),
                         "is_table": getattr(r, "is_table", False),
                     }
-                    for i, r in enumerate(results[:5], 1)
+                    for i, r in enumerate(results[:DOC_DISPLAY_WINDOW], 1)
                 ]
                 # Register tool-retrieved chunks against the in-flight chat
                 # only, so concurrent chats do not see each other's chunks
@@ -2296,10 +2411,18 @@ class Agent:
             return {"error": "No spare parts connector available"}
 
         if name == "diagnose_failure":
-            return self._tool_diagnose_failure(
-                args.get("asset_id", ""),
-                args.get("symptoms", []),
-            )
+            # Args can arrive from the leak-recovery path (model text, no
+            # provider schema enforcement), so coerce before dispatch — a
+            # wrong-typed arg must degrade to a tool-level error the model
+            # can react to, not raise and kill the whole turn.
+            asset_id = args.get("asset_id", "")
+            if not isinstance(asset_id, str):
+                return {"error": "asset_id must be a string"}
+            symptoms = args.get("symptoms", [])
+            if not isinstance(symptoms, list):
+                symptoms = []
+            symptoms = [s for s in symptoms if isinstance(s, str)]
+            return self._tool_diagnose_failure(asset_id, symptoms)
 
         if name == "get_maintenance_schedule":
             return {"info": "Maintenance schedule lookup not yet connected to a data source."}
@@ -2625,53 +2748,142 @@ class Agent:
         asset_id: str,
         symptoms: list[str],
     ) -> dict[str, Any]:
-        """Diagnose failure using the domain service."""
-        from machina.domain.alarm import Alarm, Severity
+        """Diagnose probable failure modes against the live failure-mode catalog.
 
-        # Convert symptom strings to pseudo-alarms for the analyzer
-        alarms = [
-            Alarm(
-                id=f"SYMPTOM-{i}",
-                asset_id=asset_id,
-                severity=Severity.WARNING,
-                parameter=symptom,
-                value=0.0,
-                threshold=0.0,
-                unit="",
-            )
-            for i, symptom in enumerate(symptoms)
-        ]
+        Harvests failure modes from the registered connectors at call time
+        (via :meth:`_collect_failure_modes`, the same source
+        :meth:`_build_domain_services` feeds the workflow analyzer), filters
+        the catalog to the resolved asset's declared ``failure_modes`` when
+        present, and matches the LLM's free-text symptoms by token overlap
+        against each mode's ``typical_indicators``
+        (see :func:`_symptom_tokens`). The alarm/workflow path through
+        :class:`~machina.domain.services.failure_analyzer.FailureAnalyzer`
+        keeps its exact-match semantics — fuzzy matching lives at this tool
+        boundary only.
 
-        from machina.domain.services.failure_analyzer import FailureAnalyzer
+        An empty ``probable_failures`` list ALWAYS carries an explanatory
+        ``note`` so the model can distinguish "unknown asset" from "no
+        catalog configured" from "catalog present but nothing matched".
+        """
+        from machina.exceptions import AssetNotFoundError
 
-        # Collect failure modes from asset
+        result: dict[str, Any] = {
+            "asset_id": asset_id,
+            "symptoms": symptoms,
+            "probable_failures": [],
+        }
+
+        # Resolve the asset first: an unknown asset gets a distinct, honest
+        # note instead of a full-catalog guess for equipment we know nothing
+        # about. Catch ONLY the lookup failure — a connector/catalog problem
+        # later must not masquerade as "asset not found".
         try:
             asset = self.plant.get_asset(asset_id)
-            # In a real implementation, we'd load failure modes from a registry
-            analyzer = FailureAnalyzer()
-            results = analyzer.diagnose(alarms)
-            return {
-                "asset_id": asset_id,
-                "asset_name": asset.name,
-                "symptoms": symptoms,
-                "probable_failures": [
-                    {"code": fm.code, "name": fm.name, "category": fm.category} for fm in results
-                ],
-            }
-        except Exception:
+        except AssetNotFoundError:
             logger.warning(
-                "diagnose_failure_failed",
+                "diagnose_failure_asset_not_found",
                 agent=self.name,
                 asset_id=asset_id,
                 operation="diagnose_failure",
-                symptoms=symptoms,
             )
-            return {
-                "asset_id": asset_id,
-                "symptoms": symptoms,
-                "probable_failures": [],
-                "note": "No failure mode data available for this asset.",
-            }
+            result["note"] = safe_text(f"Asset '{asset_id}' not found in the asset registry.")
+            return result
+        result["asset_name"] = asset.name
+
+        # Call-time harvest: derive the catalog from whatever connectors are
+        # registered NOW — works on un-started agents, never goes stale.
+        catalog = self._collect_failure_modes()
+        if not catalog:
+            logger.warning(
+                "diagnose_failure_no_catalog",
+                agent=self.name,
+                asset_id=asset_id,
+                operation="diagnose_failure",
+            )
+            result["note"] = "No failure-mode data configured on any connector."
+            return result
+
+        notes: list[str] = []
+
+        # Per-asset applicability filter: when the asset declares its own
+        # failure modes, match ONLY against those — a pump must never get the
+        # conveyor's belt-wear diagnosis just because both list a vibration
+        # indicator. Assets that declare nothing fall back to the full
+        # catalog, and the result says so.
+        declared = set(asset.failure_modes)
+        if declared:
+            candidates = [fm for fm in catalog if fm.code in declared]
+            if not candidates:
+                # The asset names failure modes, but NONE of them exist in the
+                # harvested catalog — an honest configuration-mismatch note,
+                # not a garbled "nothing matched" with an empty indicator list.
+                logger.warning(
+                    "diagnose_failure_declared_modes_not_in_catalog",
+                    agent=self.name,
+                    asset_id=asset_id,
+                    operation="diagnose_failure",
+                    declared=sorted(declared),
+                )
+                result["note"] = safe_text(
+                    f"Asset declares {len(declared)} failure mode(s) "
+                    f"({', '.join(sorted(declared))}) but none are present in "
+                    "the configured catalog (possible configuration mismatch)."
+                )
+                return result
+        else:
+            candidates = catalog
+            notes.append(
+                "Asset declares no failure modes; diagnosis ran against the "
+                "full failure-mode catalog."
+            )
+
+        symptom_tokens: set[str] = set()
+        for symptom in symptoms:
+            symptom_tokens |= _symptom_tokens(symptom)
+
+        ranked: list[dict[str, Any]] = []
+        for fm in candidates:
+            if not fm.typical_indicators:
+                continue
+            matched = [
+                ind for ind in fm.typical_indicators if _symptom_tokens(ind) & symptom_tokens
+            ]
+            if not matched:
+                continue
+            ranked.append(
+                {
+                    "code": fm.code,
+                    "name": fm.name,
+                    "category": fm.category,
+                    # Numeric indicator-match ratio 0-1: the fraction of this
+                    # mode's typical_indicators the symptoms hit. Distinct from
+                    # FailureAnalyzer's CATEGORICAL confidence on the
+                    # alarm/workflow path — do not conflate the two.
+                    "confidence": round(len(matched) / len(fm.typical_indicators), 2),
+                    "matching_indicators": matched,
+                    "recommended_actions": fm.recommended_actions,
+                }
+            )
+        # Rank by evidence first (matched-indicator count DESC), ratio second:
+        # a mode matching 1 of 2 indicators must not outrank one matching 3 of 6.
+        ranked.sort(
+            key=lambda entry: (len(entry["matching_indicators"]), float(entry["confidence"])),
+            reverse=True,
+        )
+        result["probable_failures"] = ranked[:5]
+
+        if not ranked:
+            # Tell the model WHAT it could have matched so it can re-ask the
+            # user in the catalog's vocabulary instead of guessing.
+            known = sorted({ind for fm in candidates for ind in fm.typical_indicators})
+            notes.append(
+                "No catalog entry matched these symptoms. Known indicators: "
+                + safe_text(", ".join(known[:20]))
+                + "."
+            )
+        if notes:
+            result["note"] = " ".join(notes)
+        return result
 
     async def _tool_execute_workflow(
         self,

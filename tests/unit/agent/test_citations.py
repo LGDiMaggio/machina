@@ -10,7 +10,7 @@ so an absolute path never leaks back through a citation.
 
 from __future__ import annotations
 
-from machina.agent.citations import parse_response
+from machina.agent.citations import parse_response, renormalize_markers, strip_markers
 from machina.domain.citation import AgentResponse, Citation
 
 # ---------------------------------------------------------------------------
@@ -326,3 +326,178 @@ class TestTolerance:
         _, cites = parse_response(text, _registry())
         assert len(cites) == 1
         assert cites[0].chunk_id == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# Egress renormalization (U3) — pure helper
+# ---------------------------------------------------------------------------
+
+
+def _cite(chunk_id: str, source: str = "", page: int = 0) -> Citation:
+    return Citation(chunk_id=chunk_id, source=source or f"{chunk_id}.md", page=page)
+
+
+class TestRenormalizeMarkers:
+    """renormalize_markers: 1..N by first appearance, fail-closed stripping."""
+
+    def test_raw_indices_renumbered_by_first_appearance(self) -> None:
+        ordered = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]
+        cites = [_cite("c6", "bearing.md", 12), _cite("c8", "lube.md", 7)]
+        text = "Replace every 8000 h [6]. Grease every 500 h [8]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Replace every 8000 h [1]. Grease every 500 h [2]."
+        assert [c.chunk_id for c in reordered] == ["c6", "c8"]
+
+    def test_first_appearance_order_wins_over_parsed_order(self) -> None:
+        # Block listed c2 before c1, but the prose mentions [1] first — the
+        # displayed numbering follows the prose, and the list is reordered.
+        ordered = ["c1", "c2"]
+        cites = [_cite("c2"), _cite("c1")]
+        text = "Alpha [1], beta [2]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Alpha [1], beta [2]."
+        assert [c.chunk_id for c in reordered] == ["c1", "c2"]
+
+    def test_duplicate_marker_shares_one_number(self) -> None:
+        ordered = ["c1", "c2", "c3"]
+        cites = [_cite("c3")]
+        text = "Fact [3]. Repeated fact [3]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Fact [1]. Repeated fact [1]."
+        assert len(reordered) == 1
+
+    def test_two_raw_indices_to_same_chunk_share_one_number(self) -> None:
+        # Dedup collision: a re-retrieved chunk sits at two display positions;
+        # the map is marker -> chunk_id -> number, never positional.
+        ordered = ["c1", "cdup", "c3", "c4", "c5", "c6", "cdup"]
+        cites = [_cite("cdup", "vib.md", 5)]
+        text = "Threshold [2]. Investigate above it [7]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Threshold [1]. Investigate above it [1]."
+        assert len(reordered) == 1
+
+    def test_out_of_range_marker_stripped(self) -> None:
+        ordered = ["c1", "c2", "c3"]
+        cites = [_cite("c2")]
+        text = "Valid [2]. Dangling claim [9]."
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert out == "Valid [1]. Dangling claim."
+
+    def test_in_range_marker_without_block_entry_stripped(self) -> None:
+        # [2] maps to a registered chunk, but the model never cited it in the
+        # block — fail-closed: stripped exactly like out-of-range, never
+        # synthesized into a Citation.
+        ordered = ["c1", "c2"]
+        cites = [_cite("c1")]
+        text = "Cited [1]. Uncited [2]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Cited [1]. Uncited."
+        assert [c.chunk_id for c in reordered] == ["c1"]
+
+    def test_marker_on_empty_display_slot_stripped(self) -> None:
+        ordered = ["", "c2"]
+        cites = [_cite("c2")]
+        text = "Ghost [1] and real [2]."
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert out == "Ghost and real [1]."
+
+    def test_block_only_citations_appended_after_inline(self) -> None:
+        ordered = ["c1", "c2", "c3"]
+        cites = [_cite("c1"), _cite("c2"), _cite("c3")]
+        text = "Only one inline mention [3]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "Only one inline mention [1]."
+        # c3 took number 1 (inline); c1 and c2 follow in parsed order.
+        assert [c.chunk_id for c in reordered] == ["c3", "c1", "c2"]
+
+    def test_zero_citations_text_byte_identical(self) -> None:
+        text = "Bracketed [1] text [9] with no citations at all."
+        out, reordered = renormalize_markers(text, [], ["c1"])
+        assert out == text
+        assert reordered == []
+
+    def test_fenced_code_block_literal_untouched(self) -> None:
+        ordered = ["c1"]
+        cites = [_cite("c1")]
+        text = "Read the register [1].\n\n```\nvalue = registers[1]\n```\n"
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert "registers[1]" in out
+        assert out.startswith("Read the register [1].")
+
+    def test_marker_between_two_fenced_blocks_renormalized(self) -> None:
+        # The inter-fence region is PROSE: a real citation marker there must
+        # renormalize, while bracket literals inside BOTH fences stay
+        # byte-identical (the fence detector must not pair the first fence's
+        # close with the second fence's open and swallow the prose between).
+        ordered = ["c1", "c2", "c3"]
+        cites = [_cite("c3", "manual.md", 4)]
+        text = (
+            "```\nfirst = registers[1]\n```\n\n"
+            "The threshold is documented [3].\n\n"
+            "```\nsecond = registers[2]\n```\n"
+        )
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert "registers[1]" in out
+        assert "registers[2]" in out
+        assert "The threshold is documented [1]." in out
+        assert "[3]" not in out
+        assert [c.chunk_id for c in reordered] == ["c3"]
+
+    def test_inline_backtick_literal_untouched(self) -> None:
+        ordered = ["c1", "c2"]
+        cites = [_cite("c2")]
+        text = "Use `arr[1]` as shown [2]."
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert out == "Use `arr[1]` as shown [1]."
+
+    def test_markdown_link_untouched(self) -> None:
+        ordered = ["c1"]
+        cites = [_cite("c1")]
+        text = "See [1](https://example.com/spec) and the manual [1]."
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert "[1](https://example.com/spec)" in out
+        assert out.endswith("the manual [1].")
+
+    def test_high_indices_with_placeholder_slots(self) -> None:
+        # Absolute indices into a multi-call turn map, with empty-string
+        # displayed-but-unregistered slots in between.
+        ordered = ["", "", "", "", "", "", "c7", "", "", "", "", "c12"]
+        cites = [_cite("c7"), _cite("c12")]
+        text = "First fact [7]. Second fact [12]."
+        out, reordered = renormalize_markers(text, cites, ordered)
+        assert out == "First fact [1]. Second fact [2]."
+        assert [c.chunk_id for c in reordered] == ["c7", "c12"]
+
+    def test_four_digit_bracket_not_a_marker(self) -> None:
+        ordered = ["c1"]
+        cites = [_cite("c1")]
+        text = "Torque to [1000] Nm per spec [1]."
+        out, _ = renormalize_markers(text, cites, ordered)
+        assert "[1000]" in out
+
+
+class TestStripMarkers:
+    """strip_markers: history fail-closed marker removal."""
+
+    def test_strips_all_markers(self) -> None:
+        text = "Fact one [1]. Fact two [2], related [12]."
+        assert strip_markers(text) == "Fact one. Fact two, related."
+
+    def test_preserves_history_source_note(self) -> None:
+        text = "Answer [1].\n\n[Sources used in this answer: pump.md]"
+        assert strip_markers(text) == "Answer.\n\n[Sources used in this answer: pump.md]"
+
+    def test_preserves_code_spans_and_links(self) -> None:
+        text = "Use `arr[1]` [1] and see [2](https://x).\n```\nregs[3]\n```"
+        out = strip_markers(text)
+        assert "`arr[1]`" in out
+        assert "[2](https://x)" in out
+        assert "regs[3]" in out
+        assert " [1]" not in out
+
+    def test_no_markers_returns_text_unchanged(self) -> None:
+        text = "No markers here, just [brackets] and [a1] codes."
+        assert strip_markers(text) == text
+
+    def test_adjacent_markers_both_stripped(self) -> None:
+        assert strip_markers("Claim [1][2].") == "Claim."

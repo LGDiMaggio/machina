@@ -1,10 +1,11 @@
-"""CI tests for the eval scenario schema/loader and the pure sniff helper.
+"""CI tests for the eval scenario schema/loader and the runner's pure helpers.
 
-Only the schema/loader and the runner's pure ``find_malformed`` sniff are
-CI-tested — the runner itself needs real Ollama models and is exercised
-manually (see ``evals/README.md``). No litellm/Ollama/machina imports
-anywhere in this module (``evals.conversational.run`` imports machina only
-under ``TYPE_CHECKING``); the loader is dependency-light by design
+Only the schema/loader and the runner's pure helpers (``find_malformed``,
+``tool_result_emptiness``, ``evaluate_assertions``) are CI-tested — the
+runner itself needs real Ollama models and is exercised manually (see
+``evals/README.md``). No litellm/Ollama/machina imports anywhere in this
+module (``evals.conversational.run`` imports machina only under
+``TYPE_CHECKING``); the loader is dependency-light by design
 (stdlib + PyYAML, a core dependency).
 """
 
@@ -13,7 +14,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from evals.conversational.run import find_malformed
+from evals.conversational.run import (
+    TurnSignals,
+    evaluate_assertions,
+    find_malformed,
+    tool_result_emptiness,
+)
 from evals.conversational.schema import (
     ASSERTION_LAYERS,
     ASSERTION_ORDER,
@@ -21,6 +27,7 @@ from evals.conversational.schema import (
     LONG_SCENARIO_MIN_TURNS,
     Scenario,
     ScenarioSchemaError,
+    TurnAssertions,
     load_scenario,
     load_scenarios,
     parse_scenario,
@@ -67,6 +74,19 @@ class TestExampleScenario:
         assert scenarios, "scenarios/ must contain at least the example file"
         ids = [s.id for s in scenarios]
         assert len(ids) == len(set(ids)), "scenario ids must be unique"
+
+    def test_diagnosis_flow_scenario_carries_tool_result_assertion(self) -> None:
+        """The tightened diagnosis scenario asserts on the tool's RESULT.
+
+        Context echo (asset context lists the failure-mode codes) can fake
+        the golden assertion; only the tool-result assertion distinguishes a
+        working diagnose_failure from a stub.
+        """
+        scenario = load_scenario(SCENARIOS_DIR / "diagnosis-flow.yaml")
+        assertions = scenario.turns[0].assertions
+        assert assertions.expect_tool_invoked == "diagnose_failure"
+        assert assertions.expect_tool_result_nonempty == "diagnose_failure"
+        assert "BEAR-WEAR-01" in assertions.golden_contains
 
 
 class TestValidation:
@@ -128,6 +148,30 @@ class TestValidation:
         with pytest.raises(ScenarioSchemaError, match="golden_contains"):
             parse_scenario(data)
 
+    def test_expect_tool_result_nonempty_parses(self) -> None:
+        data = _valid_data(
+            turns=[
+                {"user": "hi", "assertions": {"expect_tool_result_nonempty": "diagnose_failure"}}
+            ]
+        )
+        assertions = parse_scenario(data).turns[0].assertions
+        assert assertions.expect_tool_result_nonempty == "diagnose_failure"
+        assert ("expect_tool_result_nonempty", "diagnose_failure") in (
+            assertions.active_assertions()
+        )
+        # Inactive by default: a turn that never mentions it asserts nothing.
+        default = parse_scenario(_valid_data()).turns[0].assertions
+        assert default.expect_tool_result_nonempty is None
+        assert all(n != "expect_tool_result_nonempty" for n, _ in default.active_assertions())
+
+    @pytest.mark.parametrize("bad", [True, 7, ["diagnose_failure"], "", "   "])
+    def test_expect_tool_result_nonempty_rejects_non_string_and_empty(self, bad: object) -> None:
+        data = _valid_data(
+            turns=[{"user": "hi", "assertions": {"expect_tool_result_nonempty": bad}}]
+        )
+        with pytest.raises(ScenarioSchemaError, match="expect_tool_result_nonempty"):
+            parse_scenario(data)
+
     def test_malformed_yaml_file_raises_schema_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
         bad.write_text("turns: [unclosed", encoding="utf-8")
@@ -170,6 +214,7 @@ class TestLayerMapping:
         # MUST be added here AND mapped to exactly one layer.
         expected = {
             "expect_tool_invoked": "runtime",
+            "expect_tool_result_nonempty": "runtime",
             "expect_no_malformed": "runtime",
             "expect_not_fallback": "runtime",
             "expect_retrieval_source": "retrieval",
@@ -202,6 +247,7 @@ class TestLayerMapping:
                             "expect_citation": True,
                             "expect_not_fallback": True,
                             "expect_tool_invoked": "list_assets",
+                            "expect_tool_result_nonempty": "list_assets",
                             "expect_retrieval_source": "manual",
                         },
                     }
@@ -211,6 +257,7 @@ class TestLayerMapping:
         names = [n for n, _ in scenario.turns[0].assertions.active_assertions()]
         assert names == [
             "expect_tool_invoked",
+            "expect_tool_result_nonempty",
             "expect_no_malformed",
             "expect_not_fallback",
             "expect_retrieval_source",
@@ -293,3 +340,156 @@ class TestFindMalformed:
     def test_shape_b_payload_still_detected(self) -> None:
         text = '{"name": "search_assets", "arguments": {"query": "pump"}}'
         assert find_malformed(text) == "tool-call-shaped JSON in output"
+
+
+class TestToolResultEmptiness:
+    """The meaningful-emptiness heuristic behind ``expect_tool_result_nonempty``.
+
+    Pure helper (``json.loads`` + a key probe) — CI-testable without models.
+    """
+
+    def test_diagnose_failure_with_matches_is_nonempty(self) -> None:
+        raw = (
+            '{"asset_id": "P-201", "symptoms": ["high vibration"], '
+            '"probable_failures": [{"code": "BEAR-WEAR-01", "confidence": 0.67}]}'
+        )
+        assert tool_result_emptiness(raw) is None
+
+    def test_diagnose_failure_stub_shape_is_empty_despite_truthy_dict(self) -> None:
+        # The envelope (asset_id, symptoms echo, note) makes the dict truthy,
+        # but the single obvious list payload is empty — exactly the old-stub
+        # shape the assertion exists to catch.
+        raw = (
+            '{"asset_id": "P-201", "symptoms": ["high vibration"], '
+            '"probable_failures": [], "note": "No catalog entry matched."}'
+        )
+        assert tool_result_emptiness(raw) == "'probable_failures' list is empty"
+
+    @pytest.mark.parametrize("raw", ["{}", "[]", "null", '""', "", "   "])
+    def test_falsy_payloads_are_empty(self, raw: str) -> None:
+        assert tool_result_emptiness(raw) is not None
+
+    def test_generic_results_key_checked(self) -> None:
+        assert tool_result_emptiness('{"query": "pump", "results": []}') is not None
+        assert tool_result_emptiness('{"query": "pump", "results": [{"id": 1}]}') is None
+
+    def test_dict_without_list_payload_uses_truthiness(self) -> None:
+        assert tool_result_emptiness('{"status": "ok"}') is None
+
+    def test_two_list_payload_keys_one_nonempty_is_nonempty(self) -> None:
+        # Mixed shape (two candidate list keys, one carries data): the result
+        # is meaningfully non-empty.
+        raw = '{"results": [], "items": [{"id": 1}]}'
+        assert tool_result_emptiness(raw) is None
+
+    def test_multiple_list_payload_keys_all_empty_is_empty(self) -> None:
+        # More than one known list-payload key, ALL empty — must report empty,
+        # not silently fall back to dict truthiness.
+        raw = '{"results": [], "items": [], "note": "nothing"}'
+        diagnosis = tool_result_emptiness(raw)
+        assert diagnosis is not None
+        assert "results" in diagnosis and "items" in diagnosis
+
+    def test_error_key_reports_failed_call(self) -> None:
+        # A dict carrying 'error' is a FAILED call, however truthy the dict.
+        raw = '{"error": "No CMMS connector available"}'
+        diagnosis = tool_result_emptiness(raw)
+        assert diagnosis is not None
+        assert "failed" in diagnosis
+        assert "No CMMS connector available" in diagnosis
+
+    def test_replay_envelope_recurses_into_result(self) -> None:
+        # The runtime's duplicate-read replay envelope wraps the original
+        # payload under 'result' — emptiness is judged on the inner payload.
+        nonempty = (
+            '{"already_retrieved": true, "note": "duplicate read", '
+            '"result": {"probable_failures": [{"code": "BEAR-WEAR-01"}]}}'
+        )
+        assert tool_result_emptiness(nonempty) is None
+        empty = (
+            '{"already_retrieved": true, "note": "duplicate read", '
+            '"result": {"asset_id": "P-201", "probable_failures": []}}'
+        )
+        assert tool_result_emptiness(empty) == "'probable_failures' list is empty"
+
+    def test_already_executed_envelope_recurses_into_result(self) -> None:
+        # The duplicate-write envelope uses 'already_executed' instead.
+        raw = '{"already_executed": true, "note": "duplicate write", "result": {}}'
+        assert tool_result_emptiness(raw) is not None
+
+    def test_string_valued_probable_failures_counts_as_nonempty(self) -> None:
+        # Documentation case: a STRING under a known payload key does not
+        # participate in the list probe — dict truthiness decides (non-empty).
+        raw = '{"probable_failures": "see attached analysis", "asset_id": "P-201"}'
+        assert tool_result_emptiness(raw) is None
+
+    def test_unparseable_recording_falls_back_to_string_truthiness(self) -> None:
+        # Legacy truncated output_summary (repr-style, not JSON).
+        assert tool_result_emptiness("{'asset_id': 'P-201', 'probable_fail") is None
+
+    def test_nonempty_list_payload_root_is_nonempty(self) -> None:
+        assert tool_result_emptiness('[{"id": "P-201"}]') is None
+
+
+class TestExpectToolResultNonemptyEvaluation:
+    """Runtime-layer evaluation of ``expect_tool_result_nonempty``."""
+
+    @staticmethod
+    def _eval(signals: TurnSignals) -> tuple[bool, str, str]:
+        assertions = TurnAssertions(
+            expect_tool_result_nonempty="diagnose_failure", expect_no_malformed=False
+        )
+        results = evaluate_assertions(assertions, signals)
+        assert len(results) == 1
+        r = results[0]
+        assert r.name == "expect_tool_result_nonempty"
+        assert r.layer == "runtime"
+        return r.passed, r.expected, r.actual
+
+    def test_passes_on_nonempty_recorded_result(self) -> None:
+        signals = TurnSignals(
+            text="Probable failure mode: BEAR-WEAR-01.",
+            invoked_tools=("diagnose_failure",),
+            tool_results=(
+                ("diagnose_failure", '{"probable_failures": [{"code": "BEAR-WEAR-01"}]}'),
+            ),
+        )
+        passed, _, _ = self._eval(signals)
+        assert passed is True
+
+    def test_fails_when_tool_not_invoked_even_if_text_echoes_the_code(self) -> None:
+        # Context echo: the answer names BEAR-WEAR-01 (it is in the injected
+        # asset context) but the tool never ran — must FAIL.
+        signals = TurnSignals(
+            text="Probably BEAR-WEAR-01, based on the known failure modes.",
+            invoked_tools=("search_assets",),
+            tool_results=(("search_assets", '[{"id": "P-201"}]'),),
+        )
+        passed, _, actual = self._eval(signals)
+        assert passed is False
+        assert "diagnose_failure" in actual
+        assert "not invoked" in actual
+
+    def test_fails_on_empty_payload_and_evidence_names_tool_and_emptiness(self) -> None:
+        signals = TurnSignals(
+            text="Probably BEAR-WEAR-01.",
+            invoked_tools=("diagnose_failure",),
+            tool_results=(("diagnose_failure", '{"asset_id": "P-201", "probable_failures": []}'),),
+        )
+        passed, expected, actual = self._eval(signals)
+        assert passed is False
+        assert "diagnose_failure" in expected
+        assert "diagnose_failure" in actual
+        assert "'probable_failures' list is empty" in actual
+
+    def test_any_nonempty_invocation_passes_when_tool_ran_twice(self) -> None:
+        signals = TurnSignals(
+            text="BEAR-WEAR-01.",
+            invoked_tools=("diagnose_failure", "diagnose_failure"),
+            tool_results=(
+                ("diagnose_failure", '{"probable_failures": []}'),
+                ("diagnose_failure", '{"probable_failures": [{"code": "BEAR-WEAR-01"}]}'),
+            ),
+        )
+        passed, _, _ = self._eval(signals)
+        assert passed is True

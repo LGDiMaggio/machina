@@ -1,0 +1,34 @@
+{
+  "id": "citation-crossturn-echo-guard",
+  "description": "Cross-turn marker fail-closed invariant (citation-numbering family, landed with the fix per the R12 rule): a marker echoed into a LATER turn never silently resolves against that turn's fresh registry. Provenance: plan 2026-06-11-001 (history is stored marker-stripped precisely because a renormalized [1] would always be in-range next turn). Construction: 6 chunks; turn 1's pre-fetch serves the first window of 5 ([1] = bearing_guide.md), the model answers citing [1] with a proper block, and the renormalized answer is stored in history WITHOUT the marker. Turn 2's pre-fetch serves the remaining chunk (valve_specs.md, now visible as the fresh [1]); the scripted model nonetheless echoes the prior sentence including a literal '[1]' but emits NO citations block. Zero citations parse, so the egress pass leaves the text byte-identical (no renumbering, no stripping) and -- the invariant under test -- attaches NO citation: the echoed [1] must not be attributed to the stale bearing chunk nor to the fresh valve chunk. No Sources footer renders.",
+  "user_messages": [
+    "What is the bearing replacement interval for P-201?",
+    "And what about the relief valve on P-201?"
+  ],
+  "document_chunks": [
+    {"chunk_id": "chunk-bearing-001", "source": "bearing_guide.md", "page": 12, "content": "Replace the drive-end bearing every 8000 operating hours."},
+    {"chunk_id": "chunk-manual-002", "source": "pump_p201_manual.md", "page": 2, "content": "Operating envelope: 45 m3/h nominal flow at 2950 rpm."},
+    {"chunk_id": "chunk-manual-003", "source": "pump_p201_manual.md", "page": 3, "content": "Mechanical seal: cartridge type, plan 11 flush."},
+    {"chunk_id": "chunk-manual-004", "source": "pump_p201_manual.md", "page": 4, "content": "Coupling: spacer type, laser alignment required after seal work."},
+    {"chunk_id": "chunk-manual-005", "source": "pump_p201_manual.md", "page": 5, "content": "Baseplate and grouting inspection notes."},
+    {"chunk_id": "chunk-valve-006", "source": "valve_specs.md", "page": 9, "content": "Relief valve set pressure: 16 bar, test annually."}
+  ],
+  "turns": [
+    {
+      "content": "Replace the drive-end bearing every 8000 operating hours [1].\n\n<citations>\n[1]\n</citations>",
+      "tool_calls": null
+    },
+    {
+      "content": "Replace the drive-end bearing every 8000 operating hours [1].",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["[1]"],
+    "user_text_excludes": ["<citations>"],
+    "channel_text_excludes": ["Sources:", "bearing_guide.md", "valve_specs.md"]
+  }
+}

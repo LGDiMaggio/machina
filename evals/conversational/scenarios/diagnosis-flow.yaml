@@ -5,11 +5,15 @@ id: diagnosis-flow
 description: >
   Tripwires the tool-call-contract breaks documented for the 3B class
   (qwen2.5) during multi-step diagnosis: the symptom must route through the
-  diagnose_failure tool and the answer must stay clean prose — no leaked
-  tool-call JSON or raw tags on any exit path.
+  diagnose_failure tool, the tool must return a non-empty probable_failures
+  payload (catalog match — the asset context echoes "Known failure modes:
+  BEAR-WEAR-01, ..." so answer text alone cannot distinguish a working tool
+  from a stub), and the answer must stay clean prose — no leaked tool-call
+  JSON or raw tags on any exit path.
 turns:
   - user: "Pump P-201 is showing high vibration on the drive-end bearing. What is the probable failure mode?"
     assertions:
       expect_tool_invoked: "diagnose_failure"
+      expect_tool_result_nonempty: "diagnose_failure"
       expect_no_malformed: true
-      golden_contains: ["bearing"]
+      golden_contains: ["bearing", "BEAR-WEAR-01"]

@@ -1,0 +1,24 @@
+{
+  "id": "citation-block-only-no-inline",
+  "description": "FIXED (flipped with the egress-renormalization fix, per the R12 rule; originally pinned the unnumbered-footer presentation). Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads 2 chunks; the pre-fetch (P-201 exact-id resolution) registers them as [1]..[2]. The single scripted completion's prose contains NO bracketed index at all, but its block cites [2]. The citation resolves; with the fix, block-only citations (no inline marker in the prose) are appended AFTER any inline-numbered ones, in parsed order -- here it is the only citation, so it takes number 1 and the footer renders the single [1] source:page entry. The prose itself is untouched (no markers to renumber or strip), so it still carries no bracketed digits.",
+  "user_messages": ["How should I grease P-201?"],
+  "document_chunks": [
+    {"chunk_id": "chunk-motor-001", "source": "motor_maintenance.md", "page": 6, "content": "Motor maintenance: megger test windings annually."},
+    {"chunk_id": "chunk-grease-002", "source": "greasing_schedule.md", "page": 2, "content": "Grease the motor bearings every three months with lithium-based NLGI 2 grease."}
+  ],
+  "turns": [
+    {
+      "content": "Grease the motor bearings every three months using a lithium-based NLGI 2 grease, and wipe the fittings clean before applying the grease gun.\n\n<citations>\n[2]\n</citations>",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["Grease the motor bearings every three months"],
+    "user_text_excludes": ["[1]", "[2]", "<citations>"],
+    "channel_text_contains": ["Sources:", "[1] greasing_schedule.md:2"],
+    "channel_text_excludes": ["motor_maintenance.md"]
+  }
+}

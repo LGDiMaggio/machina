@@ -57,11 +57,11 @@ class TestDocumentStoreConnector:
     def _force_keyword_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Force the connector into keyword fallback for this test class.
 
-        Without this fixture the test environment has ``langchain_community``
+        Without this fixture the test environment has ``langchain_chroma``
         and ``chromadb`` installed, so RAG mode would activate. The keyword
         tests are documenting fallback behavior, so we make ``Chroma``
         unavailable on the connector module regardless of whether
-        ``langchain_community`` has already been imported by a previous
+        ``langchain_chroma`` has already been imported by a previous
         test (a plain ``sys.modules`` patch wouldn't catch that case).
         """
         import machina.connectors.docs.document_store as _ds_mod
@@ -72,6 +72,20 @@ class TestDocumentStoreConnector:
         monkeypatch.setattr(
             _ds_mod.DocumentStoreConnector, "_build_rag_index", _build_rag_index_raises
         )
+
+    @pytest.fixture(autouse=True)
+    def _fresh_legacy_probe(self) -> Any:
+        """Reset the lru_cached legacy-install probe around every test.
+
+        The probe is evaluated once per process by design; tests that
+        simulate different installed-package environments need a fresh
+        evaluation, and must not leak their simulated result to others.
+        """
+        from machina.connectors.docs.document_store import _legacy_vectorstore_installed
+
+        _legacy_vectorstore_installed.cache_clear()
+        yield
+        _legacy_vectorstore_installed.cache_clear()
 
     @pytest.mark.asyncio
     async def test_connect_and_load(self, sample_docs_dir: Path) -> None:
@@ -227,6 +241,83 @@ class TestDocumentStoreConnector:
         health = await conn.health_check()
         assert health.status.value == "healthy"
         assert health.details["chunk_count"] == 0
+
+    @staticmethod
+    async def _connect_and_capture_fallback_event(
+        sample_docs_dir: Path,
+    ) -> dict[str, Any]:
+        """Connect in fallback mode and return the keyword_fallback log event."""
+        import structlog
+
+        events: list[dict[str, Any]] = []
+
+        def _capture(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append(dict(event_dict))
+            return event_dict
+
+        structlog.configure(
+            processors=[
+                structlog.processors.add_log_level,
+                _capture,
+                structlog.processors.JSONRenderer(),
+            ]
+        )
+        try:
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+        finally:
+            structlog.reset_defaults()
+
+        fallback = [
+            e
+            for e in events
+            if e.get("event") == "connected" and e.get("mode") == "keyword_fallback"
+        ]
+        assert len(fallback) == 1
+        return fallback[0]
+
+    @pytest.mark.asyncio
+    async def test_keyword_fallback_warning_names_missing_package(
+        self, sample_docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fallback log is a WARNING that names the missing langchain-chroma."""
+        import sys
+
+        # ``None`` in sys.modules makes find_spec return None, so the
+        # legacy-install detection reports a clean (non-legacy) env even
+        # though the test environment has langchain_community installed.
+        monkeypatch.setitem(sys.modules, "langchain_community.vectorstores", None)
+
+        event = await self._connect_and_capture_fallback_event(sample_docs_dir)
+        assert event["level"] == "warning"
+        assert event["missing_package"] == "langchain-chroma"
+        assert "machina-ai[docs-rag]" in event["hint"]
+        assert "legacy" not in event["hint"].lower()
+
+    @pytest.mark.asyncio
+    async def test_keyword_fallback_warning_legacy_install_remedy(
+        self, sample_docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy install (community vectorstores present, chroma missing) →
+        the WARNING names the exact pip remedy with the [docs-rag] extra."""
+        import importlib.machinery
+        import sys
+
+        # Simulate the deprecated module still being importable: a bare
+        # `pip install -U machina-ai` over a pre-migration [docs-rag]
+        # install leaves langchain_community.vectorstores around while
+        # langchain-chroma is absent. find_spec on a sys.modules entry
+        # returns its __spec__, so the stub needs a real ModuleSpec.
+        fake_module = MagicMock()
+        fake_module.__spec__ = importlib.machinery.ModuleSpec(
+            "langchain_community.vectorstores", loader=None
+        )
+        monkeypatch.setitem(sys.modules, "langchain_community.vectorstores", fake_module)
+
+        event = await self._connect_and_capture_fallback_event(sample_docs_dir)
+        assert event["level"] == "warning"
+        assert event["missing_package"] == "langchain-chroma"
+        assert 'pip install -U "machina-ai[docs-rag]"' in event["hint"]
 
 
 class TestParentExpansion:
@@ -488,7 +579,7 @@ class TestEmbedderConfig:
         fake_module.HuggingFaceEmbeddings = MagicMock(
             side_effect=RuntimeError("model download failed")
         )
-        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", fake_module)
+        monkeypatch.setitem(sys.modules, "langchain_huggingface", fake_module)
 
         conn = DocumentStoreConnector(embedder="some-nonexistent-model")
         assert conn._load_embedding_function() is None
@@ -496,10 +587,10 @@ class TestEmbedderConfig:
     def test_embedder_wrapper_unavailable_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Missing langchain_community.embeddings → None."""
+        """Missing langchain_huggingface → None."""
         import sys
 
-        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", None)
+        monkeypatch.setitem(sys.modules, "langchain_huggingface", None)
         conn = DocumentStoreConnector(embedder="BAAI/bge-m3")
         assert conn._load_embedding_function() is None
 
@@ -511,7 +602,7 @@ class TestEmbedderConfig:
         hf_ctor = MagicMock(return_value=fake_embedding)
         fake_embeddings_module = MagicMock()
         fake_embeddings_module.HuggingFaceEmbeddings = hf_ctor
-        monkeypatch.setitem(sys.modules, "langchain_community.embeddings", fake_embeddings_module)
+        monkeypatch.setitem(sys.modules, "langchain_huggingface", fake_embeddings_module)
 
         conn = DocumentStoreConnector(embedder="BAAI/bge-m3")
         out = conn._load_embedding_function()
@@ -659,8 +750,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[sample_docs_dir])
@@ -699,8 +789,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[sample_docs_dir])
@@ -741,8 +830,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[sample_docs_dir])
@@ -784,8 +872,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[empty_dir])
@@ -837,8 +924,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[sample_docs_dir])
@@ -881,8 +967,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
                 "sentence_transformers": ce_module,
             },
         ):
@@ -928,8 +1013,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
                 "rank_bm25": None,
             },
         ):
@@ -997,8 +1081,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
                 "sentence_transformers": ce_module,
             },
         ):
@@ -1051,8 +1134,7 @@ class TestDocumentStoreRAG:
             {
                 "langchain": MagicMock(),
                 "langchain.text_splitter": mock_text_splitter,
-                "langchain_community": MagicMock(),
-                "langchain_community.vectorstores": mock_vectorstores,
+                "langchain_chroma": mock_vectorstores,
             },
         ):
             conn = DocumentStoreConnector(paths=[sample_docs_dir])

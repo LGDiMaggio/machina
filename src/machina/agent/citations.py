@@ -259,6 +259,155 @@ def _parse_block(
     return citations
 
 
+# An inline citation marker as it appears in prose: a strictly-bracketed
+# 1-3 digit index. Deliberately narrow — ``[source:page]`` forms, bracketed
+# words, and 4+-digit numbers never match (strip policy, U3).
+_INLINE_MARKER_RE = re.compile(r"\[(\d{1,3})\]")
+
+# Code regions where a bracketed digit is literal text, never a citation
+# marker: fenced ``` blocks (closing fence optional — truncation-tolerant)
+# and inline backtick spans.
+_FENCED_CODE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+
+
+def _protected_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of ``text`` where ``[n]`` is literal, not a citation marker."""
+    spans: list[tuple[int, int]] = [m.span() for m in _FENCED_CODE_RE.finditer(text)]
+    for m in _INLINE_CODE_RE.finditer(text):
+        start, end = m.span()
+        if not any(a <= start and end <= b for a, b in spans):
+            spans.append((start, end))
+    return spans
+
+
+def _iter_inline_markers(text: str) -> list[re.Match[str]]:
+    """Inline ``[n]`` marker matches, skipping code spans and markdown links.
+
+    A match immediately followed by ``(`` is markdown-link syntax
+    (``[1](https://...)``) and is never treated as a citation marker.
+    """
+    protected = _protected_spans(text)
+    markers: list[re.Match[str]] = []
+    for m in _INLINE_MARKER_RE.finditer(text):
+        if any(a <= m.start() < b for a, b in protected):
+            continue
+        if m.end() < len(text) and text[m.end()] == "(":
+            continue
+        markers.append(m)
+    return markers
+
+
+def _strip_back_to_marker(text: str, pos: int, marker_start: int) -> int:
+    """Start index for stripping a marker, eating preceding inline whitespace.
+
+    Walks left from ``marker_start`` over spaces/tabs but never past ``pos``
+    (the end of the last emitted slice), so ``"hours [9]."`` collapses to
+    ``"hours."``. Shared by the strip paths of :func:`renormalize_markers`
+    and :func:`strip_markers` so the whitespace-collapse rule cannot drift.
+    """
+    start = marker_start
+    while start > pos and text[start - 1] in " \t":
+        start -= 1
+    return start
+
+
+def renormalize_markers(
+    text: str,
+    citations: list[Citation],
+    ordered_chunks: list[str],
+) -> tuple[str, list[Citation]]:
+    """Renormalize inline ``[n]`` markers to a clean ``1..N`` at the egress.
+
+    The model cites by per-turn display index, which can be arbitrary
+    (``[6]``, ``[12]``) and means nothing to the user. This pass — run once,
+    at the sole egress, AFTER the validator chain — rewrites the surviving
+    prose so users always see ``[1][2]...`` and reorders ``citations`` to
+    match, establishing the invariant *citations list order == displayed
+    number order* (the channel footer enumerates the list 1-based).
+
+    Numbering and mapping rules:
+
+    * The mapping is marker → ``chunk_id`` → number, never positional: a raw
+      marker ``[n]`` resolves via ``ordered_chunks[n - 1]`` to a ``chunk_id``,
+      and two raw indices resolving to the same deduped chunk share one
+      number.
+    * Numbers are assigned by order of FIRST APPEARANCE in the prose;
+      citations whose chunk has no inline marker (block-only) are appended
+      AFTER, in their parsed order.
+    * Fail-closed: a marker is resolvable ONLY when its chunk is present in
+      the parsed ``citations`` list. In-range markers with no block entry are
+      stripped exactly like out-of-range ones — a :class:`Citation` is never
+      synthesized for a stray marker.
+    * Markers inside code spans (fenced blocks, inline backticks) or
+      markdown-link syntax (``[1](...)``) are literal text and left alone.
+    * With zero parsed citations the text is returned byte-identical — no
+      renumbering, no stripping.
+
+    Args:
+        text: The final rendered prose (citations block already stripped,
+            validator chain already run).
+        citations: Citations parsed for this turn (deduped by ``chunk_id``).
+        ordered_chunks: ``chunk_id`` by display position — the same map
+            :func:`parse_response` resolves block entries against.
+
+    Returns:
+        ``(rewritten_text, reordered_citations)``.
+    """
+    if not citations:
+        return text, list(citations)
+    cited: dict[str, Citation] = {c.chunk_id: c for c in citations}
+    assigned: dict[str, int] = {}
+    pieces: list[str] = []
+    pos = 0
+    for m in _iter_inline_markers(text):
+        raw_index = int(m.group(1))
+        chunk_id = ""
+        if 1 <= raw_index <= len(ordered_chunks):
+            chunk_id = ordered_chunks[raw_index - 1]
+        if chunk_id and chunk_id in cited:
+            number = assigned.setdefault(chunk_id, len(assigned) + 1)
+            pieces.append(text[pos : m.start()])
+            pieces.append(f"[{number}]")
+        else:
+            # Unresolvable (out-of-range, empty display slot, or no block
+            # entry): strip the marker plus any immediately preceding inline
+            # whitespace, so "hours [9]." collapses to "hours.".
+            pieces.append(text[pos : _strip_back_to_marker(text, pos, m.start())])
+        pos = m.end()
+    pieces.append(text[pos:])
+    reordered: list[Citation] = [cited[chunk_id] for chunk_id in assigned]
+    reordered.extend(c for c in citations if c.chunk_id not in assigned)
+    return "".join(pieces), reordered
+
+
+def strip_markers(text: str) -> str:
+    """Remove every inline ``[n]`` citation marker from ``text``.
+
+    Used for the assistant text stored in conversation history (fail-closed):
+    a renormalized ``[1]`` kept in history would always be in-range against
+    the NEXT turn's fresh registry, so an echoed marker would silently
+    resolve to a different chunk. Code spans and markdown-link syntax are
+    preserved (same skip rules as :func:`renormalize_markers`); any other
+    text — including the trailing ``[Sources used in this answer: ...]``
+    note, which never matches the 1-3 digit pattern — is untouched.
+
+    Args:
+        text: Text possibly carrying inline ``[n]`` markers.
+
+    Returns:
+        ``text`` with all markers (and their immediately preceding inline
+        whitespace) removed.
+    """
+    pieces: list[str] = []
+    pos = 0
+    for m in _iter_inline_markers(text):
+        pieces.append(text[pos : _strip_back_to_marker(text, pos, m.start())])
+        pos = m.end()
+    pieces.append(text[pos:])
+    return "".join(pieces)
+
+
 def _parse_page(raw: str, fallback: object) -> int:
     raw = raw.strip()
     if raw:

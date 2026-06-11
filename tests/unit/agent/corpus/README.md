@@ -25,6 +25,9 @@ Pin reality, never aspiration.
   "id": "<string — MUST equal the filename stem>",
   "description": "<string — names the failure mode AND its provenance (PR/transcript/doc)>",
   "user_messages": ["<optional list of user messages; one agent turn each; defaults to a single generic probe>"],
+  "document_chunks": [
+    {"chunk_id": "<non-empty>", "source": "<non-empty>", "page": 0, "content": "<non-empty>"}
+  ],
   "turns": [
     {
       "content": "<completion text, or null/empty>",
@@ -37,6 +40,8 @@ Pin reality, never aspiration.
     "disposition": "<see table below — required>",
     "user_text_contains": ["<optional substrings the final user-facing text must contain>"],
     "user_text_excludes": ["<optional substrings the final user-facing text must NOT contain>"],
+    "channel_text_contains": ["<optional substrings the CHANNEL-RENDERED text must contain>"],
+    "channel_text_excludes": ["<optional substrings the CHANNEL-RENDERED text must NOT contain>"],
     "is_fallback": false,
     "completeness": "complete"
   }
@@ -88,6 +93,34 @@ With multiple `user_messages`, turns are consumed across the agent turns in sequ
 ever legitimately mutate anything. The harness also wires a READ_ASSETS reader and a
 GET_WORK_ORDER reader, so both always-on and capability-derived read tools sit on the
 replayed agent's tool surface.
+
+## Document retrieval and channel-text extensions (citation-numbering family)
+
+Two opt-in harness extensions exist for the citation-numbering family
+(`citation-rawindex-markers`, `citation-out-of-range-marker`, `citation-block-only-no-inline`,
+`citation-dedup-collision`, `citation-crossturn-echo-guard`);
+fixtures that omit the keys are replayed exactly as before.
+
+- **`document_chunks`** (top-level, optional): a non-empty list of chunk objects with exactly
+  the keys `chunk_id` / `source` / `page` / `content` (`page` an integer, the rest non-empty
+  strings). When present, the harness attaches a spy SEARCH_DOCUMENTS connector loaded with
+  those chunks, which makes the runtime (a) **pre-fetch** document context in
+  `_gather_context` — the default `P-201` user message resolves at confidence 1.0, so the
+  pre-fetch fires and registers up to 5 chunks as the visible `[1]..[5]` — and (b) offer the
+  `search_documents` **tool** on the loop surface. Each `search()` call (pre-fetch or tool
+  dispatch alike) serves the **next window of up to 5 chunks**, mirroring the runtime's own
+  `[:5]` display/registration window, so a fixture with more than 5 chunks can script a
+  `search_documents` tool call whose results carry `citation_index` values continuing past
+  the pre-fetch slots (6, 7, 8, ...). Once exhausted, further searches return an empty list.
+  The schema guard rejects any other shape (unknown chunk keys, non-integer page, empty list).
+
+- **`expected.channel_text_contains` / `expected.channel_text_excludes`** (optional): when
+  present, the harness runs the final `AgentResponse` through the real channel formatting
+  path (`_format_response_for_channel`) and asserts the substrings against **that** rendered
+  text. This is the only place the `— Sources:` footer (one `[n] source:page` entry per
+  resolved citation, `n` = the citation's 1-based position in the reordered list) becomes
+  observable, so these keys are how a fixture pins *which* citations resolved and *what
+  number* each carries — without log capture.
 
 ## Behavior notes pinned by this corpus
 
@@ -154,3 +187,19 @@ replayed agent's tool surface.
   An EMPTY-string `function` value is detected and suppressed (fail-closed: the empty name
   dispositions as unknown) rather than treated as prose — pinned by
   `empty-function-string-key-suppressed` (PR #56 review).
+- **FIXED — citation-numbering presentation (live CLI session 2026-06-11, plan
+  2026-06-11-001).** Three fixtures originally pinned the broken presentation per the R12
+  rule and were flipped with the egress-renormalization fix: `_finalize_turn` now rewrites
+  surviving inline markers to `1..N` by first appearance AFTER the full validator chain
+  (raw `[6]`/`[8]` become `[1]`/`[2]` — `citation-rawindex-markers`), strips unresolvable
+  markers fail-closed (the dangling `[9]` never reaches the user —
+  `citation-out-of-range-marker`), appends block-only citations after the inline-numbered
+  ones (`citation-block-only-no-inline`), and reorders `AgentResponse.citations` so *list
+  order == displayed number order* — the footer enumerates it as `[n] source:page` entries
+  that line up with the prose. Two invariant fixtures landed with the fix:
+  `citation-dedup-collision` (two raw markers resolving to the same deduped chunk share one
+  number — the map is marker → `chunk_id` → number, never positional) and
+  `citation-crossturn-echo-guard` (history is stored marker-stripped, and a marker echoed
+  into a later turn with no block parses zero citations: the text stays byte-identical and
+  no citation is misattributed against the fresh registry). All five stay disposition
+  `clean`.

@@ -79,6 +79,13 @@ named in your previous answer rather than searching again.
 
 {capabilities_context}
 
+The tools and capabilities listed above are the COMPLETE set of actions \
+available to you. If the user asks for an action they do not cover (for \
+example registering, updating, or deleting a record for which no matching \
+tool exists), say plainly that you cannot do that, then suggest what you \
+CAN do instead from the capabilities above. Never promise, simulate, or \
+imply that an unsupported action was or could be performed.
+
 ## Registered Workflows
 
 {workflows_context}
@@ -436,6 +443,14 @@ def safe_source(source: str) -> str:
 _safe_source = safe_source
 
 
+# How many retrieved document chunks are displayed (and citation-indexed) per
+# search — the SAME window everywhere: format_document_results' rendering,
+# the runtime's pre-fetch registration, and the search_documents tool
+# serializer. A mismatch would desynchronise visible [n] indices from the
+# server-side citation registry.
+DOC_DISPLAY_WINDOW = 5
+
+
 def format_document_results(results: list[dict[str, Any]]) -> str:
     """Format document search results for the prompt.
 
@@ -454,7 +469,7 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         return "No relevant documents found."
 
     lines = [f"**Relevant Documents ({len(results)}):**"]
-    for i, result in enumerate(results[:5], 1):
+    for i, result in enumerate(results[:DOC_DISPLAY_WINDOW], 1):
         # Defence-in-depth: sanitise here too in case an upstream caller
         # forgot to.  Idempotent for already-sanitised values.
         source = safe_source(result.get("source", "unknown"))

@@ -1,14 +1,17 @@
 """DocumentStoreConnector — PDF/DOCX ingestion with RAG retrieval.
 
-Uses LangChain document loaders for parsing and ChromaDB for vector
-storage.  Falls back to a simple keyword search when RAG dependencies
-are not installed.
+Uses LangChain document loaders (``langchain-community``) for parsing
+and ChromaDB for vector storage via the maintained ``langchain-chroma``
+integration package.  Falls back to a simple keyword search when RAG
+dependencies are not installed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
@@ -39,6 +42,30 @@ _PARENT_OVERFETCH_FACTOR = 6
 # mixed with v0.3+ reads that expect ``parent_id`` / ``start_offset``
 # / ``is_table`` in metadata.
 _SCHEMA_VERSION = "v3"
+
+
+@functools.lru_cache(maxsize=1)
+def _legacy_vectorstore_installed() -> bool:
+    """Detect a legacy ``[docs-rag]`` install missing ``langchain-chroma``.
+
+    Returns ``True`` when ``langchain_community.vectorstores`` is
+    importable. Checked only on the keyword-fallback path: a hit there
+    means the environment carries a pre-migration RAG install (Chroma
+    came via ``langchain-community``) that was upgraded with a bare
+    ``pip install -U machina-ai`` — pip does not record extras, so
+    ``langchain-chroma`` is absent and vector mode silently degrades.
+
+    Uses ``importlib.util.find_spec`` so detection never imports the
+    deprecated module itself. Cached (``lru_cache``): ``find_spec`` does
+    filesystem I/O, which must not run on the event loop on every
+    ``connect()`` — the installed-package set cannot change mid-process.
+    """
+    try:
+        return importlib.util.find_spec("langchain_community.vectorstores") is not None
+    except (ImportError, ValueError):
+        # Parent package missing entirely (ModuleNotFoundError) or a
+        # broken/None __spec__ — either way, not a legacy install.
+        return False
 
 
 class _IndexedChunk(NamedTuple):
@@ -125,9 +152,9 @@ class DocumentStoreConnector:
     Ingests documents from one or more directories, splits them into
     chunks, embeds them in a vector store, and provides semantic search.
 
-    When ``langchain`` and ``chromadb`` are not installed, falls back to
-    a simple in-memory keyword search so the quickstart works without
-    heavy dependencies.
+    When ``langchain-chroma`` and ``chromadb`` are not installed, falls
+    back to a simple in-memory keyword search so the quickstart works
+    without heavy dependencies.
 
     Each ingested file can carry structured metadata via a sidecar
     ``<file>.meta.yaml`` or YAML frontmatter (for ``.md`` / ``.txt``).
@@ -269,11 +296,24 @@ class DocumentStoreConnector:
         except ImportError:
             await asyncio.to_thread(self._build_keyword_index, documents)
             self._use_rag = False
-            logger.info(
+            if _legacy_vectorstore_installed():
+                # Legacy [docs-rag] env upgraded via bare `pip install -U
+                # machina-ai`: langchain-community is still present but
+                # the vector store now needs langchain-chroma.
+                hint = (
+                    "legacy RAG install detected without langchain-chroma; "
+                    'run: pip install -U "machina-ai[docs-rag]"'
+                )
+            else:
+                hint = "install machina-ai[docs-rag] for semantic (vector) retrieval"
+            logger.warning(
                 "connected",
                 connector="DocumentStoreConnector",
+                operation="connect",
                 mode="keyword_fallback",
                 chunk_count=len(self._chunks),
+                missing_package="langchain-chroma",
+                hint=hint,
             )
         self._connected = True
 
@@ -491,7 +531,7 @@ class DocumentStoreConnector:
         establish the invariant: the collection contains exactly this
         corpus.
         """
-        from langchain_community.vectorstores import (  # type: ignore[import-not-found,unused-ignore]
+        from langchain_chroma import (  # type: ignore[import-not-found,unused-ignore]
             Chroma,
         )
 
@@ -545,7 +585,7 @@ class DocumentStoreConnector:
         if not model_name:
             return None
         try:
-            from langchain_community.embeddings import (  # type: ignore[import-not-found,unused-ignore]
+            from langchain_huggingface import (  # type: ignore[import-not-found,unused-ignore]
                 HuggingFaceEmbeddings,
             )
         except ImportError:

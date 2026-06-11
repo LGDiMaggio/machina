@@ -38,7 +38,13 @@ class Citation(BaseModel):
     )
 
     def inline_marker(self) -> str:
-        """Render a compact inline marker like ``[source:page]``."""
+        """Render a compact inline marker like ``[source:page]``.
+
+        Note:
+            :attr:`AgentResponse.text` now carries numeric ``[n]`` markers
+            renormalized at egress; this ``[source:page]`` format is used
+            nowhere in the rendered text. Kept for backward compatibility.
+        """
         if self.page > 0:
             return f"[{self.source}:{self.page}]"
         return f"[{self.source}]" if self.source else f"[{self.chunk_id}]"
@@ -48,11 +54,15 @@ class AgentResponse(BaseModel):
     """Structured agent output carrying text and grounded citations.
 
     Attributes:
-        text: The rendered answer (with inline citation markers preserved
-            but the trailing ``<citations>`` block stripped).
+        text: The rendered answer, carrying inline ``[n]`` citation markers
+            renormalized to ``1..N`` at egress (the trailing ``<citations>``
+            block is stripped).
         citations: List of source citations, one per chunk the agent
-            relied on. May be empty when the answer is not grounded in
-            documents.
+            relied on, in display order: ``citations[0]`` corresponds to the
+            inline ``[1]`` marker (numbered by first appearance in the
+            prose; citations referenced only in the ``<citations>`` block
+            are appended after the inline ones). May be empty when the
+            answer is not grounded in documents.
         is_fallback: ``True`` when ``text`` is a synthetic fallback the
             runtime substituted because the LLM returned no usable output
             (an empty completion or a citations-only block), not a real

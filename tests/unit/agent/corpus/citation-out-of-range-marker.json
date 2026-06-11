@@ -1,0 +1,25 @@
+{
+  "id": "citation-out-of-range-marker",
+  "description": "FIXED (flipped with the egress-renormalization fix, per the R12 rule; originally pinned the dangling-marker presentation). Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads 3 chunks; the pre-fetch (P-201 exact-id resolution) registers them as [1]..[3]. The single scripted completion cites [2] (valid) and [9] (beyond the 3-slot registry) inline and in the block. parse_response resolves [2] and drops [9] from the citations list; with the fix, _finalize_turn then strips the unresolvable literal [9] from the prose (fail-closed -- a marker that maps to no parsed citation never reaches the user) and renumbers the surviving [2] to [1], so the inline marker matches the single [1] source:page footer entry.",
+  "user_messages": ["What routine maintenance does P-201 need?"],
+  "document_chunks": [
+    {"chunk_id": "chunk-overview-001", "source": "p201_overview.md", "page": 1, "content": "P-201 routine maintenance summary."},
+    {"chunk_id": "chunk-impeller-002", "source": "impeller_inspection.md", "page": 4, "content": "Inspect the impeller for cavitation damage every quarter."},
+    {"chunk_id": "chunk-coupling-003", "source": "coupling_alignment.md", "page": 2, "content": "Check coupling alignment annually or after any seal work."}
+  ],
+  "turns": [
+    {
+      "content": "Inspect the impeller for cavitation damage every quarter [2]. The vendor datasheet also recommends an annual instrument recalibration [9].\n\n<citations>\n[2]\n[9]\n</citations>",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["[1]", "recalibration."],
+    "user_text_excludes": ["[2]", "[9]", "<citations>"],
+    "channel_text_contains": ["Sources:", "[1] impeller_inspection.md:4"],
+    "channel_text_excludes": ["p201_overview.md", "coupling_alignment.md"]
+  }
+}

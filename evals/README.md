@@ -74,6 +74,7 @@ turns:
   - user: "Self-contained user message (never references a prior answer)"
     assertions:            # OPTIONAL mapping — every key below is optional
       expect_tool_invoked: "list_assets"        # runtime: traced tool_call op
+      expect_tool_result_nonempty: "list_assets" # runtime: tool ran AND its recorded result is meaningfully non-empty
       expect_no_malformed: true                 # runtime: default true; set false to disable
       expect_not_fallback: true                 # runtime: response must not be a runtime fallback
       expect_retrieval_source: "pump_p201"      # retrieval: substring of a citation source
@@ -97,6 +98,7 @@ Every assertion type maps to exactly **one** layer:
 | Assertion | Layer | Observable signal |
 |---|---|---|
 | `expect_tool_invoked` | runtime | `agent.tracer` entries with action `tool_call` recorded during the turn |
+| `expect_tool_result_nonempty` | runtime | `metadata["result_json"]` on the traced `tool_call` entry — the named tool must have run this turn AND returned a meaningfully non-empty payload (a dict whose single obvious list payload, e.g. `probable_failures`, is non-empty). Context echo cannot fake this signal. |
 | `expect_no_malformed` | runtime | lightweight sniff of `AgentResponse.text` (tool-call-shaped JSON, raw `<think>` / `<citations>` tags) |
 | `expect_not_fallback` | runtime | `AgentResponse.is_fallback` (`true` requires a real answer; `false` requires a fallback) |
 | `expect_retrieval_source` | retrieval | `Citation.source` values on `AgentResponse.citations` |
