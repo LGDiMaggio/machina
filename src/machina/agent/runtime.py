@@ -41,6 +41,7 @@ from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
+    from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +65,41 @@ _LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"'](?:name|function)[\"']\s*:\s*[\"']")
 _LEAK_FRAGMENT_MARKER_RE = re.compile(
     r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
 )
+
+
+# Trivial English stopwords dropped when tokenizing LLM free-text symptoms at
+# the ``diagnose_failure`` tool boundary. Deliberately tiny: only glue words
+# that carry no diagnostic signal. Modifiers like "high"/"low" are kept — they
+# simply never overlap an indicator token, so they cannot cause false hits.
+_SYMPTOM_STOPWORDS: frozenset[str] = frozenset(
+    {"a", "an", "and", "are", "at", "for", "in", "is", "of", "on", "or", "the", "to", "with"}
+)
+
+_SYMPTOM_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _symptom_tokens(text: str) -> set[str]:
+    """Normalize free text into matchable tokens for ``diagnose_failure``.
+
+    Lowercases, splits on non-alphanumerics, drops stopwords and
+    single-character tokens (unit suffixes such as the ``s`` in ``mm_s``
+    or the ``c`` in ``temperature_c`` would otherwise create spurious
+    cross-mode matches).
+
+    This tokenization lives at the LLM tool boundary ONLY: it lets
+    "high vibration" match the canonical indicator
+    ``vibration_velocity_mm_s`` via the shared token ``vibration``.
+    Because indicators are tokenized with the same function, passing an
+    exact canonical indicator name as a symptom still matches — the
+    fuzzy matching is a strict superset of exact matching. The
+    alarm/workflow path (:class:`FailureAnalyzer.diagnose`) keeps its
+    exact-set-intersection semantics untouched.
+    """
+    return {
+        tok
+        for tok in _SYMPTOM_TOKEN_SPLIT_RE.split(text.lower())
+        if len(tok) > 1 and tok not in _SYMPTOM_STOPWORDS
+    }
 
 
 def _strip_code_fence(text: str) -> str:
@@ -752,11 +788,9 @@ class Agent:
         from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
         from machina.domain.services.work_order_factory import WorkOrderFactory
 
-        # Collect failure modes from connectors that provide them
-        all_failure_modes = []
-        for _name, conn in self._registry.all().items():
-            if hasattr(conn, "_failure_modes"):
-                all_failure_modes.extend(conn._failure_modes)
+        # Collect failure modes from connectors that provide them (shared
+        # with the diagnose_failure tool so the two sites cannot drift).
+        all_failure_modes = self._collect_failure_modes()
 
         # Collect maintenance plans from connectors that provide them
         all_plans = []
@@ -788,6 +822,25 @@ class Agent:
                 agent=self.name,
                 failure_modes=len(all_failure_modes),
             )
+
+    def _collect_failure_modes(self) -> list[FailureMode]:
+        """Harvest failure modes from every registered connector, deduped by code.
+
+        Single source for both the workflow path
+        (:meth:`_build_domain_services`) and the ``diagnose_failure`` tool —
+        factored out so the two sites cannot drift. Derives from each
+        connector's ``_failure_modes`` at call time, so it works on agents
+        that were never :meth:`start`\\ ed and never serves a stale snapshot.
+        Duplicate codes across connectors keep the first occurrence
+        (registration order).
+        """
+        by_code: dict[str, FailureMode] = {}
+        for _name, conn in self._registry.all().items():
+            if hasattr(conn, "_failure_modes"):
+                for fm in conn._failure_modes:
+                    if fm.code not in by_code:
+                        by_code[fm.code] = fm
+        return list(by_code.values())
 
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""
@@ -2673,53 +2726,117 @@ class Agent:
         asset_id: str,
         symptoms: list[str],
     ) -> dict[str, Any]:
-        """Diagnose failure using the domain service."""
-        from machina.domain.alarm import Alarm, Severity
+        """Diagnose probable failure modes against the live failure-mode catalog.
 
-        # Convert symptom strings to pseudo-alarms for the analyzer
-        alarms = [
-            Alarm(
-                id=f"SYMPTOM-{i}",
-                asset_id=asset_id,
-                severity=Severity.WARNING,
-                parameter=symptom,
-                value=0.0,
-                threshold=0.0,
-                unit="",
-            )
-            for i, symptom in enumerate(symptoms)
-        ]
+        Harvests failure modes from the registered connectors at call time
+        (via :meth:`_collect_failure_modes`, the same source
+        :meth:`_build_domain_services` feeds the workflow analyzer), filters
+        the catalog to the resolved asset's declared ``failure_modes`` when
+        present, and matches the LLM's free-text symptoms by token overlap
+        against each mode's ``typical_indicators``
+        (see :func:`_symptom_tokens`). The alarm/workflow path through
+        :class:`~machina.domain.services.failure_analyzer.FailureAnalyzer`
+        keeps its exact-match semantics — fuzzy matching lives at this tool
+        boundary only.
 
-        from machina.domain.services.failure_analyzer import FailureAnalyzer
+        An empty ``probable_failures`` list ALWAYS carries an explanatory
+        ``note`` so the model can distinguish "unknown asset" from "no
+        catalog configured" from "catalog present but nothing matched".
+        """
+        from machina.exceptions import AssetNotFoundError
 
-        # Collect failure modes from asset
+        result: dict[str, Any] = {
+            "asset_id": asset_id,
+            "symptoms": symptoms,
+            "probable_failures": [],
+        }
+
+        # Resolve the asset first: an unknown asset gets a distinct, honest
+        # note instead of a full-catalog guess for equipment we know nothing
+        # about. Catch ONLY the lookup failure — a connector/catalog problem
+        # later must not masquerade as "asset not found".
         try:
             asset = self.plant.get_asset(asset_id)
-            # In a real implementation, we'd load failure modes from a registry
-            analyzer = FailureAnalyzer()
-            results = analyzer.diagnose(alarms)
-            return {
-                "asset_id": asset_id,
-                "asset_name": asset.name,
-                "symptoms": symptoms,
-                "probable_failures": [
-                    {"code": fm.code, "name": fm.name, "category": fm.category} for fm in results
-                ],
-            }
-        except Exception:
+        except AssetNotFoundError:
             logger.warning(
-                "diagnose_failure_failed",
+                "diagnose_failure_asset_not_found",
                 agent=self.name,
                 asset_id=asset_id,
                 operation="diagnose_failure",
-                symptoms=symptoms,
             )
-            return {
-                "asset_id": asset_id,
-                "symptoms": symptoms,
-                "probable_failures": [],
-                "note": "No failure mode data available for this asset.",
-            }
+            result["note"] = safe_text(f"Asset '{asset_id}' not found in the asset registry.")
+            return result
+        result["asset_name"] = asset.name
+
+        # Call-time harvest: derive the catalog from whatever connectors are
+        # registered NOW — works on un-started agents, never goes stale.
+        catalog = self._collect_failure_modes()
+        if not catalog:
+            logger.warning(
+                "diagnose_failure_no_catalog",
+                agent=self.name,
+                asset_id=asset_id,
+                operation="diagnose_failure",
+            )
+            result["note"] = "No failure-mode data configured on any connector."
+            return result
+
+        notes: list[str] = []
+
+        # Per-asset applicability filter: when the asset declares its own
+        # failure modes, match ONLY against those — a pump must never get the
+        # conveyor's belt-wear diagnosis just because both list a vibration
+        # indicator. Assets that declare nothing fall back to the full
+        # catalog, and the result says so.
+        declared = set(asset.failure_modes)
+        if declared:
+            candidates = [fm for fm in catalog if fm.code in declared]
+        else:
+            candidates = catalog
+            notes.append(
+                "Asset declares no failure modes; diagnosis ran against the "
+                "full failure-mode catalog."
+            )
+
+        symptom_tokens: set[str] = set()
+        for symptom in symptoms:
+            symptom_tokens |= _symptom_tokens(symptom)
+
+        ranked: list[dict[str, Any]] = []
+        for fm in candidates:
+            if not fm.typical_indicators:
+                continue
+            matched = [
+                ind for ind in fm.typical_indicators if _symptom_tokens(ind) & symptom_tokens
+            ]
+            if not matched:
+                continue
+            ranked.append(
+                {
+                    "code": fm.code,
+                    "name": fm.name,
+                    "category": fm.category,
+                    # Fraction of this mode's indicators the symptoms hit.
+                    "confidence": round(len(matched) / len(fm.typical_indicators), 2),
+                    "matching_indicators": matched,
+                    "recommended_actions": fm.recommended_actions,
+                }
+            )
+        ranked.sort(key=lambda entry: float(entry["confidence"]), reverse=True)
+        result["probable_failures"] = ranked[:5]
+
+        if not ranked:
+            # Tell the model WHAT it could have matched so it can re-ask the
+            # user in the catalog's vocabulary instead of guessing.
+            known = sorted({ind for fm in candidates for ind in fm.typical_indicators})
+            notes.append(
+                "No catalog entry matched these symptoms. Known indicators: "
+                + safe_text(", ".join(known[:20]))
+                + "."
+            )
+        if notes:
+            result["note"] = " ".join(notes)
+        return result
 
     async def _tool_execute_workflow(
         self,

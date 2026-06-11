@@ -22,6 +22,7 @@ from machina.agent.runtime import (
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
+from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
@@ -43,6 +44,91 @@ def _make_plant() -> Plant:
             location="Building A",
             criticality=Criticality.A,
             equipment_class_code="PU",
+        )
+    )
+    return plant
+
+
+def _diag_failure_modes() -> list[FailureMode]:
+    """Catalog entries mirroring examples/sample_data/cmms/failure_modes.json."""
+    return [
+        FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear — Drive End",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "bearing_temperature_c",
+                "vibration_acceleration_g",
+            ],
+            recommended_actions=["replace_bearing", "check_alignment", "verify_lubrication"],
+        ),
+        FailureMode(
+            code="SEAL-LEAK-01",
+            name="Mechanical Seal Leakage",
+            category="mechanical",
+            typical_indicators=["seal_pressure_bar", "leakage_rate_ml_min", "flow_rate_m3h"],
+            recommended_actions=["replace_seal", "check_shaft_runout", "verify_alignment"],
+        ),
+        FailureMode(
+            code="IMP-EROSION-01",
+            name="Impeller Erosion",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "differential_pressure_bar",
+                "flow_rate_m3h",
+            ],
+            recommended_actions=["replace_impeller", "check_fluid_quality", "inspect_casing"],
+        ),
+        FailureMode(
+            code="BELT-WEAR-01",
+            name="Conveyor Belt Wear",
+            category="mechanical",
+            typical_indicators=["belt_speed_m_s", "vibration_velocity_mm_s", "motor_current_a"],
+            recommended_actions=["replace_belt", "adjust_tension", "check_rollers"],
+        ),
+    ]
+
+
+class _FakeFailureModeConnector:
+    """Connector stub that carries a failure-mode catalog (no capabilities)."""
+
+    capabilities: ClassVar[list[str]] = []
+
+    def __init__(self, failure_modes: list[FailureMode] | None = None) -> None:
+        self._failure_modes = failure_modes if failure_modes is not None else _diag_failure_modes()
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+
+def _make_diag_plant() -> Plant:
+    """Plant with a pump declaring its failure modes and an undeclared asset."""
+    plant = Plant(name="Diag Plant")
+    plant.register_asset(
+        Asset(
+            id="P-201",
+            name="Cooling Water Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            location="Building A",
+            criticality=Criticality.A,
+            failure_modes=["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROSION-01"],
+        )
+    )
+    plant.register_asset(
+        Asset(
+            id="HX-101",
+            name="Heat Exchanger",
+            type=AssetType.ROTATING_EQUIPMENT,
+            location="Building B",
+            criticality=Criticality.B,
         )
     )
     return plant
@@ -719,6 +805,155 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("get_maintenance_schedule", {})
         assert "info" in result
+
+
+class TestDiagnoseFailureCatalog:
+    """diagnose_failure matches symptoms against the live failure-mode catalog."""
+
+    @pytest.mark.asyncio
+    async def test_token_overlap_matches_canonical_indicators(self) -> None:
+        """Free-text 'high vibration' matches modes via the 'vibration' token."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["high vibration"]},
+        )
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert codes == ["BEAR-WEAR-01", "IMP-EROSION-01"]
+        top = result["probable_failures"][0]
+        # 2 of 3 bearing-wear indicators contain the 'vibration' token.
+        assert top["confidence"] == 0.67
+        assert top["matching_indicators"] == [
+            "vibration_velocity_mm_s",
+            "vibration_acceleration_g",
+        ]
+        assert top["recommended_actions"] == [
+            "replace_bearing",
+            "check_alignment",
+            "verify_lubrication",
+        ]
+        assert "note" not in result
+
+    @pytest.mark.asyncio
+    async def test_exact_indicator_name_still_matches(self) -> None:
+        """Fuzzy matching is a superset of exact: canonical names match too."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["bearing_temperature_c"]},
+        )
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert codes == ["BEAR-WEAR-01"]
+
+    @pytest.mark.asyncio
+    async def test_declared_asset_excludes_other_assets_modes(self) -> None:
+        """The pump never gets the conveyor's belt-wear diagnosis."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["vibration", "belt speed"]},
+        )
+        codes = {f["code"] for f in result["probable_failures"]}
+        assert "BELT-WEAR-01" not in codes
+        assert "BEAR-WEAR-01" in codes
+
+    @pytest.mark.asyncio
+    async def test_undeclared_asset_falls_back_to_full_catalog_with_note(self) -> None:
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "HX-101", "symptoms": ["high vibration"]},
+        )
+        codes = {f["code"] for f in result["probable_failures"]}
+        assert "BELT-WEAR-01" in codes  # full catalog in play
+        assert result["note"] == (
+            "Asset declares no failure modes; diagnosis ran against the full failure-mode catalog."
+        )
+
+    @pytest.mark.asyncio
+    async def test_works_without_start_call_time_harvest(self) -> None:
+        """The catalog is harvested at call time — no agent.start() needed."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        # Deliberately NOT awaiting agent.start().
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["seal leakage"]},
+        )
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert codes == ["SEAL-LEAK-01"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_codes_across_connectors_deduped(self) -> None:
+        """Two connectors carrying the same catalog yield no duplicate entries."""
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(), _FakeFailureModeConnector()],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["high vibration"]},
+        )
+        codes = [f["code"] for f in result["probable_failures"]]
+        assert codes == ["BEAR-WEAR-01", "IMP-EROSION-01"]
+
+    @pytest.mark.asyncio
+    async def test_results_capped_at_top_five(self) -> None:
+        modes = [
+            FailureMode(
+                code=f"VIB-{i:02d}",
+                name=f"Vibration mode {i}",
+                category="mechanical",
+                typical_indicators=["vibration_velocity_mm_s"] + ["other_indicator"] * i,
+            )
+            for i in range(7)
+        ]
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(failure_modes=modes)],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "HX-101", "symptoms": ["vibration"]},
+        )
+        failures = result["probable_failures"]
+        assert len(failures) == 5
+        confidences = [f["confidence"] for f in failures]
+        assert confidences == sorted(confidences, reverse=True)
+
+    @pytest.mark.asyncio
+    async def test_unknown_asset_note(self) -> None:
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "GHOST-9", "symptoms": ["vibration"]},
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "Asset 'GHOST-9' not found in the asset registry."
+        assert "asset_name" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_catalog_note(self) -> None:
+        agent = Agent(plant=_make_diag_plant())  # no connectors at all
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["vibration"]},
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "No failure-mode data configured on any connector."
+
+    @pytest.mark.asyncio
+    async def test_no_match_note_lists_known_indicators(self) -> None:
+        """A miss tells the model the catalog vocabulary it can re-ask in."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["strange smell"]},
+        )
+        assert result["probable_failures"] == []
+        assert result["note"].startswith("No catalog entry matched these symptoms.")
+        # Indicators come from the pump's declared modes only.
+        assert "bearing_temperature_c" in result["note"]
+        assert "belt_speed_m_s" not in result["note"]
 
 
 class TestAvailableTools:

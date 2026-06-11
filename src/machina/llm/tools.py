@@ -209,8 +209,11 @@ CHECK_SPARE_PARTS_TOOL = make_tool(
 DIAGNOSE_FAILURE_TOOL = make_tool(
     name="diagnose_failure",
     description=(
-        "Diagnose probable failure modes for an asset based on symptoms, "
-        "alarms, or technician observations. Returns ranked list of possible causes."
+        "Diagnose probable failure modes for an asset by matching symptoms, "
+        "alarms, or technician observations against the configured "
+        "failure-mode catalog for that asset. Returns a ranked list of "
+        "catalog matches with confidence and recommended actions; the result "
+        "explains itself when no catalog data is configured or nothing matches."
     ),
     parameters={
         "type": "object",
