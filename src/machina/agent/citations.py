@@ -298,6 +298,20 @@ def _iter_inline_markers(text: str) -> list[re.Match[str]]:
     return markers
 
 
+def _strip_back_to_marker(text: str, pos: int, marker_start: int) -> int:
+    """Start index for stripping a marker, eating preceding inline whitespace.
+
+    Walks left from ``marker_start`` over spaces/tabs but never past ``pos``
+    (the end of the last emitted slice), so ``"hours [9]."`` collapses to
+    ``"hours."``. Shared by the strip paths of :func:`renormalize_markers`
+    and :func:`strip_markers` so the whitespace-collapse rule cannot drift.
+    """
+    start = marker_start
+    while start > pos and text[start - 1] in " \t":
+        start -= 1
+    return start
+
+
 def renormalize_markers(
     text: str,
     citations: list[Citation],
@@ -359,10 +373,7 @@ def renormalize_markers(
             # Unresolvable (out-of-range, empty display slot, or no block
             # entry): strip the marker plus any immediately preceding inline
             # whitespace, so "hours [9]." collapses to "hours.".
-            start = m.start()
-            while start > pos and text[start - 1] in " \t":
-                start -= 1
-            pieces.append(text[pos:start])
+            pieces.append(text[pos : _strip_back_to_marker(text, pos, m.start())])
         pos = m.end()
     pieces.append(text[pos:])
     reordered: list[Citation] = [cited[chunk_id] for chunk_id in assigned]
@@ -391,10 +402,7 @@ def strip_markers(text: str) -> str:
     pieces: list[str] = []
     pos = 0
     for m in _iter_inline_markers(text):
-        start = m.start()
-        while start > pos and text[start - 1] in " \t":
-            start -= 1
-        pieces.append(text[pos:start])
+        pieces.append(text[pos : _strip_back_to_marker(text, pos, m.start())])
         pos = m.end()
     pieces.append(text[pos:])
     return "".join(pieces)
