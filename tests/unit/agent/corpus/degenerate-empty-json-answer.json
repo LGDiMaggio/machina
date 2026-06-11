@@ -1,0 +1,21 @@
+{
+  "id": "degenerate-empty-json-answer",
+  "description": "Degenerate empty-JSON answer: after the loop seam recovers a leaked READ (search_assets) and feeds the result back, the model's next completion is literally '{}'. Provenance: 2026-06-10 post-fix deepseek-r1:8b conversational eval (machina-eval-postfix-deepseek-2026-06-10.md), 7 turns. No guard catches it today: it is not tool-call-shaped (no name/function marker), not an empty string (the empty-response fallback does not fire), and not a prior-turn echo, so the bare '{}' reaches the user raw. Pinned as disposition 'clean' per R12; the degenerate-JSON guard flips this to 'fallback_empty'.",
+  "user_messages": ["what assets do we have?"],
+  "turns": [
+    {
+      "content": "{\"type\": \"function\", \"function\": {\"name\": \"search_assets\", \"arguments\": {\"query\": \"assets\"}}}",
+      "tool_calls": null
+    },
+    {
+      "content": "{}",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["{}"]
+  }
+}
