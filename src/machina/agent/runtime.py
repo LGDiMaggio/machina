@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 import structlog
 
-from machina.agent.citations import parse_response
+from machina.agent.citations import parse_response, renormalize_markers, strip_markers
 from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
 from machina.agent.prompts import (
     build_context_message,
@@ -301,9 +301,12 @@ def _is_echo(rendered: str, previous: str) -> bool:
 
     Only substantial answers (``len(rendered) >= _MIN_ECHO_LENGTH``) are
     considered — short replies legitimately recur across turns. Comparison is
-    whitespace/case-insensitive and ignores any trailing grounding note on the
-    stored ``previous`` text. Returns ``True`` when normalised character
-    similarity meets :data:`_ECHO_SIMILARITY_THRESHOLD`.
+    whitespace/case-insensitive, ignores any trailing grounding note on the
+    stored ``previous`` text, and runs over the MARKER-STRIPPED representation
+    of both sides: stored history is marker-stripped (U3), so two near-identical
+    answers differing only in inline ``[n]`` markers must still compare equal.
+    Returns ``True`` when normalised character similarity meets
+    :data:`_ECHO_SIMILARITY_THRESHOLD`.
 
     Args:
         rendered: This turn's freshly rendered answer.
@@ -317,24 +320,37 @@ def _is_echo(rendered: str, previous: str) -> bool:
         return False
     import difflib
 
-    current = _normalized_for_echo(rendered)
-    prior = _normalized_for_echo(_strip_history_note(previous))
+    current = _normalized_for_echo(strip_markers(rendered))
+    prior = _normalized_for_echo(strip_markers(_strip_history_note(previous)))
     if not current or not prior:
         return False
     return difflib.SequenceMatcher(None, current, prior).ratio() >= _ECHO_SIMILARITY_THRESHOLD
 
 
+def _footer_source(citation: Citation) -> str:
+    """``source:page`` body for one Sources-footer entry."""
+    if citation.page > 0 and citation.source:
+        return f"{citation.source}:{citation.page}"
+    return citation.source or citation.chunk_id
+
+
 def _format_response_for_channel(response: AgentResponse) -> str:
     """Render an :class:`AgentResponse` for delivery on a channel.
 
-    Inline ``[source:page]`` markers are already in ``response.text``.
-    When citations are present, a compact ``Sources`` footer is appended
-    so the operator can trace the answer back to its origin in chat
-    surfaces that don't expose the structured field.
+    ``response.text`` carries renormalized inline ``[n]`` markers (1..N by
+    first appearance — see :func:`machina.agent.citations.renormalize_markers`).
+    When citations are present, a compact ``Sources`` footer is appended whose
+    entries are numbered by 1-based position in ``response.citations`` — the
+    *citations list order == displayed number order* invariant — so every
+    inline ``[n]`` lines up with footer entry ``[n] source:page`` and the
+    operator can trace the answer back to its origin in chat surfaces that
+    don't expose the structured field.
     """
     if not response.citations:
         return response.text
-    sources = "\n".join(f"  • {c.inline_marker()}" for c in response.citations)
+    sources = "\n".join(
+        f"  • [{i}] {_footer_source(c)}" for i, c in enumerate(response.citations, 1)
+    )
     return f"{response.text}\n\n— Sources:\n{sources}"
 
 
@@ -1183,11 +1199,22 @@ class Agent:
            semantics: meaningful text surviving the scrub proceeds through the
            rest of the chain; a think-only response strips to empty and the
            empty-response fallback fires naturally.
-        3. Append the user message and the rendered assistant reply to history.
-        4. In a ``finally``, always drop the per-turn chunk registry and ordered
+        3. Renormalize inline citation markers (U3) — runs AFTER the full
+           validator chain and only when the surviving text is the parsed
+           prose with at least one resolved citation: raw per-turn indices
+           (``[6]``, ``[8]``) are rewritten to ``1..N`` by first appearance,
+           unresolvable markers are stripped fail-closed, and ``citations``
+           is reordered to match the displayed numbering. Every fallback
+           branch zeroes ``citations``, so the pass no-ops on degraded paths.
+        4. Append the user message and the rendered assistant reply to
+           history. The stored assistant text is MARKER-STRIPPED on both
+           branches (the echo-path override included) — a kept ``[1]`` would
+           always be in-range against the next turn's fresh registry and
+           silently resolve to a different chunk if echoed.
+        5. In a ``finally``, always drop the per-turn chunk registry and ordered
            index map for ``chat_id`` — even on error — so a long-lived agent
            does not accumulate orphan slots from failed turns.
-        5. Log ``response_generated`` and return the :class:`AgentResponse`.
+        6. Log ``response_generated`` and return the :class:`AgentResponse`.
 
         Args:
             chat_id: Conversation identifier.
@@ -1338,6 +1365,19 @@ class Agent:
                 )
                 citations = []
                 is_fallback = True
+            # Egress renormalization (U3): the surviving text is the parsed
+            # prose and at least one citation resolved — rewrite raw per-turn
+            # indices ([6], [8], ...) to a clean 1..N by first appearance,
+            # strip unresolvable markers fail-closed, and reorder ``citations``
+            # to match the displayed numbering (the *list order == displayed
+            # number order* invariant the channel footer enumerates). Every
+            # fallback branch above zeroed ``citations``, so this is a no-op
+            # on all degraded paths; with zero parsed citations the text stays
+            # byte-identical (no renumbering, no stripping).
+            if not is_fallback and citations:
+                rendered, citations = renormalize_markers(
+                    rendered, citations, self._turn_ordered.get(chat_id, [])
+                )
             self._add_to_history(chat_id, "user", user_text)
             # Carry the turn's grounding into history so follow-ups resolve from
             # memory instead of re-running document search (see _history_text).
@@ -1346,6 +1386,14 @@ class Agent:
                 if history_override is not None
                 else _history_text(rendered, citations)
             )
+            # History fail-closed (U3): strip inline [n] markers from the
+            # stored text on BOTH branches — _history_text's result AND the
+            # echo-path override (which bypasses _history_text). A renormalized
+            # [1] kept in history would always be in-range against the NEXT
+            # turn's fresh registry, so an echoed marker would silently resolve
+            # to a different chunk. The source note _history_text appends never
+            # matches the marker pattern and survives intact.
+            stored = strip_markers(stored)
             self._add_to_history(chat_id, "assistant", stored)
             # A real answer the loop was forced to finalize early may be missing
             # data. Hedge the USER-facing text only — ``stored`` above already

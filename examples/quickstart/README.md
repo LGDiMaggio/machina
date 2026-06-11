@@ -158,7 +158,7 @@ Agent: Based on the Grundfos CR 32-2 maintenance manual for pump P-201
 Recommended spare: SKF 6310-2RS (currently in stock: 4 units)
 
 — Sources:
-  • [pump_p201_manual.md]
+  • [1] pump_p201_manual.md
 
 You: Create a work order for bearing replacement on P-201, priority HIGH
 

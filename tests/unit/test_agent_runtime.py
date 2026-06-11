@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from machina.agent.runtime import (
+    _ECHO_SIMILARITY_THRESHOLD,
     _REPEATED_RESPONSE_FALLBACK,
     Agent,
     _format_response_for_channel,
@@ -878,6 +879,116 @@ class TestHistoryTextHelper:
         assert _strip_history_note(with_note) == body
 
 
+class TestEgressRenormalization:
+    """U3 — _finalize_turn renormalizes citation markers at the sole egress.
+
+    Users see ``[1][2]...`` inline and a matching ``[n] source:page`` footer,
+    never raw per-turn indices; unresolvable markers are stripped fail-closed;
+    the stored history is marker-free on both branches.
+    """
+
+    @staticmethod
+    def _agent_with_registry(
+        chat_id: str,
+        chunks: dict[str, tuple[str, int]],
+        ordered: list[str],
+    ) -> Agent:
+        agent = Agent()
+        agent._turn_chunks[chat_id] = {
+            cid: {"source": src, "page": page, "content": "..."}
+            for cid, (src, page) in chunks.items()
+        }
+        agent._turn_ordered[chat_id] = ordered
+        return agent
+
+    def test_high_indices_renormalized_across_placeholder_slots(self) -> None:
+        # Multi-call turn: absolute indices [7]/[12] survive empty-chunk_id
+        # placeholder slots in _turn_ordered and come out as [1]/[2].
+        agent = self._agent_with_registry(
+            "c",
+            {"ck7": ("bearing_guide.md", 12), "ck12": ("lube.md", 7)},
+            ["", "", "", "", "", "", "ck7", "", "", "", "", "ck12"],
+        )
+        raw = "Replace it [7]. Grease it [12].\n<citations>\n[7]\n[12]\n</citations>"
+        resp = agent._finalize_turn(chat_id="c", user_text="q", raw_response=raw)
+        assert resp.text == "Replace it [1]. Grease it [2]."
+        assert [c.chunk_id for c in resp.citations] == ["ck7", "ck12"]
+        channel = _format_response_for_channel(resp)
+        assert "[1] bearing_guide.md:12" in channel
+        assert "[2] lube.md:7" in channel
+
+    def test_in_range_marker_without_block_entry_stripped(self) -> None:
+        # [2] is in range but has no <citations> entry — stripped fail-closed,
+        # exactly like out-of-range; the footer keeps a single entry.
+        agent = self._agent_with_registry(
+            "c", {"ck1": ("a.md", 1), "ck2": ("b.md", 2)}, ["ck1", "ck2"]
+        )
+        raw = "Cited [1]. Uncited [2].\n<citations>\n[1]\n</citations>"
+        resp = agent._finalize_turn(chat_id="c", user_text="q", raw_response=raw)
+        assert resp.text == "Cited [1]. Uncited."
+        assert len(resp.citations) == 1
+        channel = _format_response_for_channel(resp)
+        assert channel.count("• [") == 1
+
+    def test_zero_citations_text_byte_identical(self) -> None:
+        # No citations parsed: no renumbering, no stripping — bracket-like
+        # text reaches the user untouched.
+        agent = Agent()
+        raw = "See bracket [1] and [9] with no citations block."
+        resp = agent._finalize_turn(chat_id="c", user_text="q", raw_response=raw)
+        assert resp.text == raw
+        assert resp.citations == []
+
+    def test_think_block_marker_does_not_affect_numbering(self) -> None:
+        # A [1] inside a scrubbed <think> block never participates in
+        # first-appearance numbering.
+        agent = self._agent_with_registry("c", {"ck1": ("pump.md", 3)}, ["ck1"])
+        raw = (
+            "<think>I should cite [1] and maybe [9] here</think>"
+            "The answer [1].\n<citations>\n[1]\n</citations>"
+        )
+        resp = agent._finalize_turn(chat_id="c", user_text="q", raw_response=raw)
+        assert resp.text == "The answer [1]."
+        assert len(resp.citations) == 1
+
+    def test_history_stored_marker_free_with_note(self) -> None:
+        # The user-facing text keeps the renormalized marker; the stored
+        # history entry is marker-stripped but keeps the grounding note.
+        agent = self._agent_with_registry("c", {"ck1": ("pump.md", 3)}, ["ck1"])
+        raw = "Heat to 110C [1].\n<citations>\n[1]\n</citations>"
+        resp = agent._finalize_turn(chat_id="c", user_text="q", raw_response=raw)
+        assert "[1]" in resp.text
+        stored = agent._histories["c"][-1]["content"]
+        assert "[1]" not in stored
+        assert stored.startswith("Heat to 110C.")
+        assert "[Sources used in this answer: pump.md]" in stored
+
+    _SENTENCES = (
+        "Replace the drive-end bearing",
+        "Grease the bearing housings",
+        "Check coupling alignment",
+        "Verify vibration levels",
+        "Record readings in the CMMS",
+        "Close out the work order",
+        "Archive the final report",
+    )
+
+    def test_echo_override_history_is_marker_stripped(self) -> None:
+        # The echo path stores the REAL echoed text via history_override,
+        # which bypasses _history_text — the marker-stripping must cover that
+        # branch too, or the echoed [n] re-enters the next turn's prompt.
+        clean = ". ".join(self._SENTENCES) + "."
+        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(self._SENTENCES, 10)) + "."
+        agent = Agent()
+        agent._add_to_history("c", "user", "first question")
+        agent._add_to_history("c", "assistant", clean)
+        resp = agent._finalize_turn(chat_id="c", user_text="second question", raw_response=marked)
+        assert resp.is_fallback is True
+        assert resp.text == _REPEATED_RESPONSE_FALLBACK
+        stored = agent._histories["c"][-1]["content"]
+        assert stored == clean  # markers gone, echoed text otherwise intact
+
+
 class TestRepeatedResponseSuppressed:
     """A turn must not deliver the previous turn's answer verbatim.
 
@@ -1016,6 +1127,36 @@ class TestIsEchoHelper:
         a = "The cooling pump P-201 is criticality A and located in Building A. " + "a" * 200
         b = "Spare bearing SKF-6205 is out of stock; lead time is six weeks. " + "b" * 200
         assert _is_echo(a, b) is False
+
+    _SENTENCES = (
+        "Replace the drive-end bearing",
+        "Grease the bearing housings",
+        "Check coupling alignment",
+        "Verify vibration levels",
+        "Record readings in the CMMS",
+        "Close out the work order",
+        "Archive the final report",
+    )
+
+    def test_markers_ignored_when_comparing(self) -> None:
+        """Answers identical up to inline [n] markers compare as an echo (U3).
+
+        Stored history is marker-stripped, so the comparison must run over the
+        marker-stripped representation of BOTH sides — otherwise a marker-dense
+        echo of a marker-free stored answer slips the guard. The raw-ratio
+        assertion proves this case genuinely needs the stripping (the marker
+        noise alone pushes similarity below the threshold).
+        """
+        import difflib
+
+        clean = ". ".join(self._SENTENCES) + "."
+        marked = ". ".join(f"{s} [{i}]" for i, s in enumerate(self._SENTENCES, 10)) + "."
+        assert len(marked) >= 200
+        raw_ratio = difflib.SequenceMatcher(
+            None, " ".join(marked.split()).lower(), " ".join(clean.split()).lower()
+        ).ratio()
+        assert raw_ratio < _ECHO_SIMILARITY_THRESHOLD  # would NOT fire without stripping
+        assert _is_echo(marked, clean) is True
 
 
 class _FakeLLMDoubleCreate:
@@ -1937,19 +2078,37 @@ class TestFormatResponseForChannel:
         response = AgentResponse(text="Just an answer.")
         assert _format_response_for_channel(response) == "Just an answer."
 
-    def test_citations_appended_as_sources_footer(self) -> None:
+    def test_citations_appended_as_numbered_sources_footer(self) -> None:
+        # The footer enumerates the (reordered) citations list 1-based, so
+        # entry numbers line up with the renormalized inline [n] markers.
         response = AgentResponse(
-            text="Replace bearing every 2000h [manuals/pump.pdf:42].",
+            text="Replace bearing every 2000h [1], re-grease at half interval [2].",
             citations=[
                 Citation(chunk_id="c1", source="manuals/pump.pdf", page=42),
                 Citation(chunk_id="c2", source="manuals/pump.pdf", page=43),
             ],
         )
         out = _format_response_for_channel(response)
-        assert "[manuals/pump.pdf:42]" in out  # inline marker preserved
         assert "— Sources:" in out
-        assert "manuals/pump.pdf:42" in out
-        assert "manuals/pump.pdf:43" in out
+        assert "[1] manuals/pump.pdf:42" in out
+        assert "[2] manuals/pump.pdf:43" in out
+
+    def test_footer_entry_without_page_omits_page_suffix(self) -> None:
+        response = AgentResponse(
+            text="See the manual [1].",
+            citations=[Citation(chunk_id="c1", source="manuals/pump.pdf", page=0)],
+        )
+        out = _format_response_for_channel(response)
+        assert "[1] manuals/pump.pdf" in out
+        assert "manuals/pump.pdf:" not in out
+
+    def test_footer_entry_falls_back_to_chunk_id(self) -> None:
+        response = AgentResponse(
+            text="Grounded answer.",
+            citations=[Citation(chunk_id="abc123", source="", page=4)],
+        )
+        out = _format_response_for_channel(response)
+        assert "[1] abc123" in out
 
 
 class TestRunAsync:

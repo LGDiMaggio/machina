@@ -97,7 +97,8 @@ replayed agent's tool surface.
 ## Document retrieval and channel-text extensions (citation-numbering family)
 
 Two opt-in harness extensions exist for the citation-numbering family
-(`citation-rawindex-markers`, `citation-out-of-range-marker`, `citation-block-only-no-inline`);
+(`citation-rawindex-markers`, `citation-out-of-range-marker`, `citation-block-only-no-inline`,
+`citation-dedup-collision`, `citation-crossturn-echo-guard`);
 fixtures that omit the keys are replayed exactly as before.
 
 - **`document_chunks`** (top-level, optional): a non-empty list of chunk objects with exactly
@@ -116,9 +117,10 @@ fixtures that omit the keys are replayed exactly as before.
 - **`expected.channel_text_contains` / `expected.channel_text_excludes`** (optional): when
   present, the harness runs the final `AgentResponse` through the real channel formatting
   path (`_format_response_for_channel`) and asserts the substrings against **that** rendered
-  text. This is the only place the `— Sources:` footer (one `Citation.inline_marker()` =
-  `[source:page]` entry per resolved citation) becomes observable, so these keys are how a
-  fixture pins *which* citations resolved — without log capture.
+  text. This is the only place the `— Sources:` footer (one `[n] source:page` entry per
+  resolved citation, `n` = the citation's 1-based position in the reordered list) becomes
+  observable, so these keys are how a fixture pins *which* citations resolved and *what
+  number* each carries — without log capture.
 
 ## Behavior notes pinned by this corpus
 
@@ -185,14 +187,19 @@ fixtures that omit the keys are replayed exactly as before.
   An EMPTY-string `function` value is detected and suppressed (fail-closed: the empty name
   dispositions as unknown) rather than treated as prose — pinned by
   `empty-function-string-key-suppressed` (PR #56 review).
-- **KNOWN GAP — citation-numbering presentation (live CLI session 2026-06-11, plan
-  2026-06-11-001; fix is a later unit).** Three fixtures pin TODAY's presentation, per the
-  R12 rule: a model citing tool-retrieved chunks by their continued `citation_index` leaves
-  raw `[6]`/`[8]` markers in the delivered prose while the footer renders unrelated
-  `[source:page]` entries (`citation-rawindex-markers`); an out-of-range marker is dropped
-  from the citations list **but its literal `[9]` text survives in the prose** as a dangling
-  reference (`citation-out-of-range-marker`); a block-only citation with no inline marker
-  resolves and produces a footer entry the prose never points at
-  (`citation-block-only-no-inline`). All three are disposition `clean` — the answers are
-  real, only the numbering presentation is broken. The future fix flips their `expected`
-  blocks.
+- **FIXED — citation-numbering presentation (live CLI session 2026-06-11, plan
+  2026-06-11-001).** Three fixtures originally pinned the broken presentation per the R12
+  rule and were flipped with the egress-renormalization fix: `_finalize_turn` now rewrites
+  surviving inline markers to `1..N` by first appearance AFTER the full validator chain
+  (raw `[6]`/`[8]` become `[1]`/`[2]` — `citation-rawindex-markers`), strips unresolvable
+  markers fail-closed (the dangling `[9]` never reaches the user —
+  `citation-out-of-range-marker`), appends block-only citations after the inline-numbered
+  ones (`citation-block-only-no-inline`), and reorders `AgentResponse.citations` so *list
+  order == displayed number order* — the footer enumerates it as `[n] source:page` entries
+  that line up with the prose. Two invariant fixtures landed with the fix:
+  `citation-dedup-collision` (two raw markers resolving to the same deduped chunk share one
+  number — the map is marker → `chunk_id` → number, never positional) and
+  `citation-crossturn-echo-guard` (history is stored marker-stripped, and a marker echoed
+  into a later turn with no block parses zero citations: the text stays byte-identical and
+  no citation is misattributed against the fresh registry). All five stay disposition
+  `clean`.

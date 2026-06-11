@@ -1,0 +1,35 @@
+{
+  "id": "citation-dedup-collision",
+  "description": "Egress-renormalization invariant (citation-numbering family, landed with the fix per the R12 rule): two raw inline markers resolving to the SAME deduped chunk share one displayed number. Provenance: plan 2026-06-11-001 (mapping is marker -> chunk_id -> number, never positional). Construction: document_chunks loads 7 chunks; the pre-fetch (P-201 resolution) registers chunks 1-5 as visible [1]..[5], and the scripted search_documents call serves the next window of 2, registered as [6]..[7] -- where slot 7 carries the SAME chunk_id as slot 2 (a re-retrieved chunk: _register_document_results appends the duplicate at both ordered positions while the registry dict keeps one entry). The model cites [2] and [7] inline and in the block; parse_response dedups by chunk_id to ONE citation, and the renormalizer maps both raw markers through that chunk_id to the same number 1. The footer has exactly one entry.",
+  "user_messages": ["What is the vibration alarm threshold for P-201?"],
+  "document_chunks": [
+    {"chunk_id": "chunk-overview-001", "source": "p201_overview.md", "page": 1, "content": "P-201 overview: cooling water pump, criticality A."},
+    {"chunk_id": "chunk-vib-002", "source": "vibration_analysis.md", "page": 5, "content": "Vibration alarm threshold: 7.1 mm/s RMS per ISO 10816-3 zone C/D boundary."},
+    {"chunk_id": "chunk-seal-003", "source": "seal_replacement.md", "page": 3, "content": "Seal replacement procedure: depressurize, drain, pull cartridge."},
+    {"chunk_id": "chunk-coupling-004", "source": "coupling_alignment.md", "page": 2, "content": "Check coupling alignment annually or after any seal work."},
+    {"chunk_id": "chunk-lube-005", "source": "lubrication_schedule.md", "page": 7, "content": "Grease the bearing housings with NLGI 2 grease every 500 hours."},
+    {"chunk_id": "chunk-bearing-006", "source": "bearing_guide.md", "page": 12, "content": "Replace the drive-end bearing every 8000 operating hours."},
+    {"chunk_id": "chunk-vib-002", "source": "vibration_analysis.md", "page": 5, "content": "Vibration alarm threshold: 7.1 mm/s RMS per ISO 10816-3 zone C/D boundary."}
+  ],
+  "turns": [
+    {
+      "content": "",
+      "tool_calls": [
+        {"name": "search_documents", "arguments": "{\"query\": \"vibration alarm threshold\", \"asset_id\": \"P-201\"}"}
+      ]
+    },
+    {
+      "content": "The vibration alarm threshold is 7.1 mm/s RMS [2]. Investigate the bearings whenever that threshold is exceeded [7].\n\n<citations>\n[2]\n[7]\n</citations>",
+      "tool_calls": null
+    }
+  ],
+  "expected": {
+    "disposition": "clean",
+    "is_fallback": false,
+    "completeness": "complete",
+    "user_text_contains": ["RMS [1].", "exceeded [1]."],
+    "user_text_excludes": ["[2]", "[7]", "<citations>"],
+    "channel_text_contains": ["Sources:", "[1] vibration_analysis.md:5"],
+    "channel_text_excludes": ["[2]", "bearing_guide.md", "p201_overview.md"]
+  }
+}

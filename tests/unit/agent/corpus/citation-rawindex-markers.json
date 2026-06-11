@@ -1,6 +1,6 @@
 {
   "id": "citation-rawindex-markers",
-  "description": "KNOWN GAP (pinned for visibility, per the R12 rule; fix is a later unit): raw-index citation markers reach the user verbatim while the channel footer speaks a different language. Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads the spy document connector with 8 chunks served in display windows of 5 -- the pre-fetch (P-201 resolves at confidence 1.0, so _gather_context searches documents) registers chunks 1-5 as visible [1]..[5]; the scripted search_documents tool call retrieves the next window, serialized with citation_index 6..8 (offset = the 5 already-registered slots) and registered at those positions. The model's final answer cites [6] and [8] inline with a proper <citations> block. TODAY both resolve (the registry continues past the pre-fetch slots), the block is stripped, but the raw [6]/[8] markers survive in the user text while the channel footer renders the same two citations as [source:page] entries -- visually unrelated numbering. The future fix rewrites this presentation; flipping this fixture's expected block is part of that fix.",
+  "description": "FIXED (flipped with the egress-renormalization fix, per the R12 rule; originally pinned the broken raw-index presentation). Provenance: live CLI session 2026-06-11, plan 2026-06-11-001. Construction: document_chunks loads the spy document connector with 8 chunks served in display windows of 5 -- the pre-fetch (P-201 resolves at confidence 1.0, so _gather_context searches documents) registers chunks 1-5 as visible [1]..[5]; the scripted search_documents tool call retrieves the next window, serialized with citation_index 6..8 (offset = the 5 already-registered slots) and registered at those positions. The model's final answer cites [6] and [8] inline with a proper <citations> block. With the fix, _finalize_turn renormalizes the surviving markers to 1..N by first appearance: the user sees [1] and [2], never the raw per-turn indices, and the channel footer enumerates the reordered citations list as matching [n] source:page entries.",
   "user_messages": ["What is the bearing maintenance plan for P-201?"],
   "document_chunks": [
     {"chunk_id": "chunk-manual-001", "source": "pump_p201_manual.md", "page": 1, "content": "P-201 overview: single-stage centrifugal cooling water pump."},
@@ -28,9 +28,9 @@
     "disposition": "clean",
     "is_fallback": false,
     "completeness": "complete",
-    "user_text_contains": ["[6]", "[8]"],
-    "user_text_excludes": ["<citations>"],
-    "channel_text_contains": ["Sources:", "[bearing_guide.md:12]", "[lubrication_schedule.md:7]"],
-    "channel_text_excludes": ["[seal_replacement.md:3]", "[pump_p201_manual.md:1]"]
+    "user_text_contains": ["[1]", "[2]"],
+    "user_text_excludes": ["[6]", "[8]", "<citations>"],
+    "channel_text_contains": ["Sources:", "[1] bearing_guide.md:12", "[2] lubrication_schedule.md:7"],
+    "channel_text_excludes": ["seal_replacement.md", "pump_p201_manual.md"]
   }
 }

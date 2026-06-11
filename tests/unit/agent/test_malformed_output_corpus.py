@@ -483,9 +483,10 @@ def _assert_disposition(response: Any, expected: dict[str, Any], spy: _SpyWriteC
 
     # Channel-rendered assertions: run the final AgentResponse through the
     # real channel formatting path (_format_response_for_channel), the only
-    # place the "Sources" footer — Citation.inline_marker() per resolved
-    # citation — becomes observable text. This is how the citation-numbering
-    # fixtures pin WHICH citations resolved without log capture.
+    # place the "Sources" footer — one "[n] source:page" entry per resolved
+    # citation, numbered by list position — becomes observable text. This is
+    # how the citation-numbering fixtures pin WHICH citations resolved and
+    # WHAT NUMBER each carries, without log capture.
     if "channel_text_contains" in expected or "channel_text_excludes" in expected:
         channel_text = _format_response_for_channel(response)
         for needle in expected.get("channel_text_contains", []):
