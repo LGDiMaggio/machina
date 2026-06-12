@@ -7,7 +7,7 @@ semicolon-delimited failure-code cell mapped to Asset.failure_modes).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from machina.connectors.capabilities import Capability
-from machina.connectors.docs.excel import ExcelCsvConnector, _split_semicolon_list
+from machina.connectors.docs.excel import ExcelCsvConnector
 from machina.connectors.docs.excel_schema import (
     ColumnMapping,
     ExcelConnectorConfig,
@@ -198,33 +198,11 @@ class TestAssetFailureCodeLinkage:
 
 
 # ------------------------------------------------------------------
-# Encoding helper unit tests
-# ------------------------------------------------------------------
-
-
-class TestSplitSemicolonList:
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (None, []),
-            ("", []),
-            ("   ", []),
-            ("A", ["A"]),
-            ("A;B", ["A", "B"]),
-            (" A ; B ", ["A", "B"]),
-            ("A;", ["A"]),
-            (";A", ["A"]),
-            ("A;;B;", ["A", "B"]),
-            (["A", " B "], ["A", "B"]),
-        ],
-    )
-    def test_split(self, value: Any, expected: list[str]) -> None:
-        assert _split_semicolon_list(value) == expected
-
-
-# ------------------------------------------------------------------
 # Error paths — validation at connect()
 # ------------------------------------------------------------------
+# (Encoding-helper unit tests live in
+# tests/unit/connectors/test_entity_builders.py — the shared helper's
+# home module.)
 
 
 class TestErrorPaths:

@@ -13,12 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from machina.connectors.capabilities import Capability
-from machina.connectors.sql.generic import (
-    GenericSqlConnector,
-    _build_asset,
-    _dict_to_failure_mode,
-    _split_codes,
-)
+from machina.connectors.sql.generic import GenericSqlConnector
 from machina.connectors.sql.schema import (
     FieldMapping,
     SqlConnectorConfig,
@@ -98,91 +93,11 @@ def _make_conn(cursor: MagicMock) -> MagicMock:
 
 
 # ------------------------------------------------------------------
-# Encoding: semicolon-delimited code strings
-# ------------------------------------------------------------------
-
-
-class TestSplitCodes:
-    def test_basic_split(self) -> None:
-        assert _split_codes("BEAR-WEAR-01;SEAL-LEAK-01") == [
-            "BEAR-WEAR-01",
-            "SEAL-LEAK-01",
-        ]
-
-    def test_empty_string_returns_empty_list(self) -> None:
-        assert _split_codes("") == []
-
-    def test_none_returns_empty_list(self) -> None:
-        assert _split_codes(None) == []
-
-    def test_whitespace_around_entries_trimmed(self) -> None:
-        assert _split_codes("  BEAR-WEAR-01 ; SEAL-LEAK-01  ") == [
-            "BEAR-WEAR-01",
-            "SEAL-LEAK-01",
-        ]
-
-    def test_trailing_delimiter_tolerated(self) -> None:
-        assert _split_codes("BEAR-WEAR-01;SEAL-LEAK-01;") == [
-            "BEAR-WEAR-01",
-            "SEAL-LEAK-01",
-        ]
-
-    def test_only_delimiters_and_whitespace_returns_empty(self) -> None:
-        assert _split_codes(" ; ;; ") == []
-
-    def test_existing_list_passed_through_cleaned(self) -> None:
-        assert _split_codes([" A ", "", "B"]) == ["A", "B"]
-
-
-# ------------------------------------------------------------------
-# Pure mapper tests
-# ------------------------------------------------------------------
-
-
-class TestDictToFailureMode:
-    def test_basic(self) -> None:
-        fm = _dict_to_failure_mode(
-            {
-                "code": "BEAR-WEAR-01",
-                "name": "Bearing wear",
-                "category": "mechanical",
-                "detection_methods": "vibration_analysis;thermography",
-                "mtbf_hours": 8760,
-            }
-        )
-        assert fm.code == "BEAR-WEAR-01"
-        assert fm.name == "Bearing wear"
-        assert fm.category == "mechanical"
-        assert fm.detection_methods == ["vibration_analysis", "thermography"]
-        assert fm.mtbf_hours == 8760.0
-
-    def test_optional_fields_default(self) -> None:
-        fm = _dict_to_failure_mode({"code": "SEAL-LEAK-01", "name": "Seal leakage"})
-        assert fm.mechanism == ""
-        assert fm.detection_methods == []
-        assert fm.mtbf_hours is None
-        assert fm.iso_14224_code is None
-
-
-class TestBuildAsset:
-    def test_failure_codes_resolved(self) -> None:
-        asset = _build_asset(
-            {"id": "P-001", "name": "Pompa 1", "failure_modes": "BEAR-WEAR-01;SEAL-LEAK-01"}
-        )
-        assert asset.failure_modes == ["BEAR-WEAR-01", "SEAL-LEAK-01"]
-
-    def test_no_failure_codes_field(self) -> None:
-        asset = _build_asset({"id": "P-001", "name": "Pompa 1"})
-        assert asset.failure_modes == []
-
-    def test_empty_codes_string(self) -> None:
-        asset = _build_asset({"id": "P-001", "name": "Pompa 1", "failure_modes": ""})
-        assert asset.failure_modes == []
-
-
-# ------------------------------------------------------------------
 # Capability declaration
 # ------------------------------------------------------------------
+# (Encoding and pure-mapper tests live in
+# tests/unit/connectors/test_entity_builders.py — the shared helpers'
+# home module.)
 
 
 class TestCapabilityDeclaration:

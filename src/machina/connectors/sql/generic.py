@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
 from machina.connectors.sql.drivers import connect_jdbc, connect_odbc
-from machina.domain.failure_mode import FailureMode
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -31,6 +31,7 @@ from machina.exceptions import (
 if TYPE_CHECKING:
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
     from machina.domain.asset import Asset
+    from machina.domain.failure_mode import FailureMode
     from machina.domain.work_order import WorkOrder
 
 logger = structlog.get_logger(__name__)
@@ -94,72 +95,6 @@ def _row_to_dict(
         raw_value = raw_dict.get(field_mapping.column)
         result[field_name] = _coerce_value(raw_value, field_mapping, codepage=codepage)
     return result
-
-
-def _split_codes(raw: Any) -> list[str]:
-    """Split a semicolon-delimited code string into a clean list.
-
-    This is the committed encoding for list-valued columns (shared with
-    the Excel connector): a single string column holding
-    ``;``-delimited codes, e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``.
-    Whitespace around entries is stripped and empty entries (including
-    those produced by trailing delimiters) are dropped.
-
-    Args:
-        raw: Column value — a delimited string, an existing list, or None.
-
-    Returns:
-        Clean list of non-empty code strings ([] for None/empty input).
-    """
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        return [str(item).strip() for item in raw if str(item).strip()]
-    return [part.strip() for part in str(raw).split(";") if part.strip()]
-
-
-def _dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
-    """Build a FailureMode from a coerced field dict.
-
-    List-valued fields (``detection_methods``, ``typical_indicators``,
-    ``recommended_actions``) accept a single semicolon-delimited string
-    column (e.g. ``"vibration_analysis;thermography"``) — see
-    :func:`_split_codes`.
-    """
-    mtbf = d.get("mtbf_hours")
-    iso_code = d.get("iso_14224_code")
-    return FailureMode(
-        code=str(d.get("code", "")),
-        name=str(d.get("name", "")),
-        mechanism=str(d.get("mechanism") or ""),
-        category=str(d.get("category") or ""),
-        detection_methods=_split_codes(d.get("detection_methods")),
-        typical_indicators=_split_codes(d.get("typical_indicators")),
-        recommended_actions=_split_codes(d.get("recommended_actions")),
-        mtbf_hours=float(mtbf) if mtbf is not None else None,
-        iso_14224_code=str(iso_code) if iso_code else None,
-    )
-
-
-def _build_asset(d: dict[str, Any]) -> Asset:
-    """Build an Asset, resolving the failure-code linkage column.
-
-    When the mapping populates a ``failure_modes`` field, the raw
-    semicolon-delimited string (e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``)
-    is split into ``Asset.failure_modes`` via :func:`_split_codes`.
-    """
-    codes = _split_codes(d.pop("failure_modes", None))
-    asset = _dict_to_asset(d)
-    if codes:
-        asset.failure_modes = codes
-    return asset
-
-
-_ENTITY_BUILDERS: dict[str, Any] = {
-    "Asset": _build_asset,
-    "WorkOrder": _dict_to_work_order,
-    "FailureMode": _dict_to_failure_mode,
-}
 
 
 class GenericSqlConnector:
@@ -255,14 +190,14 @@ class GenericSqlConnector:
 
         When the mapping includes a ``failure_modes`` field, the source
         column is interpreted as a semicolon-delimited failure-mode code
-        string (e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``) and resolved into
-        ``Asset.failure_modes``.
+        string and resolved into ``Asset.failure_modes`` (see
+        :func:`machina.connectors._entity_builders.split_list_cell`).
         """
         mapping = self._find_mapping("Asset")
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        return [_build_asset(r) for r in rows]
+        return [_dict_to_asset(r) for r in rows]
 
     async def read_work_orders(self) -> list[WorkOrder]:
         """Read work orders from the configured table mapping."""

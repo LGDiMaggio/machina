@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -29,8 +30,8 @@ if TYPE_CHECKING:
         SheetSchema,
     )
     from machina.domain.asset import Asset
+    from machina.domain.failure_mode import FailureMode
     from machina.domain.work_order import WorkOrder
-from machina.domain.failure_mode import FailureMode
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -39,55 +40,6 @@ from machina.exceptions import (
 )
 
 logger = structlog.get_logger(__name__)
-
-
-# Committed encoding for multi-valued spreadsheet cells (shared with the SQL
-# connector): a single string cell containing semicolon-delimited entries,
-# e.g. "BEAR-WEAR-01;SEAL-LEAK-01".
-_LIST_CELL_DELIMITER = ";"
-
-
-def _split_semicolon_list(value: Any) -> list[str]:
-    """Split a semicolon-delimited cell into a clean list of strings.
-
-    The committed multi-value cell encoding (shared with the SQL connector):
-    a single string cell with ``;``-delimited entries, e.g.
-    ``"BEAR-WEAR-01;SEAL-LEAK-01"``. Whitespace around each entry is
-    stripped and empty entries (including ones produced by a trailing
-    delimiter) are dropped. ``None`` and empty cells yield an empty list.
-
-    Args:
-        value: Raw or coerced cell value; lists/tuples pass through with
-            per-entry stripping.
-
-    Returns:
-        List of non-empty, whitespace-trimmed entries.
-    """
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return [part.strip() for part in str(value).split(_LIST_CELL_DELIMITER) if part.strip()]
-
-
-def _dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
-    """Build a FailureMode from a coerced field dict.
-
-    List-valued fields (``detection_methods``, ``typical_indicators``,
-    ``recommended_actions``) accept a single semicolon-delimited string
-    cell — the same encoding used for asset failure-code linkage.
-    """
-    return FailureMode(
-        code=str(d.get("code", "")),
-        name=str(d.get("name", "")),
-        mechanism=str(d.get("mechanism") or ""),
-        category=str(d.get("category") or ""),
-        detection_methods=_split_semicolon_list(d.get("detection_methods")),
-        typical_indicators=_split_semicolon_list(d.get("typical_indicators")),
-        recommended_actions=_split_semicolon_list(d.get("recommended_actions")),
-        mtbf_hours=d.get("mtbf_hours"),
-        iso_14224_code=d.get("iso_14224_code") or None,
-    )
 
 
 # ------------------------------------------------------------------
@@ -466,13 +418,14 @@ class ExcelCsvConnector:
         unconfigured means not-declared, so capability discovery is a true
         signal of "has a failure-mode catalog".
         """
-        caps = set(self._BASE_CAPABILITIES)
-        if self._config.failure_modes is not None:
-            caps.add(Capability.READ_FAILURE_MODES)
-        return frozenset(caps)
+        return self._capabilities
 
     def __init__(self, *, config: ExcelConnectorConfig) -> None:
         self._config = config
+        caps = set(self._BASE_CAPABILITIES)
+        if config.failure_modes is not None:
+            caps.add(Capability.READ_FAILURE_MODES)
+        self._capabilities = frozenset(caps)
         self._connected = False
         self._asset_cache: list[Asset] = []
         self._wo_cache: list[WorkOrder] = []
@@ -697,50 +650,34 @@ class ExcelCsvConnector:
     # Internal
     # ------------------------------------------------------------------
 
+    def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
+        """Shared exists-check → read → validate → parse pipeline for one sheet."""
+        path = Path(schema.path)
+        if not path.exists():
+            raise ConnectorConfigError(f"{label} file not found: {path}")
+        headers, raw_rows = self._read_file(path, schema)
+        _validate_headers(headers, schema, str(path))
+        return _rows_to_dicts(raw_rows, schema, str(path))
+
     def _validate_and_load_assets(self) -> None:
         schema = self._config.asset_registry
         assert schema is not None
-        path = Path(schema.path)
-        if not path.exists():
-            raise ConnectorConfigError(f"Asset registry file not found: {path}")
-        headers, raw_rows = self._read_file(path, schema)
-        _validate_headers(headers, schema, str(path))
-        dicts = _rows_to_dicts(raw_rows, schema, str(path))
-        # Asset ↔ failure-code linkage: a column mapped to the
-        # 'failure_modes' field carries a single semicolon-delimited string
-        # of failure-mode codes (e.g. "BEAR-WEAR-01;SEAL-LEAK-01").
-        assets = []
-        for d in dicts:
-            codes = _split_semicolon_list(d.pop("failure_modes", None))
-            asset = _dict_to_asset(d)
-            if codes:
-                asset.failure_modes = codes
-            assets.append(asset)
-        self._asset_cache = assets
+        dicts = self._load_sheet_dicts(schema, "Asset registry")
+        self._asset_cache = [_dict_to_asset(d) for d in dicts]
 
     def _validate_and_load_failure_modes(self) -> None:
         schema = self._config.failure_modes
         assert schema is not None
-        path = Path(schema.path)
-        if not path.exists():
-            raise ConnectorConfigError(f"Failure modes file not found: {path}")
-        headers, raw_rows = self._read_file(path, schema)
-        _validate_headers(headers, schema, str(path))
-        dicts = _rows_to_dicts(raw_rows, schema, str(path))
+        dicts = self._load_sheet_dicts(schema, "Failure modes")
         self._fm_cache = [_dict_to_failure_mode(d) for d in dicts]
 
     def _validate_and_load_work_orders(self) -> None:
         schema = self._config.work_orders
         assert schema is not None
-        path = Path(schema.path)
-        if not path.exists():
-            if schema.write_mode is not None:
-                self._wo_cache = []
-                return
-            raise ConnectorConfigError(f"Work order file not found: {path}")
-        headers, raw_rows = self._read_file(path, schema)
-        _validate_headers(headers, schema, str(path))
-        dicts = _rows_to_dicts(raw_rows, schema, str(path))
+        if not Path(schema.path).exists() and schema.write_mode is not None:
+            self._wo_cache = []
+            return
+        dicts = self._load_sheet_dicts(schema, "Work order")
         self._wo_cache = [_dict_to_work_order(d) for d in dicts]
 
     @staticmethod

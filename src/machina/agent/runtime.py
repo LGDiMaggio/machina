@@ -874,21 +874,28 @@ class Agent:
         """
         from machina.exceptions import ConnectorError
 
-        by_code: dict[str, FailureMode] = {}
         providers = self._registry.find_by_capability(Capability.READ_FAILURE_MODES)
-        for name, conn in providers:
-            try:
-                modes = await conn.read_failure_modes()  # type: ignore[attr-defined]
-            except ConnectorError as exc:
+        # Fan out concurrently — one slow/flaky provider must not serialise
+        # the whole harvest. gather() preserves argument order, so the
+        # first-registration-wins dedup below is unchanged.
+        results = await asyncio.gather(
+            *(conn.read_failure_modes() for _name, conn in providers),  # type: ignore[attr-defined]
+            return_exceptions=True,
+        )
+        by_code: dict[str, FailureMode] = {}
+        for (name, _conn), result in zip(providers, results, strict=True):
+            if isinstance(result, ConnectorError):
                 logger.warning(
                     "failure_mode_harvest_failed",
                     agent=self.name,
                     connector=name,
                     operation="collect_failure_modes",
-                    error=str(exc),
+                    error=str(result),
                 )
                 continue
-            for fm in modes:
+            if isinstance(result, BaseException):
+                raise result
+            for fm in result:
                 if fm.code not in by_code:
                     by_code[fm.code] = fm
         return list(by_code.values())
