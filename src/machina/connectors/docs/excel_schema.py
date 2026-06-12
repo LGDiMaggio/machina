@@ -61,11 +61,22 @@ class ExcelConnectorConfig(BaseModel):
 
     asset_registry: SheetSchema | None = Field(default=None)
     work_orders: SheetSchema | None = Field(default=None)
+    failure_modes: SheetSchema | None = Field(
+        default=None,
+        description=(
+            "Optional read-only sheet of failure-mode catalog entries. "
+            "List-valued cells (e.g. 'detection_methods') use a single "
+            "semicolon-delimited string, e.g. 'vibration_analysis;oil_analysis'."
+        ),
+    )
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
 
     @model_validator(mode="after")
     def _at_least_one_schema(self) -> ExcelConnectorConfig:
-        if self.asset_registry is None and self.work_orders is None:
-            msg = "At least one of 'asset_registry' or 'work_orders' must be configured"
+        if self.asset_registry is None and self.work_orders is None and self.failure_modes is None:
+            msg = (
+                "At least one of 'asset_registry', 'work_orders', or "
+                "'failure_modes' must be configured"
+            )
             raise ValueError(msg)
         return self
