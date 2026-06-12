@@ -203,3 +203,16 @@ fixtures that omit the keys are replayed exactly as before.
   into a later turn with no block parses zero citations: the text stays byte-identical and
   no citation is misattributed against the fresh registry). All five stay disposition
   `clean`.
+
+- **Degenerate empty-JSON answer (`{}` / `[]`).** The 2026-06-10 POST-fix deepseek-r1:8b
+  conversational eval surfaced 7 turns whose final user-facing answer was literally `{}` —
+  typically right after a leaked-read recovery (the loop seam recovers the read, feeds the
+  result back, and the model's next completion is an empty JSON object). It evaded every
+  existing gate: not tool-call-shaped, not an empty string, not an echo. `_finalize_turn` now
+  runs a degenerate-JSON guard right after the empty-response check: a rendered answer that
+  json-parses to an empty dict or list (whitespace variants like `{ }` included) carries zero
+  information, so it substitutes the empty-response fallback and sets `is_fallback`. Non-empty
+  JSON answers and non-container JSON (`null`, numbers) pass through untouched. Pinned by
+  `degenerate-empty-json-answer` (landed first as disposition `clean` per R12, flipped to
+  `fallback_empty` with the guard). The eval sniff (`evals/conversational/run.py
+  find_malformed`) observes the same mode so reports attribute it to the runtime layer.

@@ -140,6 +140,40 @@ def _parse_leak_payload(text: str) -> dict[str, Any] | list[Any] | None:
     return obj if isinstance(obj, dict | list) else None
 
 
+def _is_degenerate_json_answer(text: str) -> bool:
+    """Whether ``text`` is an empty JSON container (``{}`` or ``[]``).
+
+    The 2026-06-10 post-fix conversational eval (deepseek-r1:8b) surfaced a
+    mode where the model's final completion — typically right after a
+    leaked-read recovery fed the result back — is literally ``{}``. Such an
+    answer carries zero information, exactly like an empty completion, but
+    no other guard sees it: it is not tool-call-shaped (no name/function
+    marker), not an empty string, and not a prior-turn echo. Parsing (rather
+    than string-matching) also catches whitespace variants like ``{ }``.
+
+    A non-empty JSON answer never matches — legitimate data that happens to
+    be JSON passes through (tool-call-shaped payloads are the leak
+    detector's job), and non-container JSON (``null``, ``0``, a quoted
+    string) is out of scope by design.
+
+    Args:
+        text: The rendered answer text.
+
+    Returns:
+        ``True`` when the stripped text parses to an empty dict or list.
+    """
+    stripped = text.strip()
+    # Cheap gate: every JSON container opens with a bracket; prose skips the
+    # parse entirely.
+    if not stripped.startswith(("{", "[")):
+        return False
+    try:
+        obj = json.loads(stripped)
+    except ValueError:
+        return False
+    return isinstance(obj, dict | list) and not obj
+
+
 # Lifetime of a stored pending write-confirmation (seconds). A pending
 # confirmation is meant for the IMMEDIATE next message; an hour is
 # generous-but-safe and bounds the window in which a much-later bare
@@ -1246,8 +1280,8 @@ class Agent:
            index map resolves visible ``[n]`` markers; the registry backs the
            source/page fallback).
         2. Run the validator chain on the rendered text, in order: think-tag
-           scrub → empty-response fallback → echo guard → leaked-tool-call
-           backstop → completeness hedge. The scrub (U7) removes reasoning-model
+           scrub → empty-response fallback → degenerate-JSON fallback → echo
+           guard → leaked-tool-call backstop → completeness hedge. The scrub (U7) removes reasoning-model
            ``<think>...</think>`` blocks (case-insensitive, spans newlines;
            an UNCLOSED ``<think>`` swallows to end-of-string — truncated
            reasoning is still reasoning, never answer). Strip-and-keep-remainder
@@ -1331,6 +1365,24 @@ class Agent:
                     agent=self.name,
                     chat_id=chat_id,
                     raw_response_length=len(raw_response),
+                )
+                rendered = fallback_text
+                citations = []
+                is_fallback = True
+            # Degenerate-JSON guard (2026-06-10 post-fix deepseek eval): a
+            # rendered answer that parses to an EMPTY JSON container ("{}" or
+            # "[]") carries zero information — exactly like an empty
+            # completion — but is non-empty text, so the guard above never
+            # fires. Observed after leaked-read recoveries: the loop seam
+            # feeds the read result back and the model's next completion is
+            # literally "{}".
+            elif _is_degenerate_json_answer(rendered):
+                logger.warning(
+                    "degenerate_json_answer_suppressed",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    operation="finalize_turn",
+                    response_length=len(rendered),
                 )
                 rendered = fallback_text
                 citations = []

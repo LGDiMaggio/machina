@@ -542,3 +542,28 @@ class TestExpectToolResultNonemptyEvaluation:
         )
         passed, _, _ = self._eval(signals)
         assert passed is True
+
+
+class TestFindMalformedDegenerateJson:
+    """The sniff observes the degenerate empty-JSON answer mode.
+
+    2026-06-10 post-fix deepseek-r1:8b eval: 7 turns whose final answer was
+    literally ``{}`` (typically after a leaked-read recovery) were attributed
+    'unattributed'/golden because no observable signal claimed them. The
+    sniff mirrors the runtime's ``_finalize_turn`` degenerate-JSON guard so
+    reports attribute the mode to the runtime layer.
+    """
+
+    @pytest.mark.parametrize("text", ["{}", "[]", "  {}  ", "{ }", "[\n]"])
+    def test_empty_json_container_is_flagged(self, text: str) -> None:
+        assert find_malformed(text) == "degenerate empty-JSON answer"
+
+    def test_nonempty_data_json_is_clean(self) -> None:
+        assert find_malformed('{"status": "ok", "open_work_orders": 3}') is None
+
+    def test_json_null_is_clean(self) -> None:
+        # Non-container JSON is out of scope, mirroring the runtime guard.
+        assert find_malformed("null") is None
+
+    def test_prose_mentioning_braces_is_clean(self) -> None:
+        assert find_malformed("Use {} as the default config value.") is None

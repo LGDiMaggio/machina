@@ -2564,6 +2564,61 @@ class TestEmptyResponseFallback:
         assert resp.is_fallback is False
 
 
+class TestDegenerateJsonAnswerGuard:
+    """A rendered answer that is an EMPTY JSON container must fall back.
+
+    2026-06-10 post-fix deepseek-r1:8b eval: 7 turns answered literally
+    ``{}``, typically right after a leaked-read recovery. The text carries
+    zero information — ``_finalize_turn`` treats it exactly like an empty
+    completion (empty-response fallback + ``is_fallback``). Corpus twin:
+    ``degenerate-empty-json-answer.json``.
+    """
+
+    @pytest.mark.parametrize("raw", ["{}", "[]", "  {}  ", "{ }", "[\n]"])
+    def test_empty_json_container_yields_empty_fallback(self, raw: str) -> None:
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.citations == []
+        assert resp.is_fallback is True
+
+    def test_nonempty_json_answer_passes_through(self) -> None:
+        """A legitimate (non-tool-shaped) JSON data answer is never suppressed."""
+        agent = Agent()
+        raw = '{"status": "ok", "open_work_orders": 3}'
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response=raw)
+        assert resp.text == raw
+        assert resp.is_fallback is False
+
+    def test_non_container_json_is_out_of_scope(self) -> None:
+        """``null`` (and other non-container JSON) passes through by design."""
+        agent = Agent()
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response="null")
+        assert resp.text == "null"
+        assert resp.is_fallback is False
+
+    def test_think_block_wrapping_empty_object_is_caught(self) -> None:
+        """The guard runs on the SCRUBBED text: reasoning + `{}` still falls back."""
+        from machina.agent.runtime import _EMPTY_RESPONSE_FALLBACK
+
+        agent = Agent()
+        raw = "<think>I should answer now.</think>{}"
+        resp = agent._finalize_turn(chat_id="c", user_text="hi", raw_response=raw)
+        assert resp.text == _EMPTY_RESPONSE_FALLBACK
+        assert resp.is_fallback is True
+
+    def test_custom_fallback_text_is_used(self) -> None:
+        """The post-write narration path keeps its write-aware fallback string."""
+        agent = Agent()
+        resp = agent._finalize_turn(
+            chat_id="c", user_text="hi", raw_response="{}", fallback_text="Done — created WO-1."
+        )
+        assert resp.text == "Done — created WO-1."
+        assert resp.is_fallback is True
+
+
 class TestFormatResponseForChannel:
     """Channel handler must surface citations alongside the rendered text."""
 
