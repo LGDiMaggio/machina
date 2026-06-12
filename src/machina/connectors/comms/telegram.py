@@ -80,7 +80,9 @@ class TelegramConnector:
             raise ConnectorError("bot_token is required for TelegramConnector")
 
         try:
-            from telegram.ext import ApplicationBuilder  # type: ignore[import-not-found]
+            from telegram.ext import (  # type: ignore[import-not-found,unused-ignore]
+                ApplicationBuilder,
+            )
 
             self._application = ApplicationBuilder().token(self._bot_token).build()
             logger.info("connected", connector="TelegramConnector")
@@ -146,7 +148,7 @@ class TelegramConnector:
         if self._application is None:
             raise ConnectorError("Telegram application not initialised")
 
-        from telegram import Update  # type: ignore[import-not-found]  # noqa: TC002
+        from telegram import Update  # type: ignore[import-not-found,unused-ignore]  # noqa: TC002
         from telegram.ext import ContextTypes, filters
         from telegram.ext import MessageHandler as TGMsgHandler
 
