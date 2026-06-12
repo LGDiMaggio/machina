@@ -8,6 +8,9 @@ Excel and SQL substrates (semicolon-delimited string cells);
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from machina.connectors._entity_builders import (
     dict_to_asset,
     dict_to_failure_mode,
@@ -80,6 +83,12 @@ class TestDictToFailureMode:
             {"code": "X-01", "name": "X", "typical_indicators": ["a", " b "]}
         )
         assert fm.typical_indicators == ["a", "b"]
+
+    def test_null_code_raises_instead_of_minting_none_entity(self) -> None:
+        """A NULL code column must hit the empty-code validator — never
+        produce a literal 'None' catalog entry that dedups silently."""
+        with pytest.raises(ValidationError):
+            dict_to_failure_mode({"code": None, "name": None})
 
 
 class TestDictToAssetFailureCodeLinkage:

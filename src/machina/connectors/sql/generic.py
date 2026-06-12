@@ -13,6 +13,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import ValidationError
 
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
@@ -213,12 +214,26 @@ class GenericSqlConnector:
         Returns an empty list when no ``FailureMode`` table mapping is
         configured (in which case ``Capability.READ_FAILURE_MODES`` is
         not declared either).
+
+        Raises:
+            ConnectorError: If not connected or the read fails.
+            ConnectorSchemaError: If a mapped row produces an invalid
+                ``FailureMode`` (e.g. NULL/empty code) — a loud schema
+                signal rather than a silently truncated catalog.
         """
         mapping = self._find_mapping("FailureMode")
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        return [_dict_to_failure_mode(r) for r in rows]
+        modes: list[FailureMode] = []
+        for row in rows:
+            try:
+                modes.append(_dict_to_failure_mode(row))
+            except ValidationError as exc:
+                raise ConnectorSchemaError(
+                    f"FailureMode mapping produced an invalid row {row!r}: {exc}"
+                ) from exc
+        return modes
 
     # ------------------------------------------------------------------
     # Write operations
@@ -336,7 +351,12 @@ class GenericSqlConnector:
                     raise ConnectorTransientError(
                         f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
                     ) from exc
-                raise
+                if isinstance(exc, ConnectorError):
+                    raise
+                # Honor the connector contract: callers (e.g. the runtime's
+                # failure-mode harvest) key their degraded-operation handling
+                # on ConnectorError — a raw driver exception must not escape.
+                raise ConnectorError(f"SQL read failed: {exc}") from exc
         return []  # unreachable, satisfies mypy
 
     async def _execute_write(self, mapping: TableMapping, data: dict[str, Any]) -> None:
@@ -373,6 +393,8 @@ class GenericSqlConnector:
                 raise
 
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
+        if self._conn is None:
+            raise ConnectorError("Not connected — call connect() before reading")
         cursor = self._conn.cursor()
         try:
             cursor.execute(mapping.query)

@@ -21,7 +21,7 @@ from machina.connectors.docs.excel_schema import (
     ExcelConnectorConfig,
     SheetSchema,
 )
-from machina.exceptions import ConnectorConfigError, ConnectorSchemaError
+from machina.exceptions import ConnectorConfigError, ConnectorError, ConnectorSchemaError
 
 # ------------------------------------------------------------------
 # Fixture helpers — temp CSV files (no openpyxl needed)
@@ -138,13 +138,63 @@ class TestReadFailureModes:
         assert await conn.read_failure_modes() == []
 
     @pytest.mark.asyncio
-    async def test_disconnect_clears_cache(self, tmp_path: Path) -> None:
+    async def test_read_before_connect_raises_when_sheet_configured(self, tmp_path: Path) -> None:
+        """A configured catalog must never silently read as absent."""
+        config = ExcelConnectorConfig(failure_modes=_fm_schema(str(_fm_csv(tmp_path))))
+        conn = ExcelCsvConnector(config=config)
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_failure_modes()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_cache_and_read_raises(self, tmp_path: Path) -> None:
         config = ExcelConnectorConfig(failure_modes=_fm_schema(str(_fm_csv(tmp_path))))
         conn = ExcelCsvConnector(config=config)
         await conn.connect()
         assert len(await conn.read_failure_modes()) == 2
         await conn.disconnect()
-        assert await conn.read_failure_modes() == []
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_failure_modes()
+
+    @pytest.mark.asyncio
+    async def test_refresh_reloads_failure_modes(self, tmp_path: Path) -> None:
+        """The watcher-driven refresh picks up new catalog rows."""
+        fm_file = _fm_csv(tmp_path)
+        config = ExcelConnectorConfig(failure_modes=_fm_schema(str(fm_file)))
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        assert len(await conn.read_failure_modes()) == 2
+        with fm_file.open("a", encoding="utf-8") as f:
+            f.write("IMP-EROS-01,Erosione girante,erosion,mechanical,visual_inspection,9000,BRD\n")
+        conn.refresh()
+        assert len(await conn.read_failure_modes()) == 3
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_restores_all_caches(self, tmp_path: Path) -> None:
+        """A failed mid-refresh load must not leave caches mutually inconsistent."""
+        fm_file = _fm_csv(tmp_path)
+        config = ExcelConnectorConfig(failure_modes=_fm_schema(str(fm_file)))
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        before = await conn.read_failure_modes()
+        fm_file.unlink()
+        with pytest.raises(ConnectorConfigError):
+            conn.refresh()
+        assert await conn.read_failure_modes() == before
+
+    @pytest.mark.asyncio
+    async def test_unknown_coerce_name_fails_at_connect(self, tmp_path: Path) -> None:
+        """A typo'd coercer name fails loud, not as a silent str fallback."""
+        schema = SheetSchema(
+            path=str(_fm_csv(tmp_path)),
+            columns=[
+                ColumnMapping(column="Codice", field="code", required=True),
+                ColumnMapping(column="Nome", field="name", required=True),
+                ColumnMapping(column="MTBF (ore)", field="mtbf_hours", coerce="float"),
+            ],
+        )
+        conn = ExcelCsvConnector(config=ExcelConnectorConfig(failure_modes=schema))
+        with pytest.raises(ConnectorConfigError, match="Unknown coerce 'float'"):
+            await conn.connect()
 
 
 # ------------------------------------------------------------------

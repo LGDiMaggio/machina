@@ -175,15 +175,21 @@ class GenericCmmsConnector:
         for cap, endpoint_key in self._OPTIONAL_CAPABILITIES.items():
             if self._data_dir or endpoint_key in self._endpoints:
                 caps.add(cap)
-        if self._has_failure_mode_source():
+        if self._has_fm_source:
             caps.add(Capability.READ_FAILURE_MODES)
         return frozenset(caps)
 
-    def _has_failure_mode_source(self) -> bool:
-        """True when a failure-mode catalog source is actually configured."""
-        if self._data_dir is not None:
-            return (self._data_dir / "failure_modes.json").exists()
-        return "read_failure_modes" in self._endpoints
+    @staticmethod
+    def _detect_failure_mode_source(data_dir: Path | None) -> bool:
+        """True when a local failure-mode catalog source is present.
+
+        Local mode only: ``read_failure_modes()`` serves the catalog
+        loaded from ``failure_modes.json``. REST mode never declares the
+        capability — there is no REST fetch implemented yet, and
+        declaring a source the read path cannot serve would produce a
+        capability that harvests an empty catalog forever.
+        """
+        return data_dir is not None and (data_dir / "failure_modes.json").exists()
 
     def __init__(
         self,
@@ -204,6 +210,11 @@ class GenericCmmsConnector:
         self._connected = False
         self._endpoints = endpoints or {}
         self._yaml_mapping = yaml_mapping
+        # Snapshot the failure-mode source presence once (refreshed at
+        # connect) — a per-access filesystem stat in the capabilities
+        # property would let the declared capability flip mid-session
+        # while the loaded catalog stays a connect-time snapshot.
+        self._has_fm_source = self._detect_failure_mode_source(self._data_dir)
 
         # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
         if auth is not None:
@@ -276,7 +287,19 @@ class GenericCmmsConnector:
     # ------------------------------------------------------------------
 
     async def read_failure_modes(self) -> list[FailureMode]:
-        """Return all known failure modes."""
+        """Return all known failure modes.
+
+        In local mode the result reflects what ``failure_modes.json``
+        contained at :meth:`connect` time. The runtime's harvest treats
+        the not-connected error as "this provider contributes nothing"
+        rather than aborting.
+
+        Returns:
+            The failure-mode catalog loaded at connect time.
+
+        Raises:
+            ConnectorError: If called before :meth:`connect`.
+        """
         self._ensure_connected()
         return list(self._failure_modes)
 
@@ -631,7 +654,10 @@ class GenericCmmsConnector:
             )
 
         failure_modes_file = self._data_dir / "failure_modes.json"
-        if failure_modes_file.exists():
+        # Re-snapshot at load so the declared capability and the loaded
+        # catalog stay consistent for the lifetime of the connection.
+        self._has_fm_source = failure_modes_file.exists()
+        if self._has_fm_source:
             text = await asyncio.to_thread(failure_modes_file.read_text, encoding="utf-8")
             raw = json.loads(text)
             for item in raw:

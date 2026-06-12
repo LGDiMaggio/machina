@@ -19,7 +19,7 @@ from machina.connectors.sql.schema import (
     SqlConnectorConfig,
     TableMapping,
 )
-from machina.exceptions import ConnectorSchemaError
+from machina.exceptions import ConnectorError, ConnectorSchemaError
 
 # ------------------------------------------------------------------
 # Helpers: configs and mocked connections
@@ -147,6 +147,35 @@ class TestReadFailureModes:
         connector = GenericSqlConnector(config=config)
         await connector.connect()
         assert await connector.read_failure_modes() == []
+
+    @pytest.mark.asyncio
+    async def test_unconnected_read_raises_connector_error(self) -> None:
+        """An un-connected provider raises ConnectorError, never a raw
+        AttributeError — the runtime harvest keys its skip-and-degrade
+        behavior on the ConnectorError contract."""
+        config = _config({"failure_modes": _failure_mode_mapping()})
+        connector = GenericSqlConnector(config=config)
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_failure_modes()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_null_code_row_raises_connector_schema_error(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """A NULL/invalid code row surfaces as a loud ConnectorSchemaError
+        (a ConnectorError the harvest can degrade on), not a pydantic
+        ValidationError that aborts agent start, and never a literal
+        'None' catalog entry."""
+        cursor = _make_smart_cursor(
+            fm_rows=[(None, None, "mechanical", None, None)],
+        )
+        mock_connect.return_value = _make_conn(cursor)
+        config = _config({"failure_modes": _failure_mode_mapping()})
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+        with pytest.raises(ConnectorSchemaError, match="invalid row"):
+            await connector.read_failure_modes()
 
 
 # ------------------------------------------------------------------

@@ -640,8 +640,14 @@ class TestDynamicCapabilities:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         assert "read_failure_modes" not in conn.capabilities
 
-    def test_failure_modes_capability_rest_endpoint_gate(self) -> None:
-        """REST mode declares the capability only with a configured endpoint."""
+    def test_failure_modes_capability_never_declared_in_rest_mode(self) -> None:
+        """REST mode never declares the capability — no REST fetch exists.
+
+        Declaring a source the read path cannot serve would make the
+        capability harvest an empty catalog forever (declared-but-empty
+        false signal). Even a configured endpoint key does not declare it
+        until a REST read is implemented.
+        """
         bare = GenericCmmsConnector(url="http://example.com/api", api_key="k")
         assert "read_failure_modes" not in bare.capabilities
         configured = GenericCmmsConnector(
@@ -649,7 +655,7 @@ class TestDynamicCapabilities:
             api_key="k",
             endpoints={"read_failure_modes": {"path": "failure-modes"}},
         )
-        assert "read_failure_modes" in configured.capabilities
+        assert "read_failure_modes" not in configured.capabilities
 
     @pytest.mark.asyncio
     async def test_failure_modes_harvested_after_connect(self, sample_data_dir: Path) -> None:

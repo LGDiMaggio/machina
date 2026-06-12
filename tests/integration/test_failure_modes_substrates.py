@@ -52,7 +52,7 @@ def _failure_modes_sheet() -> SheetSchema:
             ColumnMapping(column="detection_methods", field="detection_methods"),
             ColumnMapping(column="typical_indicators", field="typical_indicators"),
             ColumnMapping(column="recommended_actions", field="recommended_actions"),
-            ColumnMapping(column="mtbf_hours", field="mtbf_hours", coerce="float"),
+            ColumnMapping(column="mtbf_hours", field="mtbf_hours", type="float"),
         ],
     )
 
@@ -126,9 +126,17 @@ class TestSubstrateEquivalence:
         await csv_agent.start()
         await json_agent.start()
         try:
-            csv_codes = {fm.code for fm in await csv_agent._collect_failure_modes()}
-            json_codes = {fm.code for fm in await json_agent._collect_failure_modes()}
-            assert csv_codes == json_codes == DEMO_CODES
+            csv_catalog = {fm.code: fm for fm in await csv_agent._collect_failure_modes()}
+            json_catalog = {fm.code: fm for fm in await json_agent._collect_failure_modes()}
+            assert set(csv_catalog) == set(json_catalog) == DEMO_CODES
+            # Field-level parity spot check — equal code sets alone could
+            # hide a substrate that drops list fields or coercions.
+            csv_bear = csv_catalog["BEAR-WEAR-01"]
+            json_bear = json_catalog["BEAR-WEAR-01"]
+            assert csv_bear.typical_indicators == json_bear.typical_indicators
+            assert csv_bear.recommended_actions == json_bear.recommended_actions
+            assert csv_bear.mtbf_hours == json_bear.mtbf_hours
+            assert csv_bear.iso_14224_code == json_bear.iso_14224_code
         finally:
             await csv_agent.stop()
             await json_agent.stop()

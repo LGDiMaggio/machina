@@ -501,9 +501,17 @@ class ExcelCsvConnector:
 
         Returns an empty list when no ``failure_modes`` sheet is
         configured (the capability is then not declared either).
+
+        Raises:
+            ConnectorError: If a sheet is configured but the connector is
+                not connected — matching the cross-substrate harvest
+                contract, so a configured catalog never silently reads
+                as "no failure-mode data configured".
         """
         if self._config.failure_modes is None:
             return []
+        if not self._connected:
+            raise ConnectorError("Not connected — call connect() before reading")
         return list(self._fm_cache)
 
     # ------------------------------------------------------------------
@@ -631,13 +639,28 @@ class ExcelCsvConnector:
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Re-read files and update caches. Called by the watcher on file changes."""
-        if self._config.asset_registry:
-            self._validate_and_load_assets()
-        if self._config.work_orders:
-            self._validate_and_load_work_orders()
-        if self._config.failure_modes:
-            self._validate_and_load_failure_modes()
+        """Re-read files and update caches. Called by the watcher on file changes.
+
+        All-or-nothing: if any sheet fails to load mid-refresh (file
+        mid-save, locked, header change), every cache is restored to its
+        pre-refresh snapshot so assets and the failure-mode catalog never
+        end up mutually inconsistent.
+        """
+        snapshot = (
+            list(self._asset_cache),
+            list(self._wo_cache),
+            list(self._fm_cache),
+        )
+        try:
+            if self._config.asset_registry:
+                self._validate_and_load_assets()
+            if self._config.work_orders:
+                self._validate_and_load_work_orders()
+            if self._config.failure_modes:
+                self._validate_and_load_failure_modes()
+        except Exception:
+            self._asset_cache, self._wo_cache, self._fm_cache = snapshot
+            raise
         logger.info(
             "cache_refreshed",
             connector="ExcelCsvConnector",
@@ -652,6 +675,13 @@ class ExcelCsvConnector:
 
     def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
         """Shared exists-check → read → validate → parse pipeline for one sheet."""
+        for col in schema.columns:
+            if col.coerce and col.coerce not in COERCER_REGISTRY:
+                raise ConnectorConfigError(
+                    f"Unknown coerce '{col.coerce}' for column '{col.column}' "
+                    f"({label}) — known coercers: {sorted(COERCER_REGISTRY)}. "
+                    "For plain type conversion use the 'type' field instead."
+                )
         path = Path(schema.path)
         if not path.exists():
             raise ConnectorConfigError(f"{label} file not found: {path}")

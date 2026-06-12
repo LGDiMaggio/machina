@@ -77,8 +77,10 @@ def dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
     numeric strings for ``mtbf_hours``) is left to pydantic validation.
     """
     return FailureMode(
-        code=str(d.get("code", "")),
-        name=str(d.get("name", "")),
+        # `or ""` so a NULL column raises the empty-code validator instead
+        # of minting a literal 'None' catalog entry.
+        code=str(d.get("code") or ""),
+        name=str(d.get("name") or ""),
         mechanism=str(d.get("mechanism") or ""),
         category=str(d.get("category") or ""),
         detection_methods=split_list_cell(d.get("detection_methods")),

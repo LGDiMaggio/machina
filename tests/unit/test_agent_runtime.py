@@ -1170,6 +1170,37 @@ class TestCollectFailureModes:
         assert result["note"] == "No failure-mode data configured on any connector."
 
     @pytest.mark.asyncio
+    async def test_non_connector_error_propagates(self) -> None:
+        """Only ConnectorError means 'skip provider' — anything else is a bug
+        in the connector and must surface loudly, not shrink the catalog."""
+
+        class _BuggyProvider(_FakeFailureModeConnector):
+            async def read_failure_modes(self) -> list[FailureMode]:
+                raise RuntimeError("programming error")
+
+        agent = Agent(plant=_make_diag_plant(), connectors=[_BuggyProvider()])
+        with pytest.raises(RuntimeError, match="programming error"):
+            await agent._collect_failure_modes()
+
+    @pytest.mark.asyncio
+    async def test_unconnected_real_provider_contributes_nothing(self) -> None:
+        """A registered-but-unconnected Generic CMMS provider is skipped, not fatal."""
+        import tempfile
+        from pathlib import Path
+
+        from machina.connectors.cmms import GenericCmmsConnector
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            modes = [{"code": "X-01", "name": "X", "category": "mechanical"}]
+            (data_dir / "failure_modes.json").write_text(json.dumps(modes), encoding="utf-8")
+            conn = GenericCmmsConnector(data_dir=data_dir)
+            agent = Agent(plant=_make_diag_plant(), connectors=[conn])
+            # Deliberately NOT connected: the public read raises ConnectorError,
+            # the harvest skips the provider, and diagnosis stays honest.
+            assert await agent._collect_failure_modes() == []
+
+    @pytest.mark.asyncio
     async def test_workflow_and_diagnose_share_single_source(self) -> None:
         """``_build_domain_services`` and ``diagnose_failure`` read the same catalog."""
         agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
