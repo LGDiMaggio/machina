@@ -166,12 +166,24 @@ class GenericCmmsConnector:
         Base capabilities are always available. Optional capabilities
         are added when running in local mode (all supported) or when
         the corresponding endpoint is configured in REST mode.
+        ``READ_FAILURE_MODES`` is stricter: it is declared only when an
+        actual catalog source exists (the local ``failure_modes.json``
+        file or a configured REST endpoint), so the capability is a true
+        signal of "has a catalog" — not merely "running in local mode".
         """
         caps = set(self._BASE_CAPABILITIES)
         for cap, endpoint_key in self._OPTIONAL_CAPABILITIES.items():
             if self._data_dir or endpoint_key in self._endpoints:
                 caps.add(cap)
+        if self._has_failure_mode_source():
+            caps.add(Capability.READ_FAILURE_MODES)
         return frozenset(caps)
+
+    def _has_failure_mode_source(self) -> bool:
+        """True when a failure-mode catalog source is actually configured."""
+        if self._data_dir is not None:
+            return (self._data_dir / "failure_modes.json").exists()
+        return "read_failure_modes" in self._endpoints
 
     def __init__(
         self,

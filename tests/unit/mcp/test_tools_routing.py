@@ -65,7 +65,7 @@ class TestCapabilityToToolMap:
             assert isinstance(tools, list), f"Capability {cap} mapping must be a list"
 
     def test_known_unmapped_capabilities_are_intentional(self) -> None:
-        """Calendar capabilities are the documented unmapped set today.
+        """Calendar and failure-mode capabilities are the documented unmapped set today.
 
         If a new empty-list mapping is added without a matching entry
         here, the test fails and forces the contributor to record the
@@ -77,6 +77,9 @@ class TestCapabilityToToolMap:
             Capability.READ_CALENDAR_EVENTS,
             Capability.CREATE_CALENDAR_EVENT,
             Capability.DELETE_CALENDAR_EVENT,
+            # READ_FAILURE_MODES feeds the runtime's diagnose_failure
+            # harvest; the raw catalog has no standalone MCP tool yet.
+            Capability.READ_FAILURE_MODES,
         }
         empty = {cap for cap, tools in CAPABILITY_TO_TOOL.items() if not tools}
         assert empty == known_gaps, (

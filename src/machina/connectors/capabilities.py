@@ -34,6 +34,7 @@ class Capability(StrEnum):
     READ_SPARE_PARTS = "read_spare_parts"
     READ_MAINTENANCE_PLANS = "read_maintenance_plans"
     READ_MAINTENANCE_HISTORY = "read_maintenance_history"
+    READ_FAILURE_MODES = "read_failure_modes"
 
     # IoT — OPC-UA
     SUBSCRIBE_TO_NODES = "subscribe_to_nodes"
