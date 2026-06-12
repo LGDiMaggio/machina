@@ -20,6 +20,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
 from machina.connectors.sql.drivers import connect_jdbc, connect_odbc
+from machina.domain.failure_mode import FailureMode
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -95,18 +96,78 @@ def _row_to_dict(
     return result
 
 
+def _split_codes(raw: Any) -> list[str]:
+    """Split a semicolon-delimited code string into a clean list.
+
+    This is the committed encoding for list-valued columns (shared with
+    the Excel connector): a single string column holding
+    ``;``-delimited codes, e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``.
+    Whitespace around entries is stripped and empty entries (including
+    those produced by trailing delimiters) are dropped.
+
+    Args:
+        raw: Column value — a delimited string, an existing list, or None.
+
+    Returns:
+        Clean list of non-empty code strings ([] for None/empty input).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return [part.strip() for part in str(raw).split(";") if part.strip()]
+
+
+def _dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
+    """Build a FailureMode from a coerced field dict.
+
+    List-valued fields (``detection_methods``, ``typical_indicators``,
+    ``recommended_actions``) accept a single semicolon-delimited string
+    column (e.g. ``"vibration_analysis;thermography"``) — see
+    :func:`_split_codes`.
+    """
+    mtbf = d.get("mtbf_hours")
+    iso_code = d.get("iso_14224_code")
+    return FailureMode(
+        code=str(d.get("code", "")),
+        name=str(d.get("name", "")),
+        mechanism=str(d.get("mechanism") or ""),
+        category=str(d.get("category") or ""),
+        detection_methods=_split_codes(d.get("detection_methods")),
+        typical_indicators=_split_codes(d.get("typical_indicators")),
+        recommended_actions=_split_codes(d.get("recommended_actions")),
+        mtbf_hours=float(mtbf) if mtbf is not None else None,
+        iso_14224_code=str(iso_code) if iso_code else None,
+    )
+
+
+def _build_asset(d: dict[str, Any]) -> Asset:
+    """Build an Asset, resolving the failure-code linkage column.
+
+    When the mapping populates a ``failure_modes`` field, the raw
+    semicolon-delimited string (e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``)
+    is split into ``Asset.failure_modes`` via :func:`_split_codes`.
+    """
+    codes = _split_codes(d.pop("failure_modes", None))
+    asset = _dict_to_asset(d)
+    if codes:
+        asset.failure_modes = codes
+    return asset
+
+
 _ENTITY_BUILDERS: dict[str, Any] = {
-    "Asset": _dict_to_asset,
+    "Asset": _build_asset,
     "WorkOrder": _dict_to_work_order,
+    "FailureMode": _dict_to_failure_mode,
 }
 
 
 class GenericSqlConnector:
     """Connector for legacy SQL databases via ODBC or JDBC.
 
-    Reads assets and work orders from database tables using a YAML
-    column-to-field schema mapping.  Writes new work orders via
-    parameterized INSERT.
+    Reads assets, work orders, and failure-mode catalogs from database
+    tables using a YAML column-to-field schema mapping.  Writes new
+    work orders via parameterized INSERT.
 
     Args:
         config: Parsed SQL connector configuration.
@@ -131,6 +192,10 @@ class GenericSqlConnector:
         caps: set[Capability] = {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
         if config.capabilities == "read_write":
             caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
+        # Declared only when a FailureMode table mapping is configured, so
+        # capability discovery is a true signal of "has a catalog source".
+        if any(m.entity == "FailureMode" for m in config.tables.values()):
+            caps.add(Capability.READ_FAILURE_MODES)
         self._capabilities = frozenset(caps)
 
     @property
@@ -186,12 +251,18 @@ class GenericSqlConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Read assets from the configured table mapping."""
+        """Read assets from the configured table mapping.
+
+        When the mapping includes a ``failure_modes`` field, the source
+        column is interpreted as a semicolon-delimited failure-mode code
+        string (e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``) and resolved into
+        ``Asset.failure_modes``.
+        """
         mapping = self._find_mapping("Asset")
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        return [_dict_to_asset(r) for r in rows]
+        return [_build_asset(r) for r in rows]
 
     async def read_work_orders(self) -> list[WorkOrder]:
         """Read work orders from the configured table mapping."""
@@ -200,6 +271,19 @@ class GenericSqlConnector:
             return []
         rows = await self._execute_read(mapping)
         return [_dict_to_work_order(r) for r in rows]
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        """Read the failure-mode catalog from the configured table mapping.
+
+        Returns an empty list when no ``FailureMode`` table mapping is
+        configured (in which case ``Capability.READ_FAILURE_MODES`` is
+        not declared either).
+        """
+        mapping = self._find_mapping("FailureMode")
+        if mapping is None:
+            return []
+        rows = await self._execute_read(mapping)
+        return [_dict_to_failure_mode(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Write operations
