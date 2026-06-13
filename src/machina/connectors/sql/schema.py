@@ -15,7 +15,14 @@ _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 
 class FieldMapping(BaseModel):
-    """Mapping from one database column to a domain entity field."""
+    """Mapping from one database column to a domain entity field.
+
+    List-valued entity fields (e.g. ``Asset.failure_modes``,
+    ``FailureMode.detection_methods``) map to a single string column
+    containing semicolon-delimited values, e.g.
+    ``"BEAR-WEAR-01;SEAL-LEAK-01"``.  The connector splits on ``;``,
+    strips whitespace from each entry, and drops empty entries.
+    """
 
     column: str = Field(..., description="Database column name")
     coerce: str | None = Field(
@@ -30,10 +37,16 @@ class FieldMapping(BaseModel):
 
 
 class TableMapping(BaseModel):
-    """Mapping from a database table/query to a domain entity type."""
+    """Mapping from a database table/query to a domain entity type.
+
+    A ``FailureMode`` mapping turns a table or view into a failure-mode
+    catalog source; the connector then declares
+    ``Capability.READ_FAILURE_MODES`` and serves the rows through
+    ``read_failure_modes()``.
+    """
 
     query: str = Field(..., description="SQL SELECT query for reading")
-    entity: Literal["Asset", "WorkOrder"] = Field(
+    entity: Literal["Asset", "WorkOrder", "FailureMode"] = Field(
         ..., description="Target Machina domain entity type"
     )
     fields: dict[str, FieldMapping] = Field(

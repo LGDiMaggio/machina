@@ -617,6 +617,69 @@ class TestDynamicCapabilities:
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
 
+    def test_failure_modes_capability_declared_with_local_file(
+        self, sample_data_dir: Path
+    ) -> None:
+        """READ_FAILURE_MODES appears only when failure_modes.json exists."""
+        modes = [
+            {
+                "code": "BEAR-WEAR-01",
+                "name": "Bearing Wear",
+                "category": "mechanical",
+                "typical_indicators": ["vibration_velocity_mm_s"],
+            }
+        ]
+        (sample_data_dir / "failure_modes.json").write_text(json.dumps(modes), encoding="utf-8")
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        assert "read_failure_modes" in conn.capabilities
+
+    def test_failure_modes_capability_absent_without_local_file(
+        self, sample_data_dir: Path
+    ) -> None:
+        """Local mode alone does not declare the capability — the source must exist."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        assert "read_failure_modes" not in conn.capabilities
+
+    def test_failure_modes_capability_never_declared_in_rest_mode(self) -> None:
+        """REST mode never declares the capability — no REST fetch exists.
+
+        Declaring a source the read path cannot serve would make the
+        capability harvest an empty catalog forever (declared-but-empty
+        false signal). Even a configured endpoint key does not declare it
+        until a REST read is implemented.
+        """
+        bare = GenericCmmsConnector(url="http://example.com/api", api_key="k")
+        assert "read_failure_modes" not in bare.capabilities
+        configured = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={"read_failure_modes": {"path": "failure-modes"}},
+        )
+        assert "read_failure_modes" not in configured.capabilities
+
+    @pytest.mark.asyncio
+    async def test_failure_modes_harvested_after_connect(self, sample_data_dir: Path) -> None:
+        """The declared capability is backed by the public read method."""
+        modes = [
+            {
+                "code": "BEAR-WEAR-01",
+                "name": "Bearing Wear",
+                "category": "mechanical",
+                "typical_indicators": ["vibration_velocity_mm_s"],
+            },
+            {
+                "code": "SEAL-LEAK-01",
+                "name": "Mechanical Seal Leakage",
+                "category": "mechanical",
+                "typical_indicators": ["seal_pressure_bar"],
+            },
+        ]
+        (sample_data_dir / "failure_modes.json").write_text(json.dumps(modes), encoding="utf-8")
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        harvested = await conn.read_failure_modes()
+        assert [fm.code for fm in harvested] == ["BEAR-WEAR-01", "SEAL-LEAK-01"]
+
 
 class TestGenericCmmsConnectorRest:
     """Pre-connect validation for REST mode.

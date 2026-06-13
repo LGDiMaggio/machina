@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
         SheetSchema,
     )
     from machina.domain.asset import Asset
+    from machina.domain.failure_mode import FailureMode
     from machina.domain.work_order import WorkOrder
 from machina.exceptions import (
     ConnectorConfigError,
@@ -377,8 +379,11 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
 class ExcelCsvConnector:
     """Connector that treats Excel/CSV files as a CMMS substrate.
 
-    Reads assets and work orders from spreadsheet files using a YAML
-    schema mapping.  Writes new work orders by appending rows.
+    Reads assets, work orders, and (optionally) a failure-mode catalog
+    from spreadsheet files using a YAML schema mapping.  Writes new work
+    orders by appending rows.  Multi-valued cells (asset failure-code
+    linkage, failure-mode list fields) use a semicolon-delimited string,
+    e.g. ``"BEAR-WEAR-01;SEAL-LEAK-01"``.
 
     Args:
         config: Parsed connector configuration.
@@ -395,7 +400,7 @@ class ExcelCsvConnector:
         ```
     """
 
-    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+    _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = frozenset(
         {
             Capability.READ_ASSETS,
             Capability.READ_WORK_ORDERS,
@@ -404,11 +409,27 @@ class ExcelCsvConnector:
         }
     )
 
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        """Return capabilities based on configuration.
+
+        Base capabilities are always available. ``READ_FAILURE_MODES`` is
+        declared only when a ``failure_modes`` sheet is configured —
+        unconfigured means not-declared, so capability discovery is a true
+        signal of "has a failure-mode catalog".
+        """
+        return self._capabilities
+
     def __init__(self, *, config: ExcelConnectorConfig) -> None:
         self._config = config
+        caps = set(self._BASE_CAPABILITIES)
+        if config.failure_modes is not None:
+            caps.add(Capability.READ_FAILURE_MODES)
+        self._capabilities = frozenset(caps)
         self._connected = False
         self._asset_cache: list[Asset] = []
         self._wo_cache: list[WorkOrder] = []
+        self._fm_cache: list[FailureMode] = []
         self._write_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -421,18 +442,22 @@ class ExcelCsvConnector:
             self._validate_and_load_assets()
         if self._config.work_orders:
             self._validate_and_load_work_orders()
+        if self._config.failure_modes:
+            self._validate_and_load_failure_modes()
         self._connected = True
         logger.info(
             "connected",
             connector="ExcelCsvConnector",
             assets_loaded=len(self._asset_cache),
             work_orders_loaded=len(self._wo_cache),
+            failure_modes_loaded=len(self._fm_cache),
         )
 
     async def disconnect(self) -> None:
         """Release caches."""
         self._asset_cache.clear()
         self._wo_cache.clear()
+        self._fm_cache.clear()
         self._connected = False
 
     async def health_check(self) -> ConnectorHealth:
@@ -441,6 +466,7 @@ class ExcelCsvConnector:
         for label, schema in [
             ("asset_registry", self._config.asset_registry),
             ("work_orders", self._config.work_orders),
+            ("failure_modes", self._config.failure_modes),
         ]:
             if schema is None:
                 continue
@@ -469,6 +495,24 @@ class ExcelCsvConnector:
         if self._config.work_orders is None:
             return []
         return list(self._wo_cache)
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        """Return failure modes from the failure-modes spreadsheet.
+
+        Returns an empty list when no ``failure_modes`` sheet is
+        configured (the capability is then not declared either).
+
+        Raises:
+            ConnectorError: If a sheet is configured but the connector is
+                not connected — matching the cross-substrate harvest
+                contract, so a configured catalog never silently reads
+                as "no failure-mode data configured".
+        """
+        if self._config.failure_modes is None:
+            return []
+        if not self._connected:
+            raise ConnectorError("Not connected — call connect() before reading")
+        return list(self._fm_cache)
 
     # ------------------------------------------------------------------
     # Write operations
@@ -595,45 +639,75 @@ class ExcelCsvConnector:
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Re-read files and update caches. Called by the watcher on file changes."""
-        if self._config.asset_registry:
-            self._validate_and_load_assets()
-        if self._config.work_orders:
-            self._validate_and_load_work_orders()
+        """Re-read files and update caches. Called by the watcher on file changes.
+
+        All-or-nothing: if any sheet fails to load mid-refresh (file
+        mid-save, locked, header change), every cache is restored to its
+        pre-refresh snapshot so assets and the failure-mode catalog never
+        end up mutually inconsistent.
+        """
+        snapshot = (
+            list(self._asset_cache),
+            list(self._wo_cache),
+            list(self._fm_cache),
+        )
+        try:
+            if self._config.asset_registry:
+                self._validate_and_load_assets()
+            if self._config.work_orders:
+                self._validate_and_load_work_orders()
+            if self._config.failure_modes:
+                self._validate_and_load_failure_modes()
+        except Exception:
+            self._asset_cache, self._wo_cache, self._fm_cache = snapshot
+            raise
         logger.info(
             "cache_refreshed",
             connector="ExcelCsvConnector",
             assets=len(self._asset_cache),
             work_orders=len(self._wo_cache),
+            failure_modes=len(self._fm_cache),
         )
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
+    def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
+        """Shared exists-check → read → validate → parse pipeline for one sheet."""
+        for col in schema.columns:
+            if col.coerce and col.coerce not in COERCER_REGISTRY:
+                raise ConnectorConfigError(
+                    f"Unknown coerce '{col.coerce}' for column '{col.column}' "
+                    f"({label}) — known coercers: {sorted(COERCER_REGISTRY)}. "
+                    "For plain type conversion use the 'type' field instead."
+                )
+        path = Path(schema.path)
+        if not path.exists():
+            raise ConnectorConfigError(f"{label} file not found: {path}")
+        headers, raw_rows = self._read_file(path, schema)
+        _validate_headers(headers, schema, str(path))
+        return _rows_to_dicts(raw_rows, schema, str(path))
+
     def _validate_and_load_assets(self) -> None:
         schema = self._config.asset_registry
         assert schema is not None
-        path = Path(schema.path)
-        if not path.exists():
-            raise ConnectorConfigError(f"Asset registry file not found: {path}")
-        headers, raw_rows = self._read_file(path, schema)
-        _validate_headers(headers, schema, str(path))
-        dicts = _rows_to_dicts(raw_rows, schema, str(path))
+        dicts = self._load_sheet_dicts(schema, "Asset registry")
         self._asset_cache = [_dict_to_asset(d) for d in dicts]
+
+    def _validate_and_load_failure_modes(self) -> None:
+        schema = self._config.failure_modes
+        assert schema is not None
+        dicts = self._load_sheet_dicts(schema, "Failure modes")
+        self._fm_cache = [_dict_to_failure_mode(d) for d in dicts]
 
     def _validate_and_load_work_orders(self) -> None:
         schema = self._config.work_orders
         assert schema is not None
-        path = Path(schema.path)
-        if not path.exists():
-            if schema.write_mode is not None:
-                self._wo_cache = []
-                return
-            raise ConnectorConfigError(f"Work order file not found: {path}")
-        headers, raw_rows = self._read_file(path, schema)
-        _validate_headers(headers, schema, str(path))
-        dicts = _rows_to_dicts(raw_rows, schema, str(path))
+        if not Path(schema.path).exists() and schema.write_mode is not None:
+            self._wo_cache = []
+            return
+        dicts = self._load_sheet_dicts(schema, "Work order")
         self._wo_cache = [_dict_to_work_order(d) for d in dicts]
 
     @staticmethod

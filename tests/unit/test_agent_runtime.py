@@ -92,9 +92,9 @@ def _diag_failure_modes() -> list[FailureMode]:
 
 
 class _FakeFailureModeConnector:
-    """Connector stub that carries a failure-mode catalog (no capabilities)."""
+    """Connector stub declaring ``READ_FAILURE_MODES`` with a catalog."""
 
-    capabilities: ClassVar[list[str]] = []
+    capabilities: ClassVar[list[str]] = ["read_failure_modes"]
 
     def __init__(self, failure_modes: list[FailureMode] | None = None) -> None:
         self._failure_modes = failure_modes if failure_modes is not None else _diag_failure_modes()
@@ -107,6 +107,34 @@ class _FakeFailureModeConnector:
 
     async def health_check(self) -> bool:
         return True
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        return list(self._failure_modes)
+
+
+class _RaisingFailureModeConnector:
+    """Stub declaring ``READ_FAILURE_MODES`` whose read always raises.
+
+    Models a registered-but-not-connected provider: the public
+    ``read_failure_modes()`` raises ``ConnectorError`` instead of serving
+    a catalog.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_failure_modes"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        from machina.exceptions import ConnectorError
+
+        raise ConnectorError("not connected")
 
 
 def _make_diag_plant() -> Plant:
@@ -871,10 +899,15 @@ class TestDiagnoseFailureCatalog:
         )
 
     @pytest.mark.asyncio
-    async def test_works_without_start_call_time_harvest(self) -> None:
-        """The catalog is harvested at call time — no agent.start() needed."""
+    async def test_call_time_harvest_via_declared_capability(self) -> None:
+        """The catalog is harvested at call time from capability-declaring providers.
+
+        The stub serves its catalog without requiring a connection, so no
+        ``agent.start()`` is needed here; real connectors whose
+        ``read_failure_modes()`` raises before connect contribute nothing
+        (see the ConnectorError guard tests).
+        """
         agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
-        # Deliberately NOT awaiting agent.start().
         result = await agent._execute_tool(
             "diagnose_failure",
             {"asset_id": "P-201", "symptoms": ["seal leakage"]},
@@ -1054,6 +1087,128 @@ class TestDiagnoseFailureCatalog:
         codes = [f["code"] for f in result["probable_failures"]]
         assert codes == ["VIB-01"]
         assert "NO-IND-01" not in codes
+
+
+class TestCollectFailureModes:
+    """Capability-gated harvest semantics of ``_collect_failure_modes``."""
+
+    @pytest.mark.asyncio
+    async def test_overlapping_codes_first_registration_wins(self) -> None:
+        """Two providers sharing a code keep the first-registered entity."""
+        first = FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear (first)",
+            category="mechanical",
+            typical_indicators=["vibration_velocity_mm_s"],
+        )
+        second = FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear (second)",
+            category="mechanical",
+            typical_indicators=["bearing_temperature_c"],
+        )
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[
+                _FakeFailureModeConnector(failure_modes=[first]),
+                _FakeFailureModeConnector(failure_modes=[second]),
+            ],
+        )
+        catalog = await agent._collect_failure_modes()
+        assert [fm.code for fm in catalog] == ["BEAR-WEAR-01"]
+        assert catalog[0].name == "Bearing Wear (first)"
+
+    @pytest.mark.asyncio
+    async def test_no_capability_declared_yields_empty_harvest(self) -> None:
+        """Connectors without the capability contribute nothing — no probing."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeConnector()])
+        assert await agent._collect_failure_modes() == []
+
+    @pytest.mark.asyncio
+    async def test_agent_starts_normally_with_no_providers(self) -> None:
+        """An agent with zero failure-mode providers starts without error."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeConnector()])
+        await agent.start()
+        try:
+            analyzer = agent._engine._services["failure_analyzer"]
+            assert analyzer._failure_modes == []
+        finally:
+            await agent.stop()
+
+    @pytest.mark.asyncio
+    async def test_provider_with_empty_catalog_tolerated(self) -> None:
+        """A declared provider returning ``[]`` is harmless."""
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_FakeFailureModeConnector(failure_modes=[])],
+        )
+        assert await agent._collect_failure_modes() == []
+
+    @pytest.mark.asyncio
+    async def test_raising_provider_contributes_nothing(self) -> None:
+        """A provider raising ConnectorError is skipped, not fatal (R9 guard)."""
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_RaisingFailureModeConnector(), _FakeFailureModeConnector()],
+        )
+        catalog = await agent._collect_failure_modes()
+        # The healthy provider's catalog still arrives.
+        assert {fm.code for fm in catalog} == {fm.code for fm in _diag_failure_modes()}
+
+    @pytest.mark.asyncio
+    async def test_raising_sole_provider_gives_honest_empty_catalog_note(self) -> None:
+        """Diagnosis stays honest when the only provider cannot serve."""
+        agent = Agent(
+            plant=_make_diag_plant(),
+            connectors=[_RaisingFailureModeConnector()],
+        )
+        result = await agent._execute_tool(
+            "diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["vibration"]},
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "No failure-mode data configured on any connector."
+
+    @pytest.mark.asyncio
+    async def test_non_connector_error_propagates(self) -> None:
+        """Only ConnectorError means 'skip provider' — anything else is a bug
+        in the connector and must surface loudly, not shrink the catalog."""
+
+        class _BuggyProvider(_FakeFailureModeConnector):
+            async def read_failure_modes(self) -> list[FailureMode]:
+                raise RuntimeError("programming error")
+
+        agent = Agent(plant=_make_diag_plant(), connectors=[_BuggyProvider()])
+        with pytest.raises(RuntimeError, match="programming error"):
+            await agent._collect_failure_modes()
+
+    @pytest.mark.asyncio
+    async def test_unconnected_real_provider_contributes_nothing(self) -> None:
+        """A registered-but-unconnected Generic CMMS provider is skipped, not fatal."""
+        import tempfile
+        from pathlib import Path
+
+        from machina.connectors.cmms import GenericCmmsConnector
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            modes = [{"code": "X-01", "name": "X", "category": "mechanical"}]
+            (data_dir / "failure_modes.json").write_text(json.dumps(modes), encoding="utf-8")
+            conn = GenericCmmsConnector(data_dir=data_dir)
+            agent = Agent(plant=_make_diag_plant(), connectors=[conn])
+            # Deliberately NOT connected: the public read raises ConnectorError,
+            # the harvest skips the provider, and diagnosis stays honest.
+            assert await agent._collect_failure_modes() == []
+
+    @pytest.mark.asyncio
+    async def test_workflow_and_diagnose_share_single_source(self) -> None:
+        """``_build_domain_services`` and ``diagnose_failure`` read the same catalog."""
+        agent = Agent(plant=_make_diag_plant(), connectors=[_FakeFailureModeConnector()])
+        await agent._build_domain_services()
+        analyzer = agent._engine._services["failure_analyzer"]
+        analyzer_codes = {fm.code for fm in analyzer._failure_modes}
+        harvest_codes = {fm.code for fm in await agent._collect_failure_modes()}
+        assert analyzer_codes == harvest_codes == {fm.code for fm in _diag_failure_modes()}
 
 
 class TestDiagnoseFailureArgCoercion:
@@ -2903,14 +3058,15 @@ class TestAgentWorkflows:
         assert "LIVE mode is active" in prompt
         assert "real" in prompt.lower()
 
-    def test_build_domain_services_reapplies_sandbox_to_engine(self) -> None:
+    @pytest.mark.asyncio
+    async def test_build_domain_services_reapplies_sandbox_to_engine(self) -> None:
         """``_build_domain_services`` re-applies ``self._sandbox`` so a rebuilt
         engine cannot silently drift below the canonical Agent value.
         """
         agent = Agent(sandbox=True)
         # Simulate the engine being replaced (e.g. by a test fixture).
         agent._engine.sandbox = False
-        agent._build_domain_services()
+        await agent._build_domain_services()
         assert agent._engine.sandbox is True
 
     def test_confirmations_default_true(self) -> None:

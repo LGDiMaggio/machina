@@ -55,6 +55,13 @@ columns and Machina domain entities. See the
 | `READ_WORK_ORDERS` | Read | Read work order rows |
 | `CREATE_WORK_ORDER` | Write | Append a new work order row |
 | `READ_SPARE_PARTS` | Read | Read spare part rows |
+| `READ_FAILURE_MODES` | Read | Read an optional failure-modes sheet — declared only when a `failure_modes` sheet schema is configured |
+
+Multi-valued cells (the asset `failure_modes` linkage column and the
+failure-mode list fields `detection_methods`, `typical_indicators`,
+`recommended_actions`) use a semicolon-delimited string, e.g.
+`"BEAR-WEAR-01;SEAL-LEAK-01"`. A sample catalog lives at
+`examples/sample_data/failure_modes.csv`.
 
 ## File Watcher
 

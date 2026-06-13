@@ -87,6 +87,12 @@ automatically.
 | `CREATE_WORK_ORDER` | Insert work order row |
 | `READ_SPARE_PARTS` | Query spare parts table (if mapped) |
 | `READ_MAINTENANCE_HISTORY` | Query work orders filtered by asset |
+| `READ_FAILURE_MODES` | Query failure-mode catalog table — declared only when a `FailureMode` table mapping is configured |
+
+To map a failure-mode catalog, add a table mapping with `entity: FailureMode`.
+List-valued columns (`detection_methods`, `typical_indicators`,
+`recommended_actions`) and the asset `failure_modes` linkage column use a
+semicolon-delimited string, e.g. `"BEAR-WEAR-01;SEAL-LEAK-01"`.
 
 ## Supported Databases
 

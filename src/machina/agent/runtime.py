@@ -797,7 +797,7 @@ class Agent:
             )
 
         # Auto-load failure modes and build domain services
-        self._build_domain_services()
+        await self._build_domain_services()
 
         # Connect channels. In sandbox mode we skip outbound I/O so
         # channels like EmailConnector do not perform real SMTP logins.
@@ -816,7 +816,7 @@ class Agent:
             connectors=list(self._registry.all().keys()),
         )
 
-    def _build_domain_services(self) -> None:
+    async def _build_domain_services(self) -> None:
         """Build domain services from loaded data and register them with the workflow engine."""
         from machina.domain.services.asset_service import AssetService
         from machina.domain.services.failure_analyzer import FailureAnalyzer
@@ -825,7 +825,7 @@ class Agent:
 
         # Collect failure modes from connectors that provide them (shared
         # with the diagnose_failure tool so the two sites cannot drift).
-        all_failure_modes = self._collect_failure_modes()
+        all_failure_modes = await self._collect_failure_modes()
 
         # Collect maintenance plans from connectors that provide them
         all_plans = []
@@ -858,23 +858,46 @@ class Agent:
                 failure_modes=len(all_failure_modes),
             )
 
-    def _collect_failure_modes(self) -> list[FailureMode]:
-        """Harvest failure modes from every registered connector, deduped by code.
+    async def _collect_failure_modes(self) -> list[FailureMode]:
+        """Harvest failure modes from capability-declaring connectors, deduped by code.
 
         Single source for both the workflow path
         (:meth:`_build_domain_services`) and the ``diagnose_failure`` tool —
-        factored out so the two sites cannot drift. Derives from each
-        connector's ``_failure_modes`` at call time, so it works on agents
-        that were never :meth:`start`\\ ed and never serves a stale snapshot.
-        Duplicate codes across connectors keep the first occurrence
+        factored out so the two sites cannot drift. Discovers providers via
+        :attr:`Capability.READ_FAILURE_MODES` and awaits each connector's
+        public ``read_failure_modes()`` at call time, so it never serves a
+        stale snapshot. A provider that raises :class:`ConnectorError`
+        (e.g. not connected) contributes nothing instead of aborting the
+        whole harvest — the empty-catalog honesty note downstream stays
+        intact. Duplicate codes across connectors keep the first occurrence
         (registration order).
         """
+        from machina.exceptions import ConnectorError
+
+        providers = self._registry.find_by_capability(Capability.READ_FAILURE_MODES)
+        # Fan out concurrently — one slow/flaky provider must not serialise
+        # the whole harvest. gather() preserves argument order, so the
+        # first-registration-wins dedup below is unchanged.
+        results = await asyncio.gather(
+            *(conn.read_failure_modes() for _name, conn in providers),  # type: ignore[attr-defined]
+            return_exceptions=True,
+        )
         by_code: dict[str, FailureMode] = {}
-        for _name, conn in self._registry.all().items():
-            if hasattr(conn, "_failure_modes"):
-                for fm in conn._failure_modes:
-                    if fm.code not in by_code:
-                        by_code[fm.code] = fm
+        for (name, _conn), result in zip(providers, results, strict=True):
+            if isinstance(result, ConnectorError):
+                logger.warning(
+                    "failure_mode_harvest_failed",
+                    agent=self.name,
+                    connector=name,
+                    operation="collect_failure_modes",
+                    error=str(result),
+                )
+                continue
+            if isinstance(result, BaseException):
+                raise result
+            for fm in result:
+                if fm.code not in by_code:
+                    by_code[fm.code] = fm
         return list(by_code.values())
 
     async def stop(self) -> None:
@@ -2474,7 +2497,7 @@ class Agent:
             if not isinstance(symptoms, list):
                 symptoms = []
             symptoms = [s for s in symptoms if isinstance(s, str)]
-            return self._tool_diagnose_failure(asset_id, symptoms)
+            return await self._tool_diagnose_failure(asset_id, symptoms)
 
         if name == "get_maintenance_schedule":
             return {"info": "Maintenance schedule lookup not yet connected to a data source."}
@@ -2795,7 +2818,7 @@ class Agent:
         )
         return created.model_dump(mode="json")  # type: ignore[no-any-return]
 
-    def _tool_diagnose_failure(
+    async def _tool_diagnose_failure(
         self,
         asset_id: str,
         symptoms: list[str],
@@ -2842,9 +2865,9 @@ class Agent:
             return result
         result["asset_name"] = asset.name
 
-        # Call-time harvest: derive the catalog from whatever connectors are
-        # registered NOW — works on un-started agents, never goes stale.
-        catalog = self._collect_failure_modes()
+        # Call-time harvest: derive the catalog from whatever connectors
+        # declare the capability NOW — never goes stale.
+        catalog = await self._collect_failure_modes()
         if not catalog:
             logger.warning(
                 "diagnose_failure_no_catalog",

@@ -648,6 +648,10 @@ CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
     Capability.READ_CALENDAR_EVENTS: [],
     Capability.CREATE_CALENDAR_EVENT: [],
     Capability.DELETE_CALENDAR_EVENT: [],
+    # * Failure modes (READ_FAILURE_MODES) — the capability drives the
+    #   agent runtime's catalog harvest (``diagnose_failure`` consumes it
+    #   internally); no standalone MCP tool exposes the raw catalog yet.
+    Capability.READ_FAILURE_MODES: [],
 }
 
 

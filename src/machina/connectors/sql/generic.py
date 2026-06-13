@@ -13,8 +13,10 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import ValidationError
 
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
+from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -30,6 +32,7 @@ from machina.exceptions import (
 if TYPE_CHECKING:
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
     from machina.domain.asset import Asset
+    from machina.domain.failure_mode import FailureMode
     from machina.domain.work_order import WorkOrder
 
 logger = structlog.get_logger(__name__)
@@ -95,18 +98,12 @@ def _row_to_dict(
     return result
 
 
-_ENTITY_BUILDERS: dict[str, Any] = {
-    "Asset": _dict_to_asset,
-    "WorkOrder": _dict_to_work_order,
-}
-
-
 class GenericSqlConnector:
     """Connector for legacy SQL databases via ODBC or JDBC.
 
-    Reads assets and work orders from database tables using a YAML
-    column-to-field schema mapping.  Writes new work orders via
-    parameterized INSERT.
+    Reads assets, work orders, and failure-mode catalogs from database
+    tables using a YAML column-to-field schema mapping.  Writes new
+    work orders via parameterized INSERT.
 
     Args:
         config: Parsed SQL connector configuration.
@@ -131,6 +128,10 @@ class GenericSqlConnector:
         caps: set[Capability] = {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
         if config.capabilities == "read_write":
             caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
+        # Declared only when a FailureMode table mapping is configured, so
+        # capability discovery is a true signal of "has a catalog source".
+        if any(m.entity == "FailureMode" for m in config.tables.values()):
+            caps.add(Capability.READ_FAILURE_MODES)
         self._capabilities = frozenset(caps)
 
     @property
@@ -186,7 +187,13 @@ class GenericSqlConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Read assets from the configured table mapping."""
+        """Read assets from the configured table mapping.
+
+        When the mapping includes a ``failure_modes`` field, the source
+        column is interpreted as a semicolon-delimited failure-mode code
+        string and resolved into ``Asset.failure_modes`` (see
+        :func:`machina.connectors._entity_builders.split_list_cell`).
+        """
         mapping = self._find_mapping("Asset")
         if mapping is None:
             return []
@@ -200,6 +207,33 @@ class GenericSqlConnector:
             return []
         rows = await self._execute_read(mapping)
         return [_dict_to_work_order(r) for r in rows]
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        """Read the failure-mode catalog from the configured table mapping.
+
+        Returns an empty list when no ``FailureMode`` table mapping is
+        configured (in which case ``Capability.READ_FAILURE_MODES`` is
+        not declared either).
+
+        Raises:
+            ConnectorError: If not connected or the read fails.
+            ConnectorSchemaError: If a mapped row produces an invalid
+                ``FailureMode`` (e.g. NULL/empty code) — a loud schema
+                signal rather than a silently truncated catalog.
+        """
+        mapping = self._find_mapping("FailureMode")
+        if mapping is None:
+            return []
+        rows = await self._execute_read(mapping)
+        modes: list[FailureMode] = []
+        for row in rows:
+            try:
+                modes.append(_dict_to_failure_mode(row))
+            except ValidationError as exc:
+                raise ConnectorSchemaError(
+                    f"FailureMode mapping produced an invalid row {row!r}: {exc}"
+                ) from exc
+        return modes
 
     # ------------------------------------------------------------------
     # Write operations
@@ -317,7 +351,12 @@ class GenericSqlConnector:
                     raise ConnectorTransientError(
                         f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
                     ) from exc
-                raise
+                if isinstance(exc, ConnectorError):
+                    raise
+                # Honor the connector contract: callers (e.g. the runtime's
+                # failure-mode harvest) key their degraded-operation handling
+                # on ConnectorError — a raw driver exception must not escape.
+                raise ConnectorError(f"SQL read failed: {exc}") from exc
         return []  # unreachable, satisfies mypy
 
     async def _execute_write(self, mapping: TableMapping, data: dict[str, Any]) -> None:
@@ -354,6 +393,8 @@ class GenericSqlConnector:
                 raise
 
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
+        if self._conn is None:
+            raise ConnectorError("Not connected — call connect() before reading")
         cursor = self._conn.cursor()
         try:
             cursor.execute(mapping.query)
