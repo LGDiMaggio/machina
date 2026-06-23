@@ -16,6 +16,8 @@
     <a href="https://machina-ai.readthedocs.io">Docs</a> &bull;
     <a href="#contributing">Contributing</a>
   </p>
+  <br/>
+  <img src="docs/assets/machina-demo.gif" alt="Machina demo" width="640"/>
 </div>
 
 ---
