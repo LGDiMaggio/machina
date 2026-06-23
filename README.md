@@ -17,7 +17,7 @@
     <a href="#contributing">Contributing</a>
   </p>
   <br/>
-  <img src="docs/assets/machina-demo.gif" alt="Machina demo" width="640"/>
+  <img src="docs/assets/machina-demo.gif" alt="Machina demo" width="700"/>
 </div>
 
 ---
