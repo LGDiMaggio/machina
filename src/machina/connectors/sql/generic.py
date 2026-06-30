@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 from pydantic import ValidationError
@@ -120,12 +120,23 @@ class GenericSqlConnector:
         ```
     """
 
+    # Capabilities available regardless of configuration. Write capabilities
+    # (CREATE_WORK_ORDER / UPDATE_WORK_ORDER) and READ_FAILURE_MODES are
+    # config-driven and added in __init__ — they are NOT part of the base set.
+    # Exposed as a ClassVar so framework introspection can read the base set
+    # off the class without instantiating the connector (which needs a parsed
+    # config). __init__ derives the live capability set from this constant, so
+    # the two cannot drift.
+    _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
+    )
+
     def __init__(self, *, config: SqlConnectorConfig) -> None:
         self._config = config
         self._conn: Any = None
         self._connected = False
 
-        caps: set[Capability] = {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
+        caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
             caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
         # Declared only when a FailureMode table mapping is configured, so
@@ -269,6 +280,9 @@ class GenericSqlConnector:
             raise ConnectorConfigError(
                 "Write operations not enabled — set capabilities: read_write"
             )
+        # introspect: stub — no per-schema UPDATE query is implemented yet, so
+        # framework introspection must treat UPDATE_WORK_ORDER as unwired here
+        # even though the capability is declared when capabilities: read_write.
         raise ConnectorError(
             "Generic SQL update_work_order requires a custom UPDATE query "
             "per schema — not yet implemented. Use create_work_order for new records."

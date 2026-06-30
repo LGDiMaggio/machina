@@ -20,7 +20,7 @@ Install the backend you need::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -88,6 +88,17 @@ class CalendarConnector:
         ```
     """
 
+    # Guaranteed *minimum* capability set: every backend can read events. The
+    # writable backends (google / outlook) additionally expose create/delete,
+    # but the ical backend is read-only, so those writes are backend-dependent.
+    # Exposed as a ClassVar so framework introspection can read the guaranteed
+    # base off the class without instantiating (which selects a backend); the
+    # write capabilities are then annotated "configurable" since they depend on
+    # the backend. (Mirrors the SQL connector semantics: base = minimum, writes
+    # = configurable deltas — keeping base = full would double-emit the writes
+    # both as guaranteed and as configurable.)
+    _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = _READONLY_CAPABILITIES
+
     def __init__(
         self,
         *,
@@ -105,7 +116,8 @@ class CalendarConnector:
         self._calendar_type_map = calendar_type_map or {}
         self._backend: Any = None
 
-        # Set capabilities based on backend
+        # Set capabilities based on backend. The ical backend is read-only
+        # (base/minimum set); every writable backend exposes the full set.
         if backend == "ical":
             self.capabilities: frozenset[Capability] = _READONLY_CAPABILITIES
         else:
