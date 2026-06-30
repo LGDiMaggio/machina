@@ -86,14 +86,20 @@ connectors:
 | `sap_pm` | SapPmConnector | `cmms-rest` |
 | `maximo` | MaximoConnector | `cmms-rest` |
 | `upkeep` | UpKeepConnector | `cmms-rest` |
+| `sql` / `generic_sql` | GenericSqlConnector | `sql` |
+| `excel` / `excel_csv` | ExcelCsvConnector | `excel` |
 | `opcua` | OpcUaConnector | `opcua` |
 | `mqtt` | MqttConnector | `mqtt` |
 | `document_store` | DocumentStoreConnector | `docs-rag` |
-| `simulated_sensor` | SimulatedSensorConnector | -- |
 | `telegram` | TelegramConnector | `telegram` |
 | `slack` | SlackConnector | `slack` |
 | `email` | EmailConnector | -- |
 | `calendar` | CalendarConnector | `calendar` |
+
+The canonical, code-derived list of registered YAML connector types is the
+generated [capability matrix](capabilities.md) (run `machina describe`); it is
+generated from `runtime._CONNECTOR_FACTORIES`, so it never drifts from what the
+loader actually accepts.
 
 The `settings` dict is passed as keyword arguments to the connector constructor.
 Check each connector's documentation for available settings.
