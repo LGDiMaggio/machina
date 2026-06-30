@@ -502,7 +502,11 @@ def _build_connectors(
                     extra_installed=_probe_extra(meta),
                     instance_computed=instance_computed,
                     degraded=True,
-                    error=f"{type(exc).__name__}: {exc}",
+                    # Scrub: an import failure message can embed an absolute
+                    # install path (and OS username); this field flows into the
+                    # LLM-/client-facing renderers, so it must pass the same core
+                    # choke point as every other free-text field.
+                    error=safe_text(f"{type(exc).__name__}: {exc}"),
                 )
             )
             continue

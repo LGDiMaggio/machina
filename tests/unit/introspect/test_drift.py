@@ -122,3 +122,28 @@ def test_provenance_only_change_does_not_trip_body_diff() -> None:
     assert strip_provenance(rebranded) == committed_body
     # ...and identical to a fresh render of the live core.
     assert strip_provenance(rebranded) == _render_body()
+
+
+# ---------------------------------------------------------------------------
+# llms.txt copies — repo-root and docs/ copies must stay byte-identical
+# ---------------------------------------------------------------------------
+
+
+def test_llms_txt_copies_stay_in_sync() -> None:
+    """The repo-root ``llms.txt`` and ``docs/llms.txt`` must be byte-identical.
+
+    Both ship: the repo-root copy is the conventional ``llms.txt`` location for
+    tooling, and ``docs/llms.txt`` is the copy served by the mkdocs site. Nothing
+    generates them (``llms.txt`` is hand-curated), so without this guard editing
+    one and not the other would silently drift the two copies apart. Paths are
+    derived from ``_MD_PATH`` (``docs/capabilities.md``) so the test needs no
+    separate notion of the repo layout.
+    """
+    docs_dir = _MD_PATH.parent  # docs/
+    repo_root = docs_dir.parent  # repository root
+    root_copy = (repo_root / "llms.txt").read_text(encoding="utf-8")
+    docs_copy = (docs_dir / "llms.txt").read_text(encoding="utf-8")
+    assert root_copy == docs_copy, (
+        "llms.txt and docs/llms.txt have drifted — keep them byte-identical "
+        "(edit both, or make one canonical)."
+    )
