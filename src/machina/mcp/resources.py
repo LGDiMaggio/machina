@@ -139,4 +139,26 @@ def register_resources(server: Any) -> None:
     async def read_failure_taxonomy() -> str:
         return json.dumps(BUILTIN_FAILURE_TAXONOMY, indent=2)
 
-    logger.info("mcp_resources_registered", count=3)
+    @server.resource(  # type: ignore[misc,untyped-decorator,unused-ignore]
+        "machina://v1/capabilities",
+        name="machina_capabilities",
+        title="Capability self-description",
+        description=(
+            "Code-derived self-description of the framework: connectors x "
+            "capabilities, extension seams, and the config-schema shape. "
+            "Served from memory — runtime-free, no connector required, and "
+            "carries no configured values (only types/shape)."
+        ),
+        mime_type="application/json",
+    )
+    async def read_capabilities() -> str:
+        # Imported here (not at module top) so importing this module stays
+        # free of even the introspect package; describe() itself imports no
+        # heavy optional dependency. render_json is the shared serializer
+        # behind docs/capabilities.json, so this resource has the same shape.
+        from machina.introspect import describe
+        from machina.introspect.render_llms import render_json
+
+        return json.dumps(render_json(describe()), indent=2)
+
+    logger.info("mcp_resources_registered", count=4)
