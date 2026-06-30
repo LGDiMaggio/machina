@@ -1,0 +1,8 @@
+{
+  "name": "machina-agent-builder",
+  "version": "0.1.0",
+  "description": "Build and extend Machina maintenance agents with an LLM, driven by Machina's code-derived self-description spine (machina describe / docs/capabilities.md / llms.txt).",
+  "author": {
+    "name": "Machina"
+  }
+}
