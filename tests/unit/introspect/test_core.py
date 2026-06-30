@@ -341,6 +341,55 @@ def test_base_connector_seam_lists_required_methods_and_template(spine: Spine) -
     assert spine.seams.add_connector_template == "connectors/{category}/{name}.py"
 
 
+# ---------------------------------------------------------------------------
+# Invariant: inspected seam docstrings are path-scrubbed at the core
+# ---------------------------------------------------------------------------
+
+
+def test_first_doc_line_scrubs_user_home_path() -> None:
+    """_first_doc_line reduces a user-home/UNC absolute path to its basename.
+
+    Seam Protocol docstrings flow, via inspect, into ProtocolSeam.doc and
+    SeamMethod.doc — which renderers emit into LLM-visible artifacts. The core
+    applies ``safe_text`` so an embedded absolute path cannot leak. We exercise
+    the core helper directly with a synthetic docstring object.
+    """
+    from machina.introspect import core
+
+    class _Synthetic:
+        """Loads the manual from C:\\Users\\tedib\\plant\\pump_manual.md now."""
+
+    line = core._first_doc_line(_Synthetic)
+    # The user-home path is reduced to its basename; the prose around it stays.
+    assert "C:\\Users\\tedib" not in line
+    assert "pump_manual.md" in line
+
+
+def test_first_doc_line_applies_safe_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The core routes inspected docstrings through safe_text (single choke).
+
+    Rather than re-implement the path heuristics, assert that the core's
+    ``safe_text`` symbol is the function applied to every non-empty docstring
+    line — proving the scrub happens at the core, not per-renderer.
+    """
+    from machina.introspect import core
+
+    calls: list[str] = []
+
+    def _spy(text: str) -> str:
+        calls.append(text)
+        return f"SCRUBBED::{text}"
+
+    monkeypatch.setattr(core, "safe_text", _spy)
+
+    class _Synthetic:
+        """A connector seam docstring line."""
+
+    out = core._first_doc_line(_Synthetic)
+    assert calls == ["A connector seam docstring line."]
+    assert out == "SCRUBBED::A connector seam docstring line."
+
+
 def _load_class(dotted_path: str) -> type:
     import importlib
 

@@ -31,6 +31,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
+from machina.agent.prompts import safe_text
 from machina.config.schema import MachinaConfig
 from machina.connectors.capabilities import Capability
 from machina.introspect._methods import (
@@ -421,14 +422,23 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
 
 
 def _first_doc_line(obj: Any) -> str:
-    """Return the first non-empty line of an object's docstring, or ''."""
+    """Return the first non-empty line of an object's docstring, scrubbed.
+
+    The line is passed through :func:`machina.agent.prompts.safe_text` before
+    it is returned, so a user-home / UNC absolute path embedded in a seam
+    Protocol docstring is reduced to its basename **at the core**. This is the
+    single choke point: every renderer (the Form-A artifact, the CLI, the MCP
+    resource) serves already-scrubbed seam text rather than re-scrubbing, so
+    an inspected docstring can never leak an identity- or infra-revealing path
+    into LLM-visible output.
+    """
     doc = inspect.getdoc(obj)
     if not doc:
         return ""
     for line in doc.splitlines():
         stripped = line.strip()
         if stripped:
-            return stripped
+            return safe_text(stripped)
     return ""
 
 

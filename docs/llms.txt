@@ -1,0 +1,50 @@
+# Machina
+
+> Machina is an open-source Python framework (Python 3.11+, `pip install machina-ai`, `import machina`) for building AI agents specialized in industrial maintenance — predictive, preventive, and corrective. It provides a canonical maintenance domain model, an elastic adapter toolkit of connectors for industrial systems (CMMS, IoT sensors, document stores, calendars, messaging), and an LLM-powered agent layer with domain-aware prompting. You build an agent by configuring a `Plant` with connectors (in YAML or Python) and pointing an `Agent` at it; you extend the framework by implementing a connector at a known seam. Every connector normalizes external data into the same domain entities (Asset, WorkOrder, FailureMode, SparePart, Alarm, MaintenancePlan), so the agent always reasons in maintenance terms regardless of the backing system.
+
+## Conventions (read before building or extending)
+
+- **Connectors are structural Protocol implementations, not ABC subclasses.** Implement `machina.connectors.base.BaseConnector` as a bare class — do NOT subclass it. Conformance is checked structurally (`@runtime_checkable` Protocol).
+- **Capabilities are declared and typed.** A connector exposes `capabilities: ClassVar[frozenset[Capability]]` (the `Capability` StrEnum in `machina.connectors.capabilities`) so the agent and MCP layer discover at runtime what actions it supports. A capability the agent can invoke must be both *declared* and backed by a *live* method — declaring one with no working method is worse than not declaring it.
+- **All I/O is async.** Connectors and the agent runtime are `async def`; use `async`/`await` for every network, file, or database call. Sync wrappers exist for simple use cases.
+- **Heavy dependencies are optional, behind extras.** The core install is small; transport libraries (OPC-UA, MQTT, SQL drivers, RAG stacks, Excel) are imported lazily inside methods and installed via pip extras — `pip install "machina-ai[opcua]"`, `[mqtt]`, `[sql]`, `[docs-rag]`, `[excel]`, etc. Importing a connector *class* never pulls a heavy dependency.
+- **The domain model is the backbone.** Code that encodes maintenance knowledge belongs in `domain/`; code that talks to an external system belongs in `connectors/`; code that orchestrates reasoning belongs in `agent/`.
+- **Vendor payload parsing lives in mappers, not connectors.** Payload↔domain mapping is pure functions in `connectors/cmms/mappers/<vendor>.py`; the connector holds transport only.
+
+## Capabilities
+
+- [Capability × connector matrix](capabilities.md): the generated, code-derived map of which connector provides which capability, the backing method for each, and which capabilities are configurable-only (need the right backend/config). This file is the authoritative capability source — it is regenerated from code and guarded by a CI drift gate, so it never goes stale. Do not infer capabilities from examples or prose; read this matrix.
+
+## Core concepts
+
+- [Architecture](architecture.md): how the agent runtime, connectors, domain model, and workflow engine fit together.
+- [Domain model reference](domain.md): Asset, WorkOrder, FailureMode, SparePart, Alarm, MaintenancePlan, Plant — the canonical entities every connector normalizes into.
+- [Quickstart](quickstart.md): build a working Q&A maintenance agent in a few minutes.
+- [YAML configuration](yaml-config.md): declare a `Plant`, its connectors, channels, LLM, and modes (including sandbox) in YAML.
+
+## Extension points
+
+How you go beyond the built-in connectors. Each seam below has a fixed location; the [capability matrix](capabilities.md) lists the live seam manifest (Protocol methods + convention seams) derived from code.
+
+- **Add a connector** → create `connectors/{category}/{name}.py` and implement the `BaseConnector` Protocol structurally; declare `capabilities: ClassVar[frozenset[Capability]]`. See [Custom Connectors](connectors/custom.md).
+- **Register the connector type** → add a `type → dotted factory path` entry to `_CONNECTOR_FACTORIES` in `runtime.py` so the runtime and MCP layer discover it.
+- **Add a capability** → add a member to the `Capability` StrEnum (`connectors/capabilities.py`), then map it to its backing method in `CAPABILITY_TO_METHOD` (`introspect/_methods.py`) — capability values are not always method names.
+- **Expose a capability as an MCP tool** → map it in `CAPABILITY_TO_TOOL` (`mcp/tools.py`).
+- **Add a vendor mapper** → pure payload↔domain functions in `connectors/cmms/mappers/{vendor}.py`.
+- **Add a built-in workflow** → drop a template into `workflows/builtins/`.
+
+## API reference
+
+- [Introspection (Spine)](api/introspect.md): `machina.introspect.describe()` returns the live, code-derived self-description (connectors × capabilities, config schema shape, seams). The generated [capability matrix](capabilities.md) (and its JSON sibling `capabilities.json`) are rendered from this same core.
+- [Agent](api/agent.md): the `Agent` runtime and its execution loop.
+- [Workflows](api/workflows.md): the workflow engine and step/trigger model.
+- [Runtime (MCP / headless)](api/runtime.md): connector registry, the type→factory map, and capability discovery.
+- [Exceptions](api/exceptions.md): the `MachinaError` hierarchy.
+
+## Optional
+
+- [MCP Server](mcp-server.md): expose any connector to Claude Desktop, Cursor, or any MCP client; the MCP layer is a thin transport adapter over the connector layer, not a separate system.
+- [Connector guides](connectors/custom.md): per-vendor connector docs (SAP PM, Maximo, UpKeep, Excel/CSV, SQL, GenericCmms YAML, OPC-UA, MQTT, Slack, Email, Calendar, Document Store).
+- [Deployment](deployment/docker.md): Docker, on-premise, secrets, scaling, and security.
+- [Observability](observability/traces.md): action traces and cost tracking.
+- Domain alignment detail: Machina's domain model carries optional ISO 14224 codes (`FailureMode.iso_14224_code`, `Asset.equipment_class_code`) alongside its own catalog identifiers, which remain the primary key. This is internal alignment detail, not required to build an agent.

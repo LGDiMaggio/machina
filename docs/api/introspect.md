@@ -2,7 +2,7 @@
 
 `machina.introspect` is the framework's **self-description spine** — a single, code-derived description of what Machina can do (connectors × capabilities), how it is configured, and where its extension seams are. It is derived entirely from code (the `Capability` enum, the connector type registry, connector `ClassVar` declarations, the config schema, and the seam Protocols), imports **no** heavy optional dependency, and returns a fully deterministic (sorted) structure.
 
-It is the neutral core that the static `llms.txt`/capability artifact, the `machina describe` CLI, and the `machina://v1/capabilities` MCP resource all render from — so they cannot drift from one another or from the code.
+It is the neutral core that the static `llms.txt` index and the generated capability artifacts (`docs/capabilities.md` and `docs/capabilities.json`) render from — so they cannot drift from one another or from the code. The same core is designed to back a `machina describe` CLI and a `machina://v1/capabilities` MCP resource; those surfaces are forthcoming, not yet shipped.
 
 ## `describe`
 
