@@ -1,4 +1,4 @@
-.PHONY: install test lint format typecheck ci docs docs-serve docs-build clean release
+.PHONY: install test lint format typecheck spine-check ci docs docs-serve docs-build clean release
 
 install:
 	pip install -e ".[dev,all]"
@@ -18,7 +18,11 @@ format:
 typecheck:
 	mypy src/machina
 
-ci: lint typecheck test
+## spine-check — fail if the committed capability artifacts drift from code
+spine-check:
+	python scripts/gen_spine.py --check
+
+ci: lint typecheck spine-check test
 
 docs: docs-serve
 
