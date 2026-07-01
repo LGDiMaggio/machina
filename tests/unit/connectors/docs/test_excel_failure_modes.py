@@ -90,7 +90,10 @@ class TestCapabilityDeclaration:
         config = ExcelConnectorConfig(failure_modes=_fm_schema(str(_fm_csv(tmp_path))))
         conn = ExcelCsvConnector(config=config)
         assert Capability.READ_ASSETS in conn.capabilities
-        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+        assert Capability.READ_WORK_ORDERS in conn.capabilities
+        # No writable work_orders sheet is configured, so writes stay undeclared.
+        assert Capability.CREATE_WORK_ORDER not in conn.capabilities
+        assert Capability.UPDATE_WORK_ORDER not in conn.capabilities
 
     def test_absent_when_not_configured(self, tmp_path: Path) -> None:
         asset_file = _asset_csv(tmp_path, ["P-001,Pompa 1,"])

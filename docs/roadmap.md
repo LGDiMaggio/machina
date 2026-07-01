@@ -25,6 +25,35 @@ Ordered by what moves adoption the most:
 5. **Plugin system** for community-contributed connectors without forking the core package.
 6. **`WhatsApp` and `Teams` communication connectors.**
 
+## MCP direction (standing position)
+
+MCP is **transport**, not a replacement for connectors. The connector layer is
+Machina's normalization layer — it maps vendor payloads onto the canonical
+maintenance domain — and that, with the write-path invariants and typed
+capabilities on top, is the moat. MCP carries normalized data; it does not
+produce it.
+
+- **The internal flip is rejected.** We do not rewire Machina's own
+  runtime↔connectors boundary to speak MCP, and we do not replace connectors
+  with a bag of MCP tools. Internal boundaries stay native Python; MCP lives only
+  at the edge. (See `MACHINA_SPEC.md` §17 for the full argument.)
+- **The transport/mapper split already future-proofs against vendor MCPs.** When
+  a CMMS vendor ships its own MCP server, that becomes a new *transport* feeding
+  the existing per-vendor mappers (`connectors/cmms/mappers/`) — a new fetch path,
+  not a re-normalization. The durable work (mapping) is insulated from transport.
+- **Outbound MCP (Machina as an MCP server) already exists** — every connector's
+  capabilities can be exposed as MCP tools (item 1 under v0.3 above).
+
+### Gated: inbound MCP-client connector
+
+A generic **inbound** connector — Machina as an MCP *client*, consuming a vendor's
+MCP server *into* the domain model (the inverse of the outbound server). It would
+be built as transport (a generic MCP client) plus per-vendor mappers, reusing the
+same transport/mapper split. **Gated behind the trigger "first real vendor CMMS
+MCP" — not built now.** Until a CMMS vendor actually ships an MCP server worth
+consuming, a generic MCP-client adapter would be speculative surface with nothing
+to validate it against.
+
 ## What's deferred beyond v0.3
 
 - Non-Python SDKs (Go / TypeScript clients).

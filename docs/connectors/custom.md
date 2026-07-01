@@ -210,14 +210,14 @@ Every connector must provide four things:
 
 | Attribute | Signature | Purpose |
 |---|---|---|
-| `capabilities` | `@property -> list[str]` | Declares which operations this connector supports (e.g. `["read_assets", "read_work_orders"]`). The agent uses this to discover capabilities at runtime and enable matching LLM tools. Concrete classes typically use a `ClassVar[list[str]]` class attribute, which satisfies the Protocol's `@property` via structural typing. |
+| `capabilities` | `ClassVar[frozenset[Capability]]` | Declares which operations this connector supports (e.g. `frozenset({Capability.READ_ASSETS, Capability.READ_WORK_ORDERS})`). The agent uses this to discover capabilities at runtime and enable matching LLM tools. `Capability` is a `StrEnum` (`machina.connectors.capabilities`); declaring a typed `frozenset` catches typos at import time. The authoritative list of every capability each built-in connector declares is the generated [capability matrix](../capabilities.md) (regenerate with `machina describe`), not an inline list maintained by hand. |
 | `connect()` | `async def connect() -> None` | Establish the underlying connection (open HTTP client, log into CMMS, subscribe to broker, …). |
 | `disconnect()` | `async def disconnect() -> None` | Clean up the connection. Called by `Agent.stop()`. |
 | `health_check()` | `async def health_check() -> ConnectorHealth` | Return a `ConnectorHealth` status the agent can use to decide whether the connector is usable. |
 
 Beyond those four, implement whatever capability methods you declared.
-A connector with `capabilities = ["read_assets"]` must also provide
-`async def read_assets(self, **kwargs) -> list[Asset]`.
+A connector with `capabilities = frozenset({Capability.READ_ASSETS})` must
+also provide `async def read_assets(self, **kwargs) -> list[Asset]`.
 
 ### Minimal example
 
@@ -230,13 +230,14 @@ from typing import Any, ClassVar
 import httpx
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus
+from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 
 
 class AcmeCmmsConnector:
     """Custom connector for the Acme CMMS REST API."""
 
-    capabilities: ClassVar[list[str]] = ["read_assets"]
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_ASSETS})
 
     def __init__(self, *, base_url: str, api_key: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -345,8 +346,11 @@ REST mocking or VCR for recorded responses.
   issues.
 - **Graceful degradation.** Declare only the capabilities you actually
   support. If your CMMS doesn't expose spare parts, omit
-  `"read_spare_parts"` — the agent will simply not offer that tool to
-  the LLM.
+  `Capability.READ_SPARE_PARTS` from the frozenset — the agent will simply
+  not offer that tool to the LLM. The generated
+  [capability matrix](../capabilities.md) (`machina describe`) is the
+  authoritative record of which built-in connector declares which
+  capability; consult it rather than any hand-maintained inline list.
 
 ## API Reference
 

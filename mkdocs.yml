@@ -100,6 +100,8 @@ nav:
       - Cost Tracking: observability/cost.md
   - API Reference:
       - Agent: api/agent.md
+      - Introspection (Spine): api/introspect.md
+      - Capability Matrix (generated): capabilities.md
       - Workflows: api/workflows.md
       - Observability: api/observability.md
       - Runtime (MCP / Headless): api/runtime.md

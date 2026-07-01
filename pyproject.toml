@@ -129,6 +129,9 @@ docs = [
     "mkdocstrings[python]>=0.25",
 ]
 
+[project.scripts]
+machina = "machina.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/LGDiMaggio/machina"
 Documentation = "https://machina-ai.readthedocs.io"

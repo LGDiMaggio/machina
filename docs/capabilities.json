@@ -1,0 +1,1099 @@
+{
+  "schema_version": "1",
+  "connectors": [
+    {
+      "type": "calendar",
+      "class_name": "CalendarConnector",
+      "dotted_path": "machina.connectors.calendar.connector.CalendarConnector",
+      "requires_extra": "calendar",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_calendar_event",
+          "method": "create_event",
+          "configurable": true
+        },
+        {
+          "capability": "delete_calendar_event",
+          "method": "delete_event",
+          "configurable": true
+        },
+        {
+          "capability": "read_calendar_events",
+          "method": "read_events",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "document_store",
+      "class_name": "DocumentStoreConnector",
+      "dotted_path": "machina.connectors.docs.document_store.DocumentStoreConnector",
+      "requires_extra": "docs-rag",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "retrieve_section",
+          "method": "retrieve_section",
+          "configurable": false
+        },
+        {
+          "capability": "search_documents",
+          "method": "search_documents",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "email",
+      "class_name": "EmailConnector",
+      "dotted_path": "machina.connectors.comms.email.EmailConnector",
+      "requires_extra": "gmail",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "receive_message",
+          "method": "listen",
+          "configurable": false
+        },
+        {
+          "capability": "send_message",
+          "method": "send_message",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "excel",
+      "class_name": "ExcelCsvConnector",
+      "dotted_path": "machina.connectors.docs.excel.ExcelCsvConnector",
+      "requires_extra": "excel",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_failure_modes",
+          "method": "read_failure_modes",
+          "configurable": true
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": true
+        }
+      ]
+    },
+    {
+      "type": "excel_csv",
+      "class_name": "ExcelCsvConnector",
+      "dotted_path": "machina.connectors.docs.excel.ExcelCsvConnector",
+      "requires_extra": "excel",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_failure_modes",
+          "method": "read_failure_modes",
+          "configurable": true
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": true
+        }
+      ]
+    },
+    {
+      "type": "generic_cmms",
+      "class_name": "GenericCmmsConnector",
+      "dotted_path": "machina.connectors.cmms.generic.GenericCmmsConnector",
+      "requires_extra": "cmms-rest",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "cancel_work_order",
+          "method": "cancel_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "close_work_order",
+          "method": "close_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "get_work_order",
+          "method": "get_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_failure_modes",
+          "method": "read_failure_modes",
+          "configurable": true
+        },
+        {
+          "capability": "read_maintenance_history",
+          "method": "read_maintenance_history",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_plans",
+          "method": "read_maintenance_plans",
+          "configurable": true
+        },
+        {
+          "capability": "read_spare_parts",
+          "method": "read_spare_parts",
+          "configurable": false
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": true
+        }
+      ]
+    },
+    {
+      "type": "generic_sql",
+      "class_name": "GenericSqlConnector",
+      "dotted_path": "machina.connectors.sql.generic.GenericSqlConnector",
+      "requires_extra": "sql",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_failure_modes",
+          "method": "read_failure_modes",
+          "configurable": true
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "maximo",
+      "class_name": "MaximoConnector",
+      "dotted_path": "machina.connectors.cmms.maximo.MaximoConnector",
+      "requires_extra": "cmms-rest",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "get_work_order",
+          "method": "get_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_plans",
+          "method": "read_maintenance_plans",
+          "configurable": false
+        },
+        {
+          "capability": "read_spare_parts",
+          "method": "read_spare_parts",
+          "configurable": false
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "mqtt",
+      "class_name": "MqttConnector",
+      "dotted_path": "machina.connectors.iot.mqtt.MqttConnector",
+      "requires_extra": "mqtt",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "publish_message",
+          "method": "publish",
+          "configurable": false
+        },
+        {
+          "capability": "subscribe_to_topics",
+          "method": "subscribe",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "opcua",
+      "class_name": "OpcUaConnector",
+      "dotted_path": "machina.connectors.iot.opcua.OpcUaConnector",
+      "requires_extra": "opcua",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "browse_nodes",
+          "method": "browse_nodes",
+          "configurable": false
+        },
+        {
+          "capability": "read_node_value",
+          "method": "read_value",
+          "configurable": false
+        },
+        {
+          "capability": "read_node_values",
+          "method": "read_values",
+          "configurable": false
+        },
+        {
+          "capability": "subscribe_to_nodes",
+          "method": "subscribe",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "sap_pm",
+      "class_name": "SapPmConnector",
+      "dotted_path": "machina.connectors.cmms.sap_pm.SapPmConnector",
+      "requires_extra": "cmms-rest",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "get_work_order",
+          "method": "get_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_plans",
+          "method": "read_maintenance_plans",
+          "configurable": false
+        },
+        {
+          "capability": "read_spare_parts",
+          "method": "read_spare_parts",
+          "configurable": false
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "slack",
+      "class_name": "SlackConnector",
+      "dotted_path": "machina.connectors.comms.slack.SlackConnector",
+      "requires_extra": "slack",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "receive_message",
+          "method": "listen",
+          "configurable": false
+        },
+        {
+          "capability": "send_message",
+          "method": "send_message",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "sql",
+      "class_name": "GenericSqlConnector",
+      "dotted_path": "machina.connectors.sql.generic.GenericSqlConnector",
+      "requires_extra": "sql",
+      "instance_computed": true,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": true
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_failure_modes",
+          "method": "read_failure_modes",
+          "configurable": true
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "telegram",
+      "class_name": "TelegramConnector",
+      "dotted_path": "machina.connectors.comms.telegram.TelegramConnector",
+      "requires_extra": "telegram",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "receive_message",
+          "method": "listen",
+          "configurable": false
+        },
+        {
+          "capability": "send_message",
+          "method": "send_message",
+          "configurable": false
+        }
+      ]
+    },
+    {
+      "type": "upkeep",
+      "class_name": "UpKeepConnector",
+      "dotted_path": "machina.connectors.cmms.upkeep.UpKeepConnector",
+      "requires_extra": "cmms-rest",
+      "instance_computed": false,
+      "degraded": false,
+      "error": "",
+      "capabilities": [
+        {
+          "capability": "create_work_order",
+          "method": "create_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "get_work_order",
+          "method": "get_work_order",
+          "configurable": false
+        },
+        {
+          "capability": "read_assets",
+          "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_plans",
+          "method": "read_maintenance_plans",
+          "configurable": false
+        },
+        {
+          "capability": "read_spare_parts",
+          "method": "read_spare_parts",
+          "configurable": false
+        },
+        {
+          "capability": "read_work_orders",
+          "method": "read_work_orders",
+          "configurable": false
+        },
+        {
+          "capability": "update_work_order",
+          "method": "update_work_order",
+          "configurable": false
+        }
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "value": "browse_nodes",
+      "method": "browse_nodes",
+      "provided_by": [
+        "opcua"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "cancel_work_order",
+      "method": "cancel_work_order",
+      "provided_by": [],
+      "configurable_in": [
+        "generic_cmms"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "close_work_order",
+      "method": "close_work_order",
+      "provided_by": [],
+      "configurable_in": [
+        "generic_cmms"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "create_calendar_event",
+      "method": "create_event",
+      "provided_by": [],
+      "configurable_in": [
+        "calendar"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "create_work_order",
+      "method": "create_work_order",
+      "provided_by": [
+        "generic_cmms",
+        "maximo",
+        "sap_pm",
+        "upkeep"
+      ],
+      "configurable_in": [
+        "excel",
+        "excel_csv",
+        "generic_sql",
+        "sql"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "delete_calendar_event",
+      "method": "delete_event",
+      "provided_by": [],
+      "configurable_in": [
+        "calendar"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "get_latest_reading",
+      "method": "get_latest_reading",
+      "provided_by": [],
+      "configurable_in": [],
+      "orphaned": true,
+      "orphan_note": "Declared by SimulatedSensorConnector (machina.connectors.iot.simulated), which is not in the default factory registry (_CONNECTOR_FACTORIES); no registered connector provides it."
+    },
+    {
+      "value": "get_related_readings",
+      "method": "get_related_readings",
+      "provided_by": [],
+      "configurable_in": [],
+      "orphaned": true,
+      "orphan_note": "Declared by SimulatedSensorConnector (machina.connectors.iot.simulated), which is not in the default factory registry (_CONNECTOR_FACTORIES); no registered connector provides it."
+    },
+    {
+      "value": "get_work_order",
+      "method": "get_work_order",
+      "provided_by": [
+        "maximo",
+        "sap_pm",
+        "upkeep"
+      ],
+      "configurable_in": [
+        "generic_cmms"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "publish_message",
+      "method": "publish",
+      "provided_by": [
+        "mqtt"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_assets",
+      "method": "read_assets",
+      "provided_by": [
+        "excel",
+        "excel_csv",
+        "generic_cmms",
+        "generic_sql",
+        "maximo",
+        "sap_pm",
+        "sql",
+        "upkeep"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_calendar_events",
+      "method": "read_events",
+      "provided_by": [
+        "calendar"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_failure_modes",
+      "method": "read_failure_modes",
+      "provided_by": [],
+      "configurable_in": [
+        "excel",
+        "excel_csv",
+        "generic_cmms",
+        "generic_sql",
+        "sql"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_maintenance_history",
+      "method": "read_maintenance_history",
+      "provided_by": [
+        "generic_cmms"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_maintenance_plans",
+      "method": "read_maintenance_plans",
+      "provided_by": [
+        "maximo",
+        "sap_pm",
+        "upkeep"
+      ],
+      "configurable_in": [
+        "generic_cmms"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_node_value",
+      "method": "read_value",
+      "provided_by": [
+        "opcua"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_node_values",
+      "method": "read_values",
+      "provided_by": [
+        "opcua"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_spare_parts",
+      "method": "read_spare_parts",
+      "provided_by": [
+        "generic_cmms",
+        "maximo",
+        "sap_pm",
+        "upkeep"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "read_work_orders",
+      "method": "read_work_orders",
+      "provided_by": [
+        "excel",
+        "excel_csv",
+        "generic_cmms",
+        "generic_sql",
+        "maximo",
+        "sap_pm",
+        "sql",
+        "upkeep"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "receive_message",
+      "method": "listen",
+      "provided_by": [
+        "email",
+        "slack",
+        "telegram"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "retrieve_section",
+      "method": "retrieve_section",
+      "provided_by": [
+        "document_store"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "search_documents",
+      "method": "search_documents",
+      "provided_by": [
+        "document_store"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "send_message",
+      "method": "send_message",
+      "provided_by": [
+        "email",
+        "slack",
+        "telegram"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "subscribe_to_nodes",
+      "method": "subscribe",
+      "provided_by": [
+        "opcua"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "subscribe_to_topics",
+      "method": "subscribe",
+      "provided_by": [
+        "mqtt"
+      ],
+      "configurable_in": [],
+      "orphaned": false,
+      "orphan_note": ""
+    },
+    {
+      "value": "update_work_order",
+      "method": "update_work_order",
+      "provided_by": [
+        "maximo",
+        "sap_pm",
+        "upkeep"
+      ],
+      "configurable_in": [
+        "excel",
+        "excel_csv",
+        "generic_cmms"
+      ],
+      "orphaned": false,
+      "orphan_note": ""
+    }
+  ],
+  "seams": {
+    "add_connector_template": "connectors/{category}/{name}.py",
+    "protocols": [
+      {
+        "name": "BaseConnector",
+        "location": "machina.connectors.base",
+        "doc": "Protocol that all Machina connectors must satisfy.",
+        "methods": [
+          {
+            "name": "capabilities",
+            "is_async": false,
+            "doc": "Typed set of actions this connector supports."
+          },
+          {
+            "name": "connect",
+            "is_async": true,
+            "doc": "Establish a connection to the external system."
+          },
+          {
+            "name": "disconnect",
+            "is_async": true,
+            "doc": "Gracefully close the connection."
+          },
+          {
+            "name": "health_check",
+            "is_async": true,
+            "doc": "Check whether the external system is reachable and responsive."
+          }
+        ]
+      },
+      {
+        "name": "RefreshableConnector",
+        "location": "machina.connectors.docs.watcher",
+        "doc": "Any connector with a synchronous refresh method.",
+        "methods": [
+          {
+            "name": "refresh",
+            "is_async": false,
+            "doc": ""
+          }
+        ]
+      },
+      {
+        "name": "SupportsConfirmation",
+        "location": "machina.connectors.comms.types",
+        "doc": "Channels that can confirm a pending write synchronously, in-turn.",
+        "methods": [
+          {
+            "name": "request_confirmation",
+            "is_async": true,
+            "doc": "Ask the user to confirm a pending write and return their decision."
+          }
+        ]
+      }
+    ],
+    "conventions": [
+      {
+        "name": "MCP tool registration",
+        "note": "Map a capability to the MCP tool(s) auto-registered when a connector declares it.",
+        "location_template": "mcp/tools.py::CAPABILITY_TO_TOOL"
+      },
+      {
+        "name": "capability vocabulary",
+        "note": "Add a new action identifier to the Capability StrEnum.",
+        "location_template": "connectors/capabilities.py::Capability.{NEW_MEMBER}"
+      },
+      {
+        "name": "capability\u2192method map",
+        "note": "Map the new capability to its backing method name (capability values are not always method names).",
+        "location_template": "introspect/_methods.py::CAPABILITY_TO_METHOD"
+      },
+      {
+        "name": "connector-type registration",
+        "note": "Register a new connector type \u2192 dotted factory path so the runtime and MCP layer can discover it.",
+        "location_template": "runtime._CONNECTOR_FACTORIES['{type}'] = '{dotted.path.ConnectorClass}'"
+      },
+      {
+        "name": "transport/mapper split",
+        "note": "Vendor payload\u2194domain mapping lives as pure functions, separate from the connector's transport code; the connector imports the mapper.",
+        "location_template": "connectors/cmms/mappers/{vendor}.py"
+      },
+      {
+        "name": "workflow builtins",
+        "note": "Drop a built-in workflow template into the builtins package.",
+        "location_template": "workflows/builtins/{workflow_name}.py"
+      }
+    ]
+  },
+  "config_schema": {
+    "$defs": {
+      "ChannelConfig": {
+        "description": "Configuration for a communication channel.",
+        "properties": {
+          "type": {
+            "description": "Channel type (e.g. 'cli', 'telegram', 'slack')",
+            "title": "Type",
+            "type": "string"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "description": "Channel-specific settings",
+            "title": "Settings",
+            "type": "object"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "ChannelConfig",
+        "type": "object"
+      },
+      "ConnectorConfig": {
+        "additionalProperties": true,
+        "description": "Configuration for a single connector instance.",
+        "properties": {
+          "type": {
+            "description": "Connector type (e.g. 'generic_cmms', 'opcua')",
+            "title": "Type",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "primary": {
+            "default": false,
+            "description": "Mark as the primary connector for its category (e.g. primary CMMS)",
+            "title": "Primary",
+            "type": "boolean"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "description": "Connector-specific settings",
+            "title": "Settings",
+            "type": "object"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "ConnectorConfig",
+        "type": "object"
+      },
+      "LLMConfig": {
+        "additionalProperties": true,
+        "description": "Configuration for the LLM provider.",
+        "properties": {
+          "provider": {
+            "default": "ollama:llama3",
+            "description": "Provider and model in 'provider:model' format",
+            "title": "Provider",
+            "type": "string"
+          },
+          "temperature": {
+            "default": 0.1,
+            "maximum": 2,
+            "minimum": 0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "max_tokens": {
+            "default": 4096,
+            "minimum": 1,
+            "title": "Max Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "LLMConfig",
+        "type": "object"
+      },
+      "McpConfig": {
+        "additionalProperties": true,
+        "description": "Configuration for the MCP server layer.",
+        "properties": {
+          "enable_vendor_tools": {
+            "default": false,
+            "description": "Register vendor-specific escape-hatch tools (non-portable)",
+            "title": "Enable Vendor Tools",
+            "type": "boolean"
+          },
+          "token_verifier_class": {
+            "default": "",
+            "description": "Dotted path to a custom TokenVerifier class (e.g. 'mymodule:VaultTokenVerifier'). When set, replaces the default static bearer token verifier.",
+            "title": "Token Verifier Class",
+            "type": "string"
+          },
+          "allowed_origins": {
+            "description": "Allowed origins for streamable-http transport (DNS-rebinding defense)",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Origins",
+            "type": "array"
+          }
+        },
+        "title": "McpConfig",
+        "type": "object"
+      },
+      "PlantConfig": {
+        "description": "Configuration for the plant (top-level asset container).",
+        "properties": {
+          "name": {
+            "default": "Default Plant",
+            "description": "Plant name",
+            "title": "Name",
+            "type": "string"
+          },
+          "location": {
+            "default": "",
+            "description": "Plant location",
+            "title": "Location",
+            "type": "string"
+          }
+        },
+        "title": "PlantConfig",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Top-level Machina configuration.\n\nExample YAML::\n\n    name: \"Maintenance Assistant\"\n    plant:\n      name: \"North Plant\"\n    connectors:\n      cmms:\n        type: generic_cmms\n        primary: true\n        settings:\n          data_dir: \"./sample_data/cmms\"\n    channels:\n      - type: cli\n    llm:\n      provider: \"ollama:llama3\"\n    sandbox: false",
+    "properties": {
+      "name": {
+        "default": "Machina Agent",
+        "description": "Agent name",
+        "title": "Name",
+        "type": "string"
+      },
+      "description": {
+        "default": "Maintenance AI assistant",
+        "description": "Agent description",
+        "title": "Description",
+        "type": "string"
+      },
+      "plant": {
+        "$ref": "#/$defs/PlantConfig"
+      },
+      "connectors": {
+        "additionalProperties": {
+          "$ref": "#/$defs/ConnectorConfig"
+        },
+        "description": "Named connector configurations",
+        "title": "Connectors",
+        "type": "object"
+      },
+      "channels": {
+        "description": "Communication channels (defaults to CLI if empty)",
+        "items": {
+          "$ref": "#/$defs/ChannelConfig"
+        },
+        "title": "Channels",
+        "type": "array"
+      },
+      "llm": {
+        "$ref": "#/$defs/LLMConfig"
+      },
+      "mcp": {
+        "$ref": "#/$defs/McpConfig"
+      },
+      "sandbox": {
+        "default": false,
+        "description": "Enable sandbox mode (writes are logged, not executed)",
+        "title": "Sandbox",
+        "type": "boolean"
+      },
+      "confirmations": {
+        "default": true,
+        "description": "Require human confirmation before write/mutation tool calls",
+        "title": "Confirmations",
+        "type": "boolean"
+      },
+      "logging": {
+        "additionalProperties": true,
+        "description": "Logging configuration overrides",
+        "title": "Logging",
+        "type": "object"
+      }
+    },
+    "title": "MachinaConfig",
+    "type": "object"
+  },
+  "gaps": {
+    "orphaned_capabilities": [
+      "get_latest_reading",
+      "get_related_readings"
+    ],
+    "unmapped_capabilities": [],
+    "settings_note": "Per-connector `settings` is an open `dict[str, Any]` (extra=allow), so connector-specific settings keys are NOT captured by MachinaConfig.model_json_schema(). Introspecting connector __init__ signatures to surface them is a deferred, security-constrained stretch."
+  }
+}

@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("openpyxl")
 
+from machina.connectors.capabilities import Capability
 from machina.connectors.docs.excel import (
     COERCER_REGISTRY,
     ExcelCsvConnector,
@@ -313,6 +314,48 @@ class TestReadAssets:
         conn = ExcelCsvConnector(config=config)
         await conn.connect()
         assert await conn.read_assets() == []
+
+
+class TestWriteCapabilityDeclaration:
+    """Write capabilities are declared only when a writable work_orders sheet is
+    configured — a declared-but-unserviceable write is worse than an undeclared
+    one, and would advertise a capability the connector raises on. Mirrors how
+    GenericSqlConnector gates its writes behind ``capabilities: read_write``.
+    """
+
+    def test_read_capabilities_always_present(self) -> None:
+        config = ExcelConnectorConfig(asset_registry=_asset_schema())
+        conn = ExcelCsvConnector(config=config)
+        assert Capability.READ_ASSETS in conn.capabilities
+        assert Capability.READ_WORK_ORDERS in conn.capabilities
+
+    def test_writes_absent_when_no_work_orders_schema(self) -> None:
+        config = ExcelConnectorConfig(asset_registry=_asset_schema())
+        conn = ExcelCsvConnector(config=config)
+        assert Capability.CREATE_WORK_ORDER not in conn.capabilities
+        assert Capability.UPDATE_WORK_ORDER not in conn.capabilities
+
+    def test_writes_absent_when_work_orders_read_only(self, tmp_path: Path) -> None:
+        schema = SheetSchema(
+            path=str(tmp_path / "odl.csv"),
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+            ],
+            write_mode=None,
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        assert Capability.CREATE_WORK_ORDER not in conn.capabilities
+        assert Capability.UPDATE_WORK_ORDER not in conn.capabilities
+        # Reads are still guaranteed regardless of write configuration.
+        assert Capability.READ_WORK_ORDERS in conn.capabilities
+
+    def test_writes_present_when_write_mode_configured(self, tmp_path: Path) -> None:
+        config = ExcelConnectorConfig(work_orders=_wo_schema(str(tmp_path / "odl.csv")))
+        conn = ExcelCsvConnector(config=config)
+        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+        assert Capability.UPDATE_WORK_ORDER in conn.capabilities
 
 
 class TestWriteWorkOrder:

@@ -6,7 +6,7 @@ using YAML-based table-to-entity mapping.
 ## Install
 
 ```bash
-pip install "machina-ai[cmms-rest]"
+pip install "machina-ai[sql]"
 # Plus your database driver:
 # pip install psycopg2-binary  # PostgreSQL
 # pip install pyodbc            # SQL Server / DB2
@@ -15,7 +15,7 @@ pip install "machina-ai[cmms-rest]"
 ## Quick Start
 
 ```python
-from machina.connectors.cmms import GenericSqlConnector
+from machina.connectors.sql import GenericSqlConnector
 
 connector = GenericSqlConnector(
     connection_string="postgresql://user:pass@host/db",
