@@ -11,7 +11,37 @@ This is the "Form C" surface of Machina's self-description spine: a packaged bui
 
 ## Install
 
-This plugin ships inside the Machina repository (it is not distributed via PyPI). Point Claude Code at this directory (`plugin/`) as a local plugin, or add it through your plugin marketplace of choice. The commands assume you are working inside a Machina checkout with `machina-ai` installed (`pip install -e .`) so `machina describe` is available.
+The plugin ships inside the Machina repository (not on PyPI). The repo doubles as a Claude Code **plugin marketplace** — it carries a `.claude-plugin/marketplace.json` at its root that registers this plugin — so installing it is two slash commands in Claude Code.
+
+**Prerequisite** — the commands run `machina describe`, so `machina-ai` must be installed in the environment where you use the plugin:
+
+```shell
+pip install machina-ai          # or, from a cloned checkout: pip install -e .
+```
+
+Run the plugin's commands from inside a Machina checkout, where the generated `docs/capabilities.md` / `docs/llms.txt` the commands read also live.
+
+### Via marketplace (recommended)
+
+Point Claude Code at the GitHub repo, then install the plugin from it:
+
+```text
+/plugin marketplace add LGDiMaggio/machina
+/plugin install machina-agent-builder@machina
+```
+
+Here `machina` is the **marketplace** name (the `name` field in `.claude-plugin/marketplace.json`) and `machina-agent-builder` is the **plugin** name — hence `plugin@marketplace`.
+
+### From a local checkout (offline / development)
+
+Add your local clone as the marketplace instead of GitHub, then install the same way:
+
+```text
+/plugin marketplace add /absolute/path/to/machina    # the repo root you cloned
+/plugin install machina-agent-builder@machina
+```
+
+Run `/plugin` at any time to open the interactive UI and browse, enable/disable, update, or remove the plugin and its marketplace.
 
 ## Why it stays in sync
 

@@ -1,0 +1,14 @@
+{
+  "name": "machina",
+  "description": "Machina's plugin marketplace — ships the LLM-driven agent-builder plugin over the code-derived self-description spine.",
+  "owner": {
+    "name": "Machina"
+  },
+  "plugins": [
+    {
+      "name": "machina-agent-builder",
+      "source": "./plugin",
+      "description": "Build and extend Machina maintenance agents with an LLM, driven by Machina's code-derived self-description spine (machina describe / docs/capabilities.md / llms.txt)."
+    }
+  ]
+}
