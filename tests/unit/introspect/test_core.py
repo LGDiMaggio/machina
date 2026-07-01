@@ -205,6 +205,8 @@ def test_instance_computed_base_read_from_class_without_instantiation(spine: Spi
     """
     for conn_type, expected in (
         ("generic_sql", {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}),
+        ("excel", {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}),
+        ("excel_csv", {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}),
         ("calendar", {Capability.READ_CALENDAR_EVENTS}),
     ):
         info = next(c for c in spine.connectors if c.type == conn_type)
@@ -217,6 +219,29 @@ def test_instance_computed_base_read_from_class_without_instantiation(spine: Spi
         guaranteed = {Capability(cc.capability) for cc in info.capabilities if not cc.configurable}
         assert guaranteed == {c for c in base if has_live_method(cls, c)}
         assert info.instance_computed is True
+
+
+def test_excel_writes_are_configurable_not_guaranteed(spine: Spine) -> None:
+    """Excel writes need a work_orders sheet with a write_mode, so the spine
+    renders them configurable — never guaranteed — mirroring SQL/generic_cmms.
+
+    A config-less ``describe()`` cannot know whether a writable work_orders
+    sheet is present, so CREATE/UPDATE_WORK_ORDER must be annotated
+    "configurable", while the asset/work-order reads stay guaranteed.
+    """
+    for conn_type in ("excel", "excel_csv"):
+        info = next(c for c in spine.connectors if c.type == conn_type)
+        guaranteed = {cc.capability for cc in info.capabilities if not cc.configurable}
+        configurable = {cc.capability for cc in info.capabilities if cc.configurable}
+        assert Capability.CREATE_WORK_ORDER.value in configurable
+        assert Capability.UPDATE_WORK_ORDER.value in configurable
+        assert Capability.CREATE_WORK_ORDER.value not in guaranteed
+        assert Capability.UPDATE_WORK_ORDER.value not in guaranteed
+        # Reads remain guaranteed regardless of configuration.
+        assert Capability.READ_ASSETS.value in guaranteed
+        assert Capability.READ_WORK_ORDERS.value in guaranteed
+        # No capability is both guaranteed and configurable.
+        assert not (guaranteed & configurable)
 
 
 def test_calendar_nonical_backend_yields_full_capabilities_at_runtime() -> None:

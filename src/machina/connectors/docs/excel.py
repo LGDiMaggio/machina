@@ -400,12 +400,16 @@ class ExcelCsvConnector:
         ```
     """
 
+    # Capabilities available regardless of configuration. The write capabilities
+    # (CREATE_WORK_ORDER / UPDATE_WORK_ORDER) and READ_FAILURE_MODES are
+    # config-driven and added in __init__ — they are NOT part of the base set.
+    # A declared-but-unserviceable write would advertise a capability the
+    # connector raises on, so writes are gated behind a configured, writable
+    # work_orders sheet (mirroring how GenericSqlConnector gates its writes).
     _BASE_CAPABILITIES: ClassVar[frozenset[Capability]] = frozenset(
         {
             Capability.READ_ASSETS,
             Capability.READ_WORK_ORDERS,
-            Capability.CREATE_WORK_ORDER,
-            Capability.UPDATE_WORK_ORDER,
         }
     )
 
@@ -413,16 +417,24 @@ class ExcelCsvConnector:
     def capabilities(self) -> frozenset[Capability]:
         """Return capabilities based on configuration.
 
-        Base capabilities are always available. ``READ_FAILURE_MODES`` is
-        declared only when a ``failure_modes`` sheet is configured —
-        unconfigured means not-declared, so capability discovery is a true
-        signal of "has a failure-mode catalog".
+        Base capabilities (asset/work-order reads) are always available.
+        ``CREATE_WORK_ORDER`` / ``UPDATE_WORK_ORDER`` are declared only when a
+        ``work_orders`` sheet with a ``write_mode`` is configured — otherwise
+        the write methods raise ``ConnectorConfigError``, so an undeclared
+        write is the honest signal. ``READ_FAILURE_MODES`` is declared only
+        when a ``failure_modes`` sheet is configured. Unconfigured means
+        not-declared, so capability discovery is a true signal of what this
+        connector can actually serve.
         """
         return self._capabilities
 
     def __init__(self, *, config: ExcelConnectorConfig) -> None:
         self._config = config
         caps = set(self._BASE_CAPABILITIES)
+        # Writes are serviceable only with a writable work_orders sheet: both
+        # create_work_order and durable update_work_order require a write_mode.
+        if config.work_orders is not None and config.work_orders.write_mode is not None:
+            caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
         if config.failure_modes is not None:
             caps.add(Capability.READ_FAILURE_MODES)
         self._capabilities = frozenset(caps)

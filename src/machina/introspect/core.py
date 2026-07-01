@@ -407,8 +407,13 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
             Capability.READ_FAILURE_MODES,
         }
     elif conn_type in ("excel", "excel_csv"):
-        # A failure_modes sheet adds READ_FAILURE_MODES.
-        full = {Capability.READ_FAILURE_MODES}
+        # A writable work_orders sheet (schema + write_mode) adds the WO writes;
+        # a failure_modes sheet adds READ_FAILURE_MODES.
+        full = {
+            Capability.CREATE_WORK_ORDER,
+            Capability.UPDATE_WORK_ORDER,
+            Capability.READ_FAILURE_MODES,
+        }
     elif conn_type == "generic_cmms":
         # Local mode / configured endpoints add the optional WO lifecycle and
         # maintenance-plan reads; a catalog source adds READ_FAILURE_MODES.

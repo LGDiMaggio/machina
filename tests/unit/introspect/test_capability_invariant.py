@@ -151,6 +151,33 @@ def test_sql_base_classvar_matches_init_built_base() -> None:
     assert connector.capabilities == GenericSqlConnector._BASE_CAPABILITIES
 
 
+def test_excel_base_classvar_matches_init_built_base() -> None:
+    """``ExcelCsvConnector._BASE_CAPABILITIES`` == its read-only ``__init__`` set.
+
+    Under a minimal read-only config (an ``asset_registry`` sheet only, no
+    ``work_orders`` ``write_mode``, no ``failure_modes``), ``__init__`` adds no
+    config-driven capabilities, so the live capability set must equal the
+    class-readable ``_BASE_CAPABILITIES`` the core reads without instantiating.
+    Any divergence means the class copy has drifted from runtime.
+    """
+    from machina.connectors.docs.excel import ExcelCsvConnector
+    from machina.connectors.docs.excel_schema import (
+        ColumnMapping,
+        ExcelConnectorConfig,
+        SheetSchema,
+    )
+
+    config = ExcelConnectorConfig(
+        asset_registry=SheetSchema(
+            path="assets.csv",
+            columns=[ColumnMapping(column="Codice", field="id", required=True)],
+        )
+    )
+    connector = ExcelCsvConnector(config=config)
+
+    assert connector.capabilities == ExcelCsvConnector._BASE_CAPABILITIES
+
+
 def test_calendar_base_classvar_matches_init_built_base() -> None:
     """``CalendarConnector._BASE_CAPABILITIES`` == the read-only ``ical`` base.
 

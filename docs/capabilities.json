@@ -81,7 +81,7 @@
         {
           "capability": "create_work_order",
           "method": "create_work_order",
-          "configurable": false
+          "configurable": true
         },
         {
           "capability": "read_assets",
@@ -101,7 +101,7 @@
         {
           "capability": "update_work_order",
           "method": "update_work_order",
-          "configurable": false
+          "configurable": true
         }
       ]
     },
@@ -117,7 +117,7 @@
         {
           "capability": "create_work_order",
           "method": "create_work_order",
-          "configurable": false
+          "configurable": true
         },
         {
           "capability": "read_assets",
@@ -137,7 +137,7 @@
         {
           "capability": "update_work_order",
           "method": "update_work_order",
-          "configurable": false
+          "configurable": true
         }
       ]
     },
@@ -547,14 +547,14 @@
       "value": "create_work_order",
       "method": "create_work_order",
       "provided_by": [
-        "excel",
-        "excel_csv",
         "generic_cmms",
         "maximo",
         "sap_pm",
         "upkeep"
       ],
       "configurable_in": [
+        "excel",
+        "excel_csv",
         "generic_sql",
         "sql"
       ],
@@ -794,13 +794,13 @@
       "value": "update_work_order",
       "method": "update_work_order",
       "provided_by": [
-        "excel",
-        "excel_csv",
         "maximo",
         "sap_pm",
         "upkeep"
       ],
       "configurable_in": [
+        "excel",
+        "excel_csv",
         "generic_cmms"
       ],
       "orphaned": false,
