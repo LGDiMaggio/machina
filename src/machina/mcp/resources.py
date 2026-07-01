@@ -4,7 +4,9 @@ Exposes Machina domain data as MCP resources so Claude Desktop and
 other MCP clients can attach assets, work orders, and the failure
 taxonomy to conversations.
 
-URI scheme is **pre-stable in v0.3.0** — may change before v0.3.1.
+The URI scheme is versioned (``machina://v1/...``); ``v1`` is the stable
+contract as of v0.3.1. A breaking change to a resource's shape goes to a new
+version segment, never a silent mutation of ``v1``.
 """
 
 from __future__ import annotations
@@ -159,6 +161,9 @@ def register_resources(server: Any) -> None:
         from machina.introspect import describe
         from machina.introspect.render_llms import render_json
 
-        return json.dumps(render_json(describe()), indent=2)
+        # Trailing newline so the body is byte-identical to the CLI's
+        # `machina describe --json` output and the committed docs/capabilities.json
+        # (both end with "\n") — the three surfaces share one exact contract.
+        return json.dumps(render_json(describe()), indent=2) + "\n"
 
     logger.info("mcp_resources_registered", count=4)

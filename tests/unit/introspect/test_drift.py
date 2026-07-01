@@ -125,6 +125,29 @@ def test_provenance_only_change_does_not_trip_body_diff() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gate sensitivity — the comparison detects a real body change
+# ---------------------------------------------------------------------------
+
+
+def test_gate_detects_a_body_mutation_not_masked_by_provenance() -> None:
+    """A real body change is caught even when the provenance header is identical.
+
+    The happy-path drift tests only prove committed == fresh. This proves the
+    *comparison itself* detects drift: two documents with the SAME provenance
+    header but a one-token body difference must compare unequal after stripping
+    provenance — so a ``strip_provenance`` bug that collapsed bodies to ``""``
+    (making empty == empty) would fail here rather than silently pass the gate.
+    """
+    body = _render_body()
+    mutated = body.replace("BaseConnector", "ZzzRenamedSeam", 1)
+    assert mutated != body, "sanity: the token must exist in the rendered body"
+
+    doc_ok = render_provenance_header("abc") + "\n" + body
+    doc_bad = render_provenance_header("abc") + "\n" + mutated
+    assert strip_provenance(doc_ok) != strip_provenance(doc_bad)
+
+
+# ---------------------------------------------------------------------------
 # llms.txt copies — repo-root and docs/ copies must stay byte-identical
 # ---------------------------------------------------------------------------
 

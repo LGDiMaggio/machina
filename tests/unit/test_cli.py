@@ -67,3 +67,29 @@ def test_no_subcommand_exits_nonzero() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main([])
     assert excinfo.value.code != 0
+
+
+def test_write_stdout_tolerates_narrow_console_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_write_stdout`` must not raise ``UnicodeEncodeError`` on a non-UTF-8
+    console (e.g. a Windows cp1252/ascii terminal). The spine can carry an em
+    dash or arrow; on a narrow stream those are replaced, not fatal.
+
+    capsys always captures as UTF-8, so this path needs an explicit narrow
+    stream to be exercised at all.
+    """
+    import io
+    import sys
+
+    class NarrowStdout(io.StringIO):
+        encoding = "ascii"
+
+    fake = NarrowStdout()
+    monkeypatch.setattr(sys, "stdout", fake)
+
+    cli._write_stdout("em—dash and arrow →\n")  # contains non-ASCII
+
+    out = fake.getvalue()
+    assert "dash" in out  # the ASCII text survived
+    assert "?" in out  # the non-ASCII glyphs were replaced, not raised on

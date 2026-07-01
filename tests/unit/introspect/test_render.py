@@ -265,12 +265,30 @@ def test_render_is_deterministic_across_two_calls() -> None:
 
 
 def test_render_json_has_no_provenance() -> None:
-    """The JSON artifact carries no provenance (so it diffs fully)."""
+    """The JSON carries a schema discriminant but no provenance (so it diffs fully)."""
     payload = render_json(_base_spine())
-    assert set(payload) == {"connectors", "capabilities", "seams", "config_schema", "gaps"}
+    assert set(payload) == {
+        "schema_version",
+        "connectors",
+        "capabilities",
+        "seams",
+        "config_schema",
+        "gaps",
+    }
+    assert payload["schema_version"] == "1"
     # The capability is present and structured.
     values = {c["value"] for c in payload["capabilities"]}
     assert "read_assets" in values
+
+
+def test_connector_json_omits_environment_dependent_extra_installed() -> None:
+    """The serialized connector carries the static ``requires_extra`` but NOT the
+    live ``extra_installed`` — a find_spec result baked into the byte-compared
+    artifact would make the drift gate flap across environments."""
+    payload = render_json(_base_spine())
+    connector = payload["connectors"][0]
+    assert "requires_extra" in connector
+    assert "extra_installed" not in connector
 
 
 # ---------------------------------------------------------------------------

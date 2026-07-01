@@ -71,11 +71,23 @@ def _render() -> tuple[str, str]:
     return markdown, payload
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (write-tmp-then-rename).
+
+    A rename into place is atomic on the same filesystem, so an interrupted run
+    can never leave a half-written or truncated artifact that the drift gate
+    would then read as spurious "drift" on the next invocation.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    tmp.replace(path)
+
+
 def _write() -> int:
     """Write both artifacts to ``docs/``; returns process exit code 0."""
     markdown, payload = _render()
-    _MD_PATH.write_text(markdown, encoding="utf-8", newline="\n")
-    _JSON_PATH.write_text(payload, encoding="utf-8", newline="\n")
+    _write_atomic(_MD_PATH, markdown)
+    _write_atomic(_JSON_PATH, payload)
     print(f"Wrote {_MD_PATH.relative_to(_REPO_ROOT)} and {_JSON_PATH.relative_to(_REPO_ROOT)}")
     return 0
 

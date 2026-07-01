@@ -239,25 +239,88 @@ def test_calendar_nonical_backend_yields_full_capabilities_at_runtime() -> None:
     assert readonly.capabilities == _READONLY_CAPABILITIES
 
 
-def test_connector_with_absent_extra_still_described(spine: Spine) -> None:
-    """A connector whose optional extra is NOT installed still appears, with
-    ``extra_installed=False`` and ``requires_extra`` set — and no ImportError.
+def test_connector_with_absent_extra_reports_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector whose optional extra is NOT installed still appears — with
+    ``extra_installed=False`` and ``requires_extra`` set — and never raises.
 
-    ``describe()`` already completed (the fixture built), proving no import of a
-    missing transport dependency raised. We additionally assert that every
-    not-installed connector still carries its extra name and, when healthy,
-    its declared capabilities.
+    Forced deterministically by stubbing the extra probe, so the ambient test
+    environment (which extras happen to be installed) cannot decide the outcome.
+    Every connector that declares an extra must still be described, carry its
+    extra name, report it not-installed, and — when its class imported cleanly
+    (transport deps are lazy) — still expose its declared capabilities.
     """
-    absent = [
-        c for c in spine.connectors if c.extra_installed is False and c.requires_extra is not None
-    ]
-    assert absent, "expected at least one connector with an uninstalled extra in this env"
-    for conn in absent:
+    from machina.introspect import core
+
+    monkeypatch.setattr(core, "_probe_extra", lambda meta: False if meta.probe_module else None)
+    spine = describe()
+
+    with_extra = [c for c in spine.connectors if c.requires_extra is not None]
+    assert with_extra, "expected connectors that declare an optional extra"
+    for conn in with_extra:
         assert conn.requires_extra
         assert conn.extra_installed is False
         if not conn.degraded:
             # Class import succeeded (lazy transport deps), so caps are present.
             assert conn.capabilities
+
+
+def test_degraded_connector_scrubs_user_path_from_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a connector class fails to import, describe() degrades it (never
+    raises) AND the error field is scrubbed of a user-home path at the core.
+
+    Pins the only site that applies ``safe_text`` to the import-failure message:
+    a regression dropping the scrub would leak an absolute install path (and OS
+    username) into the CLI, the MCP resource, and a regenerated artifact.
+    """
+    from machina.introspect import core
+
+    def boom(dotted_path: str) -> type:
+        raise ModuleNotFoundError(
+            r"No module named 'acme' (C:\Users\ci-bot\venv\Lib\acme\__init__.py)"
+        )
+
+    monkeypatch.setattr(core, "_import_class", boom)
+    spine = describe()
+
+    degraded = [c for c in spine.connectors if c.degraded]
+    assert degraded, "every connector must degrade when import raises — not crash"
+    for conn in degraded:
+        assert conn.error, "a degraded connector must carry an error string"
+        assert "ci-bot" not in conn.error, "user-home path must be scrubbed at the core"
+        assert "ModuleNotFoundError" in conn.error, "the exception type is preserved"
+
+
+def test_baseconnector_seam_surfaces_the_capabilities_property(spine: Spine) -> None:
+    """The BaseConnector seam manifest must list ``capabilities`` even though it
+    is a ``@property`` — it is the single most important member a connector
+    author implements, and a function-only reflection would silently omit it.
+    """
+    base = next((p for p in spine.seams.protocols if p.name == "BaseConnector"), None)
+    assert base is not None, "BaseConnector must appear as a protocol seam"
+    assert "capabilities" in {m.name for m in base.methods}
+
+
+def test_is_stub_method_uses_ast_not_string_scan() -> None:
+    """A docstring/comment mentioning the phrase must NOT read as a stub, while a
+    genuine ``raise NotImplementedError`` body must. Pins the AST-based check
+    against the previous raw-source scan (which false-positived on prose).
+    """
+    from machina.introspect._methods import is_stub_method
+
+    class Fixture:
+        def looks_live(self) -> int:
+            """Live method whose prose says: raise NotImplementedError (a red herring)."""
+            return 42
+
+        def genuine_stub(self) -> None:
+            raise NotImplementedError
+
+    assert is_stub_method(Fixture, "looks_live") is False
+    assert is_stub_method(Fixture, "genuine_stub") is True
 
 
 def test_capability_index_has_no_provider_in_both_buckets(spine: Spine) -> None:

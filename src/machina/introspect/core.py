@@ -385,32 +385,34 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
 
     These are declared at instance level depending on configuration, so the
     config-less core annotates them "configurable" rather than resolving them.
-    Computed as (full declared maximum) - (base), read entirely off the class
-    where possible; for the connectors whose full maximum is not class-readable
-    the maximum is the known superset of optional capabilities.
+    Computed as (full declared maximum) - (base): the base subtraction is
+    enforced below, not merely coincidental, so a capability later promoted
+    into a connector's ``_BASE_CAPABILITIES`` can never also be double-emitted
+    as configurable.
     """
+    full: set[Capability]
     if conn_type == "calendar":
         # Base is the read-only minimum (READ_CALENDAR_EVENTS, guaranteed on
         # every backend); CREATE/DELETE are configurable on the backend (the
         # writable google/outlook backends expose them, ical does not).
-        return {
+        full = {
             Capability.CREATE_CALENDAR_EVENT,
             Capability.DELETE_CALENDAR_EVENT,
         }
-    if conn_type in ("sql", "generic_sql"):
+    elif conn_type in ("sql", "generic_sql"):
         # capabilities: read_write adds writes; a FailureMode table adds reads.
-        return {
+        full = {
             Capability.CREATE_WORK_ORDER,
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_FAILURE_MODES,
         }
-    if conn_type in ("excel", "excel_csv"):
+    elif conn_type in ("excel", "excel_csv"):
         # A failure_modes sheet adds READ_FAILURE_MODES.
-        return {Capability.READ_FAILURE_MODES}
-    if conn_type == "generic_cmms":
+        full = {Capability.READ_FAILURE_MODES}
+    elif conn_type == "generic_cmms":
         # Local mode / configured endpoints add the optional WO lifecycle and
         # maintenance-plan reads; a catalog source adds READ_FAILURE_MODES.
-        return {
+        full = {
             Capability.GET_WORK_ORDER,
             Capability.UPDATE_WORK_ORDER,
             Capability.CLOSE_WORK_ORDER,
@@ -418,7 +420,9 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
             Capability.READ_MAINTENANCE_PLANS,
             Capability.READ_FAILURE_MODES,
         }
-    return set()
+    else:
+        full = set()
+    return full - base
 
 
 def _first_doc_line(obj: Any) -> str:
@@ -443,12 +447,41 @@ def _first_doc_line(obj: Any) -> str:
 
 
 def _reflect_protocol(module_path: str, class_name: str) -> ProtocolSeam:
-    """Reflect a seam Protocol's required methods via ``inspect``."""
-    module = importlib.import_module(module_path)
-    proto = getattr(module, class_name)
+    """Reflect a seam Protocol's required members via ``inspect``.
+
+    Emits both methods and ``@property`` members. Properties matter: the single
+    most important member a connector author must implement — ``capabilities``
+    on :class:`~machina.connectors.base.BaseConnector` — is a property, and a
+    seam manifest that lists only functions would silently omit it.
+
+    Import failures degrade to a marked seam (empty methods + scrubbed error)
+    rather than propagating, mirroring the connector harvest — so ``describe()``
+    keeps its "never raises" contract even if a future seam module grows a
+    top-level optional import.
+    """
+    try:
+        module = importlib.import_module(module_path)
+        proto = getattr(module, class_name)
+    except Exception as exc:
+        return ProtocolSeam(
+            name=class_name,
+            location=module_path,
+            doc=safe_text(f"{type(exc).__name__}: {exc}"),
+            methods=(),
+        )
     methods: list[SeamMethod] = []
     for name, member in inspect.getmembers(proto):
         if name.startswith("_"):
+            continue
+        if isinstance(member, property):
+            fget = member.fget
+            methods.append(
+                SeamMethod(
+                    name=name,
+                    is_async=False,
+                    doc=_first_doc_line(fget) if fget is not None else "",
+                )
+            )
             continue
         if not (inspect.isfunction(member) or inspect.ismethod(member)):
             continue
@@ -492,7 +525,17 @@ def _build_connectors(
             cls = _import_class(dotted_path)
         except Exception as exc:
             # Degrade gracefully — a missing module is a marked entry, not a
-            # crash (mirrors the runtime's tolerant connector harvest).
+            # crash (mirrors the runtime's tolerant connector harvest). Emit a
+            # WARNING so the degradation is auditable in CI logs rather than a
+            # silent hole in the capability surface (the exception *type* only —
+            # the raw message may carry an install path and is scrubbed below).
+            import structlog
+
+            structlog.get_logger(__name__).warning(
+                "connector introspection degraded",
+                connector=conn_type,
+                error=type(exc).__name__,
+            )
             connectors.append(
                 ConnectorInfo(
                     type=conn_type,

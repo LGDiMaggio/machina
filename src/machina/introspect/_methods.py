@@ -127,8 +127,47 @@ def is_stub_method(cls: type[Any], method_name: str) -> bool:
         return False
     if STUB_MARKER in source:
         return True
-    # ``raise NotImplementedError`` (with or without a message/parens).
-    return "raise NotImplementedError" in source
+    # A bare ``raise NotImplementedError`` in the body — detected structurally
+    # via the AST, not by scanning raw source, so a docstring or comment that
+    # merely mentions the phrase does not false-positive (which would silently
+    # drop a live capability from the spine).
+    return _body_raises_not_implemented(source)
+
+
+def _body_raises_not_implemented(source: str) -> bool:
+    """Whether a method's source body contains a ``raise NotImplementedError``.
+
+    Parses the source with the :mod:`ast` module and walks the function body
+    for a ``raise`` of ``NotImplementedError`` (bare or called). Docstrings and
+    comments are not statements, so a mention of the phrase in prose is ignored.
+    Falls back to a conservative substring check only if the source cannot be
+    parsed (an unusual, defensive case).
+
+    Args:
+        source: The method source as returned by :func:`inspect.getsource`.
+
+    Returns:
+        ``True`` when the body raises ``NotImplementedError``.
+    """
+    import ast
+    import textwrap
+
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return "raise NotImplementedError" in source
+    func = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)),
+        None,
+    )
+    if func is None:
+        return False
+    for node in ast.walk(func):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+                return True
+    return False
 
 
 def has_live_method(cls: type[Any], capability: Capability) -> bool:

@@ -114,6 +114,11 @@ def render_json(spine: Spine) -> dict[str, Any]:
         A plain ``dict`` of built-in types, ready for ``json.dumps``.
     """
     return {
+        # Schema discriminant: the MCP URI carries `v1`, but a cached payload
+        # body must also self-identify so a consumer can tell v1 from a future
+        # v2 without inspecting the transport. Additive; bump on breaking shape
+        # changes only.
+        "schema_version": "1",
         "connectors": [_connector_json(c) for c in spine.connectors],
         "capabilities": [_capability_json(c) for c in spine.capabilities],
         "seams": _seams_json(spine.seams),
@@ -132,7 +137,13 @@ def _connector_json(c: ConnectorInfo) -> dict[str, Any]:
         "class_name": c.class_name,
         "dotted_path": c.dotted_path,
         "requires_extra": c.requires_extra,
-        "extra_installed": c.extra_installed,
+        # NOTE: `extra_installed` is deliberately NOT serialized here. It is a
+        # live environment fact (find_spec at call time), so baking it into the
+        # committed, byte-compared artifact makes the drift gate flap across
+        # environments (a full-extras dev box vs a bare CI job). `requires_extra`
+        # (which extra is needed) is static and stays; whether it is installed
+        # is answered live by `machina describe` (text view), not by the
+        # portable JSON contract shared by the CLI, MCP resource, and artifact.
         "instance_computed": c.instance_computed,
         "degraded": c.degraded,
         "error": c.error,
@@ -224,13 +235,6 @@ def render_markdown(spine: Spine, git_sha: str = UNCOMMITTED_SHA) -> str:
         _render_gaps(spine),
     ]
     return "\n".join(parts).rstrip() + "\n"
-
-
-def _bool_cell(value: bool | None) -> str:
-    """A table cell for an optional boolean (yes / no / n/a)."""
-    if value is None:
-        return "n/a"
-    return "yes" if value else "no"
 
 
 def _render_matrix(
