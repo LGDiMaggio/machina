@@ -190,6 +190,26 @@ A technician sends an email or Telegram message in their language:
 
 The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
 
+## Build with Claude Code
+
+Machina ships a **Claude Code plugin** — `machina-agent-builder` — that makes the framework LLM-buildable. Instead of wiring an agent by hand, you drive two slash commands and Claude reads Machina's **code-derived self-description spine** (`machina describe`) to assemble a working agent from what the framework actually supports:
+
+- **`/build-machina-agent`** — reads the spine, confirms the shape with you, then generates a `config.yaml` + entrypoint wiring only the capabilities the spine reports as backed.
+- **`/extend-machina`** — adds a connector, capability, MCP tool, mapper, or workflow against the seam the spine declares, then regenerates the spine so the CI drift gate stays green.
+
+Because both commands consume the live spine rather than a hardcoded list, the plugin never goes stale as Machina changes. The repo doubles as a Claude Code **plugin marketplace**, so installing it is two slash commands:
+
+```text
+/plugin marketplace add LGDiMaggio/machina
+/plugin install machina-agent-builder@machina
+```
+
+<div align="center">
+  <img src="docs/assets/machina-plugin.gif" alt="Installing the Machina agent-builder plugin in Claude Code" width="700"/>
+</div>
+
+> **Prerequisite** — the commands run `machina describe`, so `machina-ai` must be installed in the environment where you use the plugin. See the [plugin guide](plugin/README.md) for the full walkthrough (local-checkout install, why it stays in sync).
+
 ## From Demo to Production
 
 The quickstart uses sample data. When you're ready, swap connectors to your real systems -- the agent logic doesn't change:
