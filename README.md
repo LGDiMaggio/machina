@@ -20,6 +20,10 @@
   <img src="docs/assets/machina-demo.gif" alt="Machina demo" width="700"/>
 </div>
 
+<div align="center">
+  <img src="docs/assets/machina-plugin.gif" alt="Installing the Machina agent-builder plugin in Claude Code" width="700"/>
+</div>
+
 ---
 
 ## Quick Start
