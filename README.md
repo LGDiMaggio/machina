@@ -284,7 +284,7 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 | Connector | Protocol | |
 |-----------|----------|---|
 | `OpcUA` | OPC-UA | Available |
-| `MQTT` | MQTT / Sparkplug B | Available |
+| `MQTT` | MQTT / Sparkplug B (JSON payloads only -- protobuf needs an MQTT-to-JSON bridge) | Available |
 | `Modbus` | Modbus TCP/RTU | Planned |
 
 ### Communication & Scheduling

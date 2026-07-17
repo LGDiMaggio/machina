@@ -13,9 +13,9 @@ where its extension seams are — derived entirely from code:
 
 It imports **no heavy optional dependency**.  Connector modules import their
 transport deps (asyncua, aiomqtt, httpx, chromadb, langchain, docling,
-pymodbus, openpyxl, pyodbc) lazily inside methods, so importing a connector
-*class* is safe on a bare ``pip install machina-ai``.  Optional-extra
-presence is probed with :func:`importlib.util.find_spec`, never an import.
+openpyxl, pyodbc) lazily inside methods, so importing a connector *class* is
+safe on a bare ``pip install machina-ai``.  Optional-extra presence is probed
+with :func:`importlib.util.find_spec`, never an import.
 
 The returned structure is **deterministic**: every collection is sorted by a
 stable key (capabilities by enum value, connectors by type string, methods by
