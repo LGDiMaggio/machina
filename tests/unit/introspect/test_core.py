@@ -36,7 +36,6 @@ from machina.runtime import _CONNECTOR_FACTORIES
 _HEAVY_MODULES = (
     "asyncua",
     "aiomqtt",
-    "pymodbus",
     "chromadb",
     "langchain",
     "langchain_chroma",

@@ -48,7 +48,6 @@ litellm = ["litellm>=1.0"]
 sap = ["pyodata>=1.10", "requests>=2.31"]
 opcua = ["asyncua>=1.0"]
 mqtt = ["aiomqtt>=2.0"]
-modbus = ["pymodbus>=3.5"]
 iot = [
     "machina-ai[opcua]",
     "machina-ai[mqtt]",
@@ -101,7 +100,6 @@ all = [
     "machina-ai[sap]",
     "machina-ai[opcua]",
     "machina-ai[mqtt]",
-    "machina-ai[modbus]",
     "machina-ai[telegram]",
     "machina-ai[slack]",
     "machina-ai[calendar]",
