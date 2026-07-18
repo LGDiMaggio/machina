@@ -42,6 +42,7 @@ from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
+    from machina.agent.entity_resolver import ResolvedEntity
     from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
@@ -1130,7 +1131,7 @@ class Agent:
     async def _gather_context(
         self,
         text: str,
-        resolved: list[Any],
+        resolved: list[ResolvedEntity],
         *,
         chat_id: str = "default",
     ) -> dict[str, Any]:
