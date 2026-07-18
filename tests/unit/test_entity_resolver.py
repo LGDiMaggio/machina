@@ -212,6 +212,101 @@ class TestExactIdAnchoring:
             assert _exact_ids(results) == [asset.id], f"{asset.id} regressed"
 
 
+def _plant_with_locations(*pairs: tuple[str, str]) -> Plant:
+    """Build a plant whose assets differ only in their location string."""
+    plant = Plant(name="Location Plant")
+    for asset_id, location in pairs:
+        plant.register_asset(
+            Asset(
+                id=asset_id,
+                name=f"Asset {asset_id}",
+                type=AssetType.ROTATING_EQUIPMENT,
+                location=location,
+            )
+        )
+    return plant
+
+
+class TestLocationTokenGranularity:
+    """Stage-3 location matching keeps single-character tokens.
+
+    Real plant locations put the discriminator in one-character tokens — the
+    building letter, the floor number, the bay number ("Edificio A / Piano 1 /
+    Campata 3"). A ``len(part) > 1`` filter dropped all of them, collapsing
+    every such location onto its shared nouns: "Edificio A" and "Edificio B"
+    became indistinguishable, so every location query tied and the authority
+    gate withheld a commit that no follow-up answer could ever unblock.
+    """
+
+    def test_building_letter_separates_otherwise_identical_locations(self) -> None:
+        """The pin: two locations differing only by the building letter."""
+        plant = _plant_with_locations(
+            ("P-201", "Edificio A / Piano 1"),
+            ("P-202", "Edificio B / Piano 1"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("controlla la pompa in Edificio B Piano 1")
+
+        assert [r.asset.id for r in results] == ["P-202", "P-201"]
+        assert results[0].match_reason == "location_match"
+        # Not a tie — this is what the filter destroyed, and an exact tie is
+        # exactly what ``resolution_verdict`` classifies as ambiguous.
+        assert results[0].confidence > results[1].confidence
+
+    def test_named_building_resolves_instead_of_withholding(self) -> None:
+        """The consequence: a location query can actually commit to an asset."""
+        plant = _plant_with_locations(
+            ("P-201", "Edificio A / Piano 1"),
+            ("P-202", "Edificio B / Piano 1"),
+        )
+        resolver = EntityResolver(plant)
+        verdict = resolution_verdict(resolver.resolve("controlla la pompa in Edificio B Piano 1"))
+
+        assert verdict.ambiguous is False
+        assert verdict.commits is True
+
+    def test_floor_digit_separates_otherwise_identical_locations(self) -> None:
+        """The floor number is a single character too, and equally load-bearing."""
+        plant = _plant_with_locations(
+            ("C-3", "Edificio B / Piano 0"),
+            ("C-4", "Edificio B / Piano 1"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("la caldaia in Edificio B Piano 0")
+
+        assert results[0].asset.id == "C-3"
+        assert results[0].confidence > results[1].confidence
+
+    def test_genuinely_shared_location_still_ties(self) -> None:
+        """Keeping the tokens must not disarm ambiguity where it is real.
+
+        Two assets in the *same* room are still undecidable from location
+        alone; the gate must keep withholding there.
+        """
+        plant = _plant_with_locations(
+            ("C-3", "Edificio B / Piano 0 / Centrale Termica"),
+            ("C-4", "Edificio B / Piano 0 / Centrale Termica"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("guasto in Edificio B Piano 0 Centrale Termica")
+
+        assert results[0].confidence == results[1].confidence
+        assert resolution_verdict(results).ambiguous is True
+
+    def test_empty_parts_from_leading_separator_are_dropped(self) -> None:
+        """A leading separator yields an empty split part, which must not count.
+
+        An empty part would inflate ``len(loc_parts)`` and silently deflate
+        every score for that asset.
+        """
+        plant = _plant_with_locations(("P-201", "/ Edificio A"))
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("la pompa in Edificio A")
+
+        # One real part, fully overlapped -> the stage's maximum, 0.6.
+        assert results[0].confidence == 0.6
+
+
 class TestResolvedEntity:
     """Test ResolvedEntity representation."""
 

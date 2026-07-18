@@ -332,7 +332,18 @@ class EntityResolver:
             if asset.location:
                 loc_lower = asset.location.lower()
                 loc_parts = re.split(r"[/\-,\s]+", loc_lower)
-                loc_parts = [p for p in loc_parts if len(p) > 1]
+                # Keep every non-empty part, single characters included. Plant
+                # location strings put the discriminator in exactly those: in
+                # "Edificio A / Piano 1 / Campata 3" the building letter, the
+                # floor number and the bay number are all one character, so a
+                # ``len(p) > 1`` filter reduced every such location to its
+                # shared nouns — "Edificio A" and "Edificio B" became the same
+                # token set, and every location query tied across all assets
+                # (an ambiguous verdict that can never be resolved by naming
+                # the building). The split pattern only consumes separators, so
+                # the sole thing left to drop is the empty string a leading or
+                # trailing separator produces.
+                loc_parts = [p for p in loc_parts if p]
                 overlap = set(loc_parts) & text_tokens
                 if overlap:
                     score = len(overlap) / max(len(loc_parts), 1)
