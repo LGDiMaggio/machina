@@ -56,6 +56,17 @@ logger = structlog.get_logger(__name__)
 # table and this guard.
 _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 
+# Mutating tools that write against a specific ``asset_id`` and are therefore
+# subject to :meth:`Agent._authorize_write_target`. Kept as an explicit list
+# rather than "everything in _SIDE_EFFECTING_TOOLS" because the other mutating
+# tools (``execute_workflow``) carry no ``asset_id`` argument, and running the
+# asset check over them would refuse every one of them for "no asset named".
+# A new asset-targeted write tool must be added here AND call the same check in
+# its handler — the loop's pre-check is an early-out, not the enforcement point
+# (the two-turn resume path re-enters at the handler without passing through
+# the loop at all).
+_ASSET_TARGETED_WRITE_TOOLS: frozenset[str] = frozenset({"create_work_order"})
+
 # Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
 # payloads that are recognisably tool-call-shaped but do NOT parse — truncated
 # JSON (the model ran out of tokens mid-call) or hopelessly mixed quoting.
@@ -1942,11 +1953,42 @@ class Agent:
                 # already no-ops the write — confirming a no-op would mislead).
                 gate_write = memo_key is not None and self._confirmations and not self.sandbox
 
+                # Authority pre-check, BEFORE the confirmation gate below. The
+                # tool handler runs this same check — same function, no second
+                # derivation — but the handler sits downstream of the gate, so
+                # with the default ``confirmations=True`` an unauthorised write
+                # asked the user "Create a work order for P-201?", waited for a
+                # yes, and only then refused. Two costs: a confusing round-trip,
+                # and a parked pending action that can never succeed, which
+                # ``_await_write_confirmation``'s keep-first rule then lets block
+                # a legitimate second proposal. Refusing here means nothing is
+                # proposed and nothing is stored. The handler's copy stays: the
+                # two-turn resume path re-enters there without passing through
+                # this loop.
+                write_refusal: dict[str, Any] | None = None
+                if memo_key is not None and func_name in _ASSET_TARGETED_WRITE_TOOLS:
+                    write_refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
+
                 with self.tracer.trace(
                     "tool_call",
                     operation=func_name,
                 ) as tool_span:
-                    if memo_key is None and call_key in executed_reads:
+                    if write_refusal is not None:
+                        # Unconditional: a refusal is not a mutation, so neither
+                        # sandbox nor ``confirmations=False`` exempts it, and it
+                        # takes precedence over the memo/decline branches below
+                        # (which can only be reached by a call that was
+                        # authorised earlier in this same turn anyway).
+                        tool_result = write_refusal
+                        logger.warning(
+                            "write_refused_unauthorized_asset",
+                            agent=self.name,
+                            asset_id=args.get("asset_id", ""),
+                            reason=write_refusal["reason"],
+                            chat_id=chat_id,
+                            operation=func_name,
+                        )
+                    elif memo_key is None and call_key in executed_reads:
                         # Read-only call re-issued verbatim — replay the cached
                         # result instead of re-querying the connector, and nudge
                         # the model to answer with the data it already has.

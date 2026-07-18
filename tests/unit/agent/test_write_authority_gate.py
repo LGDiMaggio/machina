@@ -21,6 +21,7 @@ three paths reach execution ungated — making the write path MORE permissive at
 
 from __future__ import annotations
 
+import time
 from typing import Any, ClassVar
 
 import pytest
@@ -47,10 +48,11 @@ def _asset(
 def _plant() -> Plant:
     """P-201 and P-202 share a name; C-101 is unrelated but registered.
 
-    Locations are multi-word and distinct on a token longer than one character:
-    the resolver drops single-character location tokens, so "Building A" and
-    "Building B" would both score a *perfect* location match on either query and
-    every location question would tie.
+    Locations are distinct on a whole word rather than on a single letter. The
+    resolver does now keep single-character location tokens, so "Building A"
+    and "Building B" would separate too — but a multi-word discriminator keeps
+    these fixtures independent of that scoring detail, since the tie these
+    tests need comes from the shared NAME, not from the location.
     """
     plant = Plant(name="Test Plant")
     plant.register_asset(_asset("P-201", location="Building Alpha"))
@@ -340,8 +342,93 @@ class TestTwoTurnResumePath:
         assert [wo.asset_id for wo in spy.created] == ["P-201"]
 
     @pytest.mark.asyncio
-    async def test_ambiguous_propose_is_still_refused_on_confirmation(self) -> None:
-        """Fail closed across the turn boundary — the ambiguity does not decay."""
+    async def test_resume_still_refuses_a_stored_ambiguous_verdict(self) -> None:
+        """Fail closed across the turn boundary — the ambiguity does not decay.
+
+        Defence in depth. The loop's pre-check means an ambiguous write is now
+        refused before a pending is ever parked, so this state is unreachable
+        through the public path; the handler's own check must still refuse it
+        if it ever appears (a future propose site, a restored store).
+        """
+        spy = _SpyCmms()
+        agent = Agent(
+            plant=_plant(),
+            connectors=[spy],
+            llm=_WriteThenAnswerLLM("P-201"),
+            confirmations=True,
+        )
+        stored = _TurnResolution.of(agent._resolver.resolve("the cooling water pump"))
+        assert stored.verdict.ambiguous is True  # precondition
+        agent._pending_actions[("c1", "u1")] = (
+            "create_work_order",
+            _args("P-201"),
+            "Create a work order?",
+            time.monotonic(),
+            stored,
+        )
+
+        await agent.handle_message_full("yes", chat_id="c1", user_id="u1")
+
+        assert spy.created == []
+
+
+class TestAmbiguousWriteBurnsNoConfirmationRoundTrip:
+    """An unauthorised write is refused BEFORE the confirmation gate.
+
+    ``gate_write`` sits in ``_llm_loop`` upstream of ``_execute_tool``, so with
+    the default ``confirmations=True`` an ambiguous write used to ask the user
+    "Create a work order for P-201?", wait for a yes, and only then refuse.
+    Two costs: a round-trip that could never have succeeded, and a parked
+    pending action that ``_await_write_confirmation``'s keep-first rule then
+    let block a legitimate second proposal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_write_refuses_without_parking_a_pending(self) -> None:
+        spy = _SpyCmms()
+        agent = Agent(
+            plant=_plant(),
+            connectors=[spy],
+            llm=_WriteThenAnswerLLM("P-201"),
+            confirmations=True,
+        )
+
+        await agent.handle_message_full(
+            "open a job for the cooling water pump", chat_id="c1", user_id="u1"
+        )
+
+        assert agent._pending_actions == {}
+        assert spy.created == []
+
+    @pytest.mark.asyncio
+    async def test_no_confirmation_question_is_put_to_the_user(self) -> None:
+        """The synchronous path must not ask either — same seam, same order."""
+        spy = _SpyCmms()
+        agent = Agent(
+            plant=_plant(),
+            connectors=[spy],
+            llm=_WriteThenAnswerLLM("P-201"),
+            confirmations=True,
+        )
+        asked: list[str] = []
+
+        async def _confirmer(prompt: str) -> bool:
+            asked.append(prompt)
+            return True
+
+        await agent.handle_message_full(
+            "open a job for the cooling water pump",
+            chat_id="c1",
+            user_id="u1",
+            confirmer=_confirmer,
+        )
+
+        assert asked == []
+        assert spy.created == []
+
+    @pytest.mark.asyncio
+    async def test_a_later_legitimate_write_is_not_blocked(self) -> None:
+        """The keep-first consequence: no dead pending occupies the slot."""
         spy = _SpyCmms()
         agent = Agent(
             plant=_plant(),
@@ -352,13 +439,17 @@ class TestTwoTurnResumePath:
         await agent.handle_message_full(
             "open a job for the cooling water pump", chat_id="c1", user_id="u1"
         )
-        pending = agent._pending_actions.get(("c1", "u1"))
-        if pending is None:
-            pytest.skip("write never reached the confirmation store")
+        assert ("c1", "u1") not in agent._pending_actions
+
+        # The user names the asset properly; the proposal must go through.
+        agent._llm = _WriteThenAnswerLLM("P-201")  # type: ignore[assignment]
+        await agent.handle_message_full("open a job for P-201", chat_id="c1", user_id="u1")
+
+        assert agent._pending_actions[("c1", "u1")][1]["asset_id"] == "P-201"
 
         await agent.handle_message_full("yes", chat_id="c1", user_id="u1")
 
-        assert spy.created == []
+        assert [wo.asset_id for wo in spy.created] == ["P-201"]
 
 
 class TestPostWriteNarrationIsNotHedged:

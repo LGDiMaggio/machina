@@ -1954,6 +1954,10 @@ class TestLoopIdempotency:
             return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
 
         agent._execute_tool = fake_exec  # type: ignore[assignment]
+        # The write-authority pre-check now runs in the loop, above the stubbed
+        # ``_execute_tool`` — so the asset has to actually be in the registry for
+        # the turn to resolve it and the memo behaviour under test to be reached.
+        _authorize_write(agent, "P-201")
         await agent.handle_message("crea un work order per P-201")
         # First call errored (not memoised) → second identical request re-runs.
         assert calls["n"] == 2
@@ -3752,6 +3756,9 @@ class TestTwoTurnConfirmation:
             {"asset_id": "P-201", "type": "corrective", "description": "first"}
         )
         await agent.start()
+        # Both targets must exist for each turn to resolve the asset it names —
+        # the write gate refuses before a pending is ever proposed otherwise.
+        _authorize_write(agent, "P-201", "P-202", chat_id="c1")
         await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
         first = agent._pending_actions[("c1", "userA")]
         # A different proposal arrives before confirmation (separate turn).
@@ -3975,6 +3982,10 @@ class TestSafetyCoverageGaps:
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
         confirmer = _RaisingConfirmer()
+        # Driving ``_llm_loop`` directly skips ``_gather_context``, so the turn
+        # carries no resolution and the write gate would refuse before the
+        # confirmer is ever consulted — seed what a real turn would have left.
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         # The exception may propagate OR be converted to a decline; either way
         # the write must NOT fire.
@@ -4001,6 +4012,7 @@ class TestSafetyCoverageGaps:
 
         agent._execute_tool = fake_exec  # type: ignore[assignment]
         confirmer = _RecordingConfirmer(True)
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
         # First confirmed call errored (not memoised) → the verbatim re-issue is
@@ -4100,6 +4112,10 @@ class TestPendingKeepFirst:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
         await agent.start()
+        # Both assets are named in the message and registered, so the turn
+        # resolves both (exact-ID multiplicity) and each proposed write is
+        # authorised — leaving keep-first, not the write gate, as what decides.
+        _authorize_write(agent, "P-201", "P-202", chat_id="c1")
 
         events: list[dict[str, Any]] = []
 
@@ -4110,7 +4126,7 @@ class TestPendingKeepFirst:
         structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
         try:
             await agent.handle_message_full(
-                "create two work orders", chat_id="c1", user_id="userA"
+                "create work orders for P-201 and P-202", chat_id="c1", user_id="userA"
             )
         finally:
             structlog.reset_defaults()
