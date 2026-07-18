@@ -30,6 +30,39 @@ _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 RESOLUTION_MIN_CONFIDENCE = 0.4
 
 
+def _id_occurs_in(asset_id: str, text: str) -> bool:
+    """Whether ``asset_id`` occurs in ``text`` as a whole token.
+
+    Raw substring containment makes a short ID match inside a longer one —
+    ``P-2`` hits inside ``P-201`` — and stage 1 hands that back at confidence
+    1.0, i.e. the wrong asset presented as the definitive referent. Anchoring
+    with non-word lookarounds on both sides rejects that while staying
+    permissive about the surrounding punctuation technicians actually type
+    (``P-201,`` / ``(P-201)`` / end of message).
+
+    ``Asset.id`` is free-form (only non-empty is enforced), so the ID is
+    escaped and matched literally rather than parsed against any ID grammar —
+    a format-constrained pattern would silently drop every asset whose ID does
+    not fit the assumed shape.
+
+    Lookarounds are used instead of ``\\b`` because ``\\b`` is defined relative
+    to the adjacent character and misbehaves for IDs that start or end with a
+    non-word character.
+
+    Known limitation, accepted: ``/`` is a non-word character, so ``P-201``
+    still matches inside ``P-201/A``.
+
+    Args:
+        asset_id: The registered asset identifier to look for.
+        text: Free-form user input.
+
+    Returns:
+        ``True`` if the ID appears as a whole token, case-insensitively.
+    """
+    pattern = rf"(?<!\w){re.escape(asset_id)}(?!\w)"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
 def _tokenise(text: str) -> set[str]:
     """Tokenise text into lowercase words with punctuation stripped."""
     cleaned = _PUNCT_RE.sub(" ", text.lower())
@@ -64,7 +97,8 @@ class EntityResolver:
     1. Exact ID match (e.g. ``"P-201"``)
     2. Name match (e.g. ``"cooling water pump"``)
     3. Location match (e.g. ``"building A"``)
-    4. Fuzzy keyword match across all asset fields
+    4. Keyword match — verbatim token containment across all asset fields
+       (no typo tolerance)
 
     Args:
         plant: The plant containing the asset registry.
@@ -99,7 +133,7 @@ class EntityResolver:
 
         # 1. Exact ID match — look for asset IDs embedded in the text
         for asset in assets:
-            if asset.id.lower() in text.lower():
+            if _id_occurs_in(asset.id, text):
                 results.append(ResolvedEntity(asset, confidence=1.0, match_reason="exact_id"))
                 logger.debug(
                     "entity_resolved",
@@ -158,7 +192,10 @@ class EntityResolver:
             results.sort(key=lambda r: r.confidence, reverse=True)
             return results
 
-        # 4. Fuzzy keyword match across all fields
+        # 4. Keyword match — exact substring containment of each query token in
+        # the asset's concatenated fields. Despite the "fuzzy" label this once
+        # carried, there is no edit-distance or typo tolerance here: a token
+        # either occurs verbatim or it does not.
         for asset in assets:
             searchable = " ".join(
                 [
@@ -188,15 +225,3 @@ class EntityResolver:
 
         results.sort(key=lambda r: r.confidence, reverse=True)
         return results
-
-    def resolve_best(self, text: str) -> Asset | None:
-        """Resolve to the single best-matching asset, or None.
-
-        Args:
-            text: User input that may reference an asset.
-
-        Returns:
-            The highest-confidence match, or ``None``.
-        """
-        matches = self.resolve(text)
-        return matches[0].asset if matches else None

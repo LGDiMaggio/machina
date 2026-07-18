@@ -89,16 +89,6 @@ class TestEntityResolver:
         results = resolver.resolve("P-201")
         assert results == []
 
-    def test_resolve_best(self) -> None:
-        resolver = EntityResolver(_make_plant())
-        asset = resolver.resolve_best("Tell me about P-201")
-        assert asset is not None
-        assert asset.id == "P-201"
-
-    def test_resolve_best_no_match(self) -> None:
-        resolver = EntityResolver(Plant(name="Empty"))
-        assert resolver.resolve_best("something") is None
-
     def test_name_keywords_partial_match(self) -> None:
         """Test partial name keyword match with score < 1.0."""
         resolver = EntityResolver(_make_plant())
@@ -115,6 +105,91 @@ class TestEntityResolver:
         assert len(results) >= 1
         # Should match P-201 (Grundfos) via keyword
         assert any(r.asset.id == "P-201" for r in results)
+
+
+def _plant_with_ids(*ids: str) -> Plant:
+    """Build a plant whose assets carry the given IDs and nothing distinctive else."""
+    plant = Plant(name="ID Plant")
+    for asset_id in ids:
+        plant.register_asset(
+            Asset(
+                id=asset_id,
+                name=f"Asset {asset_id}",
+                type=AssetType.ROTATING_EQUIPMENT,
+            )
+        )
+    return plant
+
+
+def _exact_ids(results: list[ResolvedEntity]) -> list[str]:
+    """IDs of the results that matched at stage 1 (exact_id)."""
+    return [r.asset.id for r in results if r.match_reason == "exact_id"]
+
+
+class TestExactIdAnchoring:
+    """Stage-1 ID matching is anchored to word boundaries.
+
+    Raw substring containment made ``P-2`` match inside ``P-201`` and return it
+    at confidence 1.0 — a wrong asset presented as the definitive referent.
+    These tests pin the anchoring without over-tightening it (see
+    ``docs/solutions/logic-errors/asset-id-inference-too-strict-2026-05-15.md``).
+    """
+
+    def test_happy_path_id_in_sentence(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        results = resolver.resolve("Tell me about P-201 please")
+        assert _exact_ids(results) == ["P-201"]
+        assert results[0].confidence == 1.0
+
+    def test_longer_id_does_not_match_shorter_registered_id(self) -> None:
+        resolver = EntityResolver(_plant_with_ids("P-201", "P-2010"))
+        results = resolver.resolve("P-2010 is leaking")
+        assert _exact_ids(results) == ["P-2010"]
+
+    def test_shorter_registered_id_not_matched_inside_longer_reference(self) -> None:
+        """Only P-2 exists; the user asks about P-201 — P-2 is not the referent."""
+        resolver = EntityResolver(_plant_with_ids("P-2"))
+        results = resolver.resolve("qual e lo stato di P-201?")
+        assert _exact_ids(results) == []
+
+    def test_id_at_start_of_text(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("P-201 is down")) == ["P-201"]
+
+    def test_id_at_end_of_text(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("please check P-201")) == ["P-201"]
+
+    def test_id_is_entire_text(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("P-201")) == ["P-201"]
+
+    def test_id_followed_by_punctuation(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("P-201, che perde")) == ["P-201"]
+
+    def test_id_inside_parentheses(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("the pump (P-201) is noisy")) == ["P-201"]
+
+    def test_id_case_insensitive(self) -> None:
+        resolver = EntityResolver(_make_plant())
+        assert _exact_ids(resolver.resolve("controlla p-201 subito")) == ["P-201"]
+
+    def test_id_with_regex_metacharacter_matches_literally(self) -> None:
+        """An ID containing regex metacharacters is escaped, not interpreted."""
+        resolver = EntityResolver(_plant_with_ids("P.201"))
+        assert _exact_ids(resolver.resolve("P.201 is leaking")) == ["P.201"]
+        # '.' must not act as a wildcard matching '0'
+        assert _exact_ids(resolver.resolve("P0201 is leaking")) == []
+
+    def test_every_registered_id_resolves_to_itself_only(self) -> None:
+        """Over-tightening guard: each ID still resolves, and unambiguously."""
+        plant = _make_plant()
+        resolver = EntityResolver(plant)
+        for asset in plant.list_assets():
+            results = resolver.resolve(asset.id)
+            assert _exact_ids(results) == [asset.id], f"{asset.id} regressed"
 
 
 class TestResolvedEntity:

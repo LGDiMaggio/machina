@@ -172,3 +172,29 @@ class TestEdgeCases:
     def test_case_insensitive(self, resolver_en: EntityResolver) -> None:
         results = resolver_en.resolve("PUMP p-201 LEAKING WATER")
         assert any(r.asset.id == "P-201" for r in results)
+
+
+class TestIdCoverageContract:
+    """Over-tightening guard for the word-boundary-anchored stage-1 match.
+
+    Anchoring ID matching is exactly the kind of change that has silently made
+    real IDs unresolvable before (see
+    ``docs/solutions/logic-errors/asset-id-inference-too-strict-2026-05-15.md``).
+    Every ID in the shipped registry must still resolve, at stage 1, alone.
+    """
+
+    def test_every_registry_id_resolves_uniquely_at_exact_id(
+        self, plant_en: Plant, resolver_en: EntityResolver
+    ) -> None:
+        for asset in plant_en.list_assets():
+            results = resolver_en.resolve(asset.id)
+            exact = [r.asset.id for r in results if r.match_reason == "exact_id"]
+            assert exact == [asset.id], f"{asset.id!r} resolved to {exact!r}"
+
+    def test_every_registry_id_resolves_inside_a_sentence(
+        self, plant_en: Plant, resolver_en: EntityResolver
+    ) -> None:
+        for asset in plant_en.list_assets():
+            results = resolver_en.resolve(f"fault on {asset.id}, please create a work order")
+            exact = [r.asset.id for r in results if r.match_reason == "exact_id"]
+            assert exact == [asset.id], f"{asset.id!r} resolved to {exact!r}"
