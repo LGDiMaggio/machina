@@ -18,6 +18,10 @@ The central runtime class. Public attributes worth knowing:
 
 Resolves free-text mentions in user messages (e.g. "the pump P-201", "compressore C-301") to concrete assets registered on the agent's [`Plant`](../domain.md).
 
+Both examples above resolve on the **asset ID** (`P-201`, `C-301`), which is language-independent — the surrounding word does the work only when it matches the asset's registered `name`. There is no cross-language matching and no typo tolerance: matching is verbatim containment at every stage. To make an asset resolvable by a word other than its registered name — the local-language term, plant jargon, a nickname — put that word in `Asset.aliases`, which is searched at the same authority as the name.
+
+When several candidates tie at the top, resolution is *ambiguous*: the runtime withholds the asset for that turn, asks which one is meant, and remembers the candidates so the next message can answer by ID, by name, or by position.
+
 ::: machina.agent.entity_resolver.EntityResolver
 
 ::: machina.agent.entity_resolver.ResolvedEntity

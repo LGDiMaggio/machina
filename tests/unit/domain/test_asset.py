@@ -80,6 +80,66 @@ class TestAsset:
         assert asset.equipment_class_code == "CO"
 
 
+class TestAssetAliases:
+    """Curated per-plant synonyms — where local naming lands (R6-R9)."""
+
+    def test_defaults_to_empty_list(self) -> None:
+        asset = Asset(id="P-201", name="Pump", type=AssetType.ROTATING_EQUIPMENT)
+        assert asset.aliases == []
+
+    def test_accepts_language_neutral_strings(self) -> None:
+        """R8 — no per-language fields; an alias is just a string."""
+        asset = Asset(
+            id="P-201",
+            name="Cooling Water Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            aliases=["pompa acqua di raffreddamento", "bomba de agua"],
+        )
+        assert asset.aliases == ["pompa acqua di raffreddamento", "bomba de agua"]
+
+    def test_members_are_trimmed(self) -> None:
+        """``str_strip_whitespace`` strips str FIELDS, not the members of a list one.
+
+        An untrimmed alias never matches, because resolution compares it
+        against user text — so the trimming has to be explicit.
+        """
+        asset = Asset(
+            id="P-201",
+            name="Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            aliases=["  bomba "],
+        )
+        assert asset.aliases == ["bomba"]
+
+    def test_blank_aliases_dropped(self) -> None:
+        """A blank alias would substring-match every message ever sent."""
+        asset = Asset(
+            id="P-201",
+            name="Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            aliases=["", "   ", "bomba"],
+        )
+        assert asset.aliases == ["bomba"]
+
+    def test_case_insensitive_dedup_keeps_first_spelling(self) -> None:
+        asset = Asset(
+            id="P-201",
+            name="Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            aliases=["Bomba", "bomba", "BOMBA", "pompa"],
+        )
+        assert asset.aliases == ["Bomba", "pompa"]
+
+    def test_survives_a_serialization_roundtrip(self) -> None:
+        asset = Asset(
+            id="P-201",
+            name="Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            aliases=["bomba"],
+        )
+        assert Asset.model_validate(asset.model_dump()).aliases == ["bomba"]
+
+
 class TestAssetType:
     """Test AssetType enum."""
 

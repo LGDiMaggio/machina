@@ -41,6 +41,11 @@ def plant_en() -> Plant:
             manufacturer=a.get("manufacturer", ""),
             model=a.get("model", ""),
             failure_modes=a.get("failure_modes", []),
+            # Explicit, though the shipped registry declares none yet: this
+            # fixture builds assets FIELD BY FIELD, so a registry that starts
+            # carrying aliases would otherwise be silently stripped here — the
+            # same drift trap as ``dict_to_asset``'s catch-all, in test form.
+            aliases=a.get("aliases", []),
         )
         p.register_asset(asset)
     return p
@@ -198,3 +203,26 @@ class TestIdCoverageContract:
             results = resolver_en.resolve(f"fault on {asset.id}, please create a work order")
             exact = [r.asset.id for r in results if r.match_reason == "exact_id"]
             assert exact == [asset.id], f"{asset.id!r} resolved to {exact!r}"
+
+
+class TestCuratedAliases:
+    """Per-plant curation on top of the shipped registry (R6/R7).
+
+    The registry ships no aliases yet, so this proves the mechanism an
+    integrator uses: add an ``aliases`` key to your own asset data and the
+    plant's word for the machine resolves like its registered name.
+    """
+
+    def test_curated_alias_resolves_an_asset_whose_name_it_does_not_share(
+        self, plant_en: Plant
+    ) -> None:
+        aliased = Plant(name="Demo Plant")
+        for asset in plant_en.list_assets():
+            aliased.register_asset(asset.model_copy(deep=True))
+        target = aliased.get_asset("P-201")
+        target.aliases = ["old shop floor pump"]
+
+        results = EntityResolver(aliased).resolve("the old shop floor pump is leaking")
+
+        assert results[0].asset.id == "P-201"
+        assert results[0].match_reason == "alias_match"

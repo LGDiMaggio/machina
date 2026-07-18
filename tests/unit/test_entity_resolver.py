@@ -66,6 +66,105 @@ def _make_plant() -> Plant:
     return plant
 
 
+def _aliased_plant(*pairs: tuple[str, str, list[str]]) -> Plant:
+    """A plant of ``(id, name, aliases)`` triples."""
+    plant = Plant(name="Test Plant")
+    for asset_id, name, aliases in pairs:
+        plant.register_asset(
+            Asset(
+                id=asset_id,
+                name=name,
+                type=AssetType.ROTATING_EQUIPMENT,
+                aliases=aliases,
+            )
+        )
+    return plant
+
+
+class TestAliasResolution:
+    """R6/R7 — curated per-plant synonyms resolve at name-level authority."""
+
+    def test_curated_italian_alias_resolves_an_english_named_asset(self) -> None:
+        """AE4 — the whole point: the plant's own word for the machine works."""
+        plant = _aliased_plant(("P-201", "Cooling Water Pump", ["pompa acqua raffreddamento"]))
+        results = EntityResolver(plant).resolve("la pompa acqua raffreddamento perde")
+
+        assert [r.asset.id for r in results] == ["P-201"]
+        assert results[0].match_reason == "alias_match"
+        assert results[0].confidence == 0.9
+
+    def test_alias_scores_at_name_authority_not_the_keyword_tail(self) -> None:
+        """Stage 2, not stage 4 — where the confidence scale is still coherent."""
+        plant = _aliased_plant(("P-201", "Cooling Water Pump", ["bomba"]))
+        by_alias = EntityResolver(plant).resolve("controlla la bomba")
+        by_name = EntityResolver(plant).resolve("controlla la cooling water pump")
+
+        assert by_alias[0].confidence == by_name[0].confidence
+
+    def test_alias_matching_is_case_insensitive(self) -> None:
+        plant = _aliased_plant(("P-201", "Cooling Water Pump", ["Bomba Grande"]))
+        results = EntityResolver(plant).resolve("la BOMBA GRANDE fa rumore")
+
+        assert [r.asset.id for r in results] == ["P-201"]
+
+    def test_asset_without_aliases_is_unchanged(self) -> None:
+        """No regression: the default empty list behaves exactly as before."""
+        plant = _make_plant()
+        results = EntityResolver(plant).resolve("the cooling water pump")
+
+        assert [r.asset.id for r in results] == ["P-201"]
+        assert results[0].match_reason == "name_match"
+
+    def test_registered_name_still_outranks_nothing_and_wins_alone(self) -> None:
+        plant = _aliased_plant(
+            ("P-201", "Cooling Water Pump", ["bomba"]),
+            ("P-202", "Backup Pump", []),
+        )
+        results = EntityResolver(plant).resolve("cooling water pump")
+
+        assert results[0].asset.id == "P-201"
+        assert results[0].match_reason == "name_match"
+
+    def test_alias_shared_by_two_assets_ties_rather_than_picking_one(self) -> None:
+        """Aliases must not bypass ambiguity — the tie reaches U4's gate."""
+        plant = _aliased_plant(
+            ("P-201", "Cooling Water Pump", ["bomba"]),
+            ("P-202", "Fire Water Pump", ["bomba"]),
+        )
+        results = EntityResolver(plant).resolve("la bomba perde")
+        verdict = resolution_verdict(results)
+
+        assert len(results) == 2
+        assert results[0].confidence == results[1].confidence
+        assert verdict.ambiguous is True
+
+    def test_one_assets_name_matching_anothers_alias_is_ambiguous(self) -> None:
+        """A tie across reasons is still a tie — new shape, same gate.
+
+        Aliases sit at name authority precisely so this collides rather than
+        letting the weaker signal quietly lose.
+        """
+        plant = _aliased_plant(
+            ("P-201", "Bomba", []),
+            ("P-202", "Fire Water Pump", ["bomba"]),
+        )
+        results = EntityResolver(plant).resolve("la bomba perde")
+
+        assert {r.match_reason for r in results} == {"name_match", "alias_match"}
+        assert resolution_verdict(results).ambiguous is True
+
+    def test_exact_id_still_beats_an_alias(self) -> None:
+        """Stage 1 returns before stage 2 — an ID in the text is decisive."""
+        plant = _aliased_plant(
+            ("P-201", "Cooling Water Pump", ["bomba"]),
+            ("P-202", "Backup Pump", ["bomba"]),
+        )
+        results = EntityResolver(plant).resolve("la bomba P-202 perde")
+
+        assert [r.asset.id for r in results] == ["P-202"]
+        assert results[0].match_reason == "exact_id"
+
+
 class TestEntityResolver:
     """Test entity resolution strategies."""
 

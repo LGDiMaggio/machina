@@ -86,6 +86,29 @@ def _id_occurs_in(asset_id: str, text: str) -> bool:
     return re.search(pattern, text, re.IGNORECASE) is not None
 
 
+def _alias_occurs_in(asset: Asset, text_lower: str) -> bool:
+    """Whether any curated alias of ``asset`` appears in already-lowercased text.
+
+    Same containment semantics as the name check it sits beside, so alias
+    matching is case-insensitive like the rest of the cascade.
+
+    ``asset.aliases`` is read structurally, via ``getattr``, on purpose: this
+    module is imported on every ``machina describe`` (Architecture Decision 8)
+    and its ``Asset`` import is ``TYPE_CHECKING``-only. The ``getattr`` also
+    means a duck-typed asset without the attribute degrades to "no aliases"
+    rather than raising.
+
+    Args:
+        asset: The candidate asset.
+        text_lower: User input, already lowercased by the caller.
+
+    Returns:
+        ``True`` if one of the asset's aliases occurs in the text.
+    """
+    aliases = getattr(asset, "aliases", None) or ()
+    return any(alias and alias.lower() in text_lower for alias in aliases)
+
+
 def _tokenise(text: str) -> set[str]:
     """Tokenise text into lowercase words with punctuation stripped."""
     cleaned = _PUNCT_RE.sub(" ", text.lower())
@@ -352,7 +375,9 @@ class EntityResolver:
 
     Uses a cascading strategy:
     1. Exact ID match (e.g. ``"P-201"``)
-    2. Name match (e.g. ``"cooling water pump"``)
+    2. Name match (e.g. ``"cooling water pump"``), including any curated
+       ``Asset.aliases`` — the plant's own words for the machine, searched at
+       the same authority as the registered name
     3. Location match (e.g. ``"building A"``)
     4. Keyword match — verbatim token containment across all asset fields
        (no typo tolerance)
@@ -410,6 +435,13 @@ class EntityResolver:
             # Check full name match
             if name_lower in text_lower:
                 results.append(ResolvedEntity(asset, confidence=0.9, match_reason="name_match"))
+            elif _alias_occurs_in(asset, text_lower):
+                # Curated aliases sit at NAME-level authority, deliberately —
+                # a plant's own word for a machine is not a weaker signal than
+                # the name in the registry, it is usually the stronger one.
+                # (Not stage 4: the keyword tail tops out at 0.4, which would
+                # rank a hand-curated synonym below an incidental token hit.)
+                results.append(ResolvedEntity(asset, confidence=0.9, match_reason="alias_match"))
             else:
                 # Check significant name words (skip short words)
                 name_words = {w for w in name_lower.split() if len(w) > 2}
