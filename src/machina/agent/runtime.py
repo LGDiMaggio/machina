@@ -305,6 +305,18 @@ _PARTIAL_COMPLETENESS_HEDGE = (
     "may be incomplete — ask me to re-check a specific item if you need certainty._"
 )
 
+# Appended to a mid-band read so the user is told WHICH asset the runtime
+# assumed. Mid band means the match was good enough to act on but not good
+# enough to be silent about — a location or partial-keyword hit rather than an
+# ID or a full name — and ``resolved[0]`` was taken as the referent. Stating it
+# is the runtime's job: a prompt line would be model-dependent and untestable,
+# and the repo's standing rule is that surfacing a fact is not a gate unless the
+# runtime does it. Formatted with the committed asset ID.
+_MID_CONFIDENCE_ASSUMPTION = (
+    "\n\n_Note: I took this as being about {asset_id}, inferred from your message "
+    "rather than named outright — tell me if you meant a different asset._"
+)
+
 # Substituted (and flagged via ``AgentResponse.is_fallback``) when the model
 # emitted a tool/function call as its final answer text and the runtime could
 # not safely recover it (an unknown tool, a leaked write that must not be
@@ -1437,6 +1449,12 @@ class Agent:
            unresolvable markers are stripped fail-closed, and ``citations``
            is reordered to match the displayed numbering. Every fallback
            branch zeroes ``citations``, so the pass no-ops on degraded paths.
+        3b. Append the runtime's own turn-tail statements to the USER-facing
+           text only, after history has captured the clean answer: the
+           completeness hedge, and the mid-band assumption statement naming the
+           asset the turn assumed. Both are gated off the post-write narration
+           path — implying failure or a wrong guess after a write invites a
+           duplicate write.
         4. Append the user message and the rendered assistant reply to
            history. The stored assistant text is MARKER-STRIPPED on both
            branches (the echo-path override included) — a kept ``[1]`` would
@@ -1657,6 +1675,44 @@ class Agent:
             ):
                 completeness = "partial"
                 rendered = rendered + _PARTIAL_COMPLETENESS_HEDGE
+            # Mid-band assumption statement. Same shape as the hedge above and
+            # for the same reasons: the signal is produced where it is known
+            # (``_gather_context`` records the turn's resolution) and consumed
+            # where the consequence is known (here, once the answer exists).
+            # Reads the SAME ``_turn_resolution`` record the write gate reads —
+            # a second parallel marker for the same fact is a marker that can
+            # contradict it. ``committed_id`` is None on a withheld turn, so an
+            # ambiguous or low-band turn states nothing: there is no assumed
+            # asset to name.
+            #
+            # Gated identically to the hedge, and the ``fallback_text`` clause
+            # is load-bearing rather than copied: ``_resume_pending_action``
+            # RE-INSTALLS the proposing turn's resolution before narrating, so
+            # without it a mid-band write would be narrated with a note about
+            # having guessed the asset — inviting a corrective duplicate write.
+            #
+            # ``rendered`` only — ``stored`` was captured above and keeps the
+            # clean answer, so the note never enters history, never perturbs the
+            # echo guard's similarity ratio, and cannot be parroted back by the
+            # next turn's model.
+            resolution = self._turn_resolution.get(chat_id)
+            if (
+                not is_fallback
+                and fallback_text is _EMPTY_RESPONSE_FALLBACK
+                and resolution is not None
+                and resolution.verdict.band == BAND_MID
+                and resolution.committed_id is not None
+            ):
+                logger.info(
+                    "mid_confidence_assumption_stated",
+                    agent=self.name,
+                    chat_id=chat_id,
+                    asset_id=resolution.committed_id,
+                    operation="finalize_turn",
+                )
+                rendered = rendered + _MID_CONFIDENCE_ASSUMPTION.format(
+                    asset_id=resolution.committed_id
+                )
         finally:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)

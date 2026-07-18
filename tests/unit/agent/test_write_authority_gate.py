@@ -468,3 +468,59 @@ class TestPostWriteNarrationIsNotHedged:
         assert [wo.asset_id for wo in spy.created] == ["P-201"]
         assert "NOT created" not in response.text
         assert "refused" not in response.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_mid_band_write_narration_carries_no_assumption_note(self) -> None:
+        """U7's post-write exclusion, on the path that actually reaches it.
+
+        ``_resume_pending_action`` RE-INSTALLS the proposing turn's (mid-band)
+        resolution before narrating, so the turn-tail statement would otherwise
+        fire here — telling the user the asset was only inferred, immediately
+        after the work order was created, which invites a corrective duplicate
+        write.
+        """
+        spy = _SpyCmms()
+        agent = Agent(
+            plant=_plant(),
+            connectors=[spy],
+            llm=_WriteThenAnswerLLM("P-201"),
+            confirmations=True,
+        )
+        proposal = await agent.handle_message_full(
+            "open a job in building alpha", chat_id="c1", user_id="u1"
+        )
+        # Precondition: the proposing turn IS mid-band (it carries the caveat).
+        assert "partial confidence" in agent._pending_actions[("c1", "u1")][2]
+        assert "inferred from your message" in proposal.text
+
+        narration = await agent.handle_message_full("yes", chat_id="c1", user_id="u1")
+
+        assert [wo.asset_id for wo in spy.created] == ["P-201"]
+        assert "inferred from your message" not in narration.text
+
+    @pytest.mark.asyncio
+    async def test_same_turn_write_still_states_the_assumption(self) -> None:
+        """The other write shape, decided deliberately rather than by accident.
+
+        With ``confirmations=False`` the write happens inside the loop and the
+        answer comes back on the NORMAL turn path, so the statement renders.
+        Kept, because the exclusion above exists to stop the runtime implying
+        something went wrong after a write — and naming the asset a work order
+        was just filed against implies nothing of the sort; it is the disclosure
+        the user most needs at exactly the moment it is cheapest to correct.
+        The answer must still not read as a failure.
+        """
+        spy = _SpyCmms()
+        agent = Agent(
+            plant=_plant(),
+            connectors=[spy],
+            llm=_WriteThenAnswerLLM("P-201"),
+            confirmations=False,
+        )
+
+        response = await agent.handle_message_full("open a job in building alpha", chat_id="c1")
+
+        assert [wo.asset_id for wo in spy.created] == ["P-201"]
+        assert "inferred from your message" in response.text
+        assert "NOT created" not in response.text
+        assert "may be incomplete" not in response.text

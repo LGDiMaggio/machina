@@ -17,13 +17,14 @@ import pytest
 
 from machina.agent.entity_resolver import (
     BAND_LOW,
+    BAND_MID,
     RESOLUTION_MIN_CONFIDENCE,
     ResolvedEntity,
     _ResolutionVerdict,
     resolution_verdict,
 )
 from machina.agent.prompts import format_resolved_entities
-from machina.agent.runtime import Agent
+from machina.agent.runtime import _MID_CONFIDENCE_ASSUMPTION, Agent
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 
@@ -289,6 +290,142 @@ class TestCardinalityGate:
         assert context["resolved_entities"] == []
         assert "asset" not in context
         assert "resolution_verdict" not in context
+
+
+def _mid_band_plant() -> Plant:
+    """Two assets whose LOCATIONS separate them but whose names do not.
+
+    A location question therefore reaches stage 3, where a perfect match scores
+    exactly 0.6 — the mid band — with a clear winner rather than a tie. This is
+    the shape that produces an assumed-but-not-certain referent.
+    """
+    plant = Plant(name="Test Plant")
+    plant.register_asset(
+        Asset(
+            id="P-201",
+            name="Cooling Water Pump",
+            type=AssetType.ROTATING_EQUIPMENT,
+            location="Sala Pompe",
+            criticality=Criticality.A,
+        )
+    )
+    plant.register_asset(
+        Asset(
+            id="C-101",
+            name="Air Compressor",
+            type=AssetType.ROTATING_EQUIPMENT,
+            location="Sala Compressori",
+            criticality=Criticality.B,
+        )
+    )
+    return plant
+
+
+_MID_BAND_QUERY = "che succede in sala pompe?"
+
+
+class TestMidBandAssumptionStatement:
+    """U7 — a mid-band read tells the user which asset the runtime assumed.
+
+    Produced by the runtime at the turn tail, not by the model at its
+    discretion, so it can be asserted on ``AgentResponse`` without a live LLM.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mid_band_read_names_the_assumed_asset(self) -> None:
+        agent = Agent(plant=_mid_band_plant(), llm=_RecordingLLM("The pump looks fine."))
+
+        # Precondition: the real cascade puts this in the mid band with a clear
+        # winner. If the scoring moves, this test must fail loudly here rather
+        # than pass vacuously against a high-band or tied resolution.
+        resolved = agent._resolver.resolve(_MID_BAND_QUERY)
+        verdict = resolution_verdict(resolved)
+        assert verdict.band == BAND_MID
+        assert verdict.commits is True
+        assert resolved[0].asset.id == "P-201"
+
+        response = await agent.handle_message_full(_MID_BAND_QUERY, chat_id="c1")
+
+        assert response.text.endswith(_MID_CONFIDENCE_ASSUMPTION.format(asset_id="P-201"))
+        assert "P-201" in response.text
+
+    @pytest.mark.asyncio
+    async def test_high_band_read_states_nothing(self) -> None:
+        agent = Agent(plant=_mid_band_plant(), llm=_RecordingLLM("The pump looks fine."))
+        response = await agent.handle_message_full("how is P-201 doing?", chat_id="c1")
+
+        assert response.text == "The pump looks fine."
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_turn_states_no_assumption(self) -> None:
+        """There is no assumed asset on a withheld turn — nothing to name."""
+        answer = "I found two matches. Which one do you mean?"
+        agent = Agent(plant=_tie_plant(), llm=_RecordingLLM(answer))
+        response = await agent.handle_message_full("the cooling water pump", chat_id="c1")
+
+        assert response.text == answer
+
+    @pytest.mark.asyncio
+    async def test_low_band_turn_states_no_assumption(self) -> None:
+        agent = Agent(plant=_mid_band_plant(), llm=_RecordingLLM("I'm not sure."))
+        resolved = agent._resolver.resolve("something about compressori maybe")
+        assert resolution_verdict(resolved).commits is False
+
+        response = await agent.handle_message_full(
+            "something about compressori maybe", chat_id="c1"
+        )
+
+        assert response.text == "I'm not sure."
+
+    @pytest.mark.asyncio
+    async def test_empty_resolution_states_no_assumption(self) -> None:
+        agent = Agent(plant=_mid_band_plant(), llm=_RecordingLLM("Nothing found."))
+        response = await agent.handle_message_full("what is the weather", chat_id="c1")
+
+        assert response.text == "Nothing found."
+
+    @pytest.mark.asyncio
+    async def test_statement_does_not_enter_history(self) -> None:
+        """History keeps the clean answer.
+
+        A stored note would perturb the echo guard's similarity ratio and, worse,
+        be read back by the next turn's model as something it had said.
+        """
+        answer = "The pump looks fine."
+        agent = Agent(plant=_mid_band_plant(), llm=_RecordingLLM(answer))
+        response = await agent.handle_message_full(_MID_BAND_QUERY, chat_id="c1")
+
+        assert response.text != answer  # the note really was appended
+        stored = [m for m in agent._histories["c1"] if m["role"] == "assistant"]
+        assert stored[-1]["content"] == answer
+        assert "inferred from your message" not in stored[-1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_statement_renders_in_sandbox(self) -> None:
+        """Display-tier: the flagship template defaults to ``sandbox: true`` and
+        its output is the deliverable a human files."""
+        agent = Agent(
+            plant=_mid_band_plant(),
+            llm=_RecordingLLM("The pump looks fine."),
+            sandbox=True,
+        )
+        response = await agent.handle_message_full(_MID_BAND_QUERY, chat_id="c1")
+
+        assert _MID_CONFIDENCE_ASSUMPTION.format(asset_id="P-201") in response.text
+
+    @pytest.mark.asyncio
+    async def test_a_perfect_location_match_is_the_common_case(self) -> None:
+        """Pinned deliberately: a perfect ``location_match`` scores exactly 0.6.
+
+        The band boundary is one constant, so if these statements ever prove too
+        noisy this test is where the frequency claim is visible.
+        """
+        agent = Agent(plant=_mid_band_plant())
+        resolved = agent._resolver.resolve(_MID_BAND_QUERY)
+
+        assert resolved[0].match_reason == "location_match"
+        assert resolved[0].confidence == 0.6
+        assert resolution_verdict(resolved).band == BAND_MID
 
 
 class TestDisambiguationReachesTheUser:
