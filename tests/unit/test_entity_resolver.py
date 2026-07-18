@@ -304,6 +304,7 @@ class TestResolutionVerdict:
         assert verdict.confident is False
 
     def test_tie_at_name_match_is_ambiguous(self) -> None:
+        """Identical confidence is the one case where ``resolved[0]`` is arbitrary."""
         verdict = resolution_verdict(
             [_entity("P-201", 0.9, "name_match"), _entity("P-202", 0.9, "name_match")]
         )
@@ -318,11 +319,57 @@ class TestResolutionVerdict:
         assert verdict.ambiguous is False
         assert verdict.confident is True
 
+    def test_same_band_but_different_confidence_is_not_ambiguous(self) -> None:
+        """Ambiguity is an exact tie, NOT a shared band.
+
+        0.9 and 0.75 are both ``high``, but the sort put a clear winner first —
+        there is a correct answer, so asking the user would be noise. This is
+        exactly the case a band-equality predicate gets wrong; pinned so nobody
+        re-derives band-equality from the "top band" phrasing later.
+        """
+        verdict = resolution_verdict(
+            [_entity("P-201", 0.9, "name_match"), _entity("P-202", 0.75, "name_keywords")]
+        )
+        assert verdict.band == BAND_HIGH
+        assert verdict.ambiguous is False
+
+    def test_same_mid_band_but_different_confidence_is_not_ambiguous(self) -> None:
+        """The same rule inside ``mid`` — 0.6 and 0.45 share a band, not a value."""
+        verdict = resolution_verdict(
+            [_entity("P-201", 0.6, "location_match"), _entity("P-202", 0.45, "location_match")]
+        )
+        assert verdict.band == BAND_MID
+        assert verdict.ambiguous is False
+
     def test_lower_band_runner_up_does_not_make_it_ambiguous(self) -> None:
         verdict = resolution_verdict(
             [_entity("P-201", 0.9, "name_match"), _entity("HX-401", 0.3, "keyword_match")]
         )
         assert verdict.ambiguous is False
+
+    def test_tie_below_the_top_does_not_make_it_ambiguous(self) -> None:
+        """Only the top pair matters — the runtime never had to choose lower down."""
+        verdict = resolution_verdict(
+            [
+                _entity("P-201", 0.9, "name_match"),
+                _entity("P-202", 0.7, "name_keywords"),
+                _entity("HX-401", 0.7, "name_keywords"),
+            ]
+        )
+        assert verdict.ambiguous is False
+
+    def test_two_unscored_candidates_do_not_tie_into_ambiguity(self) -> None:
+        """Unreadable confidences are withheld, not tied — ``None == None`` is a trap."""
+
+        class _Unscored:
+            def __init__(self, asset_id: str) -> None:
+                self.asset = _asset(asset_id)
+                self.match_reason = "keyword_match"
+
+        verdict = resolution_verdict([_Unscored("P-201"), _Unscored("P-202")])  # type: ignore[list-item]
+        assert verdict.band == BAND_LOW
+        assert verdict.ambiguous is False
+        assert verdict.confident is False
 
     def test_empty_list_has_no_band_and_is_not_ambiguous(self) -> None:
         verdict = resolution_verdict([])

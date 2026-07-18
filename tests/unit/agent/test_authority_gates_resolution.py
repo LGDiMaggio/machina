@@ -150,3 +150,19 @@ class TestSingleSourceOfTruth:
         ]
         context = await agent._gather_context("the cooling water pump", tied)
         assert context["resolution_verdict"].ambiguous is True
+
+    @pytest.mark.asyncio
+    async def test_clear_winner_in_the_same_band_is_not_ambiguous(self) -> None:
+        """A sorted winner is a winner — shared band is not a tie.
+
+        The gate-level counterpart of the unit pin: 0.9 over 0.75 has a correct
+        answer, so the turn proceeds instead of asking.
+        """
+        agent = _agent()
+        ranked = [
+            ResolvedEntity(asset=_asset("P-201"), confidence=0.9, match_reason="name_match"),
+            ResolvedEntity(asset=_asset("P-202"), confidence=0.75, match_reason="name_keywords"),
+        ]
+        context = await agent._gather_context("the cooling water pump", ranked)
+        assert context["resolution_verdict"].ambiguous is False
+        assert context.get("asset") is not None

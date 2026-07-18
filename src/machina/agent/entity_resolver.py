@@ -129,8 +129,8 @@ class _ResolutionVerdict:
     Attributes:
         band: :data:`BAND_HIGH`, :data:`BAND_MID`, :data:`BAND_LOW`, or ``None``
             when there were no candidates at all.
-        ambiguous: Several candidates share the top band and the top match is
-            not a whole-token ID hit.
+        ambiguous: The top two candidates have identical confidence and the top
+            match is not a whole-token ID hit.
     """
 
     band: str | None
@@ -182,12 +182,23 @@ def resolution_verdict(entities: Sequence[ResolvedEntity]) -> _ResolutionVerdict
     renderer's disambiguation nudge — read this, so they cannot disagree about
     what the same candidate list means.
 
-    Ambiguity is *not* the same as multiplicity. Several candidates tied at
-    :data:`BAND_HIGH` because the user typed several whole-token asset IDs
-    ("compare P-201 and P-202") is a well-posed question about several assets,
-    and classifying it ambiguous would turn it into an unanswerable refusal.
-    Ambiguity therefore requires that the top match arrived by something weaker
-    than an exact ID hit.
+    Ambiguity is an **exact confidence tie at the top**, not a shared band. The
+    defect being fixed is ``resolved[0]`` picking *arbitrarily* among candidates
+    of identical confidence — that is the only case where the runtime has no
+    basis to choose. Deliberately not band-equality: 0.9 against 0.75 are both
+    :data:`BAND_HIGH`, but the sort put a clear winner first, and asking the
+    user there is noise where a correct answer already exists. Non-tie
+    uncertainty is handled by stating the assumption, not by asking.
+    Deliberately not an epsilon either: every confidence in the cascade is
+    ``round(..., 2)``-quantised, so exact equality is meaningful and there is no
+    tolerance to tune.
+
+    Ambiguity is also not the same as multiplicity. A tie at
+    :data:`_EXACT_ID_REASON` means the user typed several whole-token asset IDs
+    that each matched a distinct asset ("compare P-201 and P-202") — a
+    well-posed question about several assets, and classifying it ambiguous would
+    turn it into an unanswerable refusal. Ambiguity therefore also requires that
+    the top match arrived by something weaker than an exact ID hit.
 
     Args:
         entities: Resolution candidates, highest confidence first (the order
@@ -208,9 +219,16 @@ def resolution_verdict(entities: Sequence[ResolvedEntity]) -> _ResolutionVerdict
         return _ResolutionVerdict(band=None, ambiguous=False)
 
     top = entities[0]
-    band = _band_for(getattr(top, "confidence", None))
-    at_top_band = sum(1 for ent in entities if _band_for(getattr(ent, "confidence", None)) == band)
-    ambiguous = at_top_band > 1 and getattr(top, "match_reason", "") != _EXACT_ID_REASON
+    top_confidence = getattr(top, "confidence", None)
+    band = _band_for(top_confidence)
+
+    tied_at_top = (
+        len(entities) > 1
+        and isinstance(top_confidence, (int, float))
+        and not isinstance(top_confidence, bool)
+        and getattr(entities[1], "confidence", None) == top_confidence
+    )
+    ambiguous = tied_at_top and getattr(top, "match_reason", "") != _EXACT_ID_REASON
     return _ResolutionVerdict(band=band, ambiguous=ambiguous)
 
 
