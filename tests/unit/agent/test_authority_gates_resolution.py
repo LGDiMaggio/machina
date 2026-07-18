@@ -1,11 +1,17 @@
-"""U5 — Resolution-confidence gate.
+"""Resolution-authority gate — confidence AND cardinality.
 
-A low-confidence entity resolution must not be treated as the definitive asset:
-the runtime withholds committing to it (no prefetch, no ``context['asset']``) and
-the prompt nudges the agent to ask which asset is meant. See the v0.3 plan.
+An entity resolution the runtime cannot stand behind must not be treated as the
+definitive asset. Two independent ways that happens, both withholding the commit
+(no prefetch, no ``context['asset']``) and both surfacing a directive to ask:
+
+* **Weak** — even the best match is a guess (low band).
+* **Ambiguous** — several candidates tie at the top, so ``resolved[0]`` is
+  arbitrary. Confidence cannot catch this; the canonical case ties at 1.0.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -45,7 +51,7 @@ class TestGatherContextGate:
         weak = ResolvedEntity(asset=_asset(), confidence=0.16, match_reason="keyword_match")
         context = await agent._gather_context("the thing in building a", [weak])
         assert "asset" not in context
-        assert context.get("resolution_uncertain") is True
+        assert context["resolution_verdict"].commits is False
         # Candidates are still available so the agent can ask.
         assert context["resolved_entities"] == [weak]
 
@@ -56,7 +62,7 @@ class TestGatherContextGate:
         context = await agent._gather_context("P-201", [strong])
         assert context.get("asset") is not None
         assert context["asset"].id == "P-201"
-        assert "resolution_uncertain" not in context
+        assert context["resolution_verdict"].commits is True
 
     @pytest.mark.asyncio
     async def test_match_at_floor_is_committed(self) -> None:
@@ -108,7 +114,7 @@ class TestSingleSourceOfTruth:
         )
         context = await agent._gather_context("some asset", [candidate])
 
-        withheld = context.get("resolution_uncertain") is True
+        withheld = "asset" not in context
         nudged = "Low confidence" in format_resolved_entities(
             context["resolved_entities"], context.get("resolution_verdict")
         )
@@ -139,7 +145,7 @@ class TestSingleSourceOfTruth:
         context = await agent._gather_context("compare P-201 and P-202", hits)
         assert context["resolution_verdict"].ambiguous is False
         assert context.get("asset") is not None
-        assert "resolution_uncertain" not in context
+        assert context["resolution_verdict"].commits is True
 
     @pytest.mark.asyncio
     async def test_tied_name_matches_are_flagged_ambiguous(self) -> None:
@@ -150,6 +156,10 @@ class TestSingleSourceOfTruth:
         ]
         context = await agent._gather_context("the cooling water pump", tied)
         assert context["resolution_verdict"].ambiguous is True
+        # A 0.9 tie is high-band — ``confident`` alone would have committed it.
+        assert context["resolution_verdict"].confident is True
+        assert context["resolution_verdict"].commits is False
+        assert "asset" not in context
 
     @pytest.mark.asyncio
     async def test_clear_winner_in_the_same_band_is_not_ambiguous(self) -> None:
@@ -166,3 +176,152 @@ class TestSingleSourceOfTruth:
         context = await agent._gather_context("the cooling water pump", ranked)
         assert context["resolution_verdict"].ambiguous is False
         assert context.get("asset") is not None
+
+
+class _RecordingLLM:
+    """Fake LLM that records the prompt it saw and replies with a fixed answer.
+
+    R3 has two halves and a fake can only honestly test them separately: what
+    the runtime PUT in front of the model (recorded here) and whether an answer
+    of that shape SURVIVES the finalization chain to the user. A fake that
+    invented the disambiguation question from nothing would assert neither.
+    """
+
+    def __init__(self, answer: str = "Which one do you mean?") -> None:
+        self.model = "fake:model"
+        self.answer = answer
+        self.seen: list[dict[str, str]] = []
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        self.seen = list(messages)
+        return self.answer
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        self.seen = list(messages)
+        return {"content": self.answer, "tool_calls": None}
+
+
+def _tie_plant() -> Plant:
+    """Two DISTINCT assets sharing one name — the real-tie repro."""
+    plant = Plant(name="Test Plant")
+    plant.register_asset(_asset("P-201"))
+    plant.register_asset(_asset("P-202"))
+    return plant
+
+
+class TestCardinalityGate:
+    """U4 — an ambiguous resolution withholds the commit instead of guessing."""
+
+    @pytest.mark.asyncio
+    async def test_real_tie_from_the_resolver_withholds_the_commit(self) -> None:
+        """The origin's minimal failing case, driven through the real resolver.
+
+        Not hand-built candidates: the plant is registered, the resolver is
+        asked, and the tie it produces is what the gate sees.
+        """
+        agent = Agent(plant=_tie_plant())
+        resolved = agent._resolver.resolve("the cooling water pump")
+
+        # Precondition — if the cascade stops producing a tie this test must
+        # fail loudly here rather than pass vacuously on a one-candidate list.
+        assert len(resolved) >= 2
+        assert resolved[0].confidence == resolved[1].confidence
+        assert resolved[0].match_reason != "exact_id"
+
+        context = await agent._gather_context("the cooling water pump", resolved)
+
+        assert context["resolution_verdict"].ambiguous is True
+        assert context["resolution_verdict"].commits is False
+        assert "asset" not in context
+        # No prefetch ran — the connector-derived keys are absent entirely.
+        assert "work_orders" not in context
+        assert "spare_parts" not in context
+
+    @pytest.mark.asyncio
+    async def test_single_strong_candidate_commits_and_prefetches(self) -> None:
+        agent = Agent(plant=_tie_plant())
+        resolved = agent._resolver.resolve("P-201")
+
+        assert len(resolved) == 1
+        context = await agent._gather_context("P-201", resolved)
+
+        assert context["resolution_verdict"].commits is True
+        assert context["asset"].id == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_exact_id_tie_is_multiplicity_and_still_commits(self) -> None:
+        """ "Compare P-201 and P-202" must not become an unanswerable refusal."""
+        agent = Agent(plant=_tie_plant())
+        resolved = agent._resolver.resolve("compare P-201 and P-202")
+
+        assert len(resolved) == 2
+        assert resolved[0].confidence == resolved[1].confidence
+        assert resolved[0].match_reason == "exact_id"
+
+        context = await agent._gather_context("compare P-201 and P-202", resolved)
+        assert context["resolution_verdict"].ambiguous is False
+        assert context["resolution_verdict"].commits is True
+        assert context["asset"] is not None
+
+    @pytest.mark.asyncio
+    async def test_withheld_turn_still_renders_the_candidates(self) -> None:
+        """Withholding the commit must not hide the candidates — R3 needs them."""
+        agent = Agent(plant=_tie_plant())
+        resolved = agent._resolver.resolve("the cooling water pump")
+        context = await agent._gather_context("the cooling water pump", resolved)
+
+        assert context["resolved_entities"] == resolved
+        rendered = format_resolved_entities(
+            context["resolved_entities"], context["resolution_verdict"]
+        )
+        assert "P-201" in rendered
+        assert "P-202" in rendered
+        assert "Ambiguous" in rendered
+
+    @pytest.mark.asyncio
+    async def test_empty_resolution_is_not_an_ambiguity_claim(self) -> None:
+        """Nothing found stays nothing found — no verdict, no withhold event."""
+        agent = Agent(plant=_tie_plant())
+        context = await agent._gather_context("what is the weather", [])
+
+        assert context["resolved_entities"] == []
+        assert "asset" not in context
+        assert "resolution_verdict" not in context
+
+
+class TestDisambiguationReachesTheUser:
+    """R3 — the withheld state surfaces as a question naming the candidates."""
+
+    @pytest.mark.asyncio
+    async def test_withheld_turn_asks_the_model_to_disambiguate_by_name(self) -> None:
+        """Both candidates AND an explicit directive reach the model."""
+        llm = _RecordingLLM()
+        agent = Agent(plant=_tie_plant(), llm=llm)
+        await agent.handle_message_full("the cooling water pump", chat_id="c1")
+
+        prompt = "\n".join(m.get("content", "") for m in llm.seen)
+        assert "P-201" in prompt
+        assert "P-202" in prompt
+        assert "Ambiguous" in prompt
+        # A directive, not merely a confidence number — the number was already
+        # rendered before this gate existed and changed nothing.
+        assert "Ask the user which one they mean" in prompt
+        assert "do not act on any of them" in prompt
+
+    @pytest.mark.asyncio
+    async def test_the_disambiguation_answer_reaches_the_user_intact(self) -> None:
+        """The response half of R3, asserted on ``AgentResponse``.
+
+        A finalization chain that suppressed or hedged this answer would leave
+        the user with no way to resolve the ambiguity the gate just created.
+        """
+        answer = "I found two matches: P-201 and P-202. Which one do you mean?"
+        agent = Agent(plant=_tie_plant(), llm=_RecordingLLM(answer))
+        response = await agent.handle_message_full("the cooling water pump", chat_id="c1")
+
+        assert response.text == answer
+        assert response.is_fallback is False
+        assert "P-201" in response.text
+        assert "P-202" in response.text

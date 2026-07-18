@@ -1143,24 +1143,35 @@ class Agent:
         if not resolved:
             return context
 
-        # Resolution-confidence gate (U5): the top match is selected here and its
-        # data prefetched as THE asset for the turn. A weak guess must not be
-        # treated as authoritative — withhold the commit (no prefetch, no
-        # ``context["asset"]``) and let the agent ask which asset is meant. The
-        # candidates stay in ``resolved_entities`` (with their confidence) so the
-        # prompt can render them for disambiguation (R3.1/R3.2).
+        # Resolution-authority gate: the top match is selected here and its data
+        # prefetched as THE asset for the turn. Two independent ways that is
+        # unwarranted, and the gate must catch both:
+        #
+        # * **Weak** — even the best match is a guess (low band). Acting on it
+        #   treats a 0.16 keyword hit as the definitive referent.
+        # * **Ambiguous** — several candidates tie at the top, so ``resolved[0]``
+        #   is picking arbitrarily. Confidence cannot catch this: the canonical
+        #   case is a 1.0 tie, maximally confident and still undecidable.
+        #
+        # Either way the commit is withheld (no prefetch, no ``context["asset"]``)
+        # and the agent asks which asset is meant. The candidates stay in
+        # ``resolved_entities`` (with their confidence) so the prompt can render
+        # them for disambiguation (R3).
         #
         # The verdict is derived ONCE, here, and travels down the context dict to
         # the prompt renderer. It used to be re-derived independently on each
         # side — the gate defaulting a missing confidence to 1.0 (fail-open) and
-        # the renderer reading the attribute bare (AttributeError). Same object,
-        # both consumers, no drift.
+        # the renderer reading the attribute bare (AttributeError). The withheld
+        # state is likewise READ OFF THE VERDICT rather than mirrored into a
+        # separate ``resolution_uncertain`` boolean: a flag that duplicates the
+        # verdict is a flag that can contradict it, and the write gate needs the
+        # band and the candidate list anyway, not a yes/no.
         top = resolved[0]
         verdict = resolution_verdict(resolved)
         context["resolution_verdict"] = verdict
-        if not verdict.confident:
+        if not verdict.commits:
             logger.info(
-                "low_confidence_resolution_withheld",
+                "resolution_commit_withheld",
                 agent=self.name,
                 asset_id=top.asset.id,
                 # ``getattr`` here for the same reason the verdict uses one: the
@@ -1169,9 +1180,9 @@ class Agent:
                 confidence=getattr(top, "confidence", None),
                 band=verdict.band,
                 ambiguous=verdict.ambiguous,
+                candidate_count=len(resolved),
                 operation="gather_context",
             )
-            context["resolution_uncertain"] = True
             return context
 
         asset = resolved[0].asset

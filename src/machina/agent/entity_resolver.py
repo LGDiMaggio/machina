@@ -146,6 +146,20 @@ class _ResolutionVerdict:
         """
         return self.band in (BAND_HIGH, BAND_MID)
 
+    @property
+    def commits(self) -> bool:
+        """Whether the runtime may commit to the top candidate as THE asset.
+
+        Two orthogonal reasons to withhold, collapsed into the one predicate
+        every consumer reads. :attr:`confident` answers "is the best match
+        strong enough?"; :attr:`ambiguous` answers "is the best match even
+        identifiable?" — a 1.0 tie is maximally confident and still has no
+        winner. Anything that branches on "did this turn commit to an asset?"
+        must read *this*, not either half, or one of the two failures slips
+        through.
+        """
+        return self.confident and not self.ambiguous
+
 
 def _band_for(confidence: object) -> str:
     """Classify a raw confidence value into a closed, exhaustive band.

@@ -286,11 +286,20 @@ def format_resolved_entities(
             f"  - {ent.asset.name} (ID: {ent.asset.id}) "
             f"[confidence: {ent.confidence:.0%}, match: {ent.match_reason}]"
         )
-    # When even the best match is a weak guess, tell the agent to confirm rather
-    # than act on it — the runtime has withheld committing to this asset (U5).
-    # Gated on ``verdict.confident``, the same predicate the runtime gate reads,
-    # so the nudge and the withhold cannot disagree about any candidate list.
-    if not verdict.confident:
+    # When the runtime withheld the commit, say so with a DIRECTIVE, not just a
+    # number. Rendering the candidates alone hands the model a menu with no
+    # instruction — the signal was already present before this line existed and
+    # changed nothing. Gated on ``verdict.commits``, the same predicate the
+    # runtime gate reads, so the nudge and the withhold cannot disagree about
+    # any candidate list. Ambiguity is called out separately from weakness: they
+    # are different problems for the user ("which of these?" vs "which asset?").
+    if verdict.ambiguous:
+        lines.append(
+            "  ⚠️ Ambiguous — these candidates matched equally well and no asset was "
+            "selected for this turn. Ask the user which one they mean; do not act "
+            "on any of them."
+        )
+    elif not verdict.confident:
         lines.append(
             "  ⚠️ Low confidence — ask the user which asset they mean before relying on this match."
         )
