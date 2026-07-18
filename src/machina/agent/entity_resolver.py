@@ -246,6 +246,107 @@ def resolution_verdict(entities: Sequence[ResolvedEntity]) -> _ResolutionVerdict
     return _ResolutionVerdict(band=band, ambiguous=ambiguous)
 
 
+# Ordinal vocabulary the disambiguation reply matcher accepts, IT/EN — the
+# repo's existing bilingual posture (cf. ``is_affirmation``).
+#
+# Deliberately ORDINALS ONLY, no cardinals. "one" / "uno" / "una" are the
+# obvious-looking additions and the dangerous ones: "una pompa perde" would
+# select the first candidate on the strength of an indefinite article. An
+# ordinal is a positional reference by construction; a cardinal is not.
+_ORDINALS: dict[str, int] = {
+    "first": 1,
+    "1st": 1,
+    "primo": 1,
+    "prima": 1,
+    "second": 2,
+    "2nd": 2,
+    "secondo": 2,
+    "seconda": 2,
+    "third": 3,
+    "3rd": 3,
+    "terzo": 3,
+    "terza": 3,
+    "fourth": 4,
+    "4th": 4,
+    "quarto": 4,
+    "quarta": 4,
+    "fifth": 5,
+    "5th": 5,
+    "quinto": 5,
+    "quinta": 5,
+}
+
+
+def match_disambiguation_reply(text: str, candidates: Sequence[ResolvedEntity]) -> int | None:
+    """Resolve a reply to "which asset?" against the candidates that were offered.
+
+    Answering a disambiguation question is a *different* problem from resolving
+    a fresh reference: the answer set is closed and known, so "la seconda" and a
+    bare ``2`` carry meaning they never carry in an open query. This function
+    reads only inside that closed set — it never introduces an asset the user
+    was not shown.
+
+    Four ways to name a candidate, tried in descending authority: whole-token
+    asset ID, full asset name, an IT/EN ordinal, and a bare index. Whichever
+    tier first produces any match decides the outcome — a tier that matches
+    **more than one** candidate returns ``None`` rather than falling through to
+    a weaker tier, because a reply naming two of the offered assets is a worse
+    question, not a resolution. (This is the ordinary case for the tie that
+    prompted the question: two assets sharing a name mean a name reply matches
+    both.)
+
+    Args:
+        text: The user's reply.
+        candidates: The candidates recorded when the question was asked, in the
+            order they were shown — position ``i`` is what the user sees as
+            "the ``i+1``-th".
+
+    Returns:
+        The index into ``candidates`` the reply selects, or ``None`` when the
+        reply names none of them or more than one.
+
+    Example:
+        ```python
+        index = match_disambiguation_reply("la seconda", candidates)
+        if index is not None:
+            asset = candidates[index].asset
+        ```
+    """
+    if not candidates:
+        return None
+
+    def _sole(indices: list[int]) -> int | None:
+        return indices[0] if len(indices) == 1 else None
+
+    by_id = [i for i, c in enumerate(candidates) if _id_occurs_in(c.asset.id, text)]
+    if by_id:
+        return _sole(by_id)
+
+    lowered = text.lower()
+    by_name = [
+        i for i, c in enumerate(candidates) if c.asset.name and c.asset.name.lower() in lowered
+    ]
+    if by_name:
+        return _sole(by_name)
+
+    positions = {_ORDINALS[token] for token in _tokenise(text) if token in _ORDINALS}
+    if positions:
+        if len(positions) > 1:
+            return None
+        position = positions.pop()
+        return position - 1 if 1 <= position <= len(candidates) else None
+
+    # Bare index — only when the WHOLE reply is that number. A digit embedded
+    # in prose ("il guasto è sulla linea 2") is describing the plant, not
+    # picking from a list.
+    bare = _PUNCT_RE.sub("", text).strip()
+    if bare.isdigit():
+        position = int(bare)
+        if 1 <= position <= len(candidates):
+            return position - 1
+    return None
+
+
 class EntityResolver:
     """Resolves natural language references to assets in a plant.
 

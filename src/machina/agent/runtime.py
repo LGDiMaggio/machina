@@ -23,7 +23,13 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
-from machina.agent.entity_resolver import BAND_MID, EntityResolver, resolution_verdict
+from machina.agent.entity_resolver import (
+    BAND_MID,
+    EntityResolver,
+    ResolvedEntity,
+    match_disambiguation_reply,
+    resolution_verdict,
+)
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
@@ -43,7 +49,7 @@ from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
-    from machina.agent.entity_resolver import ResolvedEntity, _ResolutionVerdict
+    from machina.agent.entity_resolver import _ResolutionVerdict
     from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
@@ -194,6 +200,17 @@ def _is_degenerate_json_answer(text: str) -> bool:
 # ``time.monotonic()`` so it is immune to wall-clock changes. Named so it is
 # tunable.
 _PENDING_ACTION_TTL_SECONDS: float = 3600.0
+
+# How many consecutive replies may fail to name one of the offered candidates
+# before the pending disambiguation is abandoned (U6). The first miss restates
+# the question; the second gives up and lets the turn resolve normally.
+#
+# A bound is required, not defensive: an entry that lives until it is answered
+# livelocks the moment the user changes subject, because every subsequent turn
+# is force-fed the stale candidate list. Abandoning is safe because it is not
+# what makes the conversation safe — the write gate refuses on an empty or
+# low-band resolution regardless of whether anything is pending here.
+_MAX_DISAMBIGUATION_MISSES: int = 2
 
 # Surfaced to the user when the LLM yields no usable text — an empty
 # completion, or a response that was nothing but a citations block. Weak
@@ -469,6 +486,11 @@ def _executed_write_fallback(func_name: str, tool_result: Any) -> str:
     )
 
 
+def _candidate_ids(entities: Sequence[ResolvedEntity]) -> tuple[str, ...]:
+    """Asset IDs of a candidate list, in order — the identity of a question asked."""
+    return tuple(entity.asset.id for entity in entities)
+
+
 @dataclass(frozen=True)
 class _TurnResolution:
     """What a turn's entity resolution established, for the write gate to read.
@@ -499,7 +521,7 @@ class _TurnResolution:
         verdict = resolution_verdict(resolved)
         return cls(
             verdict=verdict,
-            candidates=tuple(entity.asset.id for entity in resolved),
+            candidates=_candidate_ids(resolved),
             committed_id=resolved[0].asset.id if resolved and verdict.commits else None,
         )
 
@@ -700,6 +722,28 @@ class Agent:
         # refusal, never an assumption of confidence — the two-turn resume path
         # re-installs the stored record rather than running without one.
         self._turn_resolution: dict[str, _TurnResolution] = {}
+
+        # Cross-turn disambiguation store (U6). chat_id →
+        # (candidates_offered, stored_monotonic_ts, consecutive_misses).
+        # Written when a turn's resolution is AMBIGUOUS, read on the next turn
+        # so the user's answer ("P-202", "la seconda") can be matched against
+        # the assets they were actually shown.
+        #
+        # Keyed on ``chat_id`` ALONE — deliberately NOT mirroring
+        # ``_pending_actions``' ``(chat_id, user_id)`` key. That key exists
+        # because a deferred write *authorization* must bind to an identified
+        # sender, which is why ``_await_write_confirmation`` withholds outright
+        # on an empty ``user_id``. Recorded candidates are conversational
+        # memory, not an authorization: nothing here permits an action, and
+        # ``user_id`` defaults to ``""`` on every public entry point, so a
+        # faithful mirror would leave this store permanently empty for
+        # ``Agent.ask()``, the quickstart, and every channel without identity —
+        # i.e. unanswerable disambiguation on the default path.
+        #
+        # Lifecycle follows ``_pending_actions`` (survives turns, TTL-expired)
+        # and NOT ``_turn_*`` (popped in _finalize_turn, i.e. before the answer
+        # could ever arrive).
+        self._disambiguations: dict[str, tuple[tuple[ResolvedEntity, ...], float, int]] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -1124,8 +1168,13 @@ class Agent:
         self._turn_ordered[chat_id] = []
 
         try:
-            # 1. Entity resolution
+            # 1. Entity resolution, then the cross-turn disambiguation store —
+            # if the previous turn asked "which asset?", THIS message may be the
+            # answer, and answering from the offered set outranks resolving the
+            # reply as if it were a fresh reference ("la seconda" resolves to
+            # nothing on its own).
             resolved = self._resolver.resolve(text)
+            resolved = self._apply_disambiguation(text, resolved, chat_id=chat_id)
 
             # 2. Gather context from connectors
             context_data = await self._gather_context(text, resolved, chat_id=chat_id)
@@ -1225,6 +1274,143 @@ class Agent:
             await self.stop()
 
     # ------------------------------------------------------------------
+    # Internal: cross-turn disambiguation
+    # ------------------------------------------------------------------
+
+    def _record_disambiguation(self, chat_id: str, resolved: Sequence[ResolvedEntity]) -> None:
+        """Remember the candidates an ambiguous turn offered, so they stay answerable.
+
+        Recorded on ``ambiguous`` only, never on ``low``. A weak sub-0.4 match
+        is the common case, not the exceptional one (the resolver's own comment
+        cites a 0.16 dogfooding hit), and routing those into a candidate store
+        would turn every vaguely-phrased question into a disambiguation prompt.
+        An ambiguous verdict is the narrow case where the runtime has candidates
+        it genuinely cannot choose between.
+
+        Re-recording the SAME candidate list is a no-op — it preserves the miss
+        count and the TTL clock. This is what makes the bounded retry bounded:
+        a restated question re-enters this method with identical candidates, and
+        resetting the counter there would restore the unbounded behaviour the
+        counter exists to prevent.
+
+        Args:
+            chat_id: Conversation the question was asked in.
+            resolved: The tied candidates, in the order they will be shown.
+        """
+        offered = tuple(resolved)
+        existing = self._disambiguations.get(chat_id)
+        if existing is not None and _candidate_ids(existing[0]) == _candidate_ids(offered):
+            return
+        self._disambiguations[chat_id] = (offered, time.monotonic(), 0)
+        logger.info(
+            "disambiguation_recorded",
+            agent=self.name,
+            chat_id=chat_id,
+            asset_id=offered[0].asset.id if offered else None,
+            candidate_count=len(offered),
+            operation="record_disambiguation",
+        )
+
+    def _apply_disambiguation(
+        self,
+        text: str,
+        resolved: list[ResolvedEntity],
+        *,
+        chat_id: str,
+    ) -> list[ResolvedEntity]:
+        """Interpret this message as a possible answer to a pending "which asset?".
+
+        Runs between resolution and :meth:`_gather_context`, so everything
+        downstream — the commit gate, the write gate, the assumption statement —
+        sees one resolution result and needs no knowledge that a disambiguation
+        was in flight.
+
+        Four outcomes:
+
+        * **No live entry** (or expired): ``resolved`` unchanged.
+        * **Answered**: the selected candidate replaces the resolution entirely,
+          at full confidence. The human named it, so the referent is no longer
+          inferred — and a single candidate cannot tie, so the turn commits.
+        * **First miss**: the recorded candidates replace the resolution, which
+          re-derives the same ambiguous verdict and restates the question.
+          Deliberately unconditional: the alternative is to let this turn's own
+          resolution win when it looks confident, which is exactly the
+          laundering the gate exists to stop — turn 1 was ambiguous, and a turn-2
+          commit that nobody confirmed is the ungated commit R16 forbids.
+        * **Second miss**: the entry is abandoned and ``resolved`` is returned
+          unchanged. The user has moved on.
+
+        Args:
+            text: The raw incoming message.
+            resolved: What the resolver made of it, unaided.
+            chat_id: Conversation identifier (the store's whole key).
+
+        Returns:
+            The resolution the rest of the turn should run on.
+        """
+        entry = self._disambiguations.get(chat_id)
+        if entry is None:
+            return resolved
+
+        candidates, stored_ts, misses = entry
+
+        # TTL first, mirroring _resume_pending_action: an aged entry is treated
+        # as if it were never there, so a much-later "la seconda" cannot select
+        # from a list the user has long forgotten.
+        if time.monotonic() - stored_ts > _PENDING_ACTION_TTL_SECONDS:
+            self._disambiguations.pop(chat_id, None)
+            logger.info(
+                "disambiguation_expired",
+                agent=self.name,
+                chat_id=chat_id,
+                age_seconds=round(time.monotonic() - stored_ts, 1),
+                operation="apply_disambiguation",
+            )
+            return resolved
+
+        index = match_disambiguation_reply(text, candidates)
+        if index is not None:
+            chosen = candidates[index]
+            self._disambiguations.pop(chat_id, None)
+            logger.info(
+                "disambiguation_answered",
+                agent=self.name,
+                chat_id=chat_id,
+                asset_id=chosen.asset.id,
+                operation="apply_disambiguation",
+            )
+            return [
+                ResolvedEntity(
+                    asset=chosen.asset,
+                    confidence=1.0,
+                    match_reason="disambiguation_reply",
+                )
+            ]
+
+        misses += 1
+        if misses >= _MAX_DISAMBIGUATION_MISSES:
+            self._disambiguations.pop(chat_id, None)
+            logger.info(
+                "disambiguation_abandoned",
+                agent=self.name,
+                chat_id=chat_id,
+                misses=misses,
+                operation="apply_disambiguation",
+            )
+            return resolved
+
+        self._disambiguations[chat_id] = (candidates, stored_ts, misses)
+        logger.info(
+            "disambiguation_restated",
+            agent=self.name,
+            chat_id=chat_id,
+            misses=misses,
+            candidate_count=len(candidates),
+            operation="apply_disambiguation",
+        )
+        return list(candidates)
+
+    # ------------------------------------------------------------------
     # Internal: context gathering
     # ------------------------------------------------------------------
 
@@ -1289,6 +1475,13 @@ class Agent:
                 candidate_count=len(resolved),
                 operation="gather_context",
             )
+            # Ambiguity only (U6). The question "which of these?" is answerable
+            # precisely because there is a "these"; a low-band turn has one weak
+            # guess and nothing to choose between, so recording it would make
+            # the next unrelated message an answer to a question the user was
+            # never really asked.
+            if verdict.ambiguous:
+                self._record_disambiguation(chat_id, resolved)
             return context
 
         asset = resolved[0].asset
