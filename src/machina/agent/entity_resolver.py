@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from machina.domain.asset import Asset
     from machina.domain.plant import Plant
 
@@ -28,6 +30,27 @@ _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 # fuzzy_keyword≤0.4 — so this floor admits id/name/strong matches and withholds
 # the weakest keyword guesses (e.g. the 0.16 fuzzy match from dogfooding).
 RESOLUTION_MIN_CONFIDENCE = 0.4
+
+# Floor of the ``high`` band — a match the runtime may act on without hedging.
+# Split out from :data:`RESOLUTION_MIN_CONFIDENCE` so the partition below is
+# closed: ``[0.7, ∞)`` high, ``[0.4, 0.7)`` mid, ``(-∞, 0.4)`` low. The origin
+# doc said "~0.7" and left ``(0.6, 0.7)`` unassigned; an if/elif/else would have
+# swept that range into whichever branch happened to be ``else`` — permissive by
+# accident. Naming the floor makes the gap impossible to reintroduce silently.
+RESOLUTION_HIGH_CONFIDENCE = 0.7
+
+# Band labels. Plain strings rather than an enum: ``entity_resolver`` is
+# imported on every ``machina describe`` (Architecture Decision 8) and stays
+# deliberately thin, and a public enum class would pull a docs-coverage
+# obligation (``tests/unit/test_docs_coverage.py``) for zero reader benefit.
+BAND_HIGH = "high"
+BAND_MID = "mid"
+BAND_LOW = "low"
+
+# ``match_reason`` that marks a whole-token asset-ID hit. Several candidates at
+# this reason means the user named several distinct assets ("compare P-201 and
+# P-202") — multiplicity, not ambiguity.
+_EXACT_ID_REASON = "exact_id"
 
 
 def _id_occurs_in(asset_id: str, text: str) -> bool:
@@ -73,6 +96,11 @@ def _tokenise(text: str) -> set[str]:
 class ResolvedEntity:
     """Result of entity resolution.
 
+    ``confidence`` is required. It previously defaulted to ``1.0``, which made
+    an entity built without a stated confidence *maximally* confident — the
+    authority gate then acted on a match nobody had scored. Omitting it is now
+    a ``TypeError`` at construction rather than silent full trust.
+
     Args:
         asset: The matched asset.
         confidence: Confidence score (0.0-1.0).
@@ -80,7 +108,7 @@ class ResolvedEntity:
     """
 
     asset: Asset
-    confidence: float = 1.0
+    confidence: float
     match_reason: str = ""
 
     def __repr__(self) -> str:
@@ -88,6 +116,102 @@ class ResolvedEntity:
             f"ResolvedEntity(asset={self.asset.id!r}, "
             f"confidence={self.confidence:.2f}, reason={self.match_reason!r})"
         )
+
+
+@dataclass(frozen=True)
+class _ResolutionVerdict:
+    """How much authority a resolution result carries.
+
+    Private by design: the verdict is an internal contract between the runtime
+    gate and the prompt renderer, not something callers construct. Read it via
+    :func:`resolution_verdict`.
+
+    Attributes:
+        band: :data:`BAND_HIGH`, :data:`BAND_MID`, :data:`BAND_LOW`, or ``None``
+            when there were no candidates at all.
+        ambiguous: Several candidates share the top band and the top match is
+            not a whole-token ID hit.
+    """
+
+    band: str | None
+    ambiguous: bool
+
+    @property
+    def confident(self) -> bool:
+        """Whether the top match may be treated as the definitive referent.
+
+        The single predicate both consumers read, so the gate's decision to
+        withhold and the prompt's decision to nudge cannot drift apart. ``None``
+        (no candidates) is not confident — there is nothing to be confident in.
+        """
+        return self.band in (BAND_HIGH, BAND_MID)
+
+
+def _band_for(confidence: object) -> str:
+    """Classify a raw confidence value into a closed, exhaustive band.
+
+    The partition is stated as three positive tests with no ``else`` branch, so
+    no unassigned range can be swept into the permissive tier. Anything that
+    fails all three — ``NaN``, ``None``, a string, a mock without a real score —
+    is indeterminable, and an indeterminable confidence is *not* confidence:
+    it lands in :data:`BAND_LOW`.
+
+    Args:
+        confidence: A confidence score, or any value where one was expected.
+
+    Returns:
+        One of :data:`BAND_HIGH`, :data:`BAND_MID`, :data:`BAND_LOW`.
+    """
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return BAND_LOW
+    value = float(confidence)
+    if value >= RESOLUTION_HIGH_CONFIDENCE:
+        return BAND_HIGH
+    if RESOLUTION_MIN_CONFIDENCE <= value < RESOLUTION_HIGH_CONFIDENCE:
+        return BAND_MID
+    if value < RESOLUTION_MIN_CONFIDENCE:
+        return BAND_LOW
+    return BAND_LOW  # NaN and other non-comparables — fail closed.
+
+
+def resolution_verdict(entities: Sequence[ResolvedEntity]) -> _ResolutionVerdict:
+    """Derive the authority verdict for a resolution result.
+
+    The one place in ``src/`` that turns a candidate list into a band plus an
+    ambiguity call. Both consumers — the runtime's commit gate and the prompt
+    renderer's disambiguation nudge — read this, so they cannot disagree about
+    what the same candidate list means.
+
+    Ambiguity is *not* the same as multiplicity. Several candidates tied at
+    :data:`BAND_HIGH` because the user typed several whole-token asset IDs
+    ("compare P-201 and P-202") is a well-posed question about several assets,
+    and classifying it ambiguous would turn it into an unanswerable refusal.
+    Ambiguity therefore requires that the top match arrived by something weaker
+    than an exact ID hit.
+
+    Args:
+        entities: Resolution candidates, highest confidence first (the order
+            :meth:`EntityResolver.resolve` returns).
+
+    Returns:
+        The :class:`_ResolutionVerdict` for this candidate list. An empty list
+        yields ``band=None, ambiguous=False`` — the not-found path, unchanged.
+
+    Example:
+        ```python
+        verdict = resolution_verdict(resolver.resolve(text))
+        if not verdict.confident:
+            ...  # ask which asset is meant instead of acting
+        ```
+    """
+    if not entities:
+        return _ResolutionVerdict(band=None, ambiguous=False)
+
+    top = entities[0]
+    band = _band_for(getattr(top, "confidence", None))
+    at_top_band = sum(1 for ent in entities if _band_for(getattr(ent, "confidence", None)) == band)
+    ambiguous = at_top_band > 1 and getattr(top, "match_reason", "") != _EXACT_ID_REASON
+    return _ResolutionVerdict(band=band, ambiguous=ambiguous)
 
 
 class EntityResolver:

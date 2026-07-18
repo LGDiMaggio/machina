@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
-from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE, EntityResolver
+from machina.agent.entity_resolver import EntityResolver, resolution_verdict
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
@@ -1149,13 +1149,26 @@ class Agent:
         # ``context["asset"]``) and let the agent ask which asset is meant. The
         # candidates stay in ``resolved_entities`` (with their confidence) so the
         # prompt can render them for disambiguation (R3.1/R3.2).
+        #
+        # The verdict is derived ONCE, here, and travels down the context dict to
+        # the prompt renderer. It used to be re-derived independently on each
+        # side — the gate defaulting a missing confidence to 1.0 (fail-open) and
+        # the renderer reading the attribute bare (AttributeError). Same object,
+        # both consumers, no drift.
         top = resolved[0]
-        if getattr(top, "confidence", 1.0) < RESOLUTION_MIN_CONFIDENCE:
+        verdict = resolution_verdict(resolved)
+        context["resolution_verdict"] = verdict
+        if not verdict.confident:
             logger.info(
                 "low_confidence_resolution_withheld",
                 agent=self.name,
                 asset_id=top.asset.id,
-                confidence=top.confidence,
+                # ``getattr`` here for the same reason the verdict uses one: the
+                # branch we are in includes "this candidate has no readable
+                # confidence", and the log must not be what raises.
+                confidence=getattr(top, "confidence", None),
+                band=verdict.band,
+                ambiguous=verdict.ambiguous,
                 operation="gather_context",
             )
             context["resolution_uncertain"] = True
@@ -1637,6 +1650,7 @@ class Agent:
         # Add domain context
         context_str = build_context_message(
             resolved_entities=context_data.get("resolved_entities"),
+            verdict=context_data.get("resolution_verdict"),
             asset=context_data.get("asset"),
             work_orders=context_data.get("work_orders"),
             alarms=context_data.get("alarms"),

@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
-from machina.agent.entity_resolver import EntityResolver, ResolvedEntity
+import pytest
+
+from machina.agent.entity_resolver import (
+    BAND_HIGH,
+    BAND_LOW,
+    BAND_MID,
+    EntityResolver,
+    ResolvedEntity,
+    _band_for,
+    resolution_verdict,
+)
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
+
+
+def _asset(asset_id: str) -> Asset:
+    """A minimal asset for verdict tests, which never inspect asset fields."""
+    return Asset(id=asset_id, name=f"Asset {asset_id}", type=AssetType.ROTATING_EQUIPMENT)
+
+
+def _entity(asset_id: str, confidence: float, match_reason: str) -> ResolvedEntity:
+    """A resolution candidate with an explicitly stated confidence."""
+    return ResolvedEntity(_asset(asset_id), confidence=confidence, match_reason=match_reason)
 
 
 def _make_plant() -> Plant:
@@ -204,3 +224,121 @@ class TestResolvedEntity:
         entity = ResolvedEntity(asset, confidence=0.9, match_reason="test")
         assert "P-201" in repr(entity)
         assert "0.90" in repr(entity)
+
+
+class TestBandPartition:
+    """The band partition is closed: every float lands in exactly one band."""
+
+    @pytest.mark.parametrize(
+        ("confidence", "expected"),
+        [
+            (1.0, BAND_HIGH),
+            (0.9, BAND_HIGH),
+            (0.7, BAND_HIGH),
+            (0.69, BAND_MID),
+            # The former dead zone. The origin doc said "~0.7" and left
+            # (0.6, 0.7) unassigned; an if/elif/else would have swept it into
+            # whichever branch was `else`. If that was `high`, 0.65 acts
+            # silently on a guess.
+            (0.65, BAND_MID),
+            (0.5, BAND_MID),
+            # 0.4 is mid-INCLUSIVE: the pre-existing gate committed at the
+            # floor and must keep doing so.
+            (0.4, BAND_MID),
+            (0.39, BAND_LOW),
+            (0.16, BAND_LOW),
+            (0.0, BAND_LOW),
+        ],
+    )
+    def test_boundaries(self, confidence: float, expected: str) -> None:
+        assert _band_for(confidence) == expected
+
+    def test_bands_are_exhaustive_and_disjoint(self) -> None:
+        """No float falls outside the three bands, and none lands in two."""
+        for step in range(-50, 151):
+            value = step / 100
+            assert _band_for(value) in (BAND_HIGH, BAND_MID, BAND_LOW)
+
+    @pytest.mark.parametrize(
+        "indeterminable",
+        [None, float("nan"), "0.9", object()],
+    )
+    def test_indeterminable_confidence_fails_closed(self, indeterminable: object) -> None:
+        """A confidence nobody can read is not a high confidence."""
+        assert _band_for(indeterminable) == BAND_LOW
+
+
+class TestResolutionVerdict:
+    """The single derivation both the gate and the renderer read."""
+
+    def test_single_strong_candidate_is_high_and_unambiguous(self) -> None:
+        verdict = resolution_verdict([_entity("P-201", 0.95, "name_match")])
+        assert verdict.band == BAND_HIGH
+        assert verdict.ambiguous is False
+        assert verdict.confident is True
+
+    def test_single_mid_candidate_is_mid_and_unambiguous(self) -> None:
+        verdict = resolution_verdict([_entity("P-201", 0.5, "location_match")])
+        assert verdict.band == BAND_MID
+        assert verdict.ambiguous is False
+        assert verdict.confident is True
+
+    def test_exactly_one_is_high(self) -> None:
+        verdict = resolution_verdict([_entity("P-201", 1.0, "exact_id")])
+        assert verdict.band == BAND_HIGH
+
+    def test_missing_confidence_is_not_confident(self) -> None:
+        """Fail closed: an entity whose confidence cannot be read is withheld.
+
+        ``ResolvedEntity`` now requires ``confidence``, so this models the
+        duck-typed / partially-constructed candidate that used to sail through
+        the runtime's ``getattr(top, "confidence", 1.0)`` as maximally trusted.
+        """
+
+        class _Unscored:
+            asset = _asset("P-201")
+            match_reason = "keyword_match"
+
+        verdict = resolution_verdict([_Unscored()])  # type: ignore[list-item]
+        assert verdict.band == BAND_LOW
+        assert verdict.confident is False
+
+    def test_tie_at_name_match_is_ambiguous(self) -> None:
+        verdict = resolution_verdict(
+            [_entity("P-201", 0.9, "name_match"), _entity("P-202", 0.9, "name_match")]
+        )
+        assert verdict.ambiguous is True
+
+    def test_tie_at_exact_id_is_multiplicity_not_ambiguity(self) -> None:
+        """ "Compare P-201 and P-202" is a well-posed question, not a muddle."""
+        verdict = resolution_verdict(
+            [_entity("P-201", 1.0, "exact_id"), _entity("P-202", 1.0, "exact_id")]
+        )
+        assert verdict.band == BAND_HIGH
+        assert verdict.ambiguous is False
+        assert verdict.confident is True
+
+    def test_lower_band_runner_up_does_not_make_it_ambiguous(self) -> None:
+        verdict = resolution_verdict(
+            [_entity("P-201", 0.9, "name_match"), _entity("HX-401", 0.3, "keyword_match")]
+        )
+        assert verdict.ambiguous is False
+
+    def test_empty_list_has_no_band_and_is_not_ambiguous(self) -> None:
+        verdict = resolution_verdict([])
+        assert verdict.band is None
+        assert verdict.ambiguous is False
+        assert verdict.confident is False
+
+    def test_resolver_not_found_path_still_returns_empty(self) -> None:
+        """The not-found path is unchanged by the verdict work."""
+        resolver = EntityResolver(_make_plant())
+        assert resolver.resolve("zzzz") == []
+
+
+class TestConfidenceIsRequired:
+    """The 1.0 default is gone — an unscored entity cannot be constructed."""
+
+    def test_omitting_confidence_raises(self) -> None:
+        with pytest.raises(TypeError):
+            ResolvedEntity(_asset("P-201"))  # type: ignore[call-arg]

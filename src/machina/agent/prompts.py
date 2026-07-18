@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from machina.agent.citations import CITATION_PROMPT
-from machina.agent.entity_resolver import RESOLUTION_MIN_CONFIDENCE
+from machina.agent.entity_resolver import _ResolutionVerdict, resolution_verdict
 
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
@@ -256,17 +256,29 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     return "\n".join(lines)
 
 
-def format_resolved_entities(entities: list[ResolvedEntity]) -> str:
+def format_resolved_entities(
+    entities: list[ResolvedEntity],
+    verdict: _ResolutionVerdict | None = None,
+) -> str:
     """Format entity resolution results for the prompt.
 
     Args:
         entities: Resolved entity matches.
+        verdict: The verdict the runtime's authority gate already derived for
+            these same candidates. Passed down rather than recomputed so the
+            nudge shown to the LLM is the *same* judgement the gate acted on.
+            When ``None`` (direct callers outside a turn), it is derived from
+            ``entities`` via the shared :func:`resolution_verdict` — the one
+            implementation, never a second opinion.
 
     Returns:
         A summary of matched assets.
     """
     if not entities:
         return ""
+
+    if verdict is None:
+        verdict = resolution_verdict(entities)
 
     lines = ["**Resolved assets from your question:**"]
     for ent in entities[:3]:
@@ -276,7 +288,9 @@ def format_resolved_entities(entities: list[ResolvedEntity]) -> str:
         )
     # When even the best match is a weak guess, tell the agent to confirm rather
     # than act on it — the runtime has withheld committing to this asset (U5).
-    if entities[0].confidence < RESOLUTION_MIN_CONFIDENCE:
+    # Gated on ``verdict.confident``, the same predicate the runtime gate reads,
+    # so the nudge and the withhold cannot disagree about any candidate list.
+    if not verdict.confident:
         lines.append(
             "  ⚠️ Low confidence — ask the user which asset they mean before relying on this match."
         )
@@ -491,6 +505,7 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
 def build_context_message(
     *,
     resolved_entities: list[ResolvedEntity] | None = None,
+    verdict: _ResolutionVerdict | None = None,
     asset: Asset | None = None,
     work_orders: list[WorkOrder] | None = None,
     alarms: list[Alarm] | None = None,
@@ -502,13 +517,25 @@ def build_context_message(
     This is injected as a system message before the user's question
     to ground the LLM's response in real data.
 
+    Args:
+        resolved_entities: Entity-resolution candidates for this turn.
+        verdict: The authority verdict the runtime's gate derived for
+            ``resolved_entities``. Threaded through so the rendered
+            disambiguation nudge reflects the gate's actual decision rather
+            than a second, independent reading of the same candidates.
+        asset: The asset the runtime committed to, if any.
+        work_orders: Work orders prefetched for the asset.
+        alarms: Active alarms prefetched for the asset.
+        spare_parts: Spare parts prefetched for the asset.
+        document_results: RAG retrieval results.
+
     Returns:
         A formatted context string, or empty string if no context.
     """
     sections: list[str] = []
 
     if resolved_entities:
-        sections.append(format_resolved_entities(resolved_entities))
+        sections.append(format_resolved_entities(resolved_entities, verdict))
 
     if asset:
         sections.append(format_asset_context(asset))
