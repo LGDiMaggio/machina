@@ -13,16 +13,17 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
 import structlog
 
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
-from machina.agent.entity_resolver import EntityResolver, resolution_verdict
+from machina.agent.entity_resolver import BAND_MID, EntityResolver, resolution_verdict
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
@@ -42,7 +43,7 @@ from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
-    from machina.agent.entity_resolver import ResolvedEntity
+    from machina.agent.entity_resolver import ResolvedEntity, _ResolutionVerdict
     from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
@@ -445,6 +446,66 @@ def _executed_write_fallback(func_name: str, tool_result: Any) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _TurnResolution:
+    """What a turn's entity resolution established, for the write gate to read.
+
+    The context dict is local to :meth:`Agent._gather_context` and gone by the
+    time the model asks for a write, so the facts the write gate needs are
+    recorded chat-scoped instead. Three of them, because each answers a
+    different question and none substitutes for another:
+
+    * ``verdict`` — *may* a write happen at all on this turn's confidence?
+    * ``candidates`` — *which* asset IDs did this turn actually put on the
+      table? Registry membership is a liveness test every asset in the plant
+      passes; only this binds a write to what was discussed.
+    * ``committed_id`` — the one the runtime prefetched, or ``None`` when the
+      commit was withheld.
+
+    Ordered ``candidates`` rather than a set: the first entry is the top match,
+    which the refusal messages name.
+    """
+
+    verdict: _ResolutionVerdict
+    candidates: tuple[str, ...]
+    committed_id: str | None
+
+    @classmethod
+    def of(cls, resolved: Sequence[ResolvedEntity]) -> _TurnResolution:
+        """Build the record for a resolution result (including an empty one)."""
+        verdict = resolution_verdict(resolved)
+        return cls(
+            verdict=verdict,
+            candidates=tuple(entity.asset.id for entity in resolved),
+            committed_id=resolved[0].asset.id if resolved and verdict.commits else None,
+        )
+
+
+def _write_refused(reason: str, explanation: str, **extra: Any) -> dict[str, Any]:
+    """Build the payload a gated write returns INSTEAD of executing.
+
+    Shaped so the model cannot read it as a partial success: the message opens
+    by stating the work order was not created, and ``refused`` marks it
+    structurally for callers that do not read prose. The ``error`` key also
+    keeps the result out of the LLM loop's side-effect memo, so a later
+    legitimate call in the same turn is not suppressed by this one.
+
+    Args:
+        reason: Stable machine-readable slug for the refusal.
+        explanation: Human-readable cause plus the concrete next step.
+        **extra: Additional structured fields for the model (e.g. candidates).
+
+    Returns:
+        The refusal result.
+    """
+    return {
+        "error": safe_text(f"Work order NOT created — {explanation}"),
+        "refused": True,
+        "reason": reason,
+        **extra,
+    }
+
+
 class Agent:
     """Maintenance AI agent that orchestrates reasoning and actions.
 
@@ -580,8 +641,13 @@ class Agent:
         # different participant cannot confirm another user's pending write; an
         # empty (untrusted) ``user_id`` is never stored (fail-safe withhold).
         # The trailing monotonic timestamp drives TTL expiry on resume so a
-        # much-later bare affirmation cannot execute a stale write.
-        self._pending_actions: dict[tuple[str, str], tuple[str, dict[str, Any], str, float]] = {}
+        # much-later bare affirmation cannot execute a stale write. The final
+        # slot carries the proposing turn's resolution: the resume path never
+        # calls _gather_context, so without it the write gate would find no
+        # verdict on turn N+1 and — fail-closed — refuse every confirmed write.
+        self._pending_actions: dict[
+            tuple[str, str], tuple[str, dict[str, Any], str, float, _TurnResolution | None]
+        ] = {}
 
         # Per-turn chunk registry (chat_id -> chunk_id -> {source, page, content}).
         # Populated by _gather_context and the search_documents tool; consumed by
@@ -601,6 +667,16 @@ class Agent:
         # and flag ``AgentResponse.completeness``. Absent → complete. Popped in
         # _finalize_turn (and the error path), like the chunk registries.
         self._turn_completeness: dict[str, Literal["partial"]] = {}
+
+        # Per-turn, chat-scoped record of what entity resolution established.
+        # Written by _gather_context (for EVERY turn, including one that
+        # resolved nothing), read by the write gate at tool-call time, popped in
+        # _finalize_turn alongside the other per-turn state. The write gate
+        # cannot re-derive this: it sees only the arguments the model chose, and
+        # those are exactly what must not be trusted. A missing entry is a
+        # refusal, never an assumption of confidence — the two-turn resume path
+        # re-installs the stored record rather than running without one.
+        self._turn_resolution: dict[str, _TurnResolution] = {}
 
     # ------------------------------------------------------------------
     # Sandbox mode — single mutation point, propagates to the engine
@@ -1054,6 +1130,7 @@ class Agent:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
             self._turn_completeness.pop(chat_id, None)
+            self._turn_resolution.pop(chat_id, None)
             raise
 
         # 5/6. Parse citations, update history, clean up the per-turn registry,
@@ -1140,6 +1217,12 @@ class Agent:
             "resolved_entities": resolved,
         }
 
+        # Record the turn's resolution BEFORE any early return. "This turn
+        # resolved nothing" is a verdict the write gate must be able to read —
+        # it is the laundering case, where the model lifts an asset ID out of
+        # its own conversation history — not an absence it should guess at.
+        self._turn_resolution[chat_id] = _TurnResolution.of(resolved)
+
         if not resolved:
             return context
 
@@ -1167,7 +1250,7 @@ class Agent:
         # verdict is a flag that can contradict it, and the write gate needs the
         # band and the candidate list anyway, not a yes/no.
         top = resolved[0]
-        verdict = resolution_verdict(resolved)
+        verdict = self._turn_resolution[chat_id].verdict
         context["resolution_verdict"] = verdict
         if not verdict.commits:
             logger.info(
@@ -1567,6 +1650,7 @@ class Agent:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
             self._turn_completeness.pop(chat_id, None)
+            self._turn_resolution.pop(chat_id, None)
 
         logger.info(
             "response_generated",
@@ -1913,7 +1997,13 @@ class Agent:
                         )
                     elif gate_write and confirmer is not None:
                         # Synchronous path (e.g. CLI): ask, then act on yes.
-                        approved = await confirmer(self._confirmation_prompt(func_name, args))
+                        approved = await confirmer(
+                            self._confirmation_prompt(
+                                func_name,
+                                args,
+                                resolution=self._turn_resolution.get(chat_id),
+                            )
+                        )
                         if approved:
                             tool_result = await self._execute_tool(
                                 func_name, args, chat_id=chat_id
@@ -2031,15 +2121,28 @@ class Agent:
     # Confirmation gate helpers
     # ------------------------------------------------------------------
 
-    def _confirmation_prompt(self, func_name: str, args: dict[str, Any]) -> str:
+    def _confirmation_prompt(
+        self,
+        func_name: str,
+        args: dict[str, Any],
+        *,
+        resolution: _TurnResolution | None = None,
+    ) -> str:
         """Build a concrete, human-readable description of a pending write (R6).
 
-        Pure function of the tool name and its arguments — no I/O. The channel
-        renders this text verbatim, so it must state exactly what will happen.
+        Pure function of its arguments — no I/O, no instance state. The turn's
+        resolution is passed in EXPLICITLY rather than looked up from
+        ``chat_id``, because the caveat it produces has to be baked into the
+        stored prompt string at propose time: ``_pending_actions`` outlives the
+        turn, so a resume-time lookup would find the per-turn record gone and
+        silently drop the caveat from the question the user actually answers.
 
         Args:
             func_name: The mutating tool the model requested.
             args: The arguments the model supplied for the call.
+            resolution: What this turn's entity resolution established, when the
+                caller has it. A ``mid``-band resolution adds a caveat naming
+                the assumed asset; ``None`` renders the plain prompt.
 
         Returns:
             A one-paragraph confirmation question naming the concrete action.
@@ -2049,12 +2152,18 @@ class Agent:
             wo_type = args.get("type") or "corrective"
             priority = args.get("priority") or "medium"
             description = args.get("description") or "(no description)"
+            caveat = ""
+            if resolution is not None and resolution.verdict.band == BAND_MID:
+                caveat = (
+                    f"\n  ⚠️ {asset} was inferred from your message with only "
+                    "partial confidence — check it is the asset you mean."
+                )
             return (
                 "Create a work order?\n"
                 f"  • Asset: {asset}\n"
                 f"  • Type: {wo_type}\n"
                 f"  • Priority: {priority}\n"
-                f"  • Description: {description}"
+                f"  • Description: {description}{caveat}"
             )
 
         if func_name == "execute_workflow":
@@ -2171,7 +2280,12 @@ class Agent:
         Returns:
             A structured result the LLM loop feeds back as the tool result.
         """
-        prompt = self._confirmation_prompt(func_name, args)
+        # Capture the turn's resolution ONCE, here at propose time: both the
+        # caveat baked into ``prompt`` and the re-check on resume have to see
+        # what THIS turn resolved, and by the time the user answers the per-turn
+        # record is gone.
+        resolution = self._turn_resolution.get(chat_id)
+        prompt = self._confirmation_prompt(func_name, args, resolution=resolution)
 
         if not user_id:
             # Fail-safe: no trusted sender identity, so a deferred confirmation
@@ -2236,6 +2350,7 @@ class Agent:
             dict(args),
             prompt,
             time.monotonic(),
+            resolution,
         )
         logger.info(
             "write_confirmation_required",
@@ -2252,7 +2367,7 @@ class Agent:
 
     async def _resume_pending_action(
         self,
-        pending: tuple[str, dict[str, Any], str, float],
+        pending: tuple[str, dict[str, Any], str, float, _TurnResolution | None],
         text: str,
         *,
         chat_id: str,
@@ -2279,8 +2394,18 @@ class Agent:
           normal processing of this message (an unrelated message never
           silently executes the pending write).
 
+        The write gate is re-applied on execution, against the resolution
+        STORED at propose time. This turn ran no resolution of its own — the
+        message is a bare "yes" — so without re-installing the stored record the
+        gate would see nothing and refuse a write the user legitimately
+        confirmed; and if the proposal was made on an ambiguous turn, the
+        re-check is what stops the ambiguity from decaying into permission
+        across the turn boundary. A proposal stored without a resolution stays
+        without one, and is refused.
+
         Args:
-            pending: The stored ``(func_name, args, prompt, stored_ts)`` tuple.
+            pending: The stored
+                ``(func_name, args, prompt, stored_ts, resolution)`` tuple.
             text: The raw incoming message.
             chat_id: Conversation identifier.
             user_id: Sender identifier.
@@ -2290,7 +2415,7 @@ class Agent:
             ``None`` when the pending action was cancelled or expired (caller
             proceeds with normal processing).
         """
-        func_name, args, _prompt, stored_ts = pending
+        func_name, args, _prompt, stored_ts, stored_resolution = pending
 
         # TTL check FIRST: an aged pending is treated as if it were never there.
         # Pop it, do not execute, and fall through so the incoming message is
@@ -2332,9 +2457,16 @@ class Agent:
             chat_id=chat_id,
         )
 
-        # Fresh per-turn citation state for the narration pass.
+        # Fresh per-turn citation state for the narration pass, plus the
+        # proposing turn's resolution so the write gate re-checks the SAME
+        # verdict that authorised the proposal. Absent → the entry is cleared,
+        # not defaulted: the gate must refuse, not assume.
         self._turn_chunks[chat_id] = {}
         self._turn_ordered[chat_id] = []
+        if stored_resolution is not None:
+            self._turn_resolution[chat_id] = stored_resolution
+        else:
+            self._turn_resolution.pop(chat_id, None)
         try:
             tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
 
@@ -2374,6 +2506,7 @@ class Agent:
             self._turn_chunks.pop(chat_id, None)
             self._turn_ordered.pop(chat_id, None)
             self._turn_completeness.pop(chat_id, None)
+            self._turn_resolution.pop(chat_id, None)
             raise
 
         # Parse citations, update history, clean up the per-turn registry, and
@@ -2794,10 +2927,118 @@ class Agent:
             "by_type": by_type,
         }
 
+    def _authorize_write_target(self, asset_id: Any, chat_id: str) -> dict[str, Any] | None:
+        """Decide whether a write may target ``asset_id`` on this turn.
+
+        The write tools take ``asset_id`` from the model's own arguments, so
+        withholding ``context["asset"]`` upstream gates the PREFETCH and nothing
+        else — the candidate IDs are rendered to the model regardless, and it is
+        free to pick one. This is where that is stopped, and it applies three
+        checks because no one of them implies the others:
+
+        1. **Existence.** The ID is in the asset registry.
+        2. **Binding.** The ID is one this turn actually resolved. Existence is
+           a liveness test every asset in the plant passes, so on its own it
+           authorises a work order against any equipment in the site.
+        3. **Band.** ``ambiguous``, ``low``, and nothing-resolved refuse;
+           ``mid`` and ``high`` pass (the blocking *ask* for ``mid`` is the
+           separate ``gate_write`` path). Without the band check three routes
+           reach execution ungated — ``low`` is not ambiguous, an empty
+           resolution is not ambiguous, and multiplicity is not ambiguous —
+           which would make the write path more permissive at 0.2 confidence
+           than at 0.5.
+
+        Unconditional by design. A refusal is not a mutation, so neither
+        ``sandbox`` nor ``confirmations=False`` exempts it; and a turn with no
+        recorded resolution at all refuses rather than assuming confidence.
+
+        Args:
+            asset_id: The value the model supplied, of whatever type.
+            chat_id: Conversation identifier, keying the turn's resolution.
+
+        Returns:
+            ``None`` when the write may proceed, otherwise the refusal payload
+            to return in place of executing it.
+        """
+        if not isinstance(asset_id, str) or not asset_id.strip():
+            return _write_refused(
+                "missing_asset_id",
+                "no asset was named. Ask the user which asset this is for.",
+            )
+
+        record = self._turn_resolution.get(chat_id)
+        if record is None:
+            return _write_refused(
+                "no_resolution_for_turn",
+                "this turn carries no entity resolution to authorise a write "
+                "against. Ask the user to name the asset in a fresh message.",
+            )
+
+        verdict = record.verdict
+        if verdict.ambiguous:
+            return _write_refused(
+                "ambiguous_resolution",
+                f"the asset reference was ambiguous — {', '.join(record.candidates)} "
+                "matched equally well and none was selected. Ask the user which "
+                "one they mean, then create the work order for that asset.",
+                candidates=list(record.candidates),
+            )
+        if verdict.band is None:
+            return _write_refused(
+                "nothing_resolved",
+                "this turn did not resolve any asset, so there is nothing to "
+                "confirm the target against. Ask the user to name the asset by "
+                "ID or full name — do not reuse one from earlier in the "
+                "conversation without asking.",
+            )
+        if not verdict.confident:
+            return _write_refused(
+                "low_confidence_resolution",
+                f"the asset reference resolved only weakly (best guess "
+                f"{record.candidates[0]}). Confirm the asset with the user "
+                "before creating a work order.",
+                candidates=list(record.candidates),
+            )
+
+        if asset_id not in self.plant.assets:
+            return _write_refused(
+                "unknown_asset",
+                f"asset {asset_id!r} is not in the asset registry.",
+            )
+
+        if asset_id not in record.candidates:
+            return _write_refused(
+                "asset_not_resolved_this_turn",
+                f"asset {asset_id!r} is not what this turn resolved "
+                f"({', '.join(record.candidates)}). Being a real asset is not "
+                "the same as being the asset under discussion — confirm with "
+                "the user before writing to it.",
+                resolved=list(record.candidates),
+            )
+
+        return None
+
     async def _tool_create_work_order(
         self, args: dict[str, Any], *, chat_id: str = "default"
     ) -> dict[str, Any]:
         """Create a work order via the CMMS connector."""
+        # FIRST — above the sandbox early return, which currently returns before
+        # ``asset_id`` is ever read. A check at the natural-looking spot (after
+        # the connector lookup) is unreachable in sandbox mode, silently making
+        # the refusal conditional on exactly the mode the shipped template
+        # defaults to. A refusal is not a mutation; it is not sandbox-exempt.
+        refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
+        if refusal is not None:
+            logger.warning(
+                "write_refused_unauthorized_asset",
+                agent=self.name,
+                asset_id=args.get("asset_id", ""),
+                reason=refusal["reason"],
+                chat_id=chat_id,
+                operation="create_work_order",
+            )
+            return refusal
+
         if self.sandbox:
             logger.info(
                 "sandbox_create_work_order",
