@@ -24,9 +24,13 @@ import structlog
 
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
 from machina.agent.entity_resolver import (
+    BAND_HIGH,
+    BAND_LOW,
     BAND_MID,
+    MAX_RENDERED_CANDIDATES,
     EntityResolver,
     ResolvedEntity,
+    _band_for,
     match_disambiguation_reply,
     resolution_verdict,
 )
@@ -65,8 +69,15 @@ _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 # Mutating tools that write against a specific ``asset_id`` and are therefore
 # subject to :meth:`Agent._authorize_write_target`. Kept as an explicit list
 # rather than "everything in _SIDE_EFFECTING_TOOLS" because the other mutating
-# tools (``execute_workflow``) carry no ``asset_id`` argument, and running the
-# asset check over them would refuse every one of them for "no asset named".
+# tools do not take an asset as a TOP-LEVEL ``asset_id`` argument, which is the
+# only shape this gate reads. ``execute_workflow`` is the case worth naming: its
+# ``event`` payload may well carry an asset ID nested inside, but the gate would
+# read ``args["asset_id"]``, find nothing, and refuse every workflow run for
+# "no asset named" — a check that fails 100% of the time is not a check. Those
+# tools are covered by the HITL confirmation gate instead, via
+# ``MUTATING_TOOLS``. Extending resolution-authority to nested payloads means
+# teaching the gate each tool's argument shape, which is a real change, not a
+# line in this frozenset.
 # A new asset-targeted write tool must be added here AND call the same check in
 # its handler — the loop's pre-check is an early-out, not the enforcement point
 # (the two-turn resume path re-enters at the handler without passing through
@@ -504,24 +515,53 @@ class _TurnResolution:
     * ``candidates`` — *which* asset IDs did this turn actually put on the
       table? Registry membership is a liveness test every asset in the plant
       passes; only this binds a write to what was discussed.
+    * ``confidences`` — *how strongly* did each of those candidates match? The
+      candidate list is NOT confidence-homogeneous: stage 2 of the resolver
+      emits a 0.9 ``name_match`` and a ``round(0.7 * score, 2)``
+      ``name_keywords`` hit into the same list, so "the cooling water pump is
+      leaking" yields ``[P-201@0.9, C-101@0.35]``. ``verdict`` describes the TOP
+      candidate alone; without a per-candidate score the gate band-checked
+      ``P-201`` and then authorised a write against ``C-101`` at 0.35 — below
+      :data:`RESOLUTION_MIN_CONFIDENCE`, i.e. the very score it refuses as
+      ``low_confidence_resolution`` when it happens to sort first.
     * ``committed_id`` — the one the runtime prefetched, or ``None`` when the
       commit was withheld.
 
     Ordered ``candidates`` rather than a set: the first entry is the top match,
-    which the refusal messages name.
+    which the refusal messages name. ``confidences`` is keyed by ID because that
+    is what the model supplies at the write boundary.
     """
 
     verdict: _ResolutionVerdict
     candidates: tuple[str, ...]
+    confidences: dict[str, Any]
     committed_id: str | None
+
+    def band_for_candidate(self, asset_id: str) -> str:
+        """The confidence band of one named candidate, not of the top match.
+
+        Reads through the same :func:`_band_for` the verdict uses, so a
+        candidate's own band and the turn's band are computed identically.
+        Unknown IDs and unreadable confidences both land in
+        :data:`BAND_LOW` — this is a gate, and an indeterminable score is not a
+        score.
+        """
+        return _band_for(self.confidences.get(asset_id))
 
     @classmethod
     def of(cls, resolved: Sequence[ResolvedEntity]) -> _TurnResolution:
         """Build the record for a resolution result (including an empty one)."""
         verdict = resolution_verdict(resolved)
+        confidences: dict[str, Any] = {}
+        for entity in resolved:
+            # First wins: a duplicate ID keeps its strongest (earliest, since
+            # the list is confidence-sorted) score rather than being overwritten
+            # by a weaker later hit.
+            confidences.setdefault(entity.asset.id, getattr(entity, "confidence", None))
         return cls(
             verdict=verdict,
             candidates=_candidate_ids(resolved),
+            confidences=confidences,
             committed_id=resolved[0].asset.id if resolved and verdict.commits else None,
         )
 
@@ -1280,12 +1320,19 @@ class Agent:
     def _record_disambiguation(self, chat_id: str, resolved: Sequence[ResolvedEntity]) -> None:
         """Remember the candidates an ambiguous turn offered, so they stay answerable.
 
-        Recorded on ``ambiguous`` only, never on ``low``. A weak sub-0.4 match
-        is the common case, not the exceptional one (the resolver's own comment
-        cites a 0.16 dogfooding hit), and routing those into a candidate store
-        would turn every vaguely-phrased question into a disambiguation prompt.
-        An ambiguous verdict is the narrow case where the runtime has candidates
-        it genuinely cannot choose between.
+        Recorded on ``ambiguous``, and on nothing else. A LONE weak sub-0.4
+        match is the common case, not the exceptional one (the resolver's own
+        comment cites a 0.16 dogfooding hit), and routing those into a candidate
+        store would turn every vaguely-phrased question into a disambiguation
+        prompt. An ambiguous verdict is the narrow case where the runtime has
+        candidates it genuinely cannot choose between.
+
+        Band does NOT veto the recording: a low-band *tie* is recorded like any
+        other. ``format_resolved_entities`` renders its "ask the user which one
+        they mean" nudge on the same ``verdict.ambiguous``, so the user is put a
+        question in that case — and asking a question with nowhere to put the
+        answer is the one outcome worse than not asking. The predicate is shared
+        for exactly this reason; splitting it here is how the two sides drift.
 
         Re-recording the SAME candidate list is a no-op — it preserves the miss
         count and the TTL clock. This is what makes the bounded retry bounded:
@@ -1293,11 +1340,20 @@ class Agent:
         resetting the counter there would restore the unbounded behaviour the
         counter exists to prevent.
 
+        Only the candidates that are actually RENDERED are recorded. The prompt
+        shows :data:`MAX_RENDERED_CANDIDATES` of them and the store used to keep
+        every one, so "quinto" selected a fifth asset the user had never seen
+        and promoted it to confidence 1.0 — falsifying
+        :func:`match_disambiguation_reply`'s guarantee that it never introduces
+        an asset the user was not shown. One clamp, from the constant the
+        renderer slices on, keeps the offered set, the shown set and the set the
+        refusal message names identical.
+
         Args:
             chat_id: Conversation the question was asked in.
             resolved: The tied candidates, in the order they will be shown.
         """
-        offered = tuple(resolved)
+        offered = tuple(resolved[:MAX_RENDERED_CANDIDATES])
         existing = self._disambiguations.get(chat_id)
         if existing is not None and _candidate_ids(existing[0]) == _candidate_ids(offered):
             return
@@ -1325,17 +1381,21 @@ class Agent:
         sees one resolution result and needs no knowledge that a disambiguation
         was in flight.
 
-        Four outcomes:
+        Five outcomes:
 
         * **No live entry** (or expired): ``resolved`` unchanged.
         * **Answered**: the selected candidate replaces the resolution entirely,
           at full confidence. The human named it, so the referent is no longer
           inferred — and a single candidate cannot tie, so the turn commits.
+        * **Superseded**: the reply names no candidate but resolves an asset of
+          its own, unambiguously and at ``high`` band. The user abandoned the
+          question and said what they meant outright; the entry is cleared and
+          their own resolution stands. Narrow on purpose — see the comment at
+          the branch for why this is not the laundering path.
         * **First miss**: the recorded candidates replace the resolution, which
-          re-derives the same ambiguous verdict and restates the question.
-          Deliberately unconditional: the alternative is to let this turn's own
-          resolution win when it looks confident, which is exactly the
-          laundering the gate exists to stop — turn 1 was ambiguous, and a turn-2
+          re-derives the same ambiguous verdict and restates the question. A
+          turn that resolves nothing, or only weakly, is exactly the laundering
+          case the gate exists to stop: turn 1 was ambiguous, and a turn-2
           commit that nobody confirmed is the ungated commit R16 forbids.
         * **Second miss**: the entry is abandoned and ``resolved`` is returned
           unchanged. The user has moved on.
@@ -1386,6 +1446,31 @@ class Agent:
                     match_reason="disambiguation_reply",
                 )
             ]
+
+        # Not an answer — but possibly not a miss either. A turn that resolves
+        # an asset on its own, unambiguously and at ``high`` band, is the user
+        # abandoning the question and naming something outright ("crea un OdL
+        # per P-203" — a whole-token ID hit at 1.0). Replacing that with the old
+        # candidates answered a question the user had stopped asking, and named
+        # assets they were no longer discussing.
+        #
+        # This does NOT reopen the laundering hole the store exists to close.
+        # That hole is a turn resolving to NOTHING (or weakly), where the model
+        # supplies an ID from its own history with no fresh evidence — those
+        # still miss, still hold the entry, and are still refused. What passes
+        # here is a fresh, independently strong, unambiguous resolution, which
+        # is the same standard any first turn has to meet to commit.
+        own_verdict = resolution_verdict(resolved)
+        if resolved and own_verdict.band == BAND_HIGH and not own_verdict.ambiguous:
+            self._disambiguations.pop(chat_id, None)
+            logger.info(
+                "disambiguation_superseded",
+                agent=self.name,
+                chat_id=chat_id,
+                asset_id=resolved[0].asset.id,
+                operation="apply_disambiguation",
+            )
+            return resolved
 
         misses += 1
         if misses >= _MAX_DISAMBIGUATION_MISSES:
@@ -3239,6 +3324,20 @@ class Agent:
            which would make the write path more permissive at 0.2 confidence
            than at 0.5.
 
+           The band is checked TWICE, against two different things, because the
+           candidate list is not confidence-homogeneous. ``verdict.band``
+           describes ``entities[0]`` alone — it answers "did this turn resolve
+           anything worth acting on?". It does **not** answer "is the asset the
+           model just named worth acting on?", and membership in ``candidates``
+           does not answer that either: a 0.9 ``name_match`` and a 0.35
+           ``name_keywords`` hit sit side by side in the same list. So the band
+           of the *named* candidate is checked on its own, and a co-candidate
+           below :data:`RESOLUTION_MIN_CONFIDENCE` is refused exactly as it
+           would be if it had sorted first. Otherwise the gate is strictly more
+           permissive about a weak match that arrives second than about the same
+           weak match arriving first — which is the inversion this docstring
+           claims it prevents.
+
         Unconditional by design. A refusal is not a mutation, so neither
         ``sandbox`` nor ``confirmations=False`` exempts it; and a turn with no
         recorded resolution at all refuses rather than assuming confidence.
@@ -3305,6 +3404,17 @@ class Agent:
                 "the same as being the asset under discussion — confirm with "
                 "the user before writing to it.",
                 resolved=list(record.candidates),
+            )
+
+        # Band of the candidate the model ACTUALLY named — see check 3. Membership
+        # above proves it was on the table, not that it was on the table strongly.
+        if record.band_for_candidate(asset_id) == BAND_LOW:
+            return _write_refused(
+                "low_confidence_resolution",
+                f"asset {asset_id!r} matched this turn only weakly "
+                f"(the strong match was {record.candidates[0]}). Confirm the "
+                "asset with the user before creating a work order.",
+                candidates=list(record.candidates),
             )
 
         return None

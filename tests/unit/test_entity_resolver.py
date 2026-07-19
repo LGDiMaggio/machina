@@ -165,6 +165,43 @@ class TestAliasResolution:
         assert results[0].match_reason == "exact_id"
 
 
+class TestAliasMatchingIsAnchored:
+    """An alias matches as a WHOLE TOKEN, never as a substring.
+
+    Aliases are short shop-floor acronyms by design, which is exactly the shape
+    raw containment mangles — and an alias hit lands at 0.9 / high band, so the
+    runtime prefetches, states no assumption, and the write gate authorises. The
+    positive tests above all pass either way; only these fail without anchoring.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "check the CWPS unit",  # longer acronym, alias is a prefix
+            "cwp2 is noisy",  # alias followed by a digit
+            "the SCWP line is down",  # alias is a suffix
+        ],
+    )
+    def test_acronym_alias_does_not_match_inside_a_longer_token(self, text: str) -> None:
+        plant = _aliased_plant(("P-201", "Cooling Water Pump", ["CWP"]))
+        assert EntityResolver(plant).resolve(text) == []
+
+    @pytest.mark.parametrize("text", ["il bombardamento continua", "la bombola è vuota"])
+    def test_word_alias_does_not_match_inside_a_longer_word(self, text: str) -> None:
+        plant = _aliased_plant(("P-999", "Pompa Olio", ["bomba"]))
+        assert EntityResolver(plant).resolve(text) == []
+
+    def test_the_alias_still_matches_when_it_is_a_whole_token(self) -> None:
+        """The anchoring must not cost the ordinary hit, punctuation included."""
+        plant = _aliased_plant(("P-201", "Cooling Water Pump", ["CWP"]))
+        resolver = EntityResolver(plant)
+
+        for text in ["check the CWP", "(CWP) is noisy", "CWP, please", "cwp"]:
+            results = resolver.resolve(text)
+            assert [r.asset.id for r in results] == ["P-201"], text
+            assert results[0].match_reason == "alias_match"
+
+
 class TestEntityResolver:
     """Test entity resolution strategies."""
 

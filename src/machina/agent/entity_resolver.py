@@ -52,6 +52,18 @@ BAND_LOW = "low"
 # P-202") — multiplicity, not ambiguity.
 _EXACT_ID_REASON = "exact_id"
 
+# How many candidates a disambiguation question puts in front of the user.
+#
+# Shared, not repeated, because three sites must agree on it or the question
+# becomes unanswerable-by-construction: the prompt renderer (which slices the
+# candidate list before showing it), the runtime's disambiguation store (which
+# records what was offered), and the positional tiers below (which turn "the
+# fourth" into an index). When the store held every candidate and the prompt
+# showed three, "quinto" selected an asset the user had never been shown and
+# promoted it to confidence 1.0 — the exact thing
+# :func:`match_disambiguation_reply` documents that it never does.
+MAX_RENDERED_CANDIDATES = 3
+
 
 def _id_occurs_in(asset_id: str, text: str) -> bool:
     """Whether ``asset_id`` occurs in ``text`` as a whole token.
@@ -86,11 +98,21 @@ def _id_occurs_in(asset_id: str, text: str) -> bool:
     return re.search(pattern, text, re.IGNORECASE) is not None
 
 
-def _alias_occurs_in(asset: Asset, text_lower: str) -> bool:
-    """Whether any curated alias of ``asset`` appears in already-lowercased text.
+def _alias_occurs_in(asset: Asset, text: str) -> bool:
+    """Whether any curated alias of ``asset`` occurs in ``text`` as a whole token.
 
-    Same containment semantics as the name check it sits beside, so alias
-    matching is case-insensitive like the rest of the cascade.
+    Routed through :func:`_id_occurs_in` — the SAME anchoring, for the same
+    reason. Aliases are exactly the short shop-floor acronyms that raw
+    containment mangles: ``CWP`` hits inside ``CWPS`` and ``cwp2``, and the
+    Italian ``bomba`` hits inside ``bombardamento``. Every one of those lands at
+    confidence 0.9 with ``match_reason="alias_match"`` — a high-band commit, so
+    the runtime prefetches, states no assumption, and the write gate authorises.
+    Anchoring is not a refinement here; it is what makes a two- or three-letter
+    alias safe to curate at name-level authority at all.
+
+    ``_id_occurs_in`` escapes its needle literally and matches
+    case-insensitively, so an alias with punctuation (``P&ID-3``) or mixed case
+    behaves like any other, and the caller need not pre-lower the text.
 
     ``asset.aliases`` is read structurally, via ``getattr``, on purpose: this
     module is imported on every ``machina describe`` (Architecture Decision 8)
@@ -100,13 +122,13 @@ def _alias_occurs_in(asset: Asset, text_lower: str) -> bool:
 
     Args:
         asset: The candidate asset.
-        text_lower: User input, already lowercased by the caller.
+        text: Free-form user input.
 
     Returns:
-        ``True`` if one of the asset's aliases occurs in the text.
+        ``True`` if one of the asset's aliases occurs as a whole token.
     """
     aliases = getattr(asset, "aliases", None) or ()
-    return any(alias and alias.lower() in text_lower for alias in aliases)
+    return any(alias and _id_occurs_in(alias, text) for alias in aliases)
 
 
 def _tokenise(text: str) -> set[str]:
@@ -299,6 +321,39 @@ _ORDINALS: dict[str, int] = {
     "quinta": 5,
 }
 
+# Glue words that may accompany an ordinal in a reply that is still *only* an
+# ordinal — "la seconda", "the second one", "il primo grazie". Anything outside
+# this set means the ordinal is embedded in a sentence with its own subject, and
+# the positional reading is withdrawn (see the whole-reply rule in
+# :func:`match_disambiguation_reply`).
+#
+# Deliberately tiny and closed: articles, the English "one" that ordinals take
+# as a pro-form, and bare politeness. Every word added here widens the set of
+# sentences that can be read as a position, which is precisely the failure this
+# guards.
+_ORDINAL_REPLY_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # IT articles / glue
+        "la",
+        "il",
+        "lo",
+        "l",
+        "le",
+        "i",
+        "gli",
+        "quella",
+        "quello",
+        "per",
+        "favore",
+        "grazie",
+        # EN articles / glue
+        "the",
+        "one",
+        "please",
+        "thanks",
+    }
+)
+
 
 def match_disambiguation_reply(text: str, candidates: Sequence[ResolvedEntity]) -> int | None:
     """Resolve a reply to "which asset?" against the candidates that were offered.
@@ -318,11 +373,17 @@ def match_disambiguation_reply(text: str, candidates: Sequence[ResolvedEntity]) 
     prompted the question: two assets sharing a name mean a name reply matches
     both.)
 
+    The two POSITIONAL tiers read a position relative to ``candidates``, so the
+    "never introduces an asset the user was not shown" guarantee is only as good
+    as the caller's list. Callers pass the *rendered* slice — see
+    :data:`MAX_RENDERED_CANDIDATES`, which the runtime store and the prompt
+    renderer share so the offered set and the shown set are the same tuple.
+
     Args:
         text: The user's reply.
         candidates: The candidates recorded when the question was asked, in the
             order they were shown — position ``i`` is what the user sees as
-            "the ``i+1``-th".
+            "the ``i+1``-th". Must be the list actually shown, not a superset.
 
     Returns:
         The index into ``candidates`` the reply selects, or ``None`` when the
@@ -350,10 +411,35 @@ def match_disambiguation_reply(text: str, candidates: Sequence[ResolvedEntity]) 
         i for i, c in enumerate(candidates) if c.asset.name and c.asset.name.lower() in lowered
     ]
     if by_name:
+        # Longest name wins among nested matches. Containment makes "Pompa" a
+        # match for the reply "Pompa Acqua", so a user answering with an exact
+        # full name matched TWO candidates and got ``None`` — unanswerable in
+        # exactly the shape that armed the question, since stage 2 of
+        # :meth:`EntityResolver.resolve` gives both prefix-nested names 0.9 on a
+        # query containing the longer one. Dropping a match whose name is a
+        # PROPER substring of another match's name resolves that. Identical
+        # names are not proper substrings of each other, so the genuine
+        # two-assets-one-name tie still collapses to ``None``.
+        names = {i: candidates[i].asset.name.lower() for i in by_name}
+        by_name = [
+            i
+            for i in by_name
+            if not any(names[i] != names[j] and names[i] in names[j] for j in by_name)
+        ]
         return _sole(by_name)
 
-    positions = {_ORDINALS[token] for token in _tokenise(text) if token in _ORDINALS}
-    if positions:
+    # Ordinal — only when the WHOLE reply is that ordinal, modulo articles and
+    # politeness. The neighbouring bare-index tier already demands this and the
+    # ordinal tier did not, which made every ordinal word a positional selector
+    # wherever it appeared: Italian ``prima`` is an ordinary adverb ("prima era
+    # ok"), English ``second`` ordinary prose. Worse, "prima controlla P-301"
+    # discarded the user's explicit reference in favour of candidate 0 — at
+    # confidence 1.0, band ``high``, ``ambiguous=False``, i.e. through every
+    # downstream gate.
+    reply_tokens = _tokenise(text)
+    ordinal_tokens = reply_tokens & _ORDINALS.keys()
+    if ordinal_tokens and (reply_tokens - ordinal_tokens) <= _ORDINAL_REPLY_STOPWORDS:
+        positions = {_ORDINALS[token] for token in ordinal_tokens}
         if len(positions) > 1:
             return None
         position = positions.pop()
@@ -435,7 +521,7 @@ class EntityResolver:
             # Check full name match
             if name_lower in text_lower:
                 results.append(ResolvedEntity(asset, confidence=0.9, match_reason="name_match"))
-            elif _alias_occurs_in(asset, text_lower):
+            elif _alias_occurs_in(asset, text):
                 # Curated aliases sit at NAME-level authority, deliberately —
                 # a plant's own word for a machine is not a weaker signal than
                 # the name in the registry, it is usually the stronger one.

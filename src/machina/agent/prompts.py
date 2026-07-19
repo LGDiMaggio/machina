@@ -11,7 +11,11 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from machina.agent.citations import CITATION_PROMPT
-from machina.agent.entity_resolver import _ResolutionVerdict, resolution_verdict
+from machina.agent.entity_resolver import (
+    MAX_RENDERED_CANDIDATES,
+    _ResolutionVerdict,
+    resolution_verdict,
+)
 
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
@@ -281,7 +285,10 @@ def format_resolved_entities(
         verdict = resolution_verdict(entities)
 
     lines = ["**Resolved assets from your question:**"]
-    for ent in entities[:3]:
+    # The SHOWN slice, and the shared constant that defines it. The runtime's
+    # disambiguation store records the same slice, so an ordinal reply can only
+    # ever select an asset that appeared here.
+    for ent in entities[:MAX_RENDERED_CANDIDATES]:
         lines.append(
             f"  - {ent.asset.name} (ID: {ent.asset.id}) "
             f"[confidence: {ent.confidence:.0%}, match: {ent.match_reason}]"

@@ -195,6 +195,79 @@ class TestWriteRefusedOnTheBand:
         assert spy.created == []
 
 
+class TestWriteRefusedOnTheNamedCandidatesOwnBand:
+    """The candidate list is not confidence-homogeneous — every other test here uses
+    candidates that all share one score, so the band check and the membership check
+    were indistinguishable. Stage 2 of the resolver emits a 0.9 ``name_match`` and a
+    ``round(0.7 * score, 2)`` ``name_keywords`` hit into the SAME list, and the
+    verdict describes only ``entities[0]``. A write against the weak tail therefore
+    passed a band check performed on a different asset.
+    """
+
+    @staticmethod
+    def _split_plant() -> Plant:
+        """A strong match and a weak co-candidate, no tie.
+
+        "the cooling water pump is leaking" gives P-201 a full ``name_match``
+        (0.9) and C-101 a partial ``name_keywords`` hit (0.35) on the shared
+        token "water" — below ``RESOLUTION_MIN_CONFIDENCE``.
+        """
+        plant = Plant(name="Split Plant")
+        plant.register_asset(_asset("P-201", name="Cooling Water Pump"))
+        plant.register_asset(_asset("C-101", name="Water Compressor"))
+        return plant
+
+    @pytest.mark.asyncio
+    async def test_write_against_the_sub_threshold_tail_is_refused(self) -> None:
+        spy = _SpyCmms()
+        agent = Agent(plant=self._split_plant(), connectors=[spy], confirmations=False)
+        resolved = await _resolve_turn(agent, "the cooling water pump is leaking")
+        # Preconditions: a clear winner, and a tail below the floor the gate
+        # refuses when it happens to sort FIRST.
+        assert resolved[0].asset.id == "P-201"
+        assert resolved[0].confidence >= 0.7
+        assert resolved[1].asset.id == "C-101"
+        assert resolved[1].confidence < 0.4
+
+        result = await agent._execute_tool("create_work_order", _args("C-101"), chat_id="c1")
+
+        assert _refused(result)
+        assert result["reason"] == "low_confidence_resolution"
+        assert spy.created == []
+
+    @pytest.mark.asyncio
+    async def test_the_strong_top_candidate_still_writes(self) -> None:
+        """The fix must not close the gate on the match that earned the band."""
+        spy = _SpyCmms()
+        agent = Agent(plant=self._split_plant(), connectors=[spy], confirmations=False)
+        await _resolve_turn(agent, "the cooling water pump is leaking")
+
+        result = await agent._execute_tool("create_work_order", _args("P-201"), chat_id="c1")
+
+        assert not _refused(result)
+        assert [wo.asset_id for wo in spy.created] == ["P-201"]
+
+    @pytest.mark.asyncio
+    async def test_a_mid_band_co_candidate_is_not_refused(self) -> None:
+        """``mid`` passes the gate for a co-candidate exactly as it does for a top
+        match — the check is the band, not "is this the winner".
+        """
+        spy = _SpyCmms()
+        agent = Agent(plant=_plant(), connectors=[spy], confirmations=False)
+        strong = ResolvedEntity(asset=_asset("P-201"), confidence=0.9, match_reason="name_match")
+        mid = ResolvedEntity(
+            asset=_asset("C-101", name="Air Compressor"),
+            confidence=0.6,
+            match_reason="location_match",
+        )
+        await agent._gather_context("...", [strong, mid], chat_id="c1")
+
+        result = await agent._execute_tool("create_work_order", _args("C-101"), chat_id="c1")
+
+        assert not _refused(result)
+        assert [wo.asset_id for wo in spy.created] == ["C-101"]
+
+
 class TestWriteRefusedOnTheTarget:
     @pytest.mark.asyncio
     async def test_registered_asset_the_turn_did_not_resolve_is_refused(self) -> None:

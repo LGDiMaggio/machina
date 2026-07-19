@@ -16,7 +16,11 @@ from typing import Any
 
 import pytest
 
-from machina.agent.entity_resolver import ResolvedEntity, match_disambiguation_reply
+from machina.agent.entity_resolver import (
+    MAX_RENDERED_CANDIDATES,
+    ResolvedEntity,
+    match_disambiguation_reply,
+)
 from machina.agent.runtime import _PENDING_ACTION_TTL_SECONDS, Agent
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
@@ -124,6 +128,73 @@ class TestReplyMatching:
 
     def test_no_candidates_is_a_miss(self) -> None:
         assert match_disambiguation_reply("la seconda", []) is None
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "prima era ok",  # IT: 'prima' as an ordinary adverb
+            "prima di tutto controlla l'olio",
+            "prima controlla P-301",  # names a NON-candidate explicitly
+            "second thoughts on this",  # EN: 'second' in ordinary prose
+            "on second thought, leave it",
+            "il terzo turno ha segnalato rumore",  # 'terzo' describing a shift
+        ],
+    )
+    def test_an_ordinal_inside_prose_does_not_pick_a_candidate(self, reply: str) -> None:
+        """The bare-index tier's whole-reply rule, which the ordinal tier lacked.
+
+        A single ordinal ANYWHERE used to return a position, and
+        ``_apply_disambiguation`` then replaced the resolution with that
+        candidate at confidence 1.0 / ``high`` / ``ambiguous=False`` — through
+        every downstream gate. "prima controlla P-301" is the worst shape: it
+        discarded the user's own explicit reference in favour of candidate 0.
+        """
+        assert match_disambiguation_reply(reply, self._candidates()) is None
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("la seconda", 1),
+            ("seconda", 1),
+            ("la seconda, grazie", 1),
+            ("the second one", 1),
+            ("second, please", 1),
+            ("il primo", 0),
+        ],
+    )
+    def test_an_ordinal_reply_plus_glue_still_selects(self, reply: str, expected: int) -> None:
+        """The rule is "the whole reply is the ordinal", not "the reply is one word"."""
+        assert match_disambiguation_reply(reply, self._candidates()) == expected
+
+    def test_an_exact_full_name_wins_over_a_candidate_whose_name_is_its_prefix(self) -> None:
+        """Longest name wins — otherwise the tie is unanswerable BY NAME.
+
+        Containment makes "Pompa" a match for the reply "Pompa Acqua", so both
+        candidates matched and ``_sole`` returned ``None``. And prefix-nested
+        names are precisely what stage 2 of the resolver ties at 0.9 on a query
+        containing the longer string, i.e. the shape that armed the question.
+        """
+        candidates = [
+            ResolvedEntity(
+                asset=_asset("P-201", "Pompa"), confidence=0.9, match_reason="name_match"
+            ),
+            ResolvedEntity(
+                asset=_asset("P-202", "Pompa Acqua"), confidence=0.9, match_reason="name_match"
+            ),
+        ]
+
+        assert match_disambiguation_reply("Pompa Acqua", candidates) == 1
+        # ...and the shorter name still selects the shorter-named asset.
+        assert match_disambiguation_reply("Pompa", candidates) == 0
+
+    def test_two_assets_with_the_same_name_still_collapse_to_a_miss(self) -> None:
+        """Identical names are not proper substrings — the genuine tie survives."""
+        candidates = [
+            ResolvedEntity(asset=_asset("P-201"), confidence=0.9, match_reason="name_match"),
+            ResolvedEntity(asset=_asset("P-202"), confidence=0.9, match_reason="name_match"),
+        ]
+
+        assert match_disambiguation_reply("Cooling Water Pump", candidates) is None
 
 
 class TestAnsweringTheQuestion:
@@ -237,6 +308,52 @@ class TestBoundedRetry:
         assert refusal["reason"] == "nothing_resolved"
 
     @pytest.mark.asyncio
+    async def test_a_confident_fresh_resolution_supersedes_the_question(self) -> None:
+        """The user abandons the question and names an asset outright.
+
+        "crea un OdL per P-203" is a whole-token ID hit at 1.0 on an asset that
+        was never a candidate. Replacing it with the recorded candidates
+        answered a question the user had stopped asking, and put assets they
+        were no longer discussing into the refusal message.
+        """
+        plant = _tie_plant()
+        plant.register_asset(_asset("P-203", name="Boiler Feed Unit"))
+        agent = Agent(plant=plant)
+        await _ask_ambiguously(agent)
+
+        message = "crea un OdL per P-203"
+        resolved = agent._apply_disambiguation(
+            message, agent._resolver.resolve(message), chat_id="c1"
+        )
+        context = await agent._gather_context(message, resolved, chat_id="c1")
+
+        assert [r.asset.id for r in resolved] == ["P-203"]
+        assert context["asset"].id == "P-203"
+        # The question is retired, not left to catch the next message.
+        assert "c1" not in agent._disambiguations
+        # And the write the user actually asked for is authorised.
+        assert agent._authorize_write_target("P-203", "c1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_mid_band_fresh_resolution_does_not_supersede(self) -> None:
+        """The supersede branch is ``high`` only — a 0.6 guess is still a miss.
+
+        This is the boundary that keeps the branch from reopening the
+        laundering hole: anything short of a fresh, independently strong,
+        unambiguous resolution holds the entry and restates the question.
+        """
+        agent = Agent(plant=_tie_plant())
+        candidates = await _ask_ambiguously(agent)
+        mid = [
+            ResolvedEntity(asset=_asset("P-201"), confidence=0.6, match_reason="location_match")
+        ]
+
+        resolved = agent._apply_disambiguation("qualcosa in building a", mid, chat_id="c1")
+
+        assert [r.asset.id for r in resolved] == [c.asset.id for c in candidates]
+        assert agent._disambiguations["c1"][2] == 1
+
+    @pytest.mark.asyncio
     async def test_ambiguity_does_not_launder_through_a_resolveless_turn(self) -> None:
         """Turn 1 ambiguous, turn 2 resolves nothing — the write is still refused.
 
@@ -257,7 +374,7 @@ class TestBoundedRetry:
 
 class TestStoreLifecycle:
     @pytest.mark.asyncio
-    async def test_low_band_turn_records_nothing(self) -> None:
+    async def test_a_single_weak_guess_records_nothing(self) -> None:
         """A weak guess is not a menu — there is nothing to choose between."""
         agent = Agent(plant=_tie_plant())
         weak = ResolvedEntity(asset=_asset("P-201"), confidence=0.16, match_reason="keyword_match")
@@ -266,6 +383,78 @@ class TestStoreLifecycle:
 
         assert context["resolution_verdict"].commits is False
         assert "c1" not in agent._disambiguations
+
+    @pytest.mark.asyncio
+    async def test_a_low_band_tie_is_recorded_because_it_is_still_asked_about(self) -> None:
+        """The recording rule is ``ambiguous``, full stop — band does not veto it.
+
+        A single candidate cannot tie, so the single-guess test above exercises
+        only the ``not confident`` half of the withhold; it passes whether the
+        recording is keyed on ``ambiguous`` or on ``not confident``. Two
+        candidates at an identical sub-0.4 score separate them, and the answer
+        is that the entry IS recorded: ``format_resolved_entities`` renders its
+        "Ambiguous — ask the user which one they mean" nudge on the very same
+        ``verdict.ambiguous``, so the user is put a question here. Declining to
+        record would ask it and then have nowhere to put the answer.
+
+        What the ``low`` exclusion actually excludes is the single weak guess
+        above — no tie, no menu, nothing to choose between.
+        """
+        agent = Agent(plant=_tie_plant())
+        weak = [
+            ResolvedEntity(asset=_asset("P-201"), confidence=0.16, match_reason="keyword_match"),
+            ResolvedEntity(asset=_asset("P-202"), confidence=0.16, match_reason="keyword_match"),
+        ]
+
+        context = await agent._gather_context("the thing over there", weak, chat_id="c1")
+
+        verdict = context["resolution_verdict"]
+        assert verdict.ambiguous is True  # precondition: the tie half is live
+        assert verdict.band == "low"
+        assert verdict.commits is False
+        assert [c.asset.id for c in agent._disambiguations["c1"][0]] == ["P-201", "P-202"]
+        # And the question is answerable, which is the whole reason to record it.
+        answered = agent._apply_disambiguation("la seconda", [], chat_id="c1")
+        assert [r.asset.id for r in answered] == ["P-202"]
+
+    @pytest.mark.asyncio
+    async def test_only_the_rendered_candidates_are_recorded(self) -> None:
+        """The store holds what the prompt SHOWS, not everything that matched.
+
+        The prompt renders ``MAX_RENDERED_CANDIDATES``; the store used to keep
+        all of them and the positional tiers bounded on ``len(candidates)``. So
+        "quinto" selected a fifth asset the user had never been shown and
+        promoted it to confidence 1.0 — falsifying
+        ``match_disambiguation_reply``'s documented guarantee.
+        """
+        plant = Plant(name="Test Plant")
+        for n in range(1, 6):
+            plant.register_asset(_asset(f"P-20{n}"))
+        agent = Agent(plant=plant)
+        resolved = agent._resolver.resolve(_AMBIGUOUS_QUERY)
+        assert len(resolved) == 5  # precondition: more matched than are shown
+
+        await agent._gather_context(_AMBIGUOUS_QUERY, resolved, chat_id="c1")
+
+        offered = agent._disambiguations["c1"][0]
+        assert len(offered) == MAX_RENDERED_CANDIDATES
+        assert [c.asset.id for c in offered] == [r.asset.id for r in resolved[:3]]
+
+    @pytest.mark.asyncio
+    async def test_an_ordinal_past_the_rendered_slice_is_a_miss(self) -> None:
+        plant = Plant(name="Test Plant")
+        for n in range(1, 6):
+            plant.register_asset(_asset(f"P-20{n}"))
+        agent = Agent(plant=plant)
+        await agent._gather_context(
+            _AMBIGUOUS_QUERY, agent._resolver.resolve(_AMBIGUOUS_QUERY), chat_id="c1"
+        )
+
+        resolved = agent._apply_disambiguation("quinto", [], chat_id="c1")
+
+        # Restated, not answered — and certainly not resolved to P-205.
+        assert [r.asset.id for r in resolved] == ["P-201", "P-202", "P-203"]
+        assert agent._disambiguations["c1"][2] == 1
 
     @pytest.mark.asyncio
     async def test_committed_turn_records_nothing(self) -> None:
