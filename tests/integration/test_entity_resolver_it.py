@@ -41,6 +41,11 @@ def plant() -> Plant:
             manufacturer=a.get("manufacturer", ""),
             model=a.get("model", ""),
             failure_modes=a.get("failure_modes", []),
+            # Explicit, though the shipped registry declares none yet: this
+            # fixture builds assets FIELD BY FIELD, so a registry that starts
+            # carrying aliases would otherwise be silently stripped here — the
+            # same drift trap as ``dict_to_asset``'s catch-all, in test form.
+            aliases=a.get("aliases", []),
         )
         p.register_asset(asset)
     return p
@@ -171,3 +176,53 @@ class TestEdgeCases:
     def test_case_insensitive(self, resolver: EntityResolver) -> None:
         results = resolver.resolve("POMPA p-201 PERDE ACQUA")
         assert any(r.asset.id == "P-201" for r in results)
+
+
+class TestIdCoverageContract:
+    """Over-tightening guard for the word-boundary-anchored stage-1 match.
+
+    Anchoring ID matching is exactly the kind of change that has silently made
+    real IDs unresolvable before (see
+    ``docs/solutions/logic-errors/asset-id-inference-too-strict-2026-05-15.md``).
+    Every ID in the shipped registry must still resolve, at stage 1, alone.
+    """
+
+    def test_every_registry_id_resolves_uniquely_at_exact_id(
+        self, plant: Plant, resolver: EntityResolver
+    ) -> None:
+        for asset in plant.list_assets():
+            results = resolver.resolve(asset.id)
+            exact = [r.asset.id for r in results if r.match_reason == "exact_id"]
+            assert exact == [asset.id], f"{asset.id!r} resolved to {exact!r}"
+
+    def test_every_registry_id_resolves_inside_a_sentence(
+        self, plant: Plant, resolver: EntityResolver
+    ) -> None:
+        for asset in plant.list_assets():
+            results = resolver.resolve(f"guasto su {asset.id}, prego creare OdL")
+            exact = [r.asset.id for r in results if r.match_reason == "exact_id"]
+            assert exact == [asset.id], f"{asset.id!r} resolved to {exact!r}"
+
+
+class TestCuratedAliases:
+    """Per-plant curation on top of the shipped registry (R6/R7).
+
+    The registry ships no aliases yet — migrating it off the two parallel
+    IT/EN registries is deferred — so this proves the mechanism an integrator
+    uses: add an ``aliases`` key to your own asset data and the plant's word
+    for the machine resolves like its registered name.
+    """
+
+    def test_curated_alias_resolves_an_asset_whose_name_it_does_not_share(
+        self, plant: Plant
+    ) -> None:
+        aliased = Plant(name="Stabilimento Demo")
+        for asset in plant.list_assets():
+            aliased.register_asset(asset.model_copy(deep=True))
+        target = aliased.get_asset("P-201")
+        target.aliases = ["pompa del reparto vecchio"]
+
+        results = EntityResolver(aliased).resolve("la pompa del reparto vecchio perde acqua")
+
+        assert results[0].asset.id == "P-201"
+        assert results[0].match_reason == "alias_match"

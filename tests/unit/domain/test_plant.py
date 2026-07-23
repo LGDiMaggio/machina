@@ -120,6 +120,33 @@ class TestLoadAssetsFrom:
         assert plant.get_asset("P-201").equipment_class_code == "PU"
 
     @pytest.mark.asyncio
+    async def test_load_from_json_file_carries_aliases(self, tmp_path: Path) -> None:
+        """The programmatic curation route — ``Asset.model_validate`` passes it through.
+
+        Assets do not arrive from ``PlantConfig`` YAML, so this file loader and
+        the connector substrates are the only two ways a curated alias reaches
+        a running plant. Both are pinned; this is the one that needs no code.
+        """
+        path = tmp_path / "assets.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "P-201",
+                        "name": "Cooling Water Pump",
+                        "type": "rotating_equipment",
+                        "aliases": ["pompa acqua", "  bomba  "],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        plant = Plant(name="Test")
+        await plant.load_assets_from(path)
+
+        assert plant.get_asset("P-201").aliases == ["pompa acqua", "bomba"]
+
+    @pytest.mark.asyncio
     async def test_load_from_yaml_file(self, tmp_path: Path) -> None:
         yaml = pytest.importorskip("yaml")
         path = tmp_path / "assets.yaml"

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.runtime import (
     _ECHO_SIMILARITY_THRESHOLD,
     _REPEATED_RESPONSE_FALLBACK,
@@ -18,6 +19,7 @@ from machina.agent.runtime import (
     _history_text,
     _is_echo,
     _strip_history_note,
+    _TurnResolution,
 )
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -47,6 +49,36 @@ def _make_plant() -> Plant:
         )
     )
     return plant
+
+
+def _authorize_write(agent: Agent, *asset_ids: str, chat_id: str = "default") -> None:
+    """Seed the turn state a real turn would have produced for these assets.
+
+    The write-authority gate fails closed: a turn with no recorded entity
+    resolution refuses the write. Tests that drive ``_execute_tool`` or
+    ``_llm_loop`` directly skip ``_gather_context`` and so have no record — this
+    stands in for it, registering the assets and recording a confident
+    ``exact_id`` resolution over exactly them.
+    """
+    for asset_id in asset_ids:
+        if asset_id not in agent.plant.assets:
+            agent.plant.register_asset(
+                Asset(
+                    id=asset_id,
+                    name=f"Asset {asset_id}",
+                    type=AssetType.ROTATING_EQUIPMENT,
+                    location="Building A",
+                    criticality=Criticality.B,
+                )
+            )
+    agent._turn_resolution[chat_id] = _TurnResolution.of(
+        [
+            ResolvedEntity(
+                asset=agent.plant.assets[asset_id], confidence=1.0, match_reason="exact_id"
+            )
+            for asset_id in asset_ids
+        ]
+    )
 
 
 def _diag_failure_modes() -> list[FailureMode]:
@@ -671,6 +703,7 @@ class TestExecuteTool:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLM()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201")
         result = await agent._execute_tool(
             "create_work_order",
             {
@@ -697,6 +730,7 @@ class TestExecuteTool:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLM()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201")
         args = {
             "asset_id": "P-201",
             "type": "corrective",
@@ -711,8 +745,12 @@ class TestExecuteTool:
     @pytest.mark.asyncio
     async def test_create_work_order_no_connector(self) -> None:
         agent = Agent()
+        # Authorize the target first, or this asserts the write-gate refusal
+        # instead of the missing-connector error it is named for.
+        _authorize_write(agent, "P-201")
         result = await agent._execute_tool("create_work_order", {"asset_id": "P-201"})
         assert "error" in result
+        assert "connector" in result["error"]
 
     @pytest.mark.asyncio
     async def test_search_documents_tool(self) -> None:
@@ -1898,7 +1936,10 @@ class TestLoopIdempotency:
         agent = Agent(connectors=[conn], confirmations=False)
         agent._llm = _FakeLLMTwoDistinctCreates()  # type: ignore[assignment]
         await agent.start()
-        await agent.handle_message("crea due work order")
+        # Both targets must be named in the message: this goes through the full
+        # turn, and the write gate binds each write to what the turn resolved.
+        _authorize_write(agent, "P-201", "P-202")
+        await agent.handle_message("crea due work order per P-201 e P-202")
         assert conn.create_calls == 2
 
     @pytest.mark.asyncio
@@ -1913,6 +1954,10 @@ class TestLoopIdempotency:
             return {"error": "transient"} if calls["n"] == 1 else {"id": "WO-OK"}
 
         agent._execute_tool = fake_exec  # type: ignore[assignment]
+        # The write-authority pre-check now runs in the loop, above the stubbed
+        # ``_execute_tool`` — so the asset has to actually be in the registry for
+        # the turn to resolve it and the memo behaviour under test to be reached.
+        _authorize_write(agent, "P-201")
         await agent.handle_message("crea un work order per P-201")
         # First call errored (not memoised) → second identical request re-runs.
         assert calls["n"] == 2
@@ -1926,6 +1971,9 @@ class TestLoopIdempotency:
         agent = Agent(connectors=[conn], confirmations=False)
         agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
         await agent.start()
+        # The loop is driven directly, so no turn ran entity resolution — seed
+        # what _gather_context would have recorded or the write gate refuses.
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": "crea un work order per P-201"}
         ]
@@ -1954,6 +2002,9 @@ class TestLoopIdempotency:
         agent = Agent(connectors=[conn], sandbox=True)
         agent._llm = _FakeLLMDoubleCreate()  # type: ignore[assignment]
         await agent.start()
+        # The loop is driven directly, so no turn ran entity resolution — seed
+        # what _gather_context would have recorded or the write gate refuses.
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": "crea un work order per P-201"}
         ]
@@ -3239,6 +3290,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer(True)
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3252,6 +3304,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer(False)
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         result = await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3266,6 +3319,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMRewordedCreate()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer([True, False])
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3280,6 +3334,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn], confirmations=False)
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer(True)
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3293,6 +3348,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn], sandbox=True)
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer(True)
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3327,6 +3383,7 @@ class TestHitlGateSyncPath:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMDoubleCreate()  # identical args twice
         await agent.start()
+        _authorize_write(agent, "P-201", chat_id="chat1")
         confirmer = _RecordingConfirmer(False)
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
@@ -3699,6 +3756,9 @@ class TestTwoTurnConfirmation:
             {"asset_id": "P-201", "type": "corrective", "description": "first"}
         )
         await agent.start()
+        # Both targets must exist for each turn to resolve the asset it names —
+        # the write gate refuses before a pending is ever proposed otherwise.
+        _authorize_write(agent, "P-201", "P-202", chat_id="c1")
         await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
         first = agent._pending_actions[("c1", "userA")]
         # A different proposal arrives before confirmation (separate turn).
@@ -3722,9 +3782,9 @@ class TestTwoTurnConfirmation:
         await agent.handle_message_full("create a WO for P-201", chat_id="c1", user_id="userA")
         assert ("c1", "userA") in agent._pending_actions
         # Back-date the stored timestamp beyond the TTL.
-        fn, args, prompt, _ts = agent._pending_actions[("c1", "userA")]
+        fn, args, prompt, _ts, resolution = agent._pending_actions[("c1", "userA")]
         stale_ts = time.monotonic() - runtime_mod._PENDING_ACTION_TTL_SECONDS - 1.0
-        agent._pending_actions[("c1", "userA")] = (fn, args, prompt, stale_ts)
+        agent._pending_actions[("c1", "userA")] = (fn, args, prompt, stale_ts, resolution)
         # A later "yes" must NOT execute the stale write; it is processed fresh.
         agent._llm = _FakeLLMNarrate("Nothing pending.")  # type: ignore[assignment]
         await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
@@ -3922,6 +3982,10 @@ class TestSafetyCoverageGaps:
         agent._llm = _FakeLLMSingleCreate()  # type: ignore[assignment]
         await agent.start()
         confirmer = _RaisingConfirmer()
+        # Driving ``_llm_loop`` directly skips ``_gather_context``, so the turn
+        # carries no resolution and the write gate would refuse before the
+        # confirmer is ever consulted — seed what a real turn would have left.
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         # The exception may propagate OR be converted to a decline; either way
         # the write must NOT fire.
@@ -3948,6 +4012,7 @@ class TestSafetyCoverageGaps:
 
         agent._execute_tool = fake_exec  # type: ignore[assignment]
         confirmer = _RecordingConfirmer(True)
+        _authorize_write(agent, "P-201", chat_id="chat1")
         messages = [{"role": "user", "content": "create a WO for P-201"}]
         await agent._llm_loop(messages, "chat1", confirmer=confirmer)
         # First confirmed call errored (not memoised) → the verbatim re-issue is
@@ -4047,6 +4112,10 @@ class TestPendingKeepFirst:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
         await agent.start()
+        # Both assets are named in the message and registered, so the turn
+        # resolves both (exact-ID multiplicity) and each proposed write is
+        # authorised — leaving keep-first, not the write gate, as what decides.
+        _authorize_write(agent, "P-201", "P-202", chat_id="c1")
 
         events: list[dict[str, Any]] = []
 
@@ -4057,7 +4126,7 @@ class TestPendingKeepFirst:
         structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
         try:
             await agent.handle_message_full(
-                "create two work orders", chat_id="c1", user_id="userA"
+                "create work orders for P-201 and P-202", chat_id="c1", user_id="userA"
             )
         finally:
             structlog.reset_defaults()
@@ -4072,7 +4141,13 @@ class TestPendingKeepFirst:
         agent = Agent(connectors=[conn])
         agent._llm = _FakeLLMTwoPendingProposals()  # type: ignore[assignment]
         await agent.start()
-        await agent.handle_message_full("create two work orders", chat_id="c1", user_id="userA")
+        # Name both assets: the write gate re-checks the PROPOSING turn's
+        # resolution when the confirmation lands, so a turn that resolved
+        # nothing would (correctly) refuse the confirmed write.
+        _authorize_write(agent, "P-201", "P-202")
+        await agent.handle_message_full(
+            "create two work orders for P-201 and P-202", chat_id="c1", user_id="userA"
+        )
         agent._llm = _FakeLLMNarrate()  # type: ignore[assignment]
         await agent.handle_message_full("yes", chat_id="c1", user_id="userA")
         # The first (P-201) is the one that executes.

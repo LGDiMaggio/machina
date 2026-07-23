@@ -48,9 +48,19 @@ def split_list_cell(value: Any) -> list[str]:
 def dict_to_asset(d: dict[str, Any]) -> Asset:
     """Build an Asset from a coerced field dict.
 
-    A ``failure_modes`` key carries the asset↔failure-code linkage:
-    either a list of codes or a single delimited string cell (see
-    :func:`split_list_cell`).
+    A ``failure_modes`` key carries the asset↔failure-code linkage and an
+    ``aliases`` key the plant's local names for the asset: either a list or a
+    single delimited string cell (see :func:`split_list_cell`).
+
+    **Every model field must be passed explicitly here.** The ``metadata``
+    catch-all keeps only keys that are *not* ``Asset`` fields, so promoting a
+    key to a model field silently deletes it unless a line is added above —
+    the value stops reaching ``metadata`` and never starts reaching the field.
+    ``aliases`` was exactly this case: before it became a field it survived in
+    ``metadata['aliases']``, and adding the field without this line would have
+    been a pure regression. (``equipment_class_code`` is the live instance of
+    the same bug — a model field this builder never passes, so it is dropped
+    from every connector-sourced asset.)
     """
     return Asset(
         id=str(d.get("id", "")),
@@ -64,6 +74,7 @@ def dict_to_asset(d: dict[str, Any]) -> Asset:
         criticality=d.get("criticality", Criticality.C),
         parent=d.get("parent"),
         failure_modes=split_list_cell(d.get("failure_modes")),
+        aliases=split_list_cell(d.get("aliases")),
         metadata={k: v for k, v in d.items() if k not in Asset.model_fields},
     )
 

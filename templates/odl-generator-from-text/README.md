@@ -157,17 +157,33 @@ assets: pumps, boilers, motors, compressors, heat exchangers, etc.
 
 Replace it with your own asset data. The entity resolver matches by:
 
-1. Exact asset ID (e.g., "P-201")
-2. Name keywords (e.g., "pompa centrifuga")
+1. Exact asset ID as a whole token (e.g., "P-201" — "P-2" does not match inside it)
+2. Registered name, plus any curated `aliases` on the asset (e.g., "pompa centrifuga")
 3. Location (e.g., "edificio A")
-4. Fuzzy keyword match across all fields
+4. Verbatim keyword containment across all fields
+
+There is no typo tolerance or fuzzy matching at any stage — a word either
+occurs or it does not. To teach the resolver a word your technicians use, add
+it to that asset's `aliases`:
+
+```json
+{"id": "C-3", "name": "Caldaia a Vapore", "type": "static_equipment",
+ "aliases": ["boiler", "caldaia vapore"]}
+```
 
 The sample registry (`data/asset_registry.json`) uses Italian asset names (PMI-Italia style).
 An English-named equivalent is available at `data/asset_registry_en.json`.
 
-Two entity resolver prompts are available: `prompts/entity_resolver_it.txt` (Italian) and
-`prompts/entity_resolver_en.txt` (English). Both add LLM-powered
-fuzzy matching for typos, abbreviations, and synonyms.
+> **Not wired:** `prompts/entity_resolver_it.txt` and `prompts/entity_resolver_en.txt`
+> describe an LLM-assisted resolution layer for typos and abbreviations. No code
+> in this template or in Machina loads them — they are a design sketch kept for
+> reference, and nothing in the running agent behaves as they describe. The same
+> applies to the `entity_resolver.resolve` step in
+> `workflows/parse_message_to_wo.py`: the workflow engine dispatches domain
+> services (`failure_analyzer`, `work_order_factory`, `maintenance_scheduler`,
+> `domain`) and connector actions, and `entity_resolver` is neither, so that
+> step would fail if the workflow were run as written. Entity resolution happens
+> automatically on the agent's message path; it is not a workflow step.
 
 ## File Structure
 

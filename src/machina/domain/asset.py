@@ -70,6 +70,18 @@ class Asset(BaseModel):
         default_factory=list,
         description="Associated failure mode codes",
     )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Alternative names this asset is called by on site — plant jargon, "
+            "the local-language term, a shop-floor nickname. Searched at the "
+            "same authority as ``name`` during entity resolution, so a "
+            "technician's habitual word for the equipment resolves as reliably "
+            "as its registered name. Language-neutral: an Italian and an "
+            "English alias are both just entries in the list. Names only — an "
+            "alias describes what the asset is CALLED, never its condition."
+        ),
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Arbitrary key-value metadata",
@@ -92,3 +104,32 @@ class Asset(BaseModel):
         if not v.strip():
             raise ValueError("id cannot be empty")
         return v.strip()
+
+    @field_validator("aliases")
+    @classmethod
+    def _normalise_aliases(cls, v: list[str]) -> list[str]:
+        """Trim, drop empties, and de-duplicate case-insensitively.
+
+        ``str_strip_whitespace`` in :attr:`model_config` strips string *fields*
+        and not the members of a list field, so ``["  bomba "]`` would survive
+        untouched — and never match, because resolution compares the alias
+        against tokenised user text. Aliases arrive from spreadsheets and
+        hand-edited JSON, where stray padding is the norm rather than the
+        exception, so the normalisation happens once here instead of at every
+        read site.
+
+        An empty alias is dropped rather than kept: alias matching is substring
+        containment, and ``"" in text`` is true of every message, so a single
+        blank cell would otherwise match the asset against literally anything.
+        De-duplication is case-insensitive but preserves the first spelling and
+        the declared order, which is what a curated list is for.
+        """
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for alias in v:
+            trimmed = alias.strip()
+            if not trimmed or trimmed.casefold() in seen:
+                continue
+            seen.add(trimmed.casefold())
+            cleaned.append(trimmed)
+        return cleaned

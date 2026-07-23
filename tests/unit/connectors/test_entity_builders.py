@@ -8,6 +8,8 @@ Excel and SQL substrates (semicolon-delimited string cells);
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -16,6 +18,7 @@ from machina.connectors._entity_builders import (
     dict_to_failure_mode,
     split_list_cell,
 )
+from machina.domain.asset import AssetType, Criticality
 
 
 class TestSplitListCell:
@@ -115,3 +118,85 @@ class TestDictToAssetFailureCodeLinkage:
     def test_failure_modes_not_duplicated_into_metadata(self) -> None:
         asset = dict_to_asset({"id": "P-001", "name": "Pompa 1", "failure_modes": "BEAR-WEAR-01"})
         assert "failure_modes" not in asset.metadata
+
+
+class TestDictToAssetAliases:
+    """The promotion trap: a key that used to survive in ``metadata``.
+
+    Before ``aliases`` was an ``Asset`` field, an ``aliases`` column landed in
+    ``metadata['aliases']`` via the catch-all. The catch-all excludes model
+    fields, so adding the field WITHOUT an explicit pass-through would have
+    deleted the data from both places at once — the field empty, the metadata
+    key gone. These tests pin both halves.
+    """
+
+    def test_aliases_populated_and_absent_from_metadata(self) -> None:
+        asset = dict_to_asset(
+            {"id": "P-001", "name": "Cooling Water Pump", "aliases": "pompa acqua"}
+        )
+        assert asset.aliases == ["pompa acqua"]
+        assert "aliases" not in asset.metadata
+
+    def test_delimited_cell_splits_into_several_aliases(self) -> None:
+        asset = dict_to_asset(
+            {"id": "P-001", "name": "Cooling Water Pump", "aliases": "pompa acqua; bomba; CWP"}
+        )
+        assert asset.aliases == ["pompa acqua", "bomba", "CWP"]
+
+    def test_list_valued_aliases_pass_through(self) -> None:
+        asset = dict_to_asset(
+            {"id": "P-001", "name": "Pompa 1", "aliases": ["  pompa vecchia ", ""]}
+        )
+        assert asset.aliases == ["pompa vecchia"]
+
+    def test_missing_aliases_key_yields_empty_list_not_none(self) -> None:
+        asset = dict_to_asset({"id": "P-001", "name": "Pompa 1"})
+        assert asset.aliases == []
+
+    def test_a_supplied_value_reaches_every_field_or_is_a_known_omission(self) -> None:
+        """Guards the class of bug ``aliases`` nearly shipped as.
+
+        A model field this builder never passes is unreachable from EVERY
+        connector substrate, and unreachable silently — the catch-all excludes
+        model fields, so the value does not even survive in ``metadata``. This
+        supplies a distinctive value for every field and asserts it arrived,
+        with an explicit allow-list for the two that legitimately do not.
+
+        ``equipment_class_code`` is the live instance of exactly this bug
+        (tracked separately, deliberately not fixed here). ``children`` is
+        derived by ``Plant._rebuild_hierarchy``, not read from source data.
+        """
+        from machina.domain.asset import Asset
+
+        known_omissions = {"children", "equipment_class_code"}
+        supplied = {
+            "id": "P-001",
+            "name": "Pompa 1",
+            "type": AssetType.STATIC_EQUIPMENT,
+            "location": "Building A",
+            "manufacturer": "ACME",
+            "model": "M1",
+            "serial_number": "SN1",
+            "install_date": date(2020, 1, 1),
+            "criticality": Criticality.A,
+            "parent": "AREA-1",
+            "failure_modes": "F-1",
+            "aliases": "pompa vecchia",
+            "metadata": {"ignored": True},
+            "children": ["C-1"],
+            "equipment_class_code": "PU",
+        }
+        assert set(supplied) == set(Asset.model_fields), (
+            "Asset gained or lost a field — extend this dict so the omission "
+            "check below still covers every field."
+        )
+
+        asset = dict_to_asset(supplied)
+        defaults = Asset(id="X", name="X", type=AssetType.ROTATING_EQUIPMENT)
+        unreached = {
+            field
+            for field in Asset.model_fields
+            # ``metadata`` is intentionally rebuilt, not copied.
+            if field != "metadata" and getattr(asset, field) == getattr(defaults, field)
+        }
+        assert unreached == known_omissions

@@ -55,17 +55,43 @@ for step-by-step setup instructions. Time to first OdL: <15 minutes.
 
 ## Italian Entity Resolution
 
-The template includes an Italian-tuned prompt (`prompts/entity_resolver_it.txt`)
-that handles:
+Resolution is rule-based. `EntityResolver` matches, in order:
 
-- **Typos**: "pompta" → "pompa", "c.da" → "caldaia"
-- **Abbreviations**: "mot." → "motore", "compres." → "compressore"
-- **Synonyms**: "boiler" → "caldaia", "nastro" → "nastro trasportatore"
-- **Informal references**: "pompa acqua reparto B" → search by location
+1. **Exact asset ID** as a whole token — "pompa P-201 perde" → `P-201`
+2. **Registered name, and any curated `Asset.aliases`** — the plant's own word
+   for the machine, at the same authority as its registered name
+3. **Location overlap** — "pompa acqua reparto B" narrows by location
+4. **Verbatim keyword containment** across the asset's fields
 
-The rule-based `EntityResolver` handles exact ID matching, name keywords,
-and location overlap. The LLM prompt adds fuzzy matching for the cases
-the rule-based resolver cannot handle.
+**Synonyms** are what `aliases` is for. Add the words your technicians actually
+use to your asset data and they resolve like the registered name:
+
+```json
+{
+  "id": "C-3",
+  "name": "Caldaia a Vapore",
+  "type": "static_equipment",
+  "aliases": ["boiler", "caldaia vapore", "la grande"]
+}
+```
+
+The key works in `data/asset_registry.json`, in a `;`-delimited `aliases`
+column on the Excel/SQL/CMMS substrates, and anywhere `Asset` is constructed.
+Aliases are language-neutral strings — an Italian and an English alias are
+both just entries in the list — and they name the asset, never describe its
+condition.
+
+**Typos and abbreviations are not handled.** "pompta" does not resolve to
+"pompa": there is no edit-distance or fuzzy matching anywhere in the cascade,
+only verbatim containment. `prompts/entity_resolver_{it,en}.txt` ship with the
+template and describe an LLM-assisted resolution layer, but **no code loads
+them** — they are a design sketch, not a wired component. Treat them as such
+until that changes. If a spelling recurs on your site, the durable fix is to
+add it as an alias.
+
+When several assets match equally well, the runtime does not guess: it
+withholds the asset for that turn and asks which one you mean. Answering by ID,
+by name, or by position ("la seconda") resolves it.
 
 ## Sample Data
 
