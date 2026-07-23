@@ -443,6 +443,138 @@ class TestLocationTokenGranularity:
         assert results[0].confidence == 0.6
 
 
+def _plant_with_names(*pairs: tuple[str, str]) -> Plant:
+    """Build a plant whose assets differ only in their name string."""
+    plant = Plant(name="Name Plant")
+    for asset_id, name in pairs:
+        plant.register_asset(
+            Asset(
+                id=asset_id,
+                name=name,
+                type=AssetType.ROTATING_EQUIPMENT,
+            )
+        )
+    return plant
+
+
+class TestNameTokenGranularity:
+    """Stage-2 name matching folds in the trailing single-character token.
+
+    Asset names put the discriminator in a trailing one-character token — the
+    circuit letter in "Circuito Raffreddamento A"/"B", the line number in
+    "Linea 3"/"4". A ``len(w) > 2`` filter dropped it, collapsing two such names
+    onto their shared nouns: identical ``name_words``, identical score, an exact
+    tie. ``resolution_verdict`` reads that tie as ambiguous and withholds a
+    commit that naming the letter could never unblock — the letter is exactly
+    what the filter discarded. Same unresolvable loop the stage-3 location fix
+    addressed, one stage up.
+
+    The fix folds the trailing token back into the score, but names — unlike
+    locations — carry noise the filter also removed. A blanket "keep every
+    token" would make the indefinite article "a" a false circuit-"A" match. So
+    the trailing token counts toward the numerator only when the query names it
+    AND matches the rest of the name; a bare article never resolves the pair.
+    """
+
+    def test_trailing_letter_separates_otherwise_identical_names(self) -> None:
+        """The pin: two names differing only by the trailing circuit letter."""
+        plant = _plant_with_names(
+            ("P-201", "Pompa Centrifuga — Circuito Raffreddamento A"),
+            ("P-202", "Pompa Centrifuga — Circuito Raffreddamento B"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("vibrazioni sulla pompa centrifuga circuito raffreddamento A")
+
+        assert [r.asset.id for r in results] == ["P-201", "P-202"]
+        assert results[0].match_reason == "name_keywords"
+        # Not a tie — an exact tie is exactly what ``resolution_verdict``
+        # classifies as ambiguous, and naming the letter could not break it.
+        assert results[0].confidence > results[1].confidence
+
+    def test_named_circuit_resolves_instead_of_withholding(self) -> None:
+        """The consequence: naming the letter can actually commit to an asset."""
+        plant = _plant_with_names(
+            ("P-201", "Pompa Centrifuga — Circuito Raffreddamento A"),
+            ("P-202", "Pompa Centrifuga — Circuito Raffreddamento B"),
+        )
+        resolver = EntityResolver(plant)
+        verdict = resolution_verdict(
+            resolver.resolve("vibrazioni sulla pompa centrifuga circuito raffreddamento B")
+        )
+
+        assert verdict.ambiguous is False
+        assert verdict.commits is True
+
+    def test_trailing_digit_separates_otherwise_identical_names(self) -> None:
+        """The line number is a single character too, and equally load-bearing."""
+        plant = _plant_with_names(
+            ("ME-15", "Motore Elettrico — Nastro Trasportatore Linea 3"),
+            ("ME-16", "Motore Elettrico — Nastro Trasportatore Linea 4"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("guasto al motore elettrico nastro trasportatore linea 4")
+
+        assert results[0].asset.id == "ME-16"
+        assert results[0].confidence > results[1].confidence
+
+    def test_bare_article_is_not_a_false_discriminator(self) -> None:
+        """A leading article must not be read as the trailing circuit letter.
+
+        "a centrifugal pump" names no circuit, but the indefinite article "a"
+        collides with the "A" that distinguishes the two pumps. A blanket
+        keep-every-token fix credited it and committed to circuit A on the
+        strength of an article. The trailing letter is credited only when the
+        rest of the name is also named, so this stays ambiguous.
+        """
+        plant = _plant_with_names(
+            ("P-201", "Centrifugal Pump — Cooling Circuit A"),
+            ("P-202", "Centrifugal Pump — Cooling Circuit B"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("a centrifugal pump is leaking")
+
+        assert {"P-201", "P-202"} <= {r.asset.id for r in results}
+        verdict = resolution_verdict(results)
+        assert verdict.ambiguous is True
+        assert verdict.commits is False
+
+    def test_article_with_full_description_but_no_letter_stays_ambiguous(self) -> None:
+        """Naming every word plus a stray article still points at no circuit.
+
+        "a centrifugal pump cooling circuit" contains every word of the pump and
+        the article "a", yet names no circuit. The letter is credited only as
+        the name's final adjacent pair ("circuit a"), which this query does not
+        contain — so a stray article near a fully-named pump cannot commit to
+        circuit A.
+        """
+        plant = _plant_with_names(
+            ("P-201", "Centrifugal Pump — Cooling Circuit A"),
+            ("P-202", "Centrifugal Pump — Cooling Circuit B"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("a centrifugal pump cooling circuit is leaking")
+
+        assert results[0].confidence == results[1].confidence
+        assert resolution_verdict(results).ambiguous is True
+
+    def test_omitting_the_letter_keeps_the_pair_ambiguous(self) -> None:
+        """Naming the shared words but not the letter stays ambiguous.
+
+        Folding the trailing token in must not disarm ambiguity where it is
+        real: without the discriminator the two pumps are indistinguishable, and
+        the gate must keep withholding exactly as before.
+        """
+        plant = _plant_with_names(
+            ("P-201", "Pompa Centrifuga — Circuito Raffreddamento A"),
+            ("P-202", "Pompa Centrifuga — Circuito Raffreddamento B"),
+        )
+        resolver = EntityResolver(plant)
+        results = resolver.resolve("pompa centrifuga circuito raffreddamento")
+
+        assert results[0].confidence == results[1].confidence
+        assert resolution_verdict(results).ambiguous is True
+
+
 class TestResolvedEntity:
     """Test ResolvedEntity representation."""
 

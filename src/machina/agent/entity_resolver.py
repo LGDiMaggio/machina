@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import structlog
@@ -516,6 +517,12 @@ class EntityResolver:
         # 2. Name match — check if the asset name appears in the text
         text_lower = text.lower()
         text_tokens = _tokenise(text)
+        # Ordered query tokens and their adjacent pairs — used below to tell a
+        # named trailing discriminator ("… circuit A") from a bare article ("a
+        # centrifugal pump"): the letter counts only where the query places it
+        # right after the word it follows in the name.
+        query_seq = _PUNCT_RE.sub(" ", text_lower).split()
+        query_bigrams = set(pairwise(query_seq))
         for asset in assets:
             name_lower = asset.name.lower()
             # Check full name match
@@ -533,11 +540,37 @@ class EntityResolver:
                 name_words = {w for w in name_lower.split() if len(w) > 2}
                 overlap = name_words & text_tokens
                 if overlap and len(overlap) >= len(name_words) * 0.5:
-                    score = len(overlap) / len(name_words)
+                    matched, total = len(overlap), len(name_words)
+                    # A trailing one/two-character token is often the whole
+                    # difference between two otherwise-identical names — the
+                    # circuit letter in "… Raffreddamento A"/"B", the line
+                    # number in "… Linea 3"/"4". The ``len(w) > 2`` filter drops
+                    # it, so both names reduce to the same ``name_words`` and
+                    # score identically; ``resolution_verdict`` reads that exact
+                    # tie as ambiguous and withholds a commit that naming the
+                    # letter can never unblock — the letter is exactly what was
+                    # dropped. Same unresolvable loop the stage-3 location fix
+                    # addressed, but names carry noise the filter also removed.
+                    #
+                    # Fold the trailing token back into the score WITHOUT letting
+                    # it become a false discriminator. It always counts toward the
+                    # denominator, but toward the numerator only when the query
+                    # names it in context — the query contains the name's final
+                    # pair ("circuit a") as adjacent tokens, not merely a stray
+                    # "a" somewhere. So a sibling whose trailing token the query
+                    # does not name scores strictly lower and the tie breaks,
+                    # while a bare or leading article ("a centrifugal pump") never
+                    # fabricates a circuit-"A" match. Non-colliding names ending
+                    # in a real word are unaffected (no ``<= 2`` trailing token).
+                    cleaned = _PUNCT_RE.sub(" ", name_lower).split()
+                    if cleaned and len(cleaned[-1]) <= 2:
+                        total += 1
+                        if len(cleaned) >= 2 and (cleaned[-2], cleaned[-1]) in query_bigrams:
+                            matched += 1
                     results.append(
                         ResolvedEntity(
                             asset,
-                            confidence=round(0.7 * score, 2),
+                            confidence=round(0.7 * (matched / total), 2),
                             match_reason="name_keywords",
                         )
                     )
