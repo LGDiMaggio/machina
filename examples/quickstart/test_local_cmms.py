@@ -100,7 +100,7 @@ if ENABLE_CMMS:
     from machina.connectors.cmms.auth import NoAuth
     from contextvars import ContextVar
 
-    current_jwt = ContextVar("current_jwt", default="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MiwidXNlcm5hbWUiOiJ0ZXN0IiwiZmlyc3RfbmFtZSI6InRlc3QiLCJyb2xlIjoiQURNSU4iLCJjb21wYW55X2lkIjoxLCJjb21wYW55X25hbWUiOiJGZXJyZXJvIiwiY3VycmVudF9hY3RpdmVfbG9jYXRpb25faWQiOm51bGwsImFsbG93ZWRfbG9jYXRpb25zIjpbXSwiaWF0IjoxNzg4MzY3MzMwLCJleHAiOjE3ODgzOTYxMzB9.1BthKDy3DyCFVlWNy7sXSE58PbOLtYXCNnrNYod9SSg")
+    current_jwt = ContextVar("current_jwt", default="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MiwidXNlcm5hbWUiOiJ0ZXN0IiwiZmlyc3RfbmFtZSI6InRlc3QiLCJyb2xlIjoiQURNSU4iLCJjb21wYW55X2lkIjoxLCJjb21wYW55X25hbWUiOiJGZXJyZXJvIiwiY3VycmVudF9hY3RpdmVfbG9jYXRpb25faWQiOm51bGwsImFsbG93ZWRfbG9jYXRpb25zIjpbXSwiaWF0IjoxNzg4NDI0NzExLCJleHAiOjE3ODg0NTM1MTF9.p5muoRPEVOpg6oMTsNJCykTYSp8JzCgCX02c-aNwP9Y")
 
     cmms_schema = GenericCmmsYamlConfig(
         mapping={

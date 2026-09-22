@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
 from enum import StrEnum
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
@@ -60,7 +60,6 @@ logger = structlog.get_logger(__name__)
 _AuthUnion = BearerAuth | BasicAuth | ApiKeyHeaderAuth | NoAuth
 _PaginationUnion = NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
 
-
 def _require_httpx() -> Any:
     """Import httpx lazily, raising a clear error if the extra is missing."""
     try:
@@ -70,7 +69,6 @@ def _require_httpx() -> Any:
             "httpx is required for REST mode. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
-
 
 class GenericCmmsConnector:
     """Configurable connector that wraps any REST-based CMMS.
@@ -751,7 +749,6 @@ class GenericCmmsConnector:
             async for raw in self._pagination.iterate(client, url, headers, params=kwargs):
                 results.append(_parse_asset(self._apply_mapping("assets", raw)))
         return results
-        return results
 
     async def _rest_read_work_orders(self, **kwargs) -> list[WorkOrder]:
         httpx = _require_httpx()
@@ -924,11 +921,9 @@ class GenericCmmsConnector:
 
         return filtered
 
-
 # ---------------------------------------------------------------------------
 # Parsing helpers — convert raw dicts to domain entities
 # ---------------------------------------------------------------------------
-
 
 def _parse_asset(data: dict[str, Any]) -> Asset:
     """Parse a dict into an Asset, tolerating missing fields."""
@@ -956,7 +951,6 @@ def _parse_asset(data: dict[str, Any]) -> Asset:
         metadata=data.get("metadata", {}),
         equipment_class_code=data.get("equipment_class_code"),
     )
-
 
 def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Parse a dict into a WorkOrder."""
@@ -994,7 +988,6 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
         failure_cause=data.get("failure_cause"),
     )
 
-
 def _parse_spare_part(data: dict[str, Any]) -> SparePart:
     """Parse a dict into a SparePart."""
     return SparePart(
@@ -1008,7 +1001,6 @@ def _parse_spare_part(data: dict[str, Any]) -> SparePart:
         unit_cost=float(data.get("unit_cost", 0.0)),
         warehouse_location=str(data.get("warehouse_location", "")),
     )
-
 
 def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """Parse a dict into a MaintenancePlan, tolerating missing fields."""
@@ -1031,11 +1023,9 @@ def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
         active=data.get("active", True),
     )
 
-
 # ---------------------------------------------------------------------------
 # YAML mapper engine — declarative dict → entity mapping
 # ---------------------------------------------------------------------------
-
 
 def _yaml_map_row(
     entity_mapping: Any,
@@ -1062,7 +1052,6 @@ def _yaml_map_row(
             result[field_name] = val
     return result
 
-
 def _yaml_coerce_field(spec: Any, raw: dict[str, Any]) -> Any:
     """Resolve and coerce a single field from a raw dict."""
     value = resolve_path(raw, spec.source)
@@ -1086,7 +1075,6 @@ def _yaml_coerce_field(spec: Any, raw: dict[str, Any]) -> Any:
             value = coerce_enum_map(value, enum_map=spec.enum_map, default=spec.default)
 
     return value
-
 
 def _yaml_reverse_row(entity_mapping: Any, domain_data: dict[str, Any]) -> dict[str, Any]:
     """Reverse-map domain fields to external API fields for a write payload."""

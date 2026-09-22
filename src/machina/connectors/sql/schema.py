@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
-
 class FieldMapping(BaseModel):
     """Mapping from one database column to a domain entity field.
 
@@ -34,7 +33,6 @@ class FieldMapping(BaseModel):
         description="Database value → domain enum value mapping",
     )
     default: Any = Field(default=None, description="Default when column is NULL")
-
 
 class TableMapping(BaseModel):
     """Mapping from a database table/query to a domain entity type.
@@ -87,14 +85,12 @@ class TableMapping(BaseModel):
                     raise ValueError(msg)
         return self
 
-
 class SqlRetryConfig(BaseModel):
     """Retry settings for transient SQL errors."""
 
     max_retries: int = Field(default=3, ge=0, le=10)
     base_backoff: float = Field(default=0.5, ge=0.1, le=5.0)
     max_backoff: float = Field(default=8.0, ge=1.0, le=60.0)
-
 
 class SqlConnectorConfig(BaseModel):
     """Top-level configuration for GenericSqlConnector."""

@@ -19,7 +19,6 @@ from machina.connectors.capabilities import Capability
 
 logger = structlog.get_logger()
 
-
 class SimulatedSensorConnector:
     """Connector that loads sensor readings from JSON files.
 

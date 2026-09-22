@@ -41,11 +41,9 @@ from machina.exceptions import (
 
 logger = structlog.get_logger(__name__)
 
-
 # ------------------------------------------------------------------
 # Coercer registry — named functions referenced from YAML schemas
 # ------------------------------------------------------------------
-
 
 def _float_it(value: Any) -> float:
     """Parse a float, handling Italian decimal comma."""
@@ -56,16 +54,13 @@ def _float_it(value: Any) -> float:
         s = s.replace(",", ".")
     return float(s)
 
-
 def _int_it(value: Any) -> int:
     if isinstance(value, int):
         return value
     return int(_float_it(value))
 
-
 _ITALIAN_DATE_RE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$")
 _ISO_DATE_RE = re.compile(r"^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$")
-
 
 def _date_parse(value: Any) -> date:
     """Parse a date from multiple formats: dd/mm/yyyy, yyyy-mm-dd, Excel serial."""
@@ -84,7 +79,6 @@ def _date_parse(value: Any) -> date:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     # Last resort — try ISO parse
     return date.fromisoformat(s)
-
 
 def _datetime_parse(value: Any) -> datetime:
     """Parse a datetime, delegating to _date_parse for date-only values."""
@@ -105,7 +99,6 @@ def _datetime_parse(value: Any) -> datetime:
         d = _date_parse(s)
         return datetime(d.year, d.month, d.day, tzinfo=UTC)
 
-
 def _excel_serial_to_date(serial: int | float) -> date:
     """Convert an Excel serial date number to a Python date."""
     # Excel epoch is 1899-12-30 (accounting for the Lotus 1-2-3 leap year bug)
@@ -113,7 +106,6 @@ def _excel_serial_to_date(serial: int | float) -> date:
 
     base = date(1899, 12, 30)
     return base + timedelta(days=int(serial))
-
 
 def _bool_it(value: Any) -> bool:
     if isinstance(value, bool):
@@ -126,10 +118,8 @@ def _bool_it(value: Any) -> bool:
     msg = f"Cannot coerce {value!r} to bool"
     raise ValueError(msg)
 
-
 def _strip(value: Any) -> str:
     return str(value).strip()
-
 
 COERCER_REGISTRY: dict[str, Any] = {
     "float_it": _float_it,
@@ -150,12 +140,10 @@ _TYPE_COERCERS: dict[str, Any] = {
     "bool": _bool_it,
 }
 
-
 # Leading characters a spreadsheet (Excel/LibreOffice) interprets as the start
 # of a formula. A cell value beginning with one of these is a CSV/formula-
 # injection vector when the exported file is opened in a spreadsheet app.
 _FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@")
-
 
 def _guard_formula(value: str) -> str:
     """Neutralize a leading formula trigger by prefixing an apostrophe.
@@ -213,11 +201,9 @@ def _require_openpyxl() -> Any:
         ) from exc
     return openpyxl
 
-
 # ------------------------------------------------------------------
 # Row reading helpers
 # ------------------------------------------------------------------
-
 
 def _read_xlsx_rows(
     path: Path, sheet_name: str, schema: SheetSchema
@@ -252,7 +238,6 @@ def _read_xlsx_rows(
     finally:
         wb.close()
 
-
 def _read_csv_rows(path: Path, schema: SheetSchema) -> tuple[list[str], list[dict[str, Any]]]:
     """Read rows from a CSV file."""
     try:
@@ -264,7 +249,6 @@ def _read_csv_rows(path: Path, schema: SheetSchema) -> tuple[list[str], list[dic
     except csv.Error as exc:
         raise ConnectorError(f"Failed to parse CSV file '{path.name}': {exc}") from exc
 
-
 def _validate_headers(headers: list[str], schema: SheetSchema, source: str) -> None:
     required_columns = {m.column for m in schema.columns if m.required}
     missing = required_columns - set(headers)
@@ -273,7 +257,6 @@ def _validate_headers(headers: list[str], schema: SheetSchema, source: str) -> N
             f"Required columns missing from {source}: {sorted(missing)}. "
             f"Available headers: {headers}"
         )
-
 
 def _rows_to_dicts(
     raw_rows: list[dict[str, Any]],
@@ -326,11 +309,9 @@ def _rows_to_dicts(
             results.append(record)
     return results
 
-
 # ------------------------------------------------------------------
 # Write helpers
 # ------------------------------------------------------------------
-
 
 def _append_xlsx_row(
     path: Path, sheet_name: str, schema: SheetSchema, row_data: dict[str, Any]
@@ -401,7 +382,6 @@ def _filter_cache(cache: list[Any], filters: dict[str, Any]) -> list[Any]:
 # ------------------------------------------------------------------
 # Connector
 # ------------------------------------------------------------------
-
 
 class ExcelCsvConnector:
     """Connector that treats Excel/CSV files as a CMMS substrate.
