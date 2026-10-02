@@ -1,8 +1,8 @@
 # Predictive Maintenance Pipeline
 
-Autonomous end-to-end pipeline: sensor alarm triggers diagnosis, work order creation, scheduling optimization, and team notification. No human in the loop.
+An end-to-end pipeline in one workflow: an alarm event goes through rule-based and LLM diagnosis, a drafted work order and a proposed maintenance window.
 
-**This is the kind of agent that replaces a manual 3-hour process.**
+The script opens a CLI chat with the workflow registered. Ask the agent to run it (it calls its `execute_workflow` tool, which asks for your confirmation by default), or call `agent.trigger_workflow("Predictive Maintenance Pipeline", alarm_event)` from your own alarm handler -- Machina does not subscribe to alarms for you. The sensor data comes from `SimulatedSensorConnector` over the sample sensor logs.
 
 ## Run It
 
@@ -16,7 +16,7 @@ python agent.py --llm ollama:llama3
 ## Architecture
 
 ```
-Sensor alarm (OPC-UA / MQTT / simulated)
+Alarm event (passed to the workflow by your code or the agent)
     |
     v
 +-------------------------------------------------------------+
@@ -39,7 +39,7 @@ Sensor alarm (OPC-UA / MQTT / simulated)
 |  | check_parts       | --> spare part availability           |
 |  | check_history     | --> maintenance history from CMMS     |
 |  | draft_wo          | --> LLM writes WO description    *   |
-|  | submit_wo         | --> WorkOrderFactory --> CMMS         |
+|  | submit_wo         | --> WorkOrderFactory (drafts the WO)  |
 |  +--------+---------+                                       |
 |           v                                                  |
 |  Phase 4: OPTIMIZATION                                       |
@@ -50,8 +50,8 @@ Sensor alarm (OPC-UA / MQTT / simulated)
 +-------------------------------------------------------------+
     |
     v
-  Technician receives structured alert with diagnosis,
-  work order ID, spare parts, and scheduled window
+  Workflow result: diagnosis, drafted work order, spare parts,
+  and a proposed maintenance window
 ```
 
 **\* = LLM step** (3 out of 10). The other 7 are deterministic -- fast, predictable, testable without an LLM.
@@ -112,7 +112,7 @@ agent = Agent(
 )
 ```
 
-The workflow definition stays exactly the same. That's the power of Machina's domain model abstraction.
+The CMMS, document and messaging steps stay exactly the same -- that's the domain model abstraction at work. The sensor step needs a connector that declares `get_related_readings`; in v0.4 only the simulated sensor connector does (the OPC-UA and MQTT connectors expose subscriptions and node reads instead), so adapt `enrich_alarm` to your sensor source. `submit_wo` drafts the work order in memory; add a `cmms.create_work_order` step to write it to the CMMS.
 
 ## Next Steps
 

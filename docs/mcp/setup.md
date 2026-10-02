@@ -24,46 +24,58 @@ connectors:
     primary: true
     settings:
       data_dir: "./sample_data/cmms"
-llm:
-  provider: "openai:gpt-4o"
 sandbox: true
 ```
 
+The server makes no LLM calls — the MCP client brings its own model — so no
+`llm:` section is needed. `logging: {level: DEBUG}` raises the server's log
+level (logs go to stderr on stdio, stdout on HTTP).
+
 ## Starting the Server
 
-### stdio (default — for IDE integration)
+`machina mcp serve` and `python -m machina.mcp` are the same command with the
+same options.
+
+### stdio (default — for desktop and IDE clients)
 
 ```bash
-python -m machina.mcp --config machina.yaml
+machina mcp serve --config machina.yaml
 ```
 
-Use this with Claude Desktop or Cursor. Add to your MCP client config:
+The client launches the server itself. Add to your MCP client config:
 
 ```json
 {
   "mcpServers": {
     "machina": {
-      "command": "python",
-      "args": ["-m", "machina.mcp", "--config", "/path/to/machina.yaml"]
+      "command": "machina",
+      "args": ["mcp", "serve", "--config", "/path/to/machina.yaml"]
     }
   }
 }
 ```
 
+(Equivalently `"command": "python", "args": ["-m", "machina.mcp", "--config", "/path/to/machina.yaml"]`.)
+
 !!! warning "Single-user only"
-    stdio mode has no authentication. Any local process can connect.
-    See [Security](../deployment/security.md) for details.
+    stdio mode has no authentication: the client that launches the process
+    owns it. See [Security](../deployment/security.md) for details.
 
 ### streamable-http (for multi-client / server deployment)
 
 ```bash
-python -m machina.mcp \
+export MACHINA_MCP_TOKENS_JSON='{"<64-hex-char token>": "ops-dashboard"}'
+machina mcp serve \
     --config machina.yaml \
     --transport streamable-http \
     --port 8000
 ```
 
-Requires bearer token authentication. See [Auth](auth.md) for setup.
+Requires bearer token authentication; tokens must be at least 32 characters
+(`openssl rand -hex 32`). See [Auth](auth.md) for tokens and for the Host /
+Origin allow-lists. The server listens on `127.0.0.1` unless you pass
+`--host 0.0.0.0` (needed inside a container, or behind a reverse proxy on
+another machine). Clients connect to `http://<host>:<port>/mcp`.
 
 **CLI arguments:**
 
@@ -71,39 +83,39 @@ Requires bearer token authentication. See [Auth](auth.md) for setup.
 |----------|---------|-------------|
 | `--config` | (required) | Path to machina.yaml |
 | `--transport` | `stdio` | `stdio` or `streamable-http` |
-| `--host` | `0.0.0.0` | Bind address (HTTP only) |
+| `--host` | `127.0.0.1` | Bind address (HTTP only) |
 | `--port` | `8000` | Listen port (HTTP only) |
 
 ## Health Endpoint
 
-The HTTP transport exposes `GET /health`:
+The HTTP transport serves `GET /health`. It needs no token, so container
+health checks can call it; a request with a valid bearer token gets details:
 
 ```bash
-# Unauthenticated — basic liveness check
+# Unauthenticated — liveness only
 curl http://localhost:8000/health
-# {"status": "healthy", "server": "machina", "transport": "streamable-http"}
+# {"status": "healthy"}
 
-# Authenticated — includes connector details
+# Authenticated — connector names, sandbox mode, package version
 curl -H "Authorization: Bearer <token>" http://localhost:8000/health
-# {"status": "healthy", "connectors": {...}, "sandbox": true, "version": "0.3.0"}
+# {"status": "healthy", "connectors": ["cmms"], "sandbox_mode": true, "version": "0.4.0"}
 ```
 
 ## Lifecycle
 
-On startup, the MCP server:
+On startup the server loads and validates the config, builds a
+`MachinaRuntime` with the configured connectors, connects them
+(`connect_all()`), and registers the tools allowed by their capabilities,
+plus the resources and prompts. A connector that fails to connect is logged
+and skipped; the others keep serving.
 
-1. Loads config from YAML
-2. Instantiates `MachinaRuntime` with all configured connectors
-3. Calls `connect_all()` — establishes connections to CMMS, IoT, etc.
-4. Auto-registers MCP tools based on connector capabilities
-5. Registers resources and prompts
+- **stdio** — the runtime lives for the client session (one per process).
+- **streamable-http** — one runtime per server process: connectors connect
+  once at startup and every request shares them. Requests are handled
+  statelessly, so any instance behind a load balancer can serve any request.
 
-On shutdown (SIGTERM):
-
-1. Stops accepting new requests
-2. Drains in-flight requests (up to 30s)
-3. Calls `disconnect_all()` on all connectors
-4. Exits cleanly
+On shutdown the HTTP server stops accepting connections, lets in-flight
+requests finish, and then disconnects every connector (`disconnect_all()`).
 
 ## Docker
 

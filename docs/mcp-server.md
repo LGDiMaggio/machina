@@ -1,52 +1,42 @@
 # MCP Server
 
-The **MCP Server layer** will expose every Machina connector as a
-[Model Context Protocol](https://modelcontextprotocol.io/) server, letting
-**Claude Desktop**, **Cursor**, and any MCP-compatible client use Machina's
-CMMS, document-store, and messaging connectors without writing a single line
-of agent code. You point your MCP client at a Machina server, and your
-connectors' capabilities become tools the client can call directly.
+Machina exposes its connectors as a [Model Context Protocol](https://modelcontextprotocol.io/)
+server, so **Claude Desktop**, **Cursor** and any other MCP client can read
+and write maintenance data through Machina's connectors without agent code.
+The client brings its own LLM; the server makes no LLM calls.
 
-!!! warning "Not available yet"
-    The MCP layer is a **placeholder**. The `machina.mcp` namespace is
-    importable so the import path stays stable across v0.2 → v0.3, but
-    instantiating `machina.mcp.MCPServer` raises `NotImplementedError`
-    with a pointer back here. The full implementation is planned for
-    **v0.3** — see the [Roadmap](roadmap.md). Until then, use the
-    `Agent` class directly — see the [Quickstart](quickstart.md).
+The layer is a thin protocol adapter (FastMCP from the MCP Python SDK) over
+the connector layer: every capability a configured connector declares turns
+on the matching tools, so the server offers exactly what its connectors can
+serve.
 
-## Why MCP?
+```bash
+pip install "machina-ai[mcp]"
+machina mcp serve --config machina.yaml        # same as: python -m machina.mcp --config machina.yaml
+```
 
-- **Adoption multiplier.** Every MCP client (Claude Desktop, Cursor, Continue,
-  Cline, …) immediately gains the ability to talk to any CMMS, document store,
-  or communication channel Machina supports — no integration work required.
-- **No-code integration.** Users who want a maintenance assistant but don't want
-  to write Python can spin up a Machina MCP server and point their existing LLM
-  client at it. The agent layer becomes optional.
+## What it serves
 
-## How it will work
+| Surface | Contents |
+|---------|----------|
+| [Tools](mcp/tools.md) | 15 domain tools (`machina_list_assets`, `machina_create_work_order`, `machina_search_manuals`, …), registered per declared capability; 2 opt-in vendor tools (`enable_vendor_tools`) |
+| [Resources](mcp/resources.md) | 4 versioned resources: `machina://v1/assets/{asset_id}`, `machina://v1/work-orders/{wo_id}`, `machina://v1/failure-taxonomy`, `machina://v1/capabilities` |
+| [Prompts](mcp/prompts.md) | 3 templates: `diagnose_asset_failure`, `draft_preventive_plan`, `summarize_maintenance_history` |
 
-The MCP layer is a **thin protocol adapter** on top of the existing connector
-layer, not a separate system. When a connector is instantiated and registered,
-its declared `capabilities` are automatically mapped to MCP tool definitions:
+## Transports
 
-| Connector capability | MCP tool |
-|---|---|
-| `read_assets` | `list_assets`, `get_asset_details` |
-| `read_work_orders` | `list_work_orders`, `filter_work_orders` |
-| `create_work_order` | `create_work_order` |
-| `search_documents` | `search_manuals` |
-| `read_spare_parts` | `check_inventory` |
+| Transport | Use | Auth |
+|-----------|-----|------|
+| `stdio` (default) | One local client (Claude Desktop, an IDE) launching the server | None — the client owns the process |
+| `streamable-http` | Multi-client / server deployment; also serves `GET /health` | Static bearer tokens (≥ 32 characters) |
 
-The mapping is configured once in `src/machina/mcp/tools.py`; adding a new
-capability to a connector automatically exposes it as an MCP tool — no manual
-registration.
+Writes go through the connectors' `@sandbox_aware` guard: with `sandbox: true`
+in the config, write tools return a marked `[SANDBOX]` result and nothing
+reaches the CMMS.
 
-## See also
+## Read next
 
-- **[Custom Connectors](connectors/custom.md)** — How to build a connector
-  that will be exposed via MCP once the layer ships
-- **[Architecture](architecture.md)** — Where the MCP layer sits in the
-  five-layer stack
-- **[MACHINA_SPEC §17](https://github.com/LGDiMaggio/machina/blob/main/MACHINA_SPEC.md#17-mcp-server-layer)** —
-  Full spec for the MCP Server layer
+- [Setup](mcp/setup.md) — configuration, both transports, client configuration, `/health`
+- [Auth](mcp/auth.md) — bearer tokens, allowed hosts and origins
+- [Tools](mcp/tools.md) · [Resources](mcp/resources.md) · [Prompts](mcp/prompts.md)
+- [Docker deployment](deployment/docker.md) — the containerized HTTP server

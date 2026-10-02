@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Autonomous predictive maintenance -- sensor to scheduled work order.
+"""Predictive maintenance pipeline -- alarm to drafted work order and window.
 
-10-step pipeline. 3 LLM steps, 7 deterministic. Zero human intervention.
-This is the kind of agent that replaces a manual 3-hour process.
+10-step workflow: 3 LLM steps, 7 deterministic. The script opens a CLI chat
+with the workflow registered; ask the agent to run it, or call
+agent.trigger_workflow() from your own alarm handler.
 
-    python agent.py
-    python agent.py --sandbox           # log-only mode
+    python agent.py                     # sandbox (default)
+    python agent.py --live              # execute writes
     python agent.py --llm ollama:llama3
 """
 
@@ -36,7 +37,7 @@ SAMPLE_DIR = _examples_dir / "sample_data"
 
 predictive_maintenance = Workflow(
     name="Predictive Maintenance Pipeline",
-    description="Sensor alarm to scheduled work order, autonomously.",
+    description="Alarm to diagnosis, drafted work order and maintenance window.",
     trigger="alarm",
     steps=[
         # Phase 1: Detection
@@ -92,7 +93,7 @@ predictive_maintenance = Workflow(
         Step(
             "submit_wo",
             action="work_order_factory.create",
-            description="Create work order in CMMS",
+            description="Draft the work order (in memory)",
         ),
         # Phase 4: Optimization
         Step(

@@ -1,48 +1,66 @@
 # MCP Resources
 
-Machina exposes plant data as MCP resources with a versioned URI scheme.
+Machina exposes plant data as MCP resources under a versioned URI scheme,
+`machina://v1/...`. `v1` is a stable contract: a breaking change to a
+resource's shape goes to a new version segment, never into `v1`.
 
-!!! note "Pre-stable"
-    The `machina://v1/` URI scheme is **pre-stable** in v0.3.0. URIs may change
-    in v0.3.1 when the scheme is locked. Do not build hard dependencies on
-    specific URI patterns yet.
+All four resources are registered whatever the connector set. The two that
+read from the CMMS use the primary CMMS and fail when none is configured; the
+other two are served from memory.
 
-## Available Resources
+| URI | Source | Contents |
+|-----|--------|----------|
+| `machina://v1/assets/{asset_id}` | primary CMMS | One asset |
+| `machina://v1/work-orders/{wo_id}` | primary CMMS | One work order |
+| `machina://v1/failure-taxonomy` | memory | Built-in failure-mode reference list |
+| `machina://v1/capabilities` | memory | Code-derived self-description of the framework |
 
-### Asset Details
+The two templated URIs are listed by MCP clients as resource templates, the
+two fixed ones as resources. Every resource returns `application/json`.
+
+## Asset Details
 
 **URI:** `machina://v1/assets/{asset_id}`
 
-Returns JSON with full asset details: ID, name, type, location, criticality,
-manufacturer, model, failure modes, and metadata.
+The full `Asset` record as stored in the CMMS:
 
 ```json
 {
   "id": "P-201",
-  "name": "Centrifugal Pump — Cooling Loop A",
+  "name": "Centrifugal Pump",
   "type": "rotating_equipment",
-  "location": "Building A / Floor 1 / Bay 3",
-  "criticality": "A",
+  "location": "Building A",
   "manufacturer": "Grundfos",
   "model": "CR 32-2",
-  "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROS-01"]
+  "serial_number": "",
+  "install_date": null,
+  "criticality": "A",
+  "parent": null,
+  "children": [],
+  "failure_modes": ["BEAR-WEAR-01", "SEAL-LEAK-01"],
+  "aliases": [],
+  "metadata": {},
+  "equipment_class_code": null
 }
 ```
 
-### Work Order Details
+An unknown ID returns `{"error": "Asset 'P-999' not found"}`.
+
+## Work Order Details
 
 **URI:** `machina://v1/work-orders/{wo_id}`
 
-Returns JSON with work order details: ID, type, priority, status, asset ID,
-description, and assignment.
+The full `WorkOrder` record: ID, type, priority, status, asset ID,
+description, assignee, failure mode and timestamps. An unknown ID returns an
+`error` entry, as for assets.
 
-### Failure Taxonomy
+## Failure Taxonomy
 
 **URI:** `machina://v1/failure-taxonomy`
 
-Returns the built-in failure mode taxonomy — a reference list of common
-industrial failure modes with codes, categories, mechanisms, and detection
-methods. This resource is served from memory (no connector required).
+A built-in reference list of eight common failure modes, each with a code,
+category, mechanism and detection methods. It does not read the failure modes
+your CMMS defines.
 
 ```json
 [
@@ -50,18 +68,19 @@ methods. This resource is served from memory (no connector required).
     "code": "BEAR-WEAR-01",
     "name": "Bearing Wear",
     "category": "mechanical",
-    "mechanism": "Fatigue, lubrication breakdown, contamination",
-    "detection_methods": ["vibration_analysis", "temperature_monitoring", "oil_analysis"]
+    "mechanism": "fatigue",
+    "detection_methods": ["vibration_analysis", "temperature_monitoring"]
   }
 ]
 ```
 
-## MIME Types
+## Capabilities
 
-All resources return `application/json`.
+**URI:** `machina://v1/capabilities`
 
-## Resource Discovery
-
-MCP clients can list available resources dynamically. The resource list depends
-on which connectors are configured — if no CMMS is configured, asset and work
-order resources are not available. The failure taxonomy is always available.
+The framework's self-description: connector types × capabilities, extension
+seams and the shape of the config schema. It is generated from the code,
+carries no configured values, and is byte-identical to
+`machina describe --json` and the published [capability matrix](../capabilities.md)
+(`docs/capabilities.json`). It describes what Machina can do, not what this
+server has configured — the registered tools tell you that.

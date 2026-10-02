@@ -198,4 +198,4 @@ arbitrary Python logic in YAML would be fragile and hard to debug.
 
 - [Quickstart](quickstart.md) -- Python-first approach
 - [Custom Connectors](connectors/custom.md) -- Build your own connector (works with both Python and YAML)
-- [Architecture](architecture.md) -- Understand the five layers
+- [Architecture](architecture.md) -- Understand the layers and how they compose

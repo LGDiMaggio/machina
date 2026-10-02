@@ -15,7 +15,7 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Triggered when stock drops below the reorder point. Mixes deterministic checks with an LLM urgency assessment:
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, it needs a connector that declares `create_purchase_order`, or the workflow stops there.
 
 ```python
 from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy, GuardCondition
@@ -55,7 +55,7 @@ spare_part_reorder = Workflow(
 
 ### 2. Preventive Maintenance Scheduler
 
-Runs every Monday at 6 AM. Scans for due plans, LLM prioritizes, batch-creates work orders:
+Meant for a weekly run -- its trigger records the schedule (Mondays at 6 AM), but Machina does not schedule anything: start it from cron, Task Scheduler or your own service with `agent.trigger_workflow("Preventive Maintenance Scheduler")`. Scans for due plans, LLM prioritizes, batch-creates work orders:
 
 ```python
 preventive_scheduling = Workflow(
@@ -79,12 +79,14 @@ preventive_scheduling = Workflow(
 
 ### Trigger Types
 
-| Type | When it fires |
-|------|---------------|
-| `ALARM` | Sensor reading breaks threshold |
-| `SCHEDULE` | Cron expression matches |
-| `CONDITION` | Custom condition evaluates to true |
-| `MANUAL` | User or API triggers it explicitly |
+A trigger describes the event a workflow handles; it does not start the workflow. Machina watches no sensors or clocks -- a run starts when your code calls `agent.trigger_workflow(name, event)` or the agent calls its `execute_workflow` tool.
+
+| Type | Describes |
+|------|-----------|
+| `ALARM` | A sensor reading breaking a threshold |
+| `SCHEDULE` | A time-based run (e.g. a cron expression in `filter`) |
+| `CONDITION` | A custom condition becoming true |
+| `MANUAL` | An explicit request from a user or API |
 
 ### Error Policies
 

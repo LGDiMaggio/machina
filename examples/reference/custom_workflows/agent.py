@@ -2,8 +2,11 @@
 """Build your own maintenance workflows -- the workflow DSL is your superpower.
 
 Two complete custom workflows that mix deterministic steps with LLM reasoning:
-  1. Spare Part Reorder -- triggered when inventory drops below reorder point
-  2. Preventive Maintenance Scheduler -- runs every Monday at 6 AM
+  1. Spare Part Reorder -- for when inventory drops below the reorder point
+  2. Preventive Maintenance Scheduler -- a weekly run (Mondays at 6 AM)
+
+Triggers describe the event; nothing schedules or fires them. The demo starts
+the reorder workflow itself with agent.trigger_workflow().
 
     python agent.py                     # sandbox (default)
     python agent.py --live              # execute writes
@@ -114,8 +117,8 @@ spare_part_reorder = Workflow(
 
 # ── Workflow 2: Preventive Maintenance Scheduler ────────────────
 #
-# Every Monday at 6 AM: scan for due plans, let the LLM prioritize,
-# batch-create work orders, notify planners.
+# Weekly (Mondays at 6 AM, started by an external scheduler): scan for due
+# plans, let the LLM prioritize, batch-create work orders, notify planners.
 
 preventive_scheduling = Workflow(
     name="Preventive Maintenance Scheduler",

@@ -22,23 +22,21 @@ The `tests/unit/test_llm_provider.py::TestLiteLLMModelStringContract` class anch
 
 ## Sandbox mode vs live mode
 
-Every `Agent` accepts a `sandbox: bool` argument and most examples default to `sandbox=True`.
+Every `Agent` accepts a `sandbox: bool` argument. Most examples default to `sandbox=True`; the quickstart, a read-mostly Q&A agent, defaults to live.
 
 | Sandbox on | Sandbox off (`--live`) |
 |---|---|
 | Read actions (lookups, queries) run normally | Same |
 | Write actions (create work order, submit to CMMS) are logged only | Write actions execute for real |
-| `Agent._tool_create_work_order` returns a `{"sandbox": True, ...}` dict | Returns the created `WorkOrder` |
-| Workflow `channels.send_message` logs the message body and returns `{"sent": False, "sandbox": True, ...}` | Attempts to actually send |
+| `Agent._tool_create_work_order` returns a `{"sandbox": True, ...}` dict | Returns the created work order as a dict |
+| Workflow `channels.send_message` logs the message body and returns `{"sent": False, "sandbox": True, ...}` | Sends through the first communication connector |
+| `Agent.start()` does not connect channels, so no SMTP login or bot polling happens | Channels connect at start |
 
-Two known gaps to be aware of:
-
-- `Agent.start()` currently calls `connect()` on every configured channel unconditionally, regardless of `sandbox`. Connectors that talk to real services at connect-time (e.g. `EmailConnector` doing SMTP login) will attempt a live login even in sandbox mode. Tracked in [#31](https://github.com/LGDiMaggio/machina/issues/31) for v0.3.
-- The workflow notification step resolves communication connectors via the registry, not the `channels` list (also [#31](https://github.com/LGDiMaggio/machina/issues/31)). See `examples/alarm_to_workorder/README.md` for the implication.
+In sandbox mode the confirmation gate is skipped: confirming a write that will not happen would mislead.
 
 ## Connector capability discovery
 
-Every `BaseConnector` declares a `capabilities: ClassVar[list[str]]` constant. The agent reads this at startup to decide which tools are available. If your agent says "I don't have a tool for X":
+Every connector declares `capabilities: ClassVar[frozenset[Capability]]` (the `Capability` StrEnum in `machina.connectors.capabilities`). The agent reads it to decide which tools to offer. If your agent says "I don't have a tool for X":
 
 ```python
 from machina.connectors import ConnectorRegistry
@@ -50,23 +48,20 @@ print(registry.find_by_capability("create_work_order"))
 
 Common causes of missing capabilities:
 
-1. The connector is attached via `channels=[...]` instead of `connectors=[...]`. Communication connectors exposed as channels are not in the registry (see the sandbox section above).
+1. No connector declares the capability. `machina describe` (or the [capability matrix](capabilities.md)) lists what each connector type provides; some capabilities are configurable-only and need the right backend or settings.
 2. The capability name in the workflow step action string (`cmms.create_work_order`, `channels.send_message`) does not match the connector's declared capability. Run `pytest tests/test_example_actions.py` to catch this — it validates every action string against the installed connector set.
 3. The connector is an optional extra and wasn't installed. Check `pip show machina-ai` for the relevant extra (e.g. `machina-ai[sap]` for SAP PM).
 
 ## Config loader errors
 
-Machina uses YAML + env var + Python config with a fixed precedence (env vars override YAML override defaults). If a key is missing or mistyped, you'll get a `ConfigError` naming the key and the source file:
+`Agent.from_config()` and `machina mcp serve` read the YAML file as UTF-8, substitute `${VAR}` placeholders from the environment, and validate the result. The errors you are likely to see:
 
-```
-ConfigError: required key 'llm' missing in machina.yaml
-```
+- **`ValueError: Environment variable 'X' is not set`** — the YAML references `${X}` and the variable is missing. Export it, put it in the `.env` file your entrypoint loads, or give it a default with `${X:-default}` (used when `X` is unset or empty; keep defaults for non-secret settings, so a missing secret still fails loudly).
+- **`ConnectorConfigError` naming unknown settings** — the Excel/CSV and SQL connectors refuse settings keys they do not know (the error names the keys, never their values). Other connectors raise a `TypeError` for an unexpected keyword at construction.
+- **`MachinaError: Unknown connector type 'x'. Available: ...`** — from `Agent.from_config()` when the `type:` is not in the connector registry (`machina describe` lists the types). The MCP server instead logs `unknown_connector_type` and skips that connector. A type whose optional extra is not installed fails with "could not be imported" and names the cause.
+- **A pydantic `ValidationError`** — a value has the wrong type or an invalid enum value.
 
-Common causes:
-
-- The env var name uses the wrong prefix. Machina reads `MACHINA_*` variables; a `SMTP_HOST=...` setting is ignored, you need `MACHINA_SMTP_HOST=...`.
-- The YAML key and the Python key disagree. Both must be snake_case (`smtp_host`, not `smtpHost`).
-- A port env var is set to a non-numeric string (e.g. trailing whitespace). Validate port env vars and raise `SystemExit` with a clear message if they aren't integers.
+The top-level schema accepts unknown keys, so a misspelled section name (for example `setings:` instead of `settings:`) is ignored rather than rejected — if a connector seems to run with defaults, check the spelling. Keys are snake_case throughout.
 
 ## Still stuck?
 
