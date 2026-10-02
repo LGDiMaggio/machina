@@ -170,7 +170,7 @@ Two examples take you from zero to automation. Then deploy with the starter kit.
 |------|---------|--------------|
 | **1. Understand** | [quickstart/](examples/quickstart/) | Agent answers questions about equipment, procedures, spare parts, maintenance history |
 | **2. Automate** | [alarm_to_workorder/](examples/alarm_to_workorder/) | Alarm fires -- agent diagnoses failure, checks parts, creates work order, notifies team |
-| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Italian free-text messages become Work Orders. Docker, sandbox-first, production-ready |
+| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Free-text requests become confirmed Work Orders in a spreadsheet (or REST CMMS). Starter kit, sandbox-first |
 
 All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
 
@@ -178,21 +178,22 @@ All examples run with `ollama:llama3` -- local, free, no API key needed. Overrid
 
 ## Starter Kit
 
-Ready to deploy? The **odl-generator-from-text** template is a complete, clone-configure-deploy package:
+Ready to adapt? The **odl-generator-from-text** template is a copy-configure-run starter kit:
 
 ```bash
 cp -r templates/odl-generator-from-text my-agent
 cd my-agent
-cp .env.example .env    # fill in your LLM key
-docker compose up       # sandbox mode by default
+pip install "machina-ai[excel,litellm,examples]"
+cp .env.example .env        # set your LLM model and key
+python agent.py --sandbox   # or: docker compose run --rm machina
 ```
 
-A technician sends an email or Telegram message in their language:
+A technician describes a problem in their language:
 
 > *Italian:* `"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"`
 > *English:* `"pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"`
 
-The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
+The agent resolves the assets against the registry, proposes one work order per asset, and — in live mode, after you confirm each one — appends them to a spreadsheet or a REST CMMS. [Full template guide &rarr;](templates/odl-generator-from-text/)
 
 ## Build with Claude Code
 

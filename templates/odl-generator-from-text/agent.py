@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""OdL Generator — free-text message to Work Order.
+"""OdL Generator — free-text maintenance request to Work Order.
 
-A technician sends a message (email or Telegram):
+A technician types (or sends) a request such as:
     "pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"
 
-The agent parses the Italian text, resolves assets, creates structured
-Work Orders, and replies with confirmation.
+The agent resolves the assets named in the message against the plant
+registry (data/asset_registry.xlsx) and proposes one work order per asset.
+In sandbox mode (the default) nothing is written; in live mode each work
+order is confirmed before it is appended to data/workorders.xlsx.
 
-    cp .env.example .env   # fill in your LLM key
-    docker compose up
+    pip install "machina-ai[excel,litellm]"
+    cp .env.example .env        # set your LLM key (or use a local Ollama model)
+    python agent.py --sandbox
 """
 
 from __future__ import annotations
@@ -18,9 +21,9 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+TEMPLATE_DIR = Path(__file__).resolve().parent
 
-from workflows.parse_message_to_wo import message_to_workorder
+sys.path.insert(0, str(TEMPLATE_DIR.parent.parent / "src"))
 
 from machina import Agent
 from machina.observability.logging import configure_logging
@@ -49,11 +52,20 @@ def resolve_sandbox(
     return (env_value if env_value is not None else "true").lower() == "true"
 
 
+def _load_dotenv() -> None:
+    """Load ``.env`` next to this script when python-dotenv is installed."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(TEMPLATE_DIR / ".env")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OdL Generator from Text")
     parser.add_argument(
         "--config",
-        default=str(Path(__file__).resolve().parent / "config.yaml"),
+        default=str(TEMPLATE_DIR / "config.yaml"),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -68,12 +80,14 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    config_path = Path(args.config).resolve()
 
+    _load_dotenv()
     configure_logging(level="DEBUG" if args.verbose else os.getenv("MACHINA_LOG_LEVEL", "INFO"))
 
-    agent = Agent.from_config(args.config)
-    agent.register_workflow(message_to_workorder)
-
+    # The data paths in config.yaml are relative to the template directory.
+    os.chdir(TEMPLATE_DIR)
+    agent = Agent.from_config(config_path)
     agent.sandbox = resolve_sandbox(
         sandbox_flag=args.sandbox,
         live_flag=args.live,
@@ -85,14 +99,15 @@ def main() -> None:
     print(f"  {agent.name}  |  Mode: {mode}")
     print(f"{'=' * 60}")
     print()
-    print("  Send a message via email or Telegram:")
-    print("  Italian:")
-    print('    "pompa P-201 perde acqua, prego creare OdL"')
-    print('    "caldaia C-3 rumore anomalo"')
-    print("  English:")
-    print('    "pump P-201 leaking water, please create WO"')
-    print('    "boiler C-3 abnormal noise"')
+    print("  Describe the problem; name the asset by code or name:")
+    print('    "pompa P-201 perde acqua, caldaia C-3 rumore anomalo"')
+    print('    "pump P-201 leaking water, boiler C-3 abnormal noise"')
     print()
+    if agent.sandbox:
+        print("  Sandbox: work orders are proposed and logged, not written.")
+    else:
+        print("  Live: each work order is confirmed before it is written to")
+        print("  data/workorders.xlsx.")
     print("  Type 'quit' or Ctrl+C to exit.")
     print(f"{'=' * 60}\n")
 

@@ -1,0 +1,6 @@
+# Keep secrets and local output out of the image (data/ is mounted at runtime).
+.env
+data/workorders.xlsx
+data/workorders.csv
+__pycache__/
+*.pyc

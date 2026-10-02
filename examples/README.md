@@ -20,14 +20,15 @@ cd examples/alarm_to_workorder && python agent.py
 
 A vibration alarm fires on pump P-201. The agent diagnoses the failure, checks spare parts, creates a work order, and notifies the team. No human in the loop. [Details &rarr;](alarm_to_workorder/)
 
-## 3. Deploy to Production (15 minutes)
+## 3. Adapt a Starter Kit (15 minutes)
 
 ```bash
 cp -r templates/odl-generator-from-text my-agent
-cd my-agent && cp .env.example .env && docker compose up
+cd my-agent && pip install "machina-ai[excel,litellm,examples]"
+cp .env.example .env && python agent.py --sandbox
 ```
 
-Clone-configure-deploy starter kit. Italian free-text messages become Work Orders. [Details &rarr;](../templates/odl-generator-from-text/)
+Copy-configure-run starter kit: free-text requests become confirmed work orders in a spreadsheet (or a REST CMMS). [Details &rarr;](../templates/odl-generator-from-text/)
 
 ---
 
