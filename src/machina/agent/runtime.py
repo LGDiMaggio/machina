@@ -34,6 +34,7 @@ from machina.agent.entity_resolver import (
     match_disambiguation_reply,
     resolution_verdict,
 )
+from machina.agent.maintenance_schedule import get_maintenance_schedule
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
@@ -3039,7 +3040,10 @@ class Agent:
             return await self._tool_diagnose_failure(asset_id, symptoms)
 
         if name == "get_maintenance_schedule":
-            return {"info": "Maintenance schedule lookup not yet connected to a data source."}
+            schedule_asset = args.get("asset_id", "")
+            if not isinstance(schedule_asset, str):
+                return {"error": "asset_id must be a string"}
+            return await get_maintenance_schedule(self._registry, asset_id=schedule_asset)
 
         if name == "execute_workflow":
             return await self._tool_execute_workflow(
@@ -3685,6 +3689,7 @@ class Agent:
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],
             Capability.READ_SPARE_PARTS: ["check_spare_parts"],
+            Capability.READ_MAINTENANCE_PLANS: ["get_maintenance_schedule"],
         }
 
         enabled_tool_names: set[str] = set()
@@ -3692,9 +3697,9 @@ class Agent:
             for tool_name in cap_to_tool.get(cap, []):
                 enabled_tool_names.add(tool_name)
 
-        # Always include diagnosis and schedule tools
+        # Always include the diagnosis tool: it answers honestly (with an
+        # explanatory note) even when no failure-mode catalog is configured.
         enabled_tool_names.add("diagnose_failure")
-        enabled_tool_names.add("get_maintenance_schedule")
 
         # Include workflow tool only when workflows are registered
         if self._workflows:

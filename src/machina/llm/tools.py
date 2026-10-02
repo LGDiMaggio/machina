@@ -1,7 +1,11 @@
 """LLM tool definitions for function calling.
 
-Provides utilities to auto-generate OpenAI-compatible tool schemas from
-connector capabilities, and a registry of built-in maintenance tools.
+Defines the built-in maintenance tools as static, hand-written
+OpenAI-compatible schemas (:data:`BUILTIN_TOOLS`), plus :func:`make_tool` for
+building one. Schemas are not generated from connectors: the agent runtime
+(:meth:`machina.agent.runtime.Agent._get_available_tools`) offers each tool
+only when a registered connector declares the capability that backs it, so the
+model never sees a tool nothing can serve.
 """
 
 from __future__ import annotations
@@ -236,13 +240,18 @@ DIAGNOSE_FAILURE_TOOL = make_tool(
 
 GET_MAINTENANCE_SCHEDULE_TOOL = make_tool(
     name="get_maintenance_schedule",
-    description=("Get upcoming maintenance schedule for an asset or the entire plant."),
+    description=(
+        "List the preventive-maintenance plans for an asset or the entire plant: "
+        "recurrence interval, tasks, estimated duration and required skills. "
+        "Due dates are not included — the CMMS does not report when a plan was "
+        "last executed."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "asset_id": {
                 "type": "string",
-                "description": "Filter schedule by asset ID (optional).",
+                "description": "Only list plans for this asset ID (optional).",
             },
         },
     },

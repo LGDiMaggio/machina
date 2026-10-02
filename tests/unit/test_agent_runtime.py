@@ -909,10 +909,38 @@ class TestExecuteTool:
         assert "note" in result
 
     @pytest.mark.asyncio
-    async def test_get_maintenance_schedule_tool(self) -> None:
+    async def test_get_maintenance_schedule_without_provider_is_an_error(self) -> None:
         agent = Agent()
         result = await agent._execute_tool("get_maintenance_schedule", {})
-        assert "info" in result
+        assert result == {"error": "No connector provides maintenance plans"}
+
+    @pytest.mark.asyncio
+    async def test_get_maintenance_schedule_returns_live_plans(self) -> None:
+        from machina.domain.maintenance_plan import Interval, MaintenancePlan
+
+        class _PlansConnector(_FakeConnector):
+            capabilities: ClassVar[list[str]] = ["read_assets", "read_maintenance_plans"]
+
+            async def read_maintenance_plans(self) -> list[MaintenancePlan]:
+                return [
+                    MaintenancePlan(
+                        id="MP-1", asset_id="P-201", name="Quarterly", interval=Interval(months=3)
+                    ),
+                    MaintenancePlan(
+                        id="MP-2", asset_id="P-202", name="Monthly", interval=Interval(weeks=4)
+                    ),
+                ]
+
+        agent = Agent(connectors=[_PlansConnector()])
+        result = await agent._execute_tool("get_maintenance_schedule", {"asset_id": "P-201"})
+        assert [p["plan_id"] for p in result["plans"]] == ["MP-1"]
+        assert "not yet connected" not in json.dumps(result)
+
+    @pytest.mark.asyncio
+    async def test_get_maintenance_schedule_rejects_non_string_asset(self) -> None:
+        agent = Agent()
+        result = await agent._execute_tool("get_maintenance_schedule", {"asset_id": 7})
+        assert result == {"error": "asset_id must be a string"}
 
 
 class TestDiagnoseFailureCatalog:
@@ -1477,9 +1505,24 @@ class TestAvailableTools:
         names = {t["function"]["name"] for t in tools}
         # Only always-on tools
         assert "diagnose_failure" in names
-        assert "get_maintenance_schedule" in names
         # Should NOT include connector-dependent tools
         assert "search_assets" not in names
+        assert "get_maintenance_schedule" not in names
+
+    def test_schedule_tool_offered_only_with_a_plans_provider(self) -> None:
+        class _PlansConnector(_FakeConnector):
+            capabilities: ClassVar[list[str]] = ["read_assets", "read_maintenance_plans"]
+
+        without = {
+            t["function"]["name"]
+            for t in Agent(connectors=[_FakeConnector()])._get_available_tools()
+        }
+        with_plans = {
+            t["function"]["name"]
+            for t in Agent(connectors=[_PlansConnector()])._get_available_tools()
+        }
+        assert "get_maintenance_schedule" not in without
+        assert "get_maintenance_schedule" in with_plans
 
     def test_known_tool_names_no_connectors(self) -> None:
         """Leak-disposition surface with ZERO connectors: always-on tools only.
@@ -1492,7 +1535,7 @@ class TestAvailableTools:
         agent = Agent()
         known = agent._known_tool_names()
         assert "diagnose_failure" in known
-        assert "get_maintenance_schedule" in known
+        assert "get_maintenance_schedule" not in known
         assert "get_work_order" not in known
         assert "create_work_order" not in known
 
@@ -3004,8 +3047,8 @@ class TestLLMProviderSwap:
         must take the ``complete()`` fallback path instead of
         ``complete_with_tools``.
 
-        In normal operation ``_get_available_tools`` always includes two
-        built-in tools (``diagnose_failure`` and ``get_maintenance_schedule``),
+        In normal operation ``_get_available_tools`` always includes the
+        built-in ``diagnose_failure`` tool,
         so this branch is only reachable by overriding the method. We do that
         here to prove the fallback is wired up correctly for any future
         deployment that strips built-in tools.
