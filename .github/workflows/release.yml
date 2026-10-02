@@ -21,6 +21,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      # ── Tag ↔ package version ──────────────────────────────────────────────
+      # A tag that does not match pyproject.toml would publish the wrong
+      # version to PyPI and mint a Zenodo DOI under the wrong number.
+      - name: Check tag matches package version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject.toml version $PKG_VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -46,29 +60,32 @@ jobs:
 
       # ── Extract changelog for this version ────────────────────────────────
       - name: Extract release notes
-        id: release_notes
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
-          # Write to file to safely pass multiline content
-          echo "$NOTES" > release_notes.md
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          VERSION="${{ steps.version.outputs.version }}"
+          awk "/^## \[${VERSION}\]/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md > release_notes.md
+          if ! grep -q '[^[:space:]]' release_notes.md; then
+            echo "::error::CHANGELOG.md has no '## [${VERSION}]' section with release notes"
+            exit 1
+          fi
+
+      # ── PyPI publish ───────────────────────────────────────────────────────
+      # Before the GitHub Release: publishing the Release triggers the Zenodo
+      # archive, so it must only happen once the version is on PyPI. Uploading
+      # an existing version fails (no --skip-existing), stopping the job.
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload dist/*
 
       # ── GitHub Release ─────────────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: "machina-ai v${{ steps.release_notes.outputs.version }}"
+          name: "machina-ai v${{ steps.version.outputs.version }}"
           body_path: release_notes.md
           files: |
             dist/*.whl
             dist/*.tar.gz
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
-
-      # ── PyPI publish ───────────────────────────────────────────────────────
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: python -m twine upload dist/*
