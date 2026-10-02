@@ -147,6 +147,19 @@ python agent.py
 If a referenced variable is not set, `load_config()` raises `ValueError`
 with a clear message.
 
+`${VAR:-default}` supplies a fallback, with POSIX shell / Docker Compose
+semantics: the default is used when `VAR` is unset **or empty** (a blank
+`VAR=` line in an `.env` file counts as unset).
+
+```yaml
+llm:
+  provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"
+sandbox: "${MACHINA_SANDBOX_MODE:-true}"
+```
+
+Use defaults for non-secret settings only. A secret written as `${VAR}`
+fails loudly when it is missing; with a default it would silently fall back.
+
 ## When to Use YAML vs Python
 
 YAML config is designed for **knowledge-base agents** — the kind that answer

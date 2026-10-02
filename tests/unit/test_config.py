@@ -64,6 +64,81 @@ class TestLoadYaml:
             load_yaml("/nonexistent/path.yaml")
 
 
+class TestEnvVarDefaults:
+    """``${VAR:-default}`` follows POSIX/Docker Compose semantics."""
+
+    @staticmethod
+    def _load(tmp_path: Path, text: str) -> dict[str, object]:
+        cfg = tmp_path / "test.yaml"
+        cfg.write_text(text)
+        return load_yaml(cfg)
+
+    def test_default_used_when_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MACHINA_TEST_MODEL", raising=False)
+        data = self._load(tmp_path, 'model: "${MACHINA_TEST_MODEL:-openai/gpt-4o}"\n')
+        assert data["model"] == "openai/gpt-4o"
+
+    def test_set_value_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MACHINA_TEST_MODEL", "ollama/llama3")
+        data = self._load(tmp_path, 'model: "${MACHINA_TEST_MODEL:-openai/gpt-4o}"\n')
+        assert data["model"] == "ollama/llama3"
+
+    def test_default_used_when_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A blank `KEY=` line in an env file counts as unset, as in a shell.
+        monkeypatch.setenv("MACHINA_TEST_MODEL", "")
+        data = self._load(tmp_path, 'model: "${MACHINA_TEST_MODEL:-openai/gpt-4o}"\n')
+        assert data["model"] == "openai/gpt-4o"
+
+    def test_empty_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MACHINA_TEST_KEY", raising=False)
+        data = self._load(tmp_path, 'key: "${MACHINA_TEST_KEY:-}"\n')
+        assert data["key"] == ""
+
+    def test_defaults_inside_one_string(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MACHINA_TEST_HOST", raising=False)
+        monkeypatch.setenv("MACHINA_TEST_PORT", "9000")
+        data = self._load(
+            tmp_path,
+            'url: "${MACHINA_TEST_SCHEME:-http}://${MACHINA_TEST_HOST:-mock-cmms}:'
+            '${MACHINA_TEST_PORT:-8000}/api-v1"\n',
+        )
+        assert data["url"] == "http://mock-cmms:9000/api-v1"
+
+    def test_missing_without_default_still_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="DEFINITELY_NOT_SET"):
+            self._load(tmp_path, "token: ${DEFINITELY_NOT_SET}\n")
+
+    def test_malformed_placeholder_still_raises(self, tmp_path: Path) -> None:
+        # A colon without the dash is not the default syntax: it stays an
+        # (unset) variable name instead of passing through as literal text.
+        with pytest.raises(ValueError, match="NOT_SET:typo"):
+            self._load(tmp_path, "token: ${NOT_SET:typo}\n")
+
+    def test_deploy_docker_config_loads_without_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The shipped Docker config must load with no variables exported."""
+        for name in (
+            "MACHINA_CMMS_URL",
+            "MACHINA_CMMS_API_KEY",
+            "MACHINA_LLM_MODEL",
+            "MACHINA_SANDBOX_MODE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        repo_root = Path(__file__).resolve().parents[2]
+
+        config = load_config(repo_root / "deploy" / "docker" / "config.yaml")
+
+        cmms = config.connectors["cmms"]
+        assert cmms.settings["url"] == "http://mock-cmms:9000"
+        assert config.llm.provider == "openai/gpt-4o"
+        assert config.sandbox is True
+
+
 class TestLoadConfig:
     """Test full config loading and validation."""
 
