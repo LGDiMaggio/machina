@@ -38,9 +38,10 @@ def resolve_sandbox(
     """Compute sandbox mode for the template.
 
     Precedence: ``--live`` wins, then ``--sandbox``, then
-    ``MACHINA_SANDBOX_MODE`` env var. The env var defaults to ``"true"``
-    (sandbox-on) when unset, so a fresh container starts in sandbox;
-    setting ``MACHINA_SANDBOX_MODE=false`` makes LIVE the implicit default.
+    ``MACHINA_SANDBOX_MODE`` env var. Only an explicit false value
+    (``false``, ``0``, ``no``, ``off``) selects LIVE; unset, blank and any
+    other value keep sandbox on, so a fresh container — or a typo — starts
+    in sandbox.
 
     Kept as a free function (not a method) so unit tests can pin the
     precedence rule without instantiating an :class:`Agent`.
@@ -49,7 +50,7 @@ def resolve_sandbox(
         return False
     if sandbox_flag:
         return True
-    return (env_value if env_value is not None else "true").lower() == "true"
+    return (env_value or "").strip().lower() not in {"false", "0", "no", "off"}
 
 
 def _load_dotenv() -> None:

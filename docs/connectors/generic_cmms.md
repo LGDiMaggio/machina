@@ -31,7 +31,13 @@ The connector calls fixed paths under `url`:
 | Create a work order | `POST {url}/work_orders` (JSON body, the created record in the response) |
 
 List responses are a JSON array, unless a pagination strategy says otherwise
-(its `items_path` unwraps `{"data": [...]}`-style bodies). Three more
+(its `items_path` unwraps `{"data": [...]}`-style bodies). An ID is sent as one
+percent-encoded path segment (a `/` in it becomes `%2F`); an empty ID, `.` or
+`..` is refused. A 404 on a single-record `GET` means the record does not
+exist: `get_asset()` and `get_work_order()` return `None`. A create sends the
+work order with Machina's work-order ID; with a `yaml_mapping` that has
+`reverse_fields`, only the mapped fields are sent, so map `id` there to keep
+it. Three more
 operations are available when you configure their `endpoints` (paths relative
 to `url`, `{id}` replaced by the work-order ID):
 
@@ -144,7 +150,7 @@ names. To translate a different payload, give an inline `yaml_mapping` with an
 | `coerce` | `int`, `float`, `float_it`, `bool_truthy`, `iso_date`, `iso_datetime`, `strip_whitespace`, `lowercase`, `regex_extract` (needs `pattern`), `enum_map` (needs `enum_map`); more can be registered through the `machina.coercers` entry point |
 | `enum_map` | Value translation table |
 | `default` | Value when the source is missing or null |
-| `required` | Skip the record when the source is missing |
+| `required` | The source must be present: a record without it fails the whole read with a validation error (it is not skipped) |
 
 The request paths always come from the REST contract above: the mapping's
 `endpoint`, `create_endpoint` and `root` entries are validated but not used to

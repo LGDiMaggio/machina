@@ -693,11 +693,17 @@ class TestWriteDetection:
             "cmms.unset_flag",
             "cmms.setWorkOrderStatus",
             "cmms.read_settings",
+            "plc.preset",
+            "plc.bulkset",
+            "plc.OVERRIDESETPOINT",
+            "cmms.reset_asset_counter",
+            "cmms.upsert_asset",
         ],
     )
-    def test_set_at_token_start_is_a_write(self, action: str) -> None:
-        # "set" (and re-/un-set) still gates when it starts a token, camelCase
-        # included. "read_settings" stays an accepted over-gate.
+    def test_set_outside_those_nouns_is_a_write(self, action: str) -> None:
+        # Over-gating bias: "set" anywhere but inside asset/dataset/offset
+        # gates — mid-word and all-caps included. "read_settings" stays an
+        # accepted over-gate.
         assert WorkflowEngine._is_write_action(action) is True
 
     @pytest.mark.parametrize(
@@ -711,9 +717,9 @@ class TestWriteDetection:
         ],
     )
     def test_other_verbs_keep_substring_matching(self, action: str) -> None:
-        # Only "set" moved to token matching. Every other verb still matches as
-        # a substring, so run-together and mid-name writes stay gated (service
-        # steps have no @sandbox_aware backstop).
+        # Every write verb matches as a substring, so run-together and
+        # mid-name writes stay gated (service steps have no @sandbox_aware
+        # backstop).
         assert WorkflowEngine._is_write_action(action) is True
 
     def test_is_write_override_forces_both_directions(self) -> None:

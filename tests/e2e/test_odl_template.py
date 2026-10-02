@@ -12,6 +12,7 @@ Does NOT call :meth:`Agent.run` (would block on the CLI channel's stdin).
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -59,19 +60,40 @@ def _tool_results(agent: Agent, tool: str) -> list[dict[str, Any]]:
 
 
 @pytest.fixture()
-def template_agent(monkeypatch: pytest.MonkeyPatch) -> Agent:
-    # Sheet paths in config.yaml are relative to the template directory, as
-    # agent.py arranges by switching into it.
-    monkeypatch.chdir(TEMPLATE)
-    monkeypatch.delenv("MACHINA_LLM_MODEL", raising=False)
-    agent = Agent.from_config(TEMPLATE / "config.yaml")
+def template_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A pristine copy of the template, entered as the working directory.
+
+    Sheet paths in config.yaml are relative to the template directory, as
+    agent.py arranges by switching into it. Working on a copy keeps the test
+    independent of whatever a live run left in the checkout (a
+    ``workorders.xlsx``, a ``.env``) and of the developer's environment.
+    """
+    copy = tmp_path / "odl-generator-from-text"
+    shutil.copytree(
+        TEMPLATE,
+        copy,
+        ignore=shutil.ignore_patterns(".env", "workorders.*", "__pycache__"),
+    )
+    monkeypatch.chdir(copy)
+    for var in ("MACHINA_LLM_MODEL", "MACHINA_CMMS_URL", "MACHINA_SANDBOX_MODE"):
+        monkeypatch.delenv(var, raising=False)
+    return copy
+
+
+@pytest.fixture()
+def template_agent(template_copy: Path) -> Agent:
+    agent = Agent.from_config(template_copy / "config.yaml")
     agent.sandbox = True
     return agent
 
 
 @pytest.mark.asyncio
-async def test_message_becomes_sandboxed_work_orders(template_agent: Agent) -> None:
-    registry = json.loads((TEMPLATE / "data" / "asset_registry.json").read_text(encoding="utf-8"))
+async def test_message_becomes_sandboxed_work_orders(
+    template_agent: Agent, template_copy: Path
+) -> None:
+    registry = json.loads(
+        (template_copy / "data" / "asset_registry.json").read_text(encoding="utf-8")
+    )
     template_agent._llm = _ScriptedLLM(  # type: ignore[assignment]
         [
             ("create_work_order", {"asset_id": "P-201", "description": "Perdita d'acqua"}),
@@ -88,17 +110,18 @@ async def test_message_becomes_sandboxed_work_orders(template_agent: Agent) -> N
     results = _tool_results(template_agent, "create_work_order")
     assert [r["args"]["asset_id"] for r in results] == ["P-201", "C-3"]
     assert all(r["sandbox"] is True for r in results)
-    assert not (TEMPLATE / "data" / "workorders.xlsx").exists()
+    assert not (template_copy / "data" / "workorders.xlsx").exists()
 
 
-def test_rest_cmms_alternative_config_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rest_cmms_alternative_config_builds(
+    template_copy: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """config.cmms-rest.yaml (the alternative substrate) loads and builds a
     Generic CMMS connector with the optional work-order and plan endpoints."""
     from machina.connectors.capabilities import Capability
 
-    monkeypatch.chdir(TEMPLATE)
     monkeypatch.setenv("MACHINA_CMMS_API_KEY", "test-key")
-    agent = Agent.from_config(TEMPLATE / "config.cmms-rest.yaml")
+    agent = Agent.from_config(template_copy / "config.cmms-rest.yaml")
     ((_, cmms),) = [
         (name, conn)
         for name, conn in agent._registry.all().items()
@@ -126,5 +149,8 @@ async def test_write_for_an_unresolved_asset_is_refused(template_agent: Agent) -
         await template_agent.stop()
 
     (result,) = _tool_results(template_agent, "create_work_order")
-    assert "sandbox" not in result
-    assert "P-202" not in json.dumps(result.get("args", {}))
+    assert "sandbox" not in result  # refused before the sandbox interception
+    assert result["refused"] is True
+    assert result["reason"] == "asset_not_resolved_this_turn"
+    assert {"P-201", "C-3"} <= set(result["resolved"])
+    assert "P-202" not in result["resolved"]

@@ -6,12 +6,17 @@ on:
       - "v*"
 
 permissions:
-  contents: write  # needed to create GitHub Releases
+  contents: read
 
+# Three jobs, so a failed step can be retried with "Re-run failed jobs".
+# PyPI refuses a second upload of the same version: with the upload and the
+# GitHub Release in one job, a failed Release step could never be re-run.
 jobs:
-  release:
-    name: Build and publish
+  build:
+    name: Check and build
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
@@ -68,21 +73,59 @@ jobs:
             exit 1
           fi
 
-      # ── PyPI publish ───────────────────────────────────────────────────────
-      # Before the GitHub Release: publishing the Release triggers the Zenodo
-      # archive, so it must only happen once the version is on PyPI. Uploading
-      # an existing version fails (no --skip-existing), stopping the job.
+      - name: Upload distributions and release notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dist
+          path: |
+            dist/
+            release_notes.md
+          if-no-files-found: error
+
+  # ── PyPI publish ─────────────────────────────────────────────────────────
+  # Before the GitHub Release: publishing the Release triggers the Zenodo
+  # archive, so it must only happen once the version is on PyPI. Uploading an
+  # existing version fails (no --skip-existing), stopping the run here.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: python -m twine upload dist/*
+        run: |
+          python -m pip install --upgrade pip twine
+          python -m twine upload dist/*
 
-      # ── GitHub Release ─────────────────────────────────────────────────────
+  # ── GitHub Release ───────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to create GitHub Releases
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-dist
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: "machina-ai v${{ steps.version.outputs.version }}"
+          name: "machina-ai v${{ needs.build.outputs.version }}"
           body_path: release_notes.md
           files: |
             dist/*.whl

@@ -243,7 +243,7 @@ GET_MAINTENANCE_SCHEDULE_TOOL = make_tool(
     description=(
         "List the preventive-maintenance plans for an asset or the entire plant: "
         "recurrence interval, tasks, estimated duration and required skills. "
-        "Due dates are not included — the CMMS does not report when a plan was "
+        "Due dates are not included — Machina does not read when a plan was "
         "last executed."
     ),
     parameters={

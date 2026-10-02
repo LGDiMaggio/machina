@@ -41,20 +41,21 @@ class TestBuildServer:
     def test_no_tool_exposes_ctx_as_an_argument(self) -> None:
         """Regression: tools annotated ``ctx: Any`` published ``ctx`` as a
         required input, so every tools/call from a real client failed
-        validation. FastMCP must inject the context instead."""
-        from machina.config.schema import ConnectorConfig, McpConfig
+        validation. FastMCP must inject the context instead. Checked on every
+        tool — all core tools (every capability) plus the vendor tools."""
+        from machina.config.schema import McpConfig
         from machina.mcp.server import build_server
-
-        config = MachinaConfig(
-            connectors={"cmms": ConnectorConfig(type="generic_cmms", settings={})},
-            mcp=McpConfig(enable_vendor_tools=True),
-        )
+        from machina.mcp.tools import get_tools_for_capabilities
         from machina.mcp.tools_vendor import VENDOR_TOOLS
 
-        tools = build_server(config)._tool_manager.list_tools()
-        names = {tool.name for tool in tools}
-        assert "machina_list_assets" in names
-        assert {fn.__name__ for fn in VENDOR_TOOLS} <= names
+        server = build_server(MachinaConfig(mcp=McpConfig(enable_vendor_tools=True)))
+        core = get_tools_for_capabilities(frozenset(Capability))
+        for tool_fn in core:
+            server.add_tool(tool_fn)
+
+        tools = server._tool_manager.list_tools()
+        assert {tool.name for tool in tools} == {fn.__name__ for fn in [*core, *VENDOR_TOOLS]}
+        assert (len(core), len(VENDOR_TOOLS)) == (15, 2)
         for tool in tools:
             assert "ctx" not in tool.parameters.get("properties", {}), tool.name
             assert tool.context_kwarg == "ctx", tool.name

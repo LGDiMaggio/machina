@@ -331,52 +331,203 @@ def _rows_to_dicts(
 # ------------------------------------------------------------------
 
 
+def _xlsx_header(ws: Any) -> list[str]:
+    """Return a worksheet's header row, normalized like the read path."""
+    if ws.max_row < 1:
+        return []
+    return [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+
+
+def _save_xlsx_atomically(wb: Any, path: Path) -> None:
+    """Save to a temp sibling, then replace the target, so a crash cannot truncate it."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        wb.save(str(tmp))
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _log_unwritten_fields(path: Path, fields: list[str]) -> None:
+    if fields:
+        logger.warning(
+            "work_order_fields_not_persisted",
+            connector="ExcelCsvConnector",
+            operation="create_work_order",
+            file=path.name,
+            fields=fields,
+            hint="the file has no column for these mapped fields",
+        )
+
+
 def _append_xlsx_row(
     path: Path, sheet_name: str, schema: SheetSchema, row_data: dict[str, Any]
 ) -> None:
-    """Append a single row to an .xlsx file."""
+    """Append one row to an .xlsx sheet, placing each value under its header.
+
+    Values go to the column whose header names them, whatever the column
+    order in the file, and other sheets, rows and columns are left as they
+    are. A missing file or sheet is created with the schema's header row.
+    """
     openpyxl = _require_openpyxl()
     try:
         wb = openpyxl.load_workbook(str(path))
     except PermissionError as exc:
-        raise ConnectorLockedError(f"File is locked by another process: {path.name}") from exc
+        raise _file_write_error(exc, path) from exc
     except FileNotFoundError:
         wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = sheet_name
-        ws.append([m.column for m in schema.columns])
+        wb.active.title = sheet_name
 
-    if sheet_name not in wb.sheetnames:
-        wb.create_sheet(sheet_name)
-        wb[sheet_name].append([m.column for m in schema.columns])
-
-    ws = wb[sheet_name]
-    row_values = []
-    for mapping in schema.columns:
-        row_values.append(row_data.get(mapping.field))
-    ws.append(row_values)
-    wb.save(str(path))
-    wb.close()
+    unwritten: list[str] = []
+    try:
+        if sheet_name not in wb.sheetnames:
+            wb.create_sheet(sheet_name)
+        ws = wb[sheet_name]
+        header = _xlsx_header(ws)
+        if not any(header):
+            header = [m.column for m in schema.columns]
+            for col, name in enumerate(header, start=1):
+                ws.cell(row=1, column=col, value=name)
+        row_values: list[Any] = [None] * len(header)
+        for mapping in schema.columns:
+            value = row_data.get(mapping.field)
+            if mapping.column in header:
+                row_values[header.index(mapping.column)] = value
+            elif value not in (None, ""):
+                unwritten.append(mapping.field)
+        ws.append(row_values)
+        _save_xlsx_atomically(wb, path)
+    finally:
+        wb.close()
+    _log_unwritten_fields(path, unwritten)
 
 
 def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -> None:
-    """Append a single row to a CSV file."""
-    file_exists = path.exists() and path.stat().st_size > 0
-    columns = [m.column for m in schema.columns]
+    """Append one row to a CSV file, placing each value under its header.
+
+    An existing file keeps its own column order and extra columns; a missing
+    or empty file is started with the schema's header row.
+    """
+    header: list[str] = []
+    needs_newline = False
+    if path.exists() and path.stat().st_size > 0:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f), [])
+        with path.open("rb") as fb:
+            fb.seek(-1, 2)
+            needs_newline = fb.read(1) not in (b"\n", b"\r")
+    write_header = not header
+    if write_header:
+        header = [m.column for m in schema.columns]
+    row = dict.fromkeys(header, "")
+    unwritten = []
+    for mapping in schema.columns:
+        value = row_data.get(mapping.field, "")
+        if mapping.column in row:
+            row[mapping.column] = value
+        elif value not in (None, ""):
+            unwritten.append(mapping.field)
     with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        if not file_exists:
+        if needs_newline:
+            f.write("\r\n")
+        writer = csv.DictWriter(f, fieldnames=header)
+        if write_header:
             writer.writeheader()
-        csv_row = {}
-        for mapping in schema.columns:
-            csv_row[mapping.column] = row_data.get(mapping.field, "")
-        writer.writerow(csv_row)
+        writer.writerow(row)
+    _log_unwritten_fields(path, unwritten)
+
+
+def _update_xlsx_row(
+    path: Path, schema: SheetSchema, id_column: str, work_order_id: str, values: dict[str, Any]
+) -> None:
+    """Set the given column values on the row of one work order, in place.
+
+    Loads the workbook, finds the row whose ``id_column`` holds
+    ``work_order_id``, writes only the cells in ``values`` (column header →
+    value) and saves atomically. Other sheets, rows and columns are left as
+    they are.
+
+    Raises:
+        ConnectorSchemaError: If the sheet or a needed column is missing.
+        ConnectorError: If no row holds the work order.
+    """
+    openpyxl = _require_openpyxl()
+    try:
+        wb = openpyxl.load_workbook(str(path))
+    except PermissionError as exc:
+        raise _file_write_error(exc, path) from exc
+    try:
+        if schema.sheet not in wb.sheetnames:
+            raise ConnectorSchemaError(f"Sheet '{schema.sheet}' not found in {path.name}")
+        ws = wb[schema.sheet]
+        index = {name: col for col, name in enumerate(_xlsx_header(ws), start=1) if name}
+        for column in (id_column, *values):
+            if column not in index:
+                raise ConnectorSchemaError(f"Column '{column}' not found in {path.name}")
+        target = None
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row, column=index[id_column]).value
+            if cell is not None and _strip_formula_guard(str(cell).strip()) == work_order_id:
+                target = row
+                break
+        if target is None:
+            raise ConnectorError(f"Work order '{work_order_id}' not found in {path.name}")
+        for column, value in values.items():
+            ws.cell(row=target, column=index[column], value=value)
+        _save_xlsx_atomically(wb, path)
+    finally:
+        wb.close()
+
+
+def _update_csv_row(
+    path: Path, id_column: str, work_order_id: str, values: dict[str, Any]
+) -> None:
+    """CSV twin of :func:`_update_xlsx_row`: rewrite the file with one row changed.
+
+    Every other row and column is written back unchanged, via a temp sibling
+    and an atomic replace.
+    """
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        raise ConnectorError(f"Work order '{work_order_id}' not found in {path.name}")
+    header = rows[0]
+    index = {name: col for col, name in enumerate(header)}
+    for column in (id_column, *values):
+        if column not in index:
+            raise ConnectorSchemaError(f"Column '{column}' not found in {path.name}")
+    target = next(
+        (
+            row
+            for row in rows[1:]
+            if len(row) > index[id_column]
+            and _strip_formula_guard(row[index[id_column]].strip()) == work_order_id
+        ),
+        None,
+    )
+    if target is None:
+        raise ConnectorError(f"Work order '{work_order_id}' not found in {path.name}")
+    target.extend([""] * (len(header) - len(target)))
+    for column, value in values.items():
+        target[index[column]] = "" if value is None else value
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(rows)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
     """Map a write-side OS error onto the connector error contract."""
     if isinstance(exc, PermissionError):
-        return ConnectorLockedError(f"File is locked by another process: {path.name}")
+        return ConnectorLockedError(
+            f"Cannot write {path.name}: it is open in another program, "
+            "or this process lacks write permission"
+        )
     return ConnectorError(f"Could not write {path.name}: {exc.strerror or exc}")
 
 
@@ -530,9 +681,17 @@ class ExcelCsvConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Return assets from the asset registry spreadsheet."""
+        """Return assets from the asset registry spreadsheet.
+
+        Raises:
+            ConnectorError: If a registry sheet is configured but the
+                connector is not connected (or failed to), so a caller never
+                mistakes "not loaded" for "no assets".
+        """
         if self._config.asset_registry is None:
             return []
+        if not self._connected:
+            raise ConnectorError("Not connected — call connect() before reading")
         return list(self._asset_cache)
 
     async def get_asset(self, asset_id: str) -> Asset | None:
@@ -560,10 +719,16 @@ class ExcelCsvConnector:
         Args:
             asset_id: Keep only work orders for this asset.
             status: Keep only work orders in this status (enum or its value).
+
+        Raises:
+            ConnectorError: If a work-order sheet is configured but the
+                connector is not connected.
         """
         if self._config.work_orders is None:
             return []
-        wanted_status = str(getattr(status, "value", status))
+        if not self._connected:
+            raise ConnectorError("Not connected — call connect() before reading")
+        wanted_status = str(getattr(status, "value", status) or "")
         return [
             wo
             for wo in self._wo_cache
@@ -597,15 +762,18 @@ class ExcelCsvConnector:
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Append a new work order row to the spreadsheet.
 
-        Idempotent on the work-order ID: re-creating a work order whose ID is
-        already in the sheet returns the existing record instead of appending
-        a duplicate row. The agent runtime and the MCP tools derive
-        deterministic IDs and rely on this to collapse retries.
+        The sheet is re-read first, so rows added or removed by other
+        programs since ``connect()`` count. Idempotent on the work-order ID:
+        re-creating a work order whose ID is already in the sheet returns the
+        existing record instead of appending a duplicate row. The agent
+        runtime and the MCP tools derive deterministic IDs and rely on this
+        to collapse retries. The new row's values go under the matching
+        column headers, whatever the column order in the file.
 
         Raises:
             ConnectorConfigError: If no writable work-orders sheet is configured.
             ConnectorLockedError: If the file is open in another program.
-            ConnectorError: If the file cannot be written.
+            ConnectorError: If the file cannot be read or written.
         """
         schema = self._config.work_orders
         if schema is None:
@@ -617,6 +785,8 @@ class ExcelCsvConnector:
         path = Path(schema.path)
 
         async with self._write_lock:
+            # The file, not the connect-time cache, is the source of truth.
+            await asyncio.to_thread(self._validate_and_load_work_orders)
             existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
             if existing is not None:
                 logger.info(
@@ -651,24 +821,28 @@ class ExcelCsvConnector:
         assigned_to: str | None = None,
         description: str | None = None,
     ) -> WorkOrder:
-        """Update a work order in cache and persist to file.
+        """Update a work order and persist the changed cells to the file.
 
         Accepts the changes as an ``updates`` dict, as keyword arguments (the
-        shape the agent runtime and MCP tools use), or both; keyword values
-        override dict entries. A status change goes through
-        :meth:`WorkOrder.transition_to`, so only the work-order lifecycle's
-        allowed transitions succeed.
+        shape the MCP tools use), or both; keyword values override dict
+        entries. A status change goes through :meth:`WorkOrder.transition_to`,
+        so only the work-order lifecycle's allowed transitions succeed; asking
+        for the status the work order already has changes nothing, so a
+        retried update succeeds.
 
-        When ``write_mode`` is configured, a full rewrite from cache is
-        performed for both xlsx and csv files, so the change is durable
-        across restarts; if the rewrite fails, the cached work order is
-        restored. When no ``write_mode`` is set, the update is kept in cache
-        only.
+        When ``write_mode`` is configured, the sheet is re-read and only the
+        changed cells of the work order's row are written, in place: other
+        rows, columns and sheets are left as they are, and the write goes
+        through a temp file and an atomic replace. A change to a field that
+        no column is mapped to is refused rather than silently dropped. If
+        the write fails, the cached work order is restored. When no
+        ``write_mode`` is set, the update is kept in cache only.
 
         Raises:
             ConnectorError: If the work order is unknown, the status is not a
-                valid or allowed transition, or the file cannot be written
-                (:class:`ConnectorLockedError` when it is open elsewhere).
+                valid or allowed transition, a changed field has no column, or
+                the file cannot be written (:class:`ConnectorLockedError` when
+                it is open elsewhere).
         """
         changes = dict(updates or {})
         for key, value in (
@@ -687,36 +861,40 @@ class ExcelCsvConnector:
                 raise ConnectorError(f"Invalid work order status {raw_status!r}") from exc
 
         schema = self._config.work_orders
-        # Serialise the cache mutation together with the rewrite under the
-        # write lock: the rewrite reads the whole cache from a worker thread,
-        # so a concurrent update mutating the cache must not interleave.
+        persist = schema is not None and schema.write_mode is not None
+        # Serialise the reload, the cache mutation and the file write under
+        # the write lock so concurrent writes cannot interleave.
         async with self._write_lock:
+            if persist:
+                await asyncio.to_thread(self._validate_and_load_work_orders)
             idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
             if idx is None:
-                raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
+                raise ConnectorError(f"Work order '{work_order_id}' not found")
             wo = self._wo_cache[idx]
             before = wo.model_copy(deep=True)
+            changed: set[str] = set()
             try:
-                if new_status is not None:
+                if new_status is not None and new_status != wo.status:
                     try:
                         wo.transition_to(new_status)
                     except ValueError as exc:
                         raise ConnectorError(str(exc)) from exc
+                    changed |= {"status", "updated_at"}
                 for key, value in changes.items():
                     if hasattr(wo, key):
                         setattr(wo, key, value)
-                if schema and schema.write_mode:
-                    # Full rewrite from cache for both xlsx and csv so the
-                    # change is durable, not cache-only (lost on restart).
+                        changed.add(key)
+                if persist and changed:
+                    assert schema is not None
                     path = Path(schema.path)
                     try:
-                        await asyncio.to_thread(self._rewrite_work_orders, schema)
+                        await asyncio.to_thread(self._update_row_in_file, schema, wo, changed)
                     except OSError as exc:
                         raise _file_write_error(exc, path) from exc
             except Exception:
                 self._wo_cache[idx] = before
                 raise
-        if not (schema and schema.write_mode):
+        if not persist:
             logger.warning(
                 "update_not_persisted",
                 connector="ExcelCsvConnector",
@@ -734,59 +912,31 @@ class ExcelCsvConnector:
         )
         return wo
 
-    def _rewrite_work_orders(self, schema: SheetSchema) -> None:
-        """Rewrite all work orders from cache, dispatching by file format."""
+    def _update_row_in_file(self, schema: SheetSchema, wo: WorkOrder, fields: set[str]) -> None:
+        """Write the given fields of one work order to its row, in place.
+
+        Raises:
+            ConnectorError: If a changed field has no mapped column, the
+                schema maps no ID column, or the row is not in the file.
+        """
+        by_field = {m.field: m.column for m in schema.columns}
+        # updated_at is written when mapped and skipped otherwise; every other
+        # changed field must have a column, or the change would be lost.
+        unmapped = sorted(f for f in fields if f not in by_field and f != "updated_at")
+        if unmapped:
+            raise ConnectorError(
+                f"Cannot persist {', '.join(unmapped)} to {Path(schema.path).name}: "
+                "no column is mapped to it in the work_orders schema"
+            )
+        if "id" not in by_field:
+            raise ConnectorSchemaError("The work_orders schema maps no column to 'id'")
+        row = self._work_order_to_row(wo, schema)
+        values = {by_field[f]: row.get(f) for f in sorted(fields) if f in by_field}
         path = Path(schema.path)
         if path.suffix.lower() == ".csv":
-            self._rewrite_csv(path, schema)
+            _update_csv_row(path, by_field["id"], wo.id, values)
         else:
-            self._rewrite_xlsx(path, schema)
-
-    def _rewrite_xlsx(self, path: Path, schema: SheetSchema) -> None:
-        """Rewrite all work orders to the xlsx file from cache.
-
-        Writes to a temp sibling then atomically replaces the target, so a
-        crash or error mid-write cannot truncate the existing file.
-        """
-        openpyxl = _require_openpyxl()
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = schema.sheet
-            ws.append([m.column for m in schema.columns])
-            for wo in self._wo_cache:
-                row_data = self._work_order_to_row(wo, schema)
-                row_values = [row_data.get(m.field) for m in schema.columns]
-                ws.append(row_values)
-            wb.save(str(tmp))
-            wb.close()
-            tmp.replace(path)
-        except Exception:
-            # Don't leave a partial/orphaned temp file behind on failure.
-            tmp.unlink(missing_ok=True)
-            raise
-
-    def _rewrite_csv(self, path: Path, schema: SheetSchema) -> None:
-        """Rewrite all work orders to the CSV file from cache (header + rows).
-
-        Writes to a temp sibling then atomically replaces the target, so a
-        crash or error mid-write cannot truncate the existing file.
-        """
-        columns = [m.column for m in schema.columns]
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            with tmp.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=columns)
-                writer.writeheader()
-                for wo in self._wo_cache:
-                    row_data = self._work_order_to_row(wo, schema)
-                    writer.writerow({m.column: row_data.get(m.field, "") for m in schema.columns})
-            tmp.replace(path)
-        except Exception:
-            # Don't leave a partial/orphaned temp file behind on failure.
-            tmp.unlink(missing_ok=True)
-            raise
+            _update_xlsx_row(path, schema, by_field["id"], wo.id, values)
 
     # ------------------------------------------------------------------
     # Cache refresh (called by watcher)

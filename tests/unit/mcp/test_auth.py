@@ -51,6 +51,43 @@ class TestStaticBearerTokenVerifier:
         assert a is not None and a.client_id == "service-a"
         assert b is not None and b.client_id == "service-b"
 
+    def test_a_config_object_is_not_a_token_map(self) -> None:
+        """dict(config) would turn config field names into accepted tokens."""
+        from machina.config.schema import MachinaConfig
+
+        with pytest.raises(TypeError, match="token -> client_id"):
+            StaticBearerTokenVerifier(MachinaConfig())  # type: ignore[arg-type]
+
+    def test_non_string_entries_are_refused(self) -> None:
+        with pytest.raises(TypeError):
+            StaticBearerTokenVerifier({"tok": 1})  # type: ignore[dict-item]
+
+
+class TestBuildVerifier:
+    def test_static_verifier_as_token_verifier_class_is_refused(self) -> None:
+        """Naming the built-in verifier must not start a server that accepts
+        config field names (name, description, ...) as bearer tokens."""
+        from machina.config.schema import MachinaConfig, McpConfig
+        from machina.mcp.auth import build_verifier
+
+        config = MachinaConfig(
+            mcp=McpConfig(token_verifier_class="machina.mcp.auth.StaticBearerTokenVerifier")
+        )
+        env = {"MACHINA_MCP_TOKENS_JSON": "", "MACHINA_MCP_TOKENS": ""}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            pytest.raises(ConnectorError, match="built-in static verifier"),
+        ):
+            build_verifier(config)
+
+    def test_verifier_outside_the_machina_namespace_is_refused(self) -> None:
+        from machina.config.schema import MachinaConfig, McpConfig
+        from machina.mcp.auth import build_verifier
+
+        config = MachinaConfig(mcp=McpConfig(token_verifier_class="os.system"))
+        with pytest.raises(ConnectorError, match="allowed namespace"):
+            build_verifier(config)
+
 
 class TestLoadTokensFromEnv:
     def test_json_env_var(self) -> None:

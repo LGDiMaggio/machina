@@ -50,9 +50,10 @@ connectors:
           insert_columns: {id: WO_ID, asset_id: EQUIP_ID, description: WO_DESC}
 ```
 
-Keep the DSN in the environment: it usually carries credentials. Errors never
-echo it, and the connection log shows it redacted. Unknown settings keys are
-refused with an error that names them.
+Keep the DSN in the environment: it usually carries credentials. Connection
+errors and the connection log show it redacted. Unknown top-level settings
+keys are refused with an error that names them; a misspelled key inside a
+table or field mapping is ignored, so check those by hand.
 
 ### Mapping reference
 
@@ -109,11 +110,19 @@ a validated `SqlConnectorConfig` (from `machina.connectors.sql.schema`) as
 | `create_work_order` | `capabilities: read_write` | Parameterized `INSERT` into `insert_table` |
 | `read_failure_modes` | a `FailureMode` mapping is configured | The failure-mode catalog |
 
-`create_work_order` is idempotent on the work-order ID: if the ID already
-exists, the existing record is returned and nothing is inserted. It needs
-`insert_table` and `insert_columns` on the `WorkOrder` mapping. Updating work
-orders is not supported, and spare parts and maintenance history are not read
-from SQL. With sandbox mode on, the insert never runs (`@sandbox_aware`).
+`create_work_order` needs `insert_table` and `insert_columns` on the
+`WorkOrder` mapping, and `insert_columns` should include `id`, so the row is
+stored under Machina's deterministic work-order ID. It is then idempotent on
+that ID: before inserting, it runs the `WorkOrder` query and, if a row with
+the same ID is there, returns that record and inserts nothing. The check and
+the insert run under one lock inside the process; another process writing to
+the same table can still race it, so give the ID column a unique constraint.
+The check reads the whole `WorkOrder` query, so keep that query selective on a
+large table.
+
+Updating work orders is not supported, and spare parts and maintenance history
+are not read from SQL. With sandbox mode on, neither the check nor the insert
+runs (`@sandbox_aware`).
 
 ## Use Cases
 

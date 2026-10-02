@@ -6,6 +6,7 @@ the dict-to-entity construction logic.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -102,8 +103,37 @@ def dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
     )
 
 
+def _timestamp(value: Any) -> datetime | None:
+    """Return a datetime for a coerced cell, or ``None`` when it is not one.
+
+    ``datetime`` and ``date`` values pass (a date becomes midnight), as do
+    ISO 8601 strings; anything else is treated as absent, so one odd cell
+    cannot make a whole sheet unreadable.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
-    """Build a WorkOrder from a coerced field dict."""
+    """Build a WorkOrder from a coerced field dict.
+
+    ``failure_mode``, ``created_at`` and ``updated_at`` are carried over when
+    the source has them; otherwise the model defaults apply (a fresh
+    timestamp, no failure mode).
+    """
+    timestamps = {
+        field: stamp
+        for field in ("created_at", "updated_at")
+        if (stamp := _timestamp(d.get(field))) is not None
+    }
     return WorkOrder(
         id=str(d.get("id", "")),
         type=d.get("type", WorkOrderType.CORRECTIVE),
@@ -113,5 +143,7 @@ def dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
         description=str(d.get("description", "")),
         assigned_to=d.get("assigned_to"),
         estimated_duration_hours=d.get("estimated_duration_hours"),
+        failure_mode=str(d["failure_mode"]) if d.get("failure_mode") else None,
+        **timestamps,
         metadata={k: v for k, v in d.items() if k not in WorkOrder.model_fields},
     )

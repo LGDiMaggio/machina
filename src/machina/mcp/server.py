@@ -420,6 +420,9 @@ def serve(
         _configure_logging(config)
         build_server(config, transport="stdio").run(transport="stdio")
     elif transport == "streamable-http":
+        # uvicorn ships with the MCP SDK: check for the SDK first so a missing
+        # extra gets the install hint, not a bare ModuleNotFoundError.
+        _require_fastmcp()
         import uvicorn  # type: ignore[import-not-found,unused-ignore]
 
         _configure_logging(config)

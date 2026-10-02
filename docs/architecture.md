@@ -79,12 +79,16 @@ connector. When a message comes in, the runtime:
    chunks carry IDs the model can cite) and the conversation history.
 5. **Runs the tool loop.** The LLM is called with the tools its connectors
    enable, for up to five iterations. Read results are reused within the turn.
-   Every write passes three gates: the *resolution-authority* gate (a work
-   order is created only for an asset this turn resolved), the
-   *human-in-the-loop* confirmation (on by default — the CLI asks y/N,
-   asynchronous channels confirm on the next message), and *sandbox* mode
-   (the connector's `@sandbox_aware` guard turns the write into a logged
-   no-op). A write repeated within the turn is not executed twice.
+   The two writing tools are gated. `create_work_order` must target an asset
+   this turn resolved — the *resolution-authority* gate, applied in sandbox
+   mode too. Outside sandbox, `create_work_order` and `execute_workflow` then
+   wait for a *human-in-the-loop* confirmation (on by default — the CLI asks
+   y/N, asynchronous channels confirm on the next message). In *sandbox* mode
+   there is nothing to confirm: the agent logs the proposed work order and
+   returns it without calling the connector, a workflow runs with its write
+   steps replaced by placeholders, and the connectors' `@sandbox_aware` guard
+   blocks any write that would still reach them. A write repeated within the
+   turn is not executed twice.
 6. **Finalizes the turn**: citations are parsed and checked against the
    chunks retrieved this turn, guards stop leaked tool-call text and echoed
    output from reaching the user, and the history is updated before the
@@ -166,7 +170,8 @@ Agent.handle_message()
     │
     ├──► _llm_loop() — LLM with the enabled tools (≤ 5 iterations)
     │    ├── reads: search_assets, read_work_orders, check_spare_parts, …
-    │    ├── writes: resolution-authority → confirmation → sandbox
+    │    ├── writes: authority gate → sandbox: logged, not run
+    │    │                          → live: confirmation → connector
     │    └── final text
     │
     ├──► _finalize_turn() — citations, output guards, history

@@ -129,9 +129,10 @@ class GenericSqlConnector:
         ```
     """
 
-    # Capabilities available regardless of configuration. Write capabilities
-    # (CREATE_WORK_ORDER / UPDATE_WORK_ORDER) and READ_FAILURE_MODES are
-    # config-driven and added in __init__ — they are NOT part of the base set.
+    # Capabilities available regardless of configuration. CREATE_WORK_ORDER
+    # and READ_FAILURE_MODES are config-driven and added in __init__ — they
+    # are NOT part of the base set. UPDATE_WORK_ORDER is never declared
+    # (update_work_order is a stub).
     # Exposed as a ClassVar so framework introspection can read the base set
     # off the class without instantiating the connector (which needs a parsed
     # config). __init__ derives the live capability set from this constant, so
@@ -160,6 +161,13 @@ class GenericSqlConnector:
         self._config = config
         self._conn: Any = None
         self._connected = False
+        # One DB-API connection is shared by every caller (the MCP HTTP server
+        # serves concurrent requests from one connector), and DB-API
+        # connections are not safe to use from several threads at once:
+        # every database call goes through _db_lock. _write_lock additionally
+        # holds the idempotency probe and the INSERT together.
+        self._db_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
@@ -306,10 +314,12 @@ class GenericSqlConnector:
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Insert a new work order row into the database.
 
-        Idempotent on the work-order ID: when a row with the same ID is
+        Idempotent on the work-order ID within this process: the ID probe and
+        the INSERT run under one lock, and when a row with the same ID is
         already readable through the WorkOrder mapping, that record is
         returned and nothing is inserted. The agent runtime and the MCP tools
-        derive deterministic IDs and rely on this to collapse retries.
+        derive deterministic IDs and rely on this to collapse retries. Across
+        processes, a unique constraint on the ID column is the backstop.
         """
         if Capability.CREATE_WORK_ORDER not in self._capabilities:
             raise ConnectorConfigError(
@@ -322,19 +332,25 @@ class GenericSqlConnector:
             raise ConnectorConfigError("No insert_table configured for WorkOrder mapping")
         if not mapping.insert_columns:
             raise ConnectorConfigError("No insert_columns configured for WorkOrder mapping")
-        existing = next(
-            (wo for wo in await self.read_work_orders() if wo.id == work_order.id), None
-        )
-        if existing is not None:
-            logger.info(
-                "work_order_create_idempotent_hit",
-                connector="GenericSqlConnector",
-                operation="create_work_order",
-                work_order_id=work_order.id,
-                asset_id=work_order.asset_id,
-            )
-            return existing
-        await self._execute_write(mapping, work_order.model_dump())
+        async with self._write_lock:
+            # Probe the mapped rows by ID rather than building every row into
+            # a WorkOrder: one legacy row with an unmapped status must not
+            # block every create.
+            rows = await self._execute_read(mapping)
+            match = next((r for r in rows if str(r.get("id", "")) == work_order.id), None)
+            if match is not None:
+                logger.info(
+                    "work_order_create_idempotent_hit",
+                    connector="GenericSqlConnector",
+                    operation="create_work_order",
+                    work_order_id=work_order.id,
+                    asset_id=work_order.asset_id,
+                )
+                try:
+                    return _dict_to_work_order(match)
+                except (ValidationError, ValueError, TypeError):
+                    return work_order
+            await self._execute_write(mapping, work_order.model_dump())
         logger.info(
             "work_order_created",
             connector="GenericSqlConnector",
@@ -420,7 +436,8 @@ class GenericSqlConnector:
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                return await asyncio.to_thread(self._read_sync, mapping)
+                async with self._db_lock:
+                    return await asyncio.to_thread(self._read_sync, mapping)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
@@ -458,7 +475,8 @@ class GenericSqlConnector:
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                return await asyncio.to_thread(self._execute_insert, mapping, data)
+                async with self._db_lock:
+                    return await asyncio.to_thread(self._execute_insert, mapping, data)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
@@ -483,7 +501,11 @@ class GenericSqlConnector:
                     raise ConnectorTransientError(
                         f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
                     ) from exc
-                raise
+                if isinstance(exc, ConnectorError):
+                    raise
+                # Same contract as _execute_read: callers handle ConnectorError,
+                # so a raw driver exception must not escape a write either.
+                raise ConnectorError(f"SQL write failed: {exc}") from exc
 
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
         if self._conn is None:

@@ -2,7 +2,10 @@
 
 Machina registers three prompt templates that MCP clients offer to the user
 (for example in the slash menu). Each one renders a step-by-step instruction
-for the client's model, naming the Machina tools to use.
+for the client's model describing what to look up. Only
+`diagnose_asset_failure` names a tool (`machina_get_asset`); its ranking step
+refers to a diagnosis tool that the MCP server does not offer, so the
+capability-honesty guard below has the model say so instead of simulating it.
 
 ## Available Prompts
 
@@ -65,5 +68,6 @@ Each rendered prompt ends with two fixed instructions:
 
 MCP clients fetch prompts with the standard prompt protocol. The three
 prompts are registered whatever the configured connectors are, and their
-steps name tools that a given server may not offer; the capability-honesty
-guard tells the model to report a missing tool rather than work around it.
+steps call for data that a given server may not offer; the
+capability-honesty guard tells the model to report a missing tool rather than
+work around it.

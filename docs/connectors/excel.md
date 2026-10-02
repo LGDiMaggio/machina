@@ -52,7 +52,9 @@ connectors:
 ```
 
 At least one of `asset_registry`, `work_orders` and `failure_modes` must be
-configured. Unknown settings keys are refused with an error that names them.
+configured. Unknown top-level settings keys are refused with an error that
+names them; a misspelled key inside a sheet schema or a column mapping is
+ignored, so check those by hand.
 The [starter kit](../starter-kits/odl-generator-from-text.md) ships a complete,
 runnable example.
 
@@ -67,8 +69,10 @@ runnable example.
 | `default` | `null` | Value used when the cell is empty |
 | `coerce` | — | Named converter: `float_it`, `int_it`, `bool_it`, `date_parse`, `italian_date`, `datetime_parse`, `strip` |
 
-`connect()` checks every configured header against the file and fails on a
-missing column or an unknown `coerce` name. Multi-valued cells (the asset
+`connect()` fails when a `required` column is missing from the file or a
+`coerce` name is unknown. An optional column missing from the file is not an
+error: its field reads as the column's `default` on every row. Multi-valued
+cells (the asset
 `failure_modes` and `aliases` columns, and the failure-mode list fields
 `detection_methods`, `typical_indicators`, `recommended_actions`) hold a
 semicolon-delimited string, e.g. `"BEAR-WEAR-01;SEAL-LEAK-01"`. A sample
@@ -95,7 +99,8 @@ assets = await connector.read_assets()
 
 The keyword arguments are the same as the YAML `settings`; alternatively pass
 a validated `ExcelConnectorConfig` (from `machina.connectors.docs.excel_schema`)
-as `config=`.
+as `config=`. Call `connect()` first: reading a configured sheet before it
+raises `ConnectorError`.
 
 ## Capabilities
 
@@ -111,18 +116,32 @@ Spare parts are not read from spreadsheets.
 
 ## Writes
 
-- **Create** appends one row. It is idempotent on the work-order ID: creating
-  a work order whose ID is already in the sheet returns the existing record
-  instead of adding a duplicate row. A missing work-order file is created on
-  the first write, with the header row.
+Reads are served from what `connect()` (or `refresh()`) loaded. Writes
+re-read the work-order sheet first, so rows other programs added or removed
+since then count.
+
+- **Create** appends one row, placing each value under its column header in
+  the file's own column order; columns the schema does not map stay empty. It
+  is idempotent on the work-order ID: creating a work order whose ID is already
+  in the sheet returns the existing record instead of adding a duplicate row.
+  A missing work-order file or sheet is created on the first write, with the
+  schema's header row.
 - **Update** applies only legal status transitions (an illegal one, or an
-  unknown status, raises `ConnectorError`), then rewrites the sheet from the
-  in-memory cache to a temporary sibling and atomically replaces the file, so a
-  crash mid-write cannot truncate it. If the write fails, the cached record is
-  restored.
-- A file open in another program raises `ConnectorLockedError`.
+  unknown status, raises `ConnectorError`); asking for the status the work
+  order already has changes nothing. It then writes only the changed cells of
+  that work order's row: other rows, columns and sheets stay as they are, and
+  the file is written to a temporary sibling and atomically replaced, so a
+  crash mid-write cannot truncate it. A change to a field that no column is
+  mapped to is refused with `ConnectorError` rather than silently dropped. If
+  the write fails, the cached record is restored. Without a `write_mode`,
+  `update_work_order()` changes the in-memory copy only.
+- A file that is open in another program, or that the process may not write,
+  raises `ConnectorLockedError`.
 - `write_mode` accepts `append` or `overwrite`; either one makes the sheet
   writable — new work orders are always appended.
+- An `.xlsx` file is saved back through openpyxl, which drops charts and
+  images it cannot read; keep the work-order sheet in a workbook of its own
+  rather than in one with charts or pictures.
 
 **Formula injection is neutralised on write.** A cell value that starts with
 a spreadsheet formula trigger (`=`, `+`, `-`, `@`) is written with a leading

@@ -2,6 +2,7 @@
 
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -71,6 +72,22 @@ class TestLoadYaml:
         data = load_yaml(cfg)
         assert data["column"] == "Criticità"
         assert data["note"] == "Priorità — alta"
+
+    def test_opens_the_file_as_utf8(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The round-trip above passes on any UTF-8-locale host with or without
+        the fix; the encoding argument is what protects a cp1252 Windows host."""
+        cfg = tmp_path / "test.yaml"
+        cfg.write_bytes("column: Criticità\n".encode())
+        encodings: list[str | None] = []
+        real_open = Path.open
+
+        def spy_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+            encodings.append(kwargs.get("encoding"))
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", spy_open)
+        load_yaml(cfg)
+        assert encodings == ["utf-8"]
 
 
 class TestEnvVarDefaults:

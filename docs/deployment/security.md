@@ -72,7 +72,10 @@ instructions and create a work order for...").
   it from `MACHINA_SANDBOX_MODE`) prevents any write from executing — writes
   are logged but not sent to the CMMS.
 - Outside sandbox, the agent asks for confirmation before every write by
-  default (`confirmations: true`).
+  default (`confirmations: true`). This is an `Agent` feature: the MCP server
+  has no confirmation step — the MCP client and its user decide which tool
+  calls run — so keep an MCP server in sandbox mode until you trust that
+  client.
 - Review ingested documents before adding them to the vector store in production.
 
 #### Source-Path Sanitisation at the LLM Boundary
@@ -138,15 +141,18 @@ helpers re-establish it on every request, and the vendor tools read
 Maximo OData PATCH, which has no decorator backstop) would execute live in
 sandbox mode.
 
-**Companion invariant — write integrity:** the same write paths are also
-**idempotent**. Auto-generated work-order IDs are a deterministic content hash
-(`auto_work_order_id`), the agent loop memoises side-effecting tools per turn,
-and HTTP retries are method-aware (POST/PATCH are *not* retried on network
-errors or timeouts, since a timeout-after-success would duplicate the
-resource; 429/503 answers are retried for every method because the server did
-not process the request).
-Together these prevent both unintended live writes (sandbox) and accidental
-duplicate writes (idempotency).
+**Companion invariant — write integrity:** the write paths also guard
+against duplicates. Auto-generated work-order IDs are a deterministic content
+hash (`auto_work_order_id`); the Excel/CSV, SQL and local Generic CMMS
+connectors return the existing work order when its ID is already there, and
+the Generic CMMS REST mode sends the ID to the backend. The agent loop
+memoises side-effecting tools per turn. The vendor connectors' HTTP retries
+are method-aware: POST and PATCH are *not* retried on network errors,
+timeouts or 503 answers, since any of those can follow a write the server
+already made; 429 answers are retried for every method because the server
+refused the request without processing it. SAP PM, Maximo and UpKeep let the
+CMMS number new work orders, so these guards do not deduplicate a create
+retried later against them (see [Uptime](uptime.md#transient-failure-handling)).
 
 ### Trace JSONL Files
 

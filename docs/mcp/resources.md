@@ -54,6 +54,13 @@ The full `WorkOrder` record: ID, type, priority, status, asset ID,
 description, assignee, failure mode and timestamps. An unknown ID returns an
 `error` entry, as for assets.
 
+Reading one work order needs a primary CMMS that declares `get_work_order`:
+SAP PM, Maximo, UpKeep, and the Generic CMMS connector in local mode or with a
+`get_work_order` endpoint configured. The Excel/CSV and SQL connectors list
+work orders but cannot read a single one, so with either as the primary CMMS
+this resource returns an `error` entry; use the `machina_list_work_orders`
+tool instead.
+
 ## Failure Taxonomy
 
 **URI:** `machina://v1/failure-taxonomy`

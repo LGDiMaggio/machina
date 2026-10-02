@@ -20,24 +20,33 @@ entire class of state-corruption bugs.
 The SAP PM, Maximo and UpKeep connectors send their HTTP calls through
 `request_with_retry` (`machina.connectors.cmms.retry`):
 
-- **Retried responses:** HTTP 429 (Too Many Requests) and 503 (Service
-  Unavailable), for every method — they mean the server did not process the
-  request.
+- **Retried responses:** HTTP 429 (Too Many Requests) for every method — the
+  server refused the request without processing it — and HTTP 503 (Service
+  Unavailable) for idempotent methods only, because a gateway can answer 503
+  after the backend already processed a POST or PATCH.
 - **Retried network errors:** `TimeoutException`, `ConnectError`, `ReadError`,
   for idempotent methods only (GET, HEAD, OPTIONS, PUT, DELETE). A POST or
   PATCH fails fast, because a timeout after a successful create would
   otherwise produce a duplicate.
 - **Strategy:** exponential backoff — `min(0.5 s × 2^attempt, 8 s)`, up to 3
-  retries; `Retry-After` honored on 429 (numeric seconds).
+  retries. A numeric `Retry-After` header on a retried 429 or 503 replaces the
+  computed delay and is not capped.
 - **Other errors:** 4xx (except 429) and 5xx (except 503) return immediately —
   the connector raises its own exception.
 
 The Generic CMMS connector's REST mode makes single attempts, without retries.
 
-If the CMMS stays down past the retry window (~15 seconds), the operation
-fails and the error reaches the agent or MCP client. Machina does not queue
-failed writes; work-order IDs are deterministic, so retrying the same create
-later does not duplicate it on a backend that honors client IDs.
+The retry window is short: about 3.5 seconds of backoff (0.5 + 1 + 2 s) plus
+each attempt's own timeout, longer only when the server sends `Retry-After`. If
+the CMMS stays down past it, the operation fails and the error reaches the
+agent or MCP client. Machina does not queue failed writes.
+
+Work-order IDs are deterministic, but only some connectors use them to avoid
+duplicates: the Excel/CSV and SQL connectors and the Generic CMMS connector's
+local mode return the existing work order when its ID is already there, and
+the Generic CMMS REST mode sends the ID to the backend (unless a
+`reverse_fields` mapping leaves it out), which may or may not honor it. SAP PM, Maximo and UpKeep let the CMMS number new work orders, so a
+create retried later can produce a second one — check for it before retrying.
 
 ### OPC-UA Connector
 
@@ -121,7 +130,8 @@ sandbox mode and the package version:
 A connector that failed to connect at startup is logged
 (`runtime_connector_failed`, then `runtime_partial_startup`) and still listed;
 the server keeps serving the healthy ones, and calls that reach the failed
-connector return errors.
+connector return errors. Machina does not retry the connection: restart the
+server once the backend is reachable again.
 
 ## Monitoring Recommendations
 

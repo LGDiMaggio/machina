@@ -11,8 +11,11 @@ connector capabilities  →  CAPABILITY_TO_TOOL  →  registered tools
 
 Each tool talks to one connector: CMMS tools to the primary CMMS (the
 connector marked `primary: true`, otherwise the first one that reads assets),
-the others to the first connector with the needed capability. The
-[capability matrix](../capabilities.md) shows which connector declares what.
+the others to the first connector with the needed capability. Registration
+looks at every configured connector, dispatch only at that one: a CMMS tool
+turned on by a secondary CMMS still calls the primary, and fails when the
+primary cannot serve it. The [capability matrix](../capabilities.md) shows
+which connector declares what.
 
 ## Domain Tools
 
@@ -54,16 +57,31 @@ host paths. Its `filters` keys are `asset_id`, `doc_type`,
 | `machina_send_message` | `send_message` | `channel`, `text` |
 
 `priority` is one of `emergency`, `high`, `medium`, `low`; `work_order_type`
-is one of `corrective`, `preventive`, `predictive`, `improvement`; `status` is
-one of `created`, `assigned`, `in_progress`, `completed`, `closed`,
-`cancelled`. `machina_create_work_order` checks that the asset exists first,
-and derives the work-order ID from the content, so repeating the same call
-yields the same ID. `channel` in `machina_send_message` is the chat ID
-(Telegram), the channel name (Slack) or the e-mail address (Email).
+is one of `corrective`, `preventive`, `predictive`, `improvement`; `status` in
+`machina_update_work_order` is one of `created`, `assigned`, `in_progress`,
+`completed`, `closed`, `cancelled`. `machina_create_work_order` checks that
+the asset exists first, and derives the work-order ID from the content, so
+repeating the same call yields the same ID; whether the connector uses that ID
+to avoid a duplicate depends on the connector (see
+[Uptime](../deployment/uptime.md#transient-failure-handling)). The `reason` of
+`machina_cancel_work_order` is not sent to the CMMS — only the sandbox result
+repeats it. `channel` in `machina_send_message` is the chat ID (Telegram), the
+channel name (Slack) or the e-mail address (Email).
 
-Capabilities with no tool — the calendar capabilities, `read_failure_modes`,
-and the OPC-UA/MQTT subscription capabilities — are simply not exposed over
-MCP.
+The `status` filter of `machina_list_work_orders` is passed to the connector
+as given: the Generic CMMS, Excel/CSV and SQL connectors compare it with the
+values above, while SAP PM, Maximo and UpKeep expect their own status codes
+(for example `REL` on SAP PM).
+
+The MCP server has no human-in-the-loop confirmation: a write tool runs when
+the client calls it, and which calls happen is up to the MCP client and its
+user. Keep the server in sandbox mode until you trust both.
+
+Capabilities with no tool are not exposed over MCP: the calendar
+capabilities, `read_failure_modes`, `receive_message`, `retrieve_section`,
+`get_related_readings`, and the OPC-UA and MQTT capabilities
+(`browse_nodes`, `read_node_value`, `read_node_values`, `subscribe_to_nodes`,
+`subscribe_to_topics`, `publish_message`).
 
 ## Vendor Tools (opt-in)
 
@@ -92,15 +110,23 @@ messaging service. They return a synthesized result marked as such:
 }
 ```
 
-The block is enforced at the connector boundary by the `@sandbox_aware`
-decorator, so it applies however a write is reached: MCP, the agent runtime,
-or direct calls. The vendor tools check sandbox mode themselves before
-calling the vendor API.
+The write tools call the connector as usual; its `@sandbox_aware` guard
+raises `SandboxViolationError` before anything is written, and the tool turns
+that into the result above. The guard sits at the connector boundary, so it
+also backs the agent runtime and workflows, and a direct Python call to a
+connector write method in sandbox mode raises the exception instead of
+returning a result. Reads still run: `machina_create_work_order` looks the
+asset up in the CMMS before the guard stops the write. The vendor tools check
+sandbox mode themselves before calling the vendor API.
 
 ## Error Handling
 
-Most connector failures and missing records come back as an `error` entry in
-the result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
-model can read them. A tool that raises — such as
-`machina_create_work_order` on an unknown asset — surfaces as an MCP error
-result carrying the exception message; the Python traceback is not sent.
+Missing records and missing connectors come back as an `error` entry in the
+result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
+model can read them; so do an invalid `status` in `machina_update_work_order`,
+an alarm source without `get_alarms()`, and connector failures in
+`machina_list_assets`, `machina_get_maintenance_history` and
+`machina_send_message`. Any other connector failure — and
+`machina_create_work_order` on an unknown asset — raises: the client receives
+an MCP error result carrying the exception message; the Python traceback is
+not sent.

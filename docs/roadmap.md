@@ -8,8 +8,9 @@ Released 2026-10-02. Highlights (full list in the [changelog](changelog.md)):
   with bearer-token auth, 15 capability-gated tools, 4 resources and 3 prompts,
   plus a working Docker/systemd deployment.
 - **Runtime-enforced write safety**: human-in-the-loop confirmation on by
-  default, a resolution-authority gate on every write, sandbox mode at the
-  connector boundary, and idempotent work-order creation.
+  default in the agent, a resolution-authority gate on work-order creation,
+  sandbox mode at the connector boundary, and work-order creation that is
+  idempotent on the Generic CMMS, Excel/CSV and SQL connectors.
 - **Substrates from YAML**: the Excel/CSV, SQL and Generic CMMS connectors (and
   the vendor CMMS auth blocks) build from a `machina.yaml`, failure-mode
   catalogs are a declared capability, and the `odl-generator-from-text` starter

@@ -38,8 +38,9 @@ pip install machina-ai[all]          # Everything
 
 - :material-sitemap: **[Architecture](architecture.md)**
 
-    The five-layer architecture: connectors, domain model, agent runtime,
-    LLM abstraction, and observability. How data flows end-to-end.
+    The layers — connectors, domain model, agent runtime, workflow engine,
+    LLM abstraction and observability — with the MCP server beside them. How
+    data flows end-to-end.
 
 - :material-puzzle: **[Custom Connectors](connectors/custom.md)**
 

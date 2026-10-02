@@ -101,7 +101,7 @@ agent you run yourself, attach a JSONL exporter — see
 sudo systemctl stop machina
 sudo /opt/machina-venv/bin/pip install --upgrade "machina-ai[cmms-rest,mcp]"
 sudo systemctl start machina
-tail -n 50 /var/log/machina/machina.log  # verify clean startup
+tail -n 50 /var/log/machina/machina.log /var/log/machina/machina.err  # verify clean startup
 ```
 
 ### Docker

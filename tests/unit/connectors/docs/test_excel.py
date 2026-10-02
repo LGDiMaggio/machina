@@ -640,6 +640,90 @@ class TestCsvSupport:
         # Original file unchanged — not truncated by the failed rewrite.
         assert csv_file.read_text(encoding="utf-8-sig") == before
 
+    @pytest.mark.asyncio
+    async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """A field starting with a formula trigger is written with a leading
+        apostrophe (so a spreadsheet treats it as text), and round-trips back
+        to its original value through a fresh connector read."""
+        csv_file = tmp_path / "odl.csv"
+        schema = SheetSchema(
+            path=str(csv_file),
+            sheet="ignored",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=SUM(A1:A9)+cmd",
+            )
+        )
+        # On disk the trigger is neutralized with a leading apostrophe.
+        on_disk = csv_file.read_text(encoding="utf-8-sig")
+        assert "'=SUM(A1:A9)+cmd" in on_disk
+        assert ",=SUM" not in on_disk  # raw formula must not be present unguarded
+
+        # A fresh connector reads back the original value (clean round-trip).
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=SUM(A1:A9)+cmd"
+
+    @pytest.mark.asyncio
+    async def test_xlsx_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
+        """xlsx write neutralizes formula triggers (also stops openpyxl from
+        storing the value as a real formula) and round-trips."""
+        import openpyxl
+
+        xlsx_file = tmp_path / "odl.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "OdL"
+        ws.append(["ID", "Codice Asset", "Descrizione"])
+        wb.save(str(xlsx_file))
+        wb.close()
+        schema = SheetSchema(
+            path=str(xlsx_file),
+            sheet="OdL",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+            write_mode="append",
+        )
+        config = ExcelConnectorConfig(work_orders=schema)
+        conn = ExcelCsvConnector(config=config)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-001",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-001",
+                description="=HYPERLINK(0)",
+            )
+        )
+        wb2 = openpyxl.load_workbook(str(xlsx_file))
+        cell = wb2["OdL"].cell(row=2, column=3)
+        wb2.close()
+        # Stored as a text string (leading apostrophe), not a formula.
+        assert cell.data_type != "f"
+        assert cell.value == "'=HYPERLINK(0)"
+
+        conn2 = ExcelCsvConnector(config=config)
+        await conn2.connect()
+        reloaded = await conn2.read_work_orders()
+        assert reloaded[0].description == "=HYPERLINK(0)"
+
 
 def _flat_settings(tmp_path: Path) -> dict[str, object]:
     """The connector settings exactly as a ``machina.yaml`` entry carries them."""
@@ -759,10 +843,10 @@ class TestYamlSettingsAndCallContract:
     ) -> None:
         conn = await _connected_with_work_orders(tmp_path)
 
-        def _locked(schema: object) -> None:
+        def _locked(schema: object, wo: object, fields: object) -> None:
             raise PermissionError("workbook open in another program")
 
-        monkeypatch.setattr(conn, "_rewrite_work_orders", _locked)
+        monkeypatch.setattr(conn, "_update_row_in_file", _locked)
         with pytest.raises(ConnectorLockedError):
             await conn.update_work_order("WO-1", description="changed")
         (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
@@ -796,88 +880,232 @@ class TestYamlSettingsAndCallContract:
             ExcelCsvConnector(**settings)
 
     @pytest.mark.asyncio
-    async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
-        """A field starting with a formula trigger is written with a leading
-        apostrophe (so a spreadsheet treats it as text), and round-trips back
-        to its original value through a fresh connector read."""
-        csv_file = tmp_path / "odl.csv"
-        schema = SheetSchema(
-            path=str(csv_file),
-            sheet="ignored",
-            columns=[
-                ColumnMapping(column="ID", field="id", required=True),
-                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
-                ColumnMapping(column="Descrizione", field="description"),
-            ],
-            write_mode="append",
-        )
-        config = ExcelConnectorConfig(work_orders=schema)
-        conn = ExcelCsvConnector(config=config)
-        await conn.connect()
-        await conn.create_work_order(
-            WorkOrder(
-                id="WO-001",
-                type=WorkOrderType.CORRECTIVE,
-                asset_id="P-001",
-                description="=SUM(A1:A9)+cmd",
-            )
-        )
-        # On disk the trigger is neutralized with a leading apostrophe.
-        on_disk = csv_file.read_text(encoding="utf-8-sig")
-        assert "'=SUM(A1:A9)+cmd" in on_disk
-        assert ",=SUM" not in on_disk  # raw formula must not be present unguarded
-
-        # A fresh connector reads back the original value (clean round-trip).
-        conn2 = ExcelCsvConnector(config=config)
-        await conn2.connect()
-        reloaded = await conn2.read_work_orders()
-        assert reloaded[0].description == "=SUM(A1:A9)+cmd"
+    async def test_same_status_update_is_a_no_op(self, tmp_path: Path) -> None:
+        """A retried status update succeeds instead of failing the transition."""
+        conn = await _connected_with_work_orders(tmp_path)
+        await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+        again = await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+        assert again.status is WorkOrderStatus.ASSIGNED
 
     @pytest.mark.asyncio
-    async def test_xlsx_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
-        """xlsx write neutralizes formula triggers (also stops openpyxl from
-        storing the value as a real formula) and round-trips."""
+    async def test_update_of_an_unmapped_field_is_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        columns = settings["work_orders"]["columns"]  # type: ignore[index]
+        settings["work_orders"]["columns"] = [  # type: ignore[index]
+            c for c in columns if c["field"] != "assigned_to"
+        ]
+        conn = ExcelCsvConnector(**settings)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        with pytest.raises(ConnectorError, match="Cannot persist assigned_to"):
+            await conn.update_work_order("WO-1", assigned_to="Mario Rossi")
+        (wo,) = await conn.read_work_orders()
+        assert wo.assigned_to is None
+
+    @pytest.mark.asyncio
+    async def test_reads_before_connect_are_errors(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_assets()
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_work_orders()
+
+    @pytest.mark.asyncio
+    async def test_create_maps_a_locked_file_and_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        wo = WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="z")
+
+        def _locked(path: object, schema: object, row: object) -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_write_row", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.create_work_order(wo)
+        assert "WO-9" not in [w.id for w in await conn.read_work_orders()]
+
+        monkeypatch.undo()
+        await conn.create_work_order(wo)
+        content = (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+        assert content.count("WO-9") == 1
+
+    @pytest.mark.asyncio
+    async def test_create_maps_other_os_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _disk_full(path: object, schema: object, row: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(conn, "_write_row", _disk_full)
+        with pytest.raises(ConnectorError, match="Could not write"):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+
+
+class TestWritesPreserveTheFile:
+    """Writes touch only their own row: other sheets, rows and columns survive."""
+
+    @staticmethod
+    def _workbook(path: Path) -> None:
         import openpyxl
 
-        xlsx_file = tmp_path / "odl.xlsx"
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "OdL"
-        ws.append(["ID", "Codice Asset", "Descrizione"])
-        wb.save(str(xlsx_file))
+        ws.append(["ID", "Note", "Codice Asset", "Stato", "Descrizione"])
+        ws.append(["WO-1", "keep me", "P-201", "created", "first"])
+        ws.append(["WO-2", "and me", "C-3", "created", "second"])
+        other = wb.create_sheet("Asset")
+        other.append(["Codice", "Nome"])
+        other.append(["P-201", "Pompa A"])
+        wb.save(str(path))
         wb.close()
+
+    @staticmethod
+    def _config(path: Path) -> ExcelConnectorConfig:
+        return ExcelConnectorConfig(
+            work_orders=SheetSchema(
+                path=str(path),
+                sheet="OdL",
+                write_mode="append",
+                columns=[
+                    ColumnMapping(column="ID", field="id", required=True),
+                    ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                    ColumnMapping(column="Stato", field="status"),
+                    ColumnMapping(column="Descrizione", field="description"),
+                ],
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_xlsx_update_keeps_other_sheets_rows_and_columns(self, tmp_path: Path) -> None:
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", description="changed")
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            assert wb.sheetnames == ["OdL", "Asset"]
+            rows = list(wb["OdL"].iter_rows(values_only=True))
+            assert rows[1] == ("WO-1", "keep me", "P-201", "created", "changed")
+            assert rows[2] == ("WO-2", "and me", "C-3", "created", "second")
+            assert list(wb["Asset"].iter_rows(values_only=True))[1] == ("P-201", "Pompa A")
+        finally:
+            wb.close()
+
+    @pytest.mark.asyncio
+    async def test_xlsx_append_follows_the_file_column_order(self, tmp_path: Path) -> None:
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+            )
+        )
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            rows = list(wb["OdL"].iter_rows(values_only=True))
+            assert rows[3] == ("WO-3", None, "P-201", "created", "new")
+        finally:
+            wb.close()
+        fresh = ExcelCsvConnector(config=self._config(path))
+        await fresh.connect()
+        assert [wo.id for wo in await fresh.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_csv_append_follows_the_file_column_order(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_text(
+            "Descrizione,Note,ID,Codice Asset\nfirst,keep me,WO-1,P-201\n", encoding="utf-8"
+        )
         schema = SheetSchema(
-            path=str(xlsx_file),
-            sheet="OdL",
+            path=str(path),
+            sheet="ignored",
+            write_mode="append",
             columns=[
                 ColumnMapping(column="ID", field="id", required=True),
                 ColumnMapping(column="Codice Asset", field="asset_id", required=True),
                 ColumnMapping(column="Descrizione", field="description"),
             ],
-            write_mode="append",
         )
-        config = ExcelConnectorConfig(work_orders=schema)
-        conn = ExcelCsvConnector(config=config)
+        conn = ExcelCsvConnector(config=ExcelConnectorConfig(work_orders=schema))
         await conn.connect()
-        await conn.create_work_order(
-            WorkOrder(
-                id="WO-001",
-                type=WorkOrderType.CORRECTIVE,
-                asset_id="P-001",
-                description="=HYPERLINK(0)",
-            )
-        )
-        wb2 = openpyxl.load_workbook(str(xlsx_file))
-        cell = wb2["OdL"].cell(row=2, column=3)
-        wb2.close()
-        # Stored as a text string (leading apostrophe), not a formula.
-        assert cell.data_type != "f"
-        assert cell.value == "'=HYPERLINK(0)"
 
-        conn2 = ExcelCsvConnector(config=config)
-        await conn2.connect()
-        reloaded = await conn2.read_work_orders()
-        assert reloaded[0].description == "=HYPERLINK(0)"
+        await conn.create_work_order(
+            WorkOrder(id="WO-2", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="new")
+        )
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines == [
+            "Descrizione,Note,ID,Codice Asset",
+            "first,keep me,WO-1,P-201",
+            "new,,WO-2,C-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_sees_rows_added_after_connect(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        path = tmp_path / "odl.csv"
+        with path.open("a", encoding="utf-8", newline="") as f:
+            f.write("WO-EXT,C-3,external,created,\r\n")
+
+        updated = await conn.update_work_order("WO-EXT", description="edited")
+
+        assert updated.description == "edited"
+        content = path.read_text(encoding="utf-8-sig")
+        assert "WO-EXT,C-3,edited,created" in content
+        assert content.count("WO-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_update_keeps_failure_mode_and_creation_date(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_text(
+            "ID,Codice Asset,Stato,Modo di guasto,Data creazione\n"
+            "WO-1,P-201,created,BEAR-WEAR-01,2026-01-15T10:00:00\n",
+            encoding="utf-8",
+        )
+        schema = SheetSchema(
+            path=str(path),
+            sheet="ignored",
+            write_mode="append",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Stato", field="status"),
+                ColumnMapping(column="Modo di guasto", field="failure_mode"),
+                ColumnMapping(
+                    column="Data creazione", field="created_at", coerce="datetime_parse"
+                ),
+            ],
+        )
+        conn = ExcelCsvConnector(config=ExcelConnectorConfig(work_orders=schema))
+        await conn.connect()
+        (wo,) = await conn.read_work_orders()
+        assert wo.failure_mode == "BEAR-WEAR-01"
+        assert wo.created_at.replace(tzinfo=None) == datetime(2026, 1, 15, 10, 0)
+
+        await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+
+        row = path.read_text(encoding="utf-8").splitlines()[1]
+        assert row == "WO-1,P-201,assigned,BEAR-WEAR-01,2026-01-15T10:00:00"
 
 
 class TestRefresh:

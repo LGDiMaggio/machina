@@ -7,8 +7,9 @@ The client brings its own LLM; the server makes no LLM calls.
 
 The layer is a thin protocol adapter (FastMCP from the MCP Python SDK) over
 the connector layer: every capability a configured connector declares turns
-on the matching tools, so the server offers exactly what its connectors can
-serve.
+on the matching tools. A CMMS tool always calls the primary CMMS, so with
+several CMMS connectors a tool turned on by a secondary one returns an error
+when the primary cannot serve it.
 
 ```bash
 pip install "machina-ai[mcp]"
@@ -31,8 +32,9 @@ machina mcp serve --config machina.yaml        # same as: python -m machina.mcp 
 | `streamable-http` | Multi-client / server deployment; also serves `GET /health` | Static bearer tokens (≥ 32 characters) |
 
 Writes go through the connectors' `@sandbox_aware` guard: with `sandbox: true`
-in the config, write tools return a marked `[SANDBOX]` result and nothing
-reaches the CMMS.
+in the config, write tools return a marked `[SANDBOX]` result and no write
+reaches the CMMS. There is no confirmation step — the MCP client decides which
+tool calls run.
 
 ## Read next
 

@@ -5,8 +5,9 @@ Lists preventive-maintenance plans from the first connector that declares
 the same first-provider rule the other CMMS read tools follow — with each
 plan's recurrence, tasks, effort and required skills.
 
-Due dates are deliberately **not** computed. No connector reports when a
-plan was last executed; without that, a calendar projection
+Due dates are deliberately **not** computed. Machina's connectors do not
+read when a plan was last executed (some CMMSs record it; no mapper maps it
+yet); without that, a calendar projection
 (:meth:`~machina.domain.services.maintenance_scheduler.MaintenanceScheduler.scan_due_plans`)
 can only assume the last run was exactly one interval ago — which reports
 every active plan as due today. The tool says so instead of inventing dates.
@@ -20,7 +21,6 @@ import structlog
 
 from machina.agent.prompts import safe_text
 from machina.connectors.capabilities import Capability
-from machina.exceptions import ConnectorError
 
 if TYPE_CHECKING:
     from machina.connectors.base import ConnectorRegistry
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 DUE_DATES_NOTE = (
-    "Due dates are not computed: the CMMS reports each plan's recurrence but "
-    "not when it was last executed."
+    "Due dates are not computed: Machina reads each plan's recurrence but "
+    "not when the plan was last executed."
 )
 
 
@@ -71,12 +71,16 @@ async def get_maintenance_schedule(
     connector_name, connector = providers[0]
     try:
         plans: list[MaintenancePlan] = await connector.read_maintenance_plans()  # type: ignore[attr-defined]
-    except ConnectorError as exc:
+    except Exception as exc:
+        # A REST backend fails with httpx errors, not only ConnectorError; any
+        # provider failure becomes an error the model can relay, not an
+        # exception that aborts the whole turn.
         logger.warning(
             "maintenance_plans_read_failed",
             connector=connector_name,
             asset_id=asset_id,
             operation="get_maintenance_schedule",
+            error_type=type(exc).__name__,
             error=str(exc),
         )
         return {"error": safe_text(str(exc))}

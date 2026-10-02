@@ -63,35 +63,47 @@ The pipeline is defined declaratively. Each step specifies what to do, not how:
 ```python
 from machina.workflows import Workflow, Step
 
+asset = {"asset_id": "{trigger.asset_id}"}
+
 predictive_maintenance = Workflow(
     name="Predictive Maintenance Pipeline",
     trigger="alarm",
     steps=[
         # Phase 1: Detection
-        Step("enrich_alarm", action="sensors.get_related_readings"),
+        Step("enrich_alarm", action="sensors.get_related_readings", inputs=asset),
 
         # Phase 2: Diagnosis
-        Step("diagnose_rules", action="failure_analyzer.diagnose"),
-        Step("search_manuals", action="docs.search_documents"),
+        Step("diagnose_rules", action="failure_analyzer.diagnose",
+             inputs={**asset, "parameter": "{trigger.parameter}", "value": "{trigger.value}",
+                     "severity": "{trigger.severity}"}),
+        Step("search_manuals", action="docs.search_documents",
+             inputs={"query": "{trigger.parameter} {trigger.asset_id}"}),
         Step("diagnose_llm",  action="agent.reason",
              prompt="...synthesize {diagnose_rules} + {search_manuals}..."),
 
         # Phase 3: Action
-        Step("check_parts",   action="cmms.read_spare_parts"),
-        Step("check_history", action="cmms.read_maintenance_history"),
+        Step("check_parts",   action="cmms.read_spare_parts", inputs=asset),
+        Step("check_history", action="cmms.read_maintenance_history", inputs=asset),
         Step("draft_wo",      action="agent.reason",
              prompt="...create WO from {diagnose_llm} + {check_parts}..."),
-        Step("submit_wo",     action="work_order_factory.create"),
+        Step("submit_wo",     action="work_order_factory.create", is_write=False,
+             inputs={**asset, "failure_mode": "{diagnose_rules.failure_mode_for_write}",
+                     "description": "{draft_wo}"}),
 
         # Phase 4: Optimization
-        Step("find_window",       action="maintenance_scheduler.find_window"),
+        Step("find_window",       action="maintenance_scheduler.find_window", inputs=asset),
         Step("optimize_schedule", action="agent.reason",
              prompt="...optimize {submit_wo} into {find_window}..."),
     ],
 )
 ```
 
-Steps reference each other with `{step_name}` template variables. The workflow engine handles context propagation automatically.
+Connector and domain-service steps receive only the arguments their `inputs`
+pass; the engine fills the `{trigger.…}` and `{step_name}` template variables
+from the alarm event and the earlier steps' outputs, and `agent.reason` prompts
+use the same variables. In sandbox mode the three LLM steps return a
+placeholder instead of calling the model, so a sandbox run shows the wiring
+and the deterministic results without an API key.
 
 ## Connecting Real Systems
 
@@ -112,7 +124,7 @@ agent = Agent(
 )
 ```
 
-The CMMS, document and messaging steps stay exactly the same -- that's the domain model abstraction at work. The sensor step needs a connector that declares `get_related_readings`; in v0.4 only the simulated sensor connector does (the OPC-UA and MQTT connectors expose subscriptions and node reads instead), so adapt `enrich_alarm` to your sensor source. `submit_wo` drafts the work order in memory; add a `cmms.create_work_order` step to write it to the CMMS.
+The CMMS and document steps stay exactly the same -- that's the domain model abstraction at work. The sensor step needs a connector that declares `get_related_readings`; in v0.4 only the simulated sensor connector does (the OPC-UA and MQTT connectors expose subscriptions and node reads instead), so adapt `enrich_alarm` to your sensor source. `submit_wo` drafts the work order in memory; add a `cmms.create_work_order` step to write it to the CMMS.
 
 ## Next Steps
 

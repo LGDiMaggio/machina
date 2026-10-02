@@ -55,9 +55,9 @@ agent.run()
 | `channels` | list | `[]` (defaults to CLI) | Communication channels |
 | `llm` | object | `{provider: "ollama:llama3"}` | LLM provider settings |
 | `sandbox` | boolean | `false` | Enable sandbox mode (writes logged, not executed) |
-| `confirmations` | boolean | `true` | Ask the user to confirm every write before it runs |
+| `confirmations` | boolean | `true` | Agent only: ask the user to confirm every write before it runs (the MCP server has no confirmation step) |
 | `mcp` | object | see below | MCP server settings |
-| `logging` | object | `{}` | Logging overrides, e.g. `{level: DEBUG}` |
+| `logging` | object | `{}` | Logging overrides, e.g. `{level: DEBUG}`; read only by `machina mcp serve` (in Python, call `configure_logging()`) |
 
 Unknown top-level keys are accepted and ignored, so check the spelling of
 section names.
@@ -174,7 +174,8 @@ python agent.py
 ```
 
 If a referenced variable is not set, `load_config()` raises `ValueError`
-with a clear message.
+with a clear message. A variable that is set but empty (a blank `VAR=` line in
+an `.env` file) is substituted as an empty string.
 
 `${VAR:-default}` supplies a fallback, with POSIX shell / Docker Compose
 semantics: the default is used when `VAR` is unset **or empty** (a blank
@@ -188,6 +189,8 @@ sandbox: "${MACHINA_SANDBOX_MODE:-true}"
 
 Use defaults for non-secret settings only. A secret written as `${VAR}`
 fails loudly when it is missing; with a default it would silently fall back.
+It does not fail when it is blank, though: comment out an unused `VAR=` line
+in an `.env` file instead of leaving it empty.
 
 ## When to Use YAML vs Python
 

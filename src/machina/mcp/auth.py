@@ -2,7 +2,7 @@
 
 Implements the MCP SDK's ``TokenVerifier`` protocol for static bearer
 tokens loaded from environment variables.  Each token maps to a
-``client_id`` so CMMS audit logs can attribute writes to a named identity.
+``client_id`` that is attached to the verified access token.
 
 Token sources (checked in order):
 1. ``MACHINA_MCP_TOKENS_JSON`` — JSON object ``{"<token>": "<client_id>"}``
@@ -41,9 +41,19 @@ class StaticBearerTokenVerifier:
 
     Args:
         token_to_identity: Mapping of token strings to client identifiers.
+
+    Raises:
+        TypeError: If ``token_to_identity`` is not a ``dict`` of strings to
+            strings — anything else (a config object, for instance) would
+            turn arbitrary keys into accepted tokens.
     """
 
     def __init__(self, token_to_identity: dict[str, str]) -> None:
+        if not isinstance(token_to_identity, dict) or not all(
+            isinstance(token, str) and isinstance(client, str)
+            for token, client in token_to_identity.items()
+        ):
+            raise TypeError("StaticBearerTokenVerifier needs a dict of token -> client_id strings")
         self._tokens = dict(token_to_identity)
 
     async def verify_token(self, token: str) -> Any | None:
@@ -139,6 +149,13 @@ def build_verifier(config: Any) -> Any:
         from machina.runtime import _import_class
 
         cls = _import_class(verifier_class_path)
+        if isinstance(cls, type) and issubclass(cls, StaticBearerTokenVerifier):
+            # The static verifier takes its tokens from the environment; built
+            # from the config it would accept config field names as tokens.
+            raise ConnectorError(
+                "token_verifier_class names the built-in static verifier — leave "
+                "token_verifier_class empty and set MACHINA_MCP_TOKENS_JSON instead"
+            )
         return cls(config)
 
     tokens = load_tokens_from_env()

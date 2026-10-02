@@ -1,8 +1,11 @@
 # MCP Authentication
 
-The streamable-http transport requires bearer-token authentication on every
-request, including `/mcp`. stdio mode has no authentication: the client that
-launches the process owns it (single user, local process only).
+The streamable-http transport requires bearer-token authentication on `/mcp`,
+the MCP endpoint. Two routes answer without a token: `GET /health` (which adds
+runtime details when a valid token is sent) and the OAuth metadata route
+`GET /.well-known/oauth-protected-resource`. stdio mode has no
+authentication: the client that launches the process owns it (single user,
+local process only).
 
 ## Static Bearer Tokens
 
@@ -76,9 +79,13 @@ server read-only toward the CMMS.
 ## Allowed Hosts and Origins
 
 The HTTP transport also checks the `Host` header (and the `Origin` header,
-when present) to block DNS-rebinding attacks. The defaults accept only
-loopback names (`localhost`, `127.0.0.1`, `[::1]`, with or without a port).
-When clients reach the server under another name, list it in the config:
+when present) to block DNS-rebinding attacks. The default hosts are the
+loopback names `localhost`, `127.0.0.1` and `[::1]`, with or without a port.
+The default origins are `http://localhost` and `https://localhost`, with or
+without a port, and `http://127.0.0.1` and `https://127.0.0.1` with a port —
+a page served from `http://127.0.0.1` without a port, or from `[::1]`, is
+refused unless you list it. Setting either list replaces its defaults. When
+clients reach the server under another name, list it in the config:
 
 ```yaml
 mcp:
@@ -105,6 +112,8 @@ mcp:
   namespace, so a config file cannot load arbitrary code. In v0.4 the package
   ships only the static verifier, so a custom one means adding a module
   inside the `machina` package (for example in a fork or a vendored build).
+- Naming the built-in static verifier here is refused: leave
+  `token_verifier_class` empty and set `MACHINA_MCP_TOKENS_JSON` instead.
 - The class is constructed with the whole loaded configuration, `cls(config)`.
 - It implements `async def verify_token(self, token: str) -> AccessToken | None`
   (the MCP SDK's `TokenVerifier` protocol) and must grant the `mcp:use`

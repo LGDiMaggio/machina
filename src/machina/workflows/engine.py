@@ -46,13 +46,14 @@ _WRITE_SUBSTRINGS: tuple[str, ...] = (
     "send",
     "submit",
     "update",
+    "upsert",
     "write",
 )
-# "set" is too short to match as a substring — it sits inside common nouns
-# ("assets", "dataset", "offset"), which made every asset read look like a
-# write. It (and re-/un-set) only counts when it starts a token.
-_SET_AT_TOKEN_START = re.compile(r"(?:^|[^a-z])(?:re|un)?set")
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+# "set" sits inside common read nouns ("assets", "dataset", "offset"), which
+# made every asset read look like a write. Those nouns are removed before the
+# "set" substring check, so "set" keeps over-gating everywhere else: "reset",
+# "plc.preset", "bulkset", all-caps names like "OVERRIDESETPOINT".
+_NOUNS_CONTAINING_SET = re.compile(r"asset|dataset|offset")
 
 
 def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -545,15 +546,13 @@ class WorkflowEngine:
         ``get_update_history``) is the acceptable cost — set ``is_write=False``
         on such a step to opt out.
 
-        Write verbs match as substrings, with one exception: ``set`` (also
-        ``reset``/``unset``) must start a token — after the start, a ``.``,
-        ``_`` or a camelCase boundary — because as a bare substring it hits
-        nouns such as ``assets`` and turned every asset read into a write.
+        Write verbs match as case-insensitive substrings. ``set`` is matched
+        after removing the nouns that contain it (``asset``, ``dataset``,
+        ``offset``), which otherwise turned every asset read into a write.
         """
         if step is not None and step.is_write is not None:
             return step.is_write
         lowered = action.lower()
         if any(verb in lowered for verb in _WRITE_SUBSTRINGS):
             return True
-        tokenised = _CAMEL_BOUNDARY.sub("_", action).lower()
-        return _SET_AT_TOKEN_START.search(tokenised) is not None
+        return "set" in _NOUNS_CONTAINING_SET.sub("", lowered)

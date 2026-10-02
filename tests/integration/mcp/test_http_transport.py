@@ -247,3 +247,36 @@ class TestMcpEndpoint:
         with _client(config, base_url="http://mcp.example.com") as client:
             response = client.post("/mcp", headers=headers, json=_rpc("tools/list", 1))
         assert response.status_code == 200, response.text
+
+
+class TestOriginAllowList:
+    """Browser requests carry an Origin; only allow-listed origins reach /mcp."""
+
+    @staticmethod
+    def _list_tools(config: MachinaConfig, origin: str) -> int:
+        headers = {**MCP_HEADERS, "Authorization": f"Bearer {TOKEN}", "Origin": origin}
+        with _client(config) as client:
+            response = client.post("/mcp", headers=headers, json=_rpc("tools/list", 1))
+        return response.status_code
+
+    def test_foreign_origin_is_rejected(self, http_config: MachinaConfig) -> None:
+        assert self._list_tools(http_config, "https://evil.example") == 403
+
+    @pytest.mark.parametrize(
+        "origin", ["http://localhost", "http://localhost:5173", "https://127.0.0.1:8443"]
+    )
+    def test_default_loopback_origins_are_accepted(
+        self, http_config: MachinaConfig, origin: str
+    ) -> None:
+        assert self._list_tools(http_config, origin) == 200
+
+    def test_loopback_ip_without_a_port_is_not_a_default(self, http_config: MachinaConfig) -> None:
+        """The defaults list ``http://127.0.0.1:*`` — a port is required."""
+        assert self._list_tools(http_config, "http://127.0.0.1") == 403
+
+    def test_configured_origins_replace_the_defaults(self, http_config: MachinaConfig) -> None:
+        config = http_config.model_copy(
+            update={"mcp": McpConfig(allowed_origins=["https://console.example.com"])}
+        )
+        assert self._list_tools(config, "https://console.example.com") == 200
+        assert self._list_tools(config, "http://localhost:5173") == 403

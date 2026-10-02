@@ -23,9 +23,13 @@ connectors:
     type: generic_cmms
     primary: true
     settings:
-      data_dir: "./sample_data/cmms"
+      data_dir: "/path/to/sample_data/cmms"
 sandbox: true
 ```
+
+Paths in `settings` are resolved against the server's working directory, not
+the config file's location. A desktop client launches the server from a
+directory of its own choosing, so use absolute paths.
 
 The server makes no LLM calls — the MCP client brings its own model — so no
 `llm:` section is needed. `logging: {level: DEBUG}` raises the server's log
@@ -106,8 +110,11 @@ curl -H "Authorization: Bearer <token>" http://localhost:8000/health
 On startup the server loads and validates the config, builds a
 `MachinaRuntime` with the configured connectors, connects them
 (`connect_all()`), and registers the tools allowed by their capabilities,
-plus the resources and prompts. A connector that fails to connect is logged
-and skipped; the others keep serving.
+plus the resources and prompts. A connector whose settings cannot be built
+is logged (`connector_instantiation_failed`) and left out. A connector that
+fails to connect is logged (`runtime_connector_failed`) but stays registered:
+its tools stay listed and return errors until the server is restarted, while
+the other connectors keep serving.
 
 - **stdio** — the runtime lives for the client session (one per process).
 - **streamable-http** — one runtime per server process: connectors connect
