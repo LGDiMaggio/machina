@@ -118,17 +118,19 @@ agent = Agent(
 ```
 
 ```
-  Alarm: P-201 | vibration_velocity = 7.8 mm/s (threshold: 6.0)
+  Alarm:  ALM-2026-0412-001  |  Asset: P-201
+  vibration_velocity_mm_s = 7.8 (threshold: 6.0)
 
-    [+] analyze_alarm      — Bearing wear (BEAR-WEAR-01), confidence: HIGH
-    [+] check_spare_parts  — SKF 6310-2RS in stock (4 units)
-    [+] create_work_order  — [LLM] Priority HIGH, est. 4 hours
-    [+] notify_technician  — [SANDBOX] Message logged
-
-  Result: SUCCESS (2.34s)
+  Result: SUCCESS (0.00s)
+    [+] analyze_alarm        BEAR-WEAR-01 (medium), IMP-EROSION-01 (medium), BELT-WEAR-01 (medium)
+    [+] check_history        none
+    [+] check_spare_parts    SKF-6310 (stock 4), SEAL-CR32-KIT (stock 1)
+    [+] generate_work_order  WO-AUTO-3B717CA0: corrective, priority medium, failure mode BEAR-WEAR-01
+    [+] notify_technician    sandbox: intercepted, not executed
+    [+] submit_work_order    sandbox: intercepted, not executed
 ```
 
-6 steps, only 2 use the LLM. The rest are deterministic -- fast, predictable, testable. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
+6 steps, all deterministic -- domain services and connector calls, no LLM call -- so they are fast, predictable and testable; in sandbox mode the notification and the CMMS submit are intercepted. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
 
 ### Or configure via YAML
 
@@ -172,7 +174,7 @@ Two examples take you from zero to automation. Then deploy with the starter kit.
 | **2. Automate** | [alarm_to_workorder/](examples/alarm_to_workorder/) | Alarm fires -- agent diagnoses failure, checks parts, creates work order, notifies team |
 | **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Free-text requests become confirmed Work Orders in a spreadsheet (or REST CMMS). Starter kit, sandbox-first |
 
-All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
+The LLM-driven examples default to `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`. The alarm workflow needs no LLM at all.
 
 **More patterns** in [examples/reference/](examples/reference/): predictive pipelines, CMMS portability, custom workflows, YAML config, autonomous agents.
 
