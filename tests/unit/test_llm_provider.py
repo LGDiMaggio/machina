@@ -292,6 +292,12 @@ class TestLiteLLMModelStringContract:
             # Users passing the already-normalized form must not see a
             # double-normalization that breaks LiteLLM (e.g. "openai//gpt-4o").
             ("openai/gpt-4o", "openai/gpt-4o"),
+            # Only the provider separator is rewritten: a model tag keeps its
+            # colon in either input form.
+            ("ollama:llama3:8b", "ollama/llama3:8b"),
+            ("ollama/qwen3:8b", "ollama/qwen3:8b"),
+            ("openai/gpt-4o:2024-11-20", "openai/gpt-4o:2024-11-20"),
+            ("ollama:hf.co/org/model:Q4_K_M", "ollama/hf.co/org/model:Q4_K_M"),
         ],
     )
     def test_normalizes_to_litellm_accepted_form(
@@ -313,6 +319,14 @@ class TestLiteLLMModelStringContract:
         model, custom_llm_provider, *_ = litellm.get_llm_provider(provider.model)
         assert model == "gpt-4o"
         assert custom_llm_provider == "openai"
+
+    def test_tagged_slash_form_reaches_real_litellm_unchanged(self) -> None:
+        """``ollama/qwen3:8b`` must not become ``ollama/qwen3/8b``."""
+        litellm = pytest.importorskip("litellm")
+
+        provider = LLMProvider(model="ollama/qwen3:8b")
+        model, custom_llm_provider, *_ = litellm.get_llm_provider(provider.model)
+        assert (model, custom_llm_provider) == ("qwen3:8b", "ollama")
 
     def test_unnormalized_colon_form_is_rejected_by_real_litellm(self) -> None:
         """Anchor the regression: the form we *used* to pass must still fail.

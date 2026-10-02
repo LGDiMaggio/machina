@@ -73,6 +73,7 @@ Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machin
 - **The `odl-generator-from-text` starter kit runs end to end** (`python agent.py --sandbox` or `docker compose run --rm machina`): real Excel schema and sample registries, the agent's own resolution → write gate → confirmation → sandbox path instead of a workflow the engine could not dispatch, and a README limited to what runs. Its typo-tolerance and WhatsApp promises are withdrawn; synonyms are genuinely supported through `Asset.aliases`.
 - **The Docker deployment works**: the mock CMMS serves the Generic CMMS REST contract, the config passes the CMMS key and reads sandbox mode and log level from the environment, and the server listens on all interfaces inside the container.
 - **The alarm-to-work-order example** no longer accepts an `--llm` option it never used.
+- **Model strings keep their tag.** `LLMProvider` rewrote the first colon of every model string, so a slash-form model with a tag — `ollama/qwen3:8b`, `openai/gpt-4o:2024-11-20` — reached LiteLLM as `ollama/qwen3/8b` and failed. Only a `provider:model` prefix is rewritten now.
 
 ### Documentation alignment
 

@@ -13,10 +13,9 @@ provider = LLMProvider(model="openai:gpt-4o")
 assert provider.model == "openai/gpt-4o"   # normalized
 ```
 
-If you see an error like `LLM Provider NOT provided. Pass in the LLM provider you are trying to call.` from LiteLLM, a model string is reaching LiteLLM without being normalized. Check whether:
+Only the provider separator is rewritten: `ollama:llama3:8b` becomes `ollama/llama3:8b`, and a string already in slash form — `ollama/qwen3:8b`, `openai/gpt-4o:2024-11-20` — is passed through unchanged, so model tags keep their colons.
 
-1. You're calling LiteLLM directly (bypassing `LLMProvider`) — route through `LLMProvider.complete` / `complete_with_tools` instead.
-2. You're passing a versioned model string with multiple colons (e.g. `openai:gpt-4o:2024-11-20`). Only the first colon is rewritten; use `openai/gpt-4o:2024-11-20` explicitly.
+If you see an error like `LLM Provider NOT provided. Pass in the LLM provider you are trying to call.` from LiteLLM, a model string is reaching LiteLLM without being normalized — typically because you call LiteLLM directly, bypassing `LLMProvider`. Route through `LLMProvider.complete` / `complete_with_tools` instead.
 
 The `tests/unit/test_llm_provider.py::TestLiteLLMModelStringContract` class anchors this behaviour against the real LiteLLM parser — if it ever starts accepting the colon form, that test will start failing and the normalization becomes optional.
 
