@@ -116,6 +116,15 @@ class TestListAssetsTool:
 
 
 class TestServe:
+    @pytest.fixture(autouse=True)
+    def _no_global_logging_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """serve() configures process-wide logging (structlog with cached
+        loggers); doing that inside the test process would leak into every
+        later test. The real effect is covered by the stdio subprocess test."""
+        import machina.mcp.server as mcp_server
+
+        monkeypatch.setattr(mcp_server, "_configure_logging", lambda config: None)
+
     def test_unknown_transport_raises(self) -> None:
         from machina.mcp.server import serve
 
