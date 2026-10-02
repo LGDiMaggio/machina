@@ -11,6 +11,10 @@ import pytest
 from machina.exceptions import ConnectorError
 from machina.mcp.auth import StaticBearerTokenVerifier, load_tokens_from_env
 
+# Environment-loaded tokens must be at least 32 characters.
+TOKEN_A = "a" * 64
+TOKEN_B = "b" * 64
+
 
 class TestStaticBearerTokenVerifier:
     @pytest.mark.asyncio
@@ -50,13 +54,13 @@ class TestStaticBearerTokenVerifier:
 
 class TestLoadTokensFromEnv:
     def test_json_env_var(self) -> None:
-        env = {"MACHINA_MCP_TOKENS_JSON": '{"tok1": "alice", "tok2": "bob"}'}
+        env = {"MACHINA_MCP_TOKENS_JSON": json.dumps({TOKEN_A: "alice", TOKEN_B: "bob"})}
         with patch.dict(os.environ, env, clear=False):
             tokens = load_tokens_from_env()
-        assert tokens == {"tok1": "alice", "tok2": "bob"}
+        assert tokens == {TOKEN_A: "alice", TOKEN_B: "bob"}
 
     def test_legacy_csv_env_var(self) -> None:
-        env = {"MACHINA_MCP_TOKENS": "secret1,secret2", "MACHINA_MCP_TOKENS_JSON": ""}
+        env = {"MACHINA_MCP_TOKENS": f"{TOKEN_A},{TOKEN_B}", "MACHINA_MCP_TOKENS_JSON": ""}
         with patch.dict(os.environ, env, clear=False):
             import warnings
 
@@ -65,19 +69,39 @@ class TestLoadTokensFromEnv:
                 tokens = load_tokens_from_env()
                 assert any("deprecated" in str(warning.message).lower() for warning in w)
         assert tokens == {
-            "secret1": "machina-unattributed",
-            "secret2": "machina-unattributed",
+            TOKEN_A: "machina-unattributed",
+            TOKEN_B: "machina-unattributed",
         }
 
     def test_json_takes_precedence_over_legacy(self) -> None:
         env = {
-            "MACHINA_MCP_TOKENS_JSON": '{"tok1": "alice"}',
-            "MACHINA_MCP_TOKENS": "legacy1,legacy2",
+            "MACHINA_MCP_TOKENS_JSON": json.dumps({TOKEN_A: "alice"}),
+            "MACHINA_MCP_TOKENS": TOKEN_B,
         }
         with patch.dict(os.environ, env, clear=False):
             tokens = load_tokens_from_env()
-        assert "tok1" in tokens
-        assert "legacy1" not in tokens
+        assert TOKEN_A in tokens
+        assert TOKEN_B not in tokens
+
+    @pytest.mark.parametrize("placeholder", ["your-token-here", "change-me-token", "x" * 31])
+    def test_short_json_token_refused(self, placeholder: str) -> None:
+        """A token shorter than 32 characters (e.g. a copied placeholder) is refused."""
+        env = {"MACHINA_MCP_TOKENS_JSON": json.dumps({placeholder: "client"})}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            pytest.raises(ConnectorError, match="at least 32 characters") as excinfo,
+        ):
+            load_tokens_from_env()
+        assert placeholder not in str(excinfo.value)  # never echo the secret
+
+    def test_short_legacy_token_refused(self) -> None:
+        env = {"MACHINA_MCP_TOKENS": f"{TOKEN_A},short", "MACHINA_MCP_TOKENS_JSON": ""}
+        with (
+            patch.dict(os.environ, env, clear=False),
+            pytest.warns(DeprecationWarning),
+            pytest.raises(ConnectorError, match="at least 32 characters"),
+        ):
+            load_tokens_from_env()
 
     def test_no_tokens_raises(self) -> None:
         env = {"MACHINA_MCP_TOKENS_JSON": "", "MACHINA_MCP_TOKENS": ""}
@@ -127,7 +151,7 @@ class TestBuildServerWithAuth:
         from machina.config.schema import MachinaConfig
         from machina.mcp.server import build_server
 
-        env = {"MACHINA_MCP_TOKENS_JSON": '{"test-token": "test-user"}'}
+        env = {"MACHINA_MCP_TOKENS_JSON": json.dumps({TOKEN_A: "test-user"})}
         with patch.dict(os.environ, env, clear=False):
             config = MachinaConfig()
             server = build_server(config, transport="streamable-http")
@@ -166,3 +190,58 @@ class TestHealthEndpoint:
         scope = {"type": "http", "path": "/other", "headers": []}
         await health_app(scope, None, mock_send)
         assert responses[0]["status"] == 404
+
+    @pytest.mark.asyncio
+    async def test_authenticated_health_reports_package_version(self) -> None:
+        """The detailed payload carries the installed package version, not a literal."""
+        from types import SimpleNamespace
+
+        import machina
+        from machina.mcp.server import health_app
+
+        responses: list[dict] = []
+
+        async def mock_send(msg: dict) -> None:
+            responses.append(msg)
+
+        app = SimpleNamespace(
+            _runtime_ref=SimpleNamespace(connectors={"cmms": object()}, sandbox_mode=True),
+            _token_verifier=StaticBearerTokenVerifier({TOKEN_A: "alice"}),
+        )
+        scope = {
+            "type": "http",
+            "path": "/health",
+            "app": app,
+            "headers": [(b"authorization", f"Bearer {TOKEN_A}".encode())],
+        }
+        await health_app(scope, None, mock_send)
+
+        body = json.loads(responses[1]["body"])
+        assert body["version"] == machina.__version__
+        assert body["connectors"] == ["cmms"]
+        assert body["sandbox_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_health_with_invalid_token_stays_minimal(self) -> None:
+        from types import SimpleNamespace
+
+        from machina.mcp.server import health_app
+
+        responses: list[dict] = []
+
+        async def mock_send(msg: dict) -> None:
+            responses.append(msg)
+
+        app = SimpleNamespace(
+            _runtime_ref=SimpleNamespace(connectors={"cmms": object()}, sandbox_mode=True),
+            _token_verifier=StaticBearerTokenVerifier({TOKEN_A: "alice"}),
+        )
+        scope = {
+            "type": "http",
+            "path": "/health",
+            "app": app,
+            "headers": [(b"authorization", b"Bearer not-the-token")],
+        }
+        await health_app(scope, None, mock_send)
+
+        assert json.loads(responses[1]["body"]) == {"status": "healthy"}

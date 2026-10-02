@@ -990,12 +990,20 @@
           },
           "token_verifier_class": {
             "default": "",
-            "description": "Dotted path to a custom TokenVerifier class (e.g. 'mymodule:VaultTokenVerifier'). When set, replaces the default static bearer token verifier.",
+            "description": "Dotted path to a custom TokenVerifier class under the 'machina.' namespace (e.g. 'machina.contrib.auth.VaultTokenVerifier'); other namespaces are refused. When set, replaces the default static bearer token verifier.",
             "title": "Token Verifier Class",
             "type": "string"
           },
+          "allowed_hosts": {
+            "description": "Host header values the streamable-http transport accepts (DNS-rebinding defense). 'name:*' matches any port; a bare name matches a Host sent without a port, as a TLS-terminating proxy forwards it. Add the host clients (or your proxy) actually send.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Hosts",
+            "type": "array"
+          },
           "allowed_origins": {
-            "description": "Allowed origins for streamable-http transport (DNS-rebinding defense)",
+            "description": "Origin header values the streamable-http transport accepts from browser-based clients (DNS-rebinding defense); requests without an Origin header are not affected.",
             "items": {
               "type": "string"
             },

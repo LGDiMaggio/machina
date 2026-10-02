@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from machina import cli
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_describe_text_output(capsys: pytest.CaptureFixture[str]) -> None:

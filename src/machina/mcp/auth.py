@@ -8,6 +8,12 @@ Token sources (checked in order):
 1. ``MACHINA_MCP_TOKENS_JSON`` — JSON object ``{"<token>": "<client_id>"}``
 2. ``MACHINA_MCP_TOKENS`` — comma-separated tokens (legacy; all get
    ``client_id="machina-unattributed"``; emits a deprecation warning)
+
+Every token loaded from the environment must be at least
+:data:`MIN_TOKEN_LENGTH` characters, so a copied placeholder from an example
+``.env`` file cannot become a working credential. The verified ``client_id``
+is attached to the request's access token; it is not yet written to traces,
+logs or CMMS records.
 """
 
 from __future__ import annotations
@@ -22,6 +28,10 @@ import structlog
 from machina.exceptions import ConnectorError
 
 logger = structlog.get_logger(__name__)
+
+#: Minimum length of a bearer token loaded from the environment
+#: (``openssl rand -hex 16`` yields exactly 32 characters).
+MIN_TOKEN_LENGTH = 32
 
 
 class StaticBearerTokenVerifier:
@@ -53,6 +63,17 @@ class StaticBearerTokenVerifier:
         )
 
 
+def _require_strong_tokens(tokens: dict[str, str], source: str) -> None:
+    """Refuse tokens shorter than :data:`MIN_TOKEN_LENGTH` (never echoing them)."""
+    weak = sum(1 for token in tokens if len(token) < MIN_TOKEN_LENGTH)
+    if weak:
+        raise ConnectorError(
+            f"{source}: {weak} token(s) shorter than the minimum — MCP bearer "
+            f"tokens must be at least {MIN_TOKEN_LENGTH} characters "
+            "(generate one with `openssl rand -hex 32`)"
+        )
+
+
 def load_tokens_from_env() -> dict[str, str]:
     """Load bearer tokens from environment variables.
 
@@ -60,21 +81,23 @@ def load_tokens_from_env() -> dict[str, str]:
         A ``{token: client_id}`` mapping.
 
     Raises:
-        ConnectorError: If no tokens are configured.
+        ConnectorError: If no tokens are configured, the JSON is invalid, or
+            any token is shorter than :data:`MIN_TOKEN_LENGTH` characters.
     """
     json_raw = os.environ.get("MACHINA_MCP_TOKENS_JSON", "")
     if json_raw:
         try:
             tokens: dict[str, str] = json.loads(json_raw)
-            if not isinstance(tokens, dict) or not tokens:
-                raise ConnectorError(
-                    "MACHINA_MCP_TOKENS_JSON must be a non-empty JSON object "
-                    '{"<token>": "<client_id>"}'
-                )
-            logger.info("mcp_tokens_loaded", source="MACHINA_MCP_TOKENS_JSON", count=len(tokens))
-            return tokens
         except json.JSONDecodeError as exc:
             raise ConnectorError(f"MACHINA_MCP_TOKENS_JSON is not valid JSON: {exc}") from exc
+        if not isinstance(tokens, dict) or not tokens:
+            raise ConnectorError(
+                "MACHINA_MCP_TOKENS_JSON must be a non-empty JSON object "
+                '{"<token>": "<client_id>"}'
+            )
+        _require_strong_tokens(tokens, "MACHINA_MCP_TOKENS_JSON")
+        logger.info("mcp_tokens_loaded", source="MACHINA_MCP_TOKENS_JSON", count=len(tokens))
+        return tokens
 
     legacy_raw = os.environ.get("MACHINA_MCP_TOKENS", "")
     if legacy_raw:
@@ -86,6 +109,7 @@ def load_tokens_from_env() -> dict[str, str]:
         )
         token_list = [t.strip() for t in legacy_raw.split(",") if t.strip()]
         tokens = {t: "machina-unattributed" for t in token_list}
+        _require_strong_tokens(tokens, "MACHINA_MCP_TOKENS")
         logger.info("mcp_tokens_loaded", source="MACHINA_MCP_TOKENS", count=len(tokens))
         return tokens
 
