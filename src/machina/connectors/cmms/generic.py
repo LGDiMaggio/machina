@@ -268,7 +268,7 @@ class GenericCmmsConnector:
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
         # Serialises the read-check-mutate-persist sequence in local mode so
-        # concurrent create/update calls (e.g. via asyncio.gather in AgentTeam)
+        # concurrent create/update calls (e.g. tool calls gathered concurrently)
         # cannot race on the in-memory list or the file write.
         self._local_write_lock = asyncio.Lock()
 

@@ -1,29 +1,57 @@
 # Roadmap
 
-## v0.3.1 (next patch) — Fixes
+## v0.4 — Current release
 
-- **Channel / connector-registry unification** ([#31](https://github.com/LGDiMaggio/machina/issues/31)). Channels passed as `Agent(channels=[...])` are now registered into the `ConnectorRegistry`, so workflow steps using `channels.send_message` (e.g. `alarm_to_workorder.notify_technician`) dispatch through them in live mode. `sandbox=True` now also gates `channel.connect()` / `channel.disconnect()` — no SMTP/Slack/Telegram logins in sandbox.
+Released 2026-10-02. Highlights (full list in the [changelog](changelog.md)):
 
-## v0.2.1 — Consolidation
+- **MCP server** you can run: `machina mcp serve` over stdio or streamable HTTP
+  with bearer-token auth, 15 capability-gated tools, 4 resources and 3 prompts,
+  plus a working Docker/systemd deployment.
+- **Runtime-enforced write safety**: human-in-the-loop confirmation on by
+  default, a resolution-authority gate on every write, sandbox mode at the
+  connector boundary, and idempotent work-order creation.
+- **Substrates from YAML**: the Excel/CSV, SQL and Generic CMMS connectors (and
+  the vendor CMMS auth blocks) build from a `machina.yaml`, failure-mode
+  catalogs are a declared capability, and the `odl-generator-from-text` starter
+  kit runs end to end.
+- **Documentation checked against the code**, including the generated
+  [capability matrix](capabilities.md).
 
-A focused hardening release between v0.2.0 and v0.3. No new features; the goal was an honest, stable base with its loose ends tightened:
+## Earlier releases
 
-- **Loud stub for `machina.mcp.MCPServer`.** `import machina.mcp` stays importable across the v0.2 → v0.3 transition; instantiating `MCPServer()` now raises `NotImplementedError` with a pointer back here instead of silently handing back an empty namespace.
-- **`EmailConnector`** available as a communication connector. See `docs/connectors/email.md` for setup.
-- **LiteLLM contract test** against the real `litellm.get_llm_provider` parser. Pins the `provider:model → provider/model` normalization that produced reactive fix `b48f649`, and anchors the inverse (colon form must keep being rejected) so a future LiteLLM relaxation is noisy, not silent.
-- **Extended example validator.** `tests/validate_examples.py` now imports every runnable `examples/*/agent.py` and verifies module-level `Agent(...)` construction actually runs. Catches the "imports fine but blows up at first call" class of bug.
-- **Per-module coverage floors in CI** for the core modules (`agent`, `config`, `llm`, `observability`, `workflows`). Each floor sits below the measured baseline with a ~5% buffer, so normal refactor churn has headroom but a silent regression trips CI.
+- **v0.3.1** — write-path safety and idempotency (deterministic work-order IDs,
+  layer-wide sandbox enforcement, atomic local persistence, method-aware
+  retries) and the RAG upgrade (hybrid retrieval, reranking, parent-document
+  chunking, layout-aware parsing, citations).
+- **v0.3.0** — the MCP server layer, typed connector capabilities, the Excel/CSV
+  and SQL connectors, the Generic CMMS YAML mapper, the deployment story and
+  the first starter kit.
+- **v0.2.x** — workflow engine, OPC-UA and MQTT connectors, Slack, Email and
+  Calendar, sandbox mode, security hardening.
+- **v0.1** — domain model, SAP PM / Maximo / UpKeep connectors, document store
+  with RAG, Telegram, agent runtime.
 
-## v0.3 — Next
+## v0.5 — Next
 
 Ordered by what moves adoption the most:
 
-1. **MCP server layer.** Expose every connector's declared capabilities as Model Context Protocol tools so Claude Desktop, Cursor, Continue, and any MCP-compatible client can talk to Machina connectors with no agent code. This is the biggest adoption multiplier on the roadmap and the reason `machina.mcp` has been reserved as a stable import path.
-2. **More CMMS connectors** — MaintainX, Limble, Fiix. Same `BaseConnector` / capability-declaration pattern as SAP PM, Maximo, UpKeep.
-3. **Multi-agent orchestration** (`AgentTeam`). Deferred to v0.3.1.
-4. **Anomaly detection & RUL estimation** on top of the IoT connector stream.
-5. **Plugin system** for community-contributed connectors without forking the core package.
-6. **`WhatsApp` and `Teams` communication connectors.**
+1. **More CMMS connectors** — MaintainX, Limble, Fiix, on the same
+   connector/capability pattern as SAP PM, Maximo and UpKeep.
+2. **WhatsApp and Teams** communication connectors.
+3. **Anomaly detection and RUL estimation** on top of the IoT connector
+   streams.
+4. **Multi-agent orchestration.**
+
+Also planned: removing the deprecated raw-string capability forms (declare
+`frozenset[Capability]`).
+
+## Later
+
+- A plugin system for community-contributed connectors without forking the core
+  package.
+- Non-Python SDKs (Go / TypeScript clients).
+
+Machina stays a framework, not a hosted product.
 
 ## MCP direction (standing position)
 
@@ -36,13 +64,13 @@ produce it.
 - **The internal flip is rejected.** We do not rewire Machina's own
   runtime↔connectors boundary to speak MCP, and we do not replace connectors
   with a bag of MCP tools. Internal boundaries stay native Python; MCP lives only
-  at the edge. (See `MACHINA_SPEC.md` §17 for the full argument.)
+  at the edge.
 - **The transport/mapper split already future-proofs against vendor MCPs.** When
   a CMMS vendor ships its own MCP server, that becomes a new *transport* feeding
   the existing per-vendor mappers (`connectors/cmms/mappers/`) — a new fetch path,
   not a re-normalization. The durable work (mapping) is insulated from transport.
-- **Outbound MCP (Machina as an MCP server) already exists** — every connector's
-  capabilities can be exposed as MCP tools (item 1 under v0.3 above).
+- **Outbound MCP (Machina as an MCP server) exists** — every connector's
+  capabilities can be exposed as MCP tools (see [MCP Server](mcp-server.md)).
 
 ### Gated: inbound MCP-client connector
 
@@ -53,11 +81,6 @@ same transport/mapper split. **Gated behind the trigger "first real vendor CMMS
 MCP" — not built now.** Until a CMMS vendor actually ships an MCP server worth
 consuming, a generic MCP-client adapter would be speculative surface with nothing
 to validate it against.
-
-## What's deferred beyond v0.3
-
-- Non-Python SDKs (Go / TypeScript clients).
-- Hosted control plane. Machina stays a framework, not a product.
 
 ## How to steer the roadmap
 

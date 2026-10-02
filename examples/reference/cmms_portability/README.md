@@ -48,8 +48,8 @@ Same question, same domain entities, same answer format -- regardless of the CMM
 | `Maximo` | IBM Maximo | API Key, Basic, Bearer | v0.1 |
 | `UpKeep` | UpKeep CMMS | Bearer (Session-Token) | v0.1 |
 | `GenericCmms` | Any REST-based CMMS | Configurable | v0.1 |
-| `MaintainX` | MaintainX | Bearer | v0.3 |
-| `Limble` | Limble CMMS | API Key | v0.3 |
+| `MaintainX` | MaintainX | Bearer | Planned (v0.5) |
+| `Limble` | Limble CMMS | API Key | Planned (v0.5) |
 
 ## Why This Matters
 

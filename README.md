@@ -8,6 +8,7 @@
     <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/v/machina-ai.svg" alt="PyPI version"/></a>
     <a href="https://github.com/LGDiMaggio/machina/actions"><img src="https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main" alt="CI"/></a>
     <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/dm/machina-ai.svg" alt="Downloads"/></a>
+    <a href="https://doi.org/10.5281/zenodo.19456867"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.19456867.svg" alt="DOI"/></a>
   </p>
   <p>
     <a href="#quick-start">Quick Start</a> &bull;
@@ -289,6 +290,13 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 | `Limble` | Limble CMMS | Planned |
 | `Fiix` | Fiix (Rockwell) | Planned |
 
+### Spreadsheets & Databases
+
+| Connector | Source | |
+|-----------|--------|---|
+| `ExcelCsv` | Excel (`.xlsx`) and CSV files, mapped column by column | Available |
+| `GenericSql` | SQL databases over ODBC/JDBC, mapped query by query | Available |
+
 ### IoT & Industrial Protocols
 
 | Connector | Protocol | |
@@ -327,7 +335,7 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 |              YOUR APPLICATION                         |
 |  +---------------------+  +------------------------+ |
 |  |    AGENT LAYER       |  |    MCP SERVER LAYER    | |
-|  | Runtime + Workflows  |  |  (auto-generated from  | |
+|  | Runtime + Workflows  |  |  (tools gated by       | |
 |  | Domain Prompting     |  |   connector caps)      | |
 |  +----------+-----------+  +-----------+------------+ |
 +-----------+----------------------------+--------------+
@@ -335,7 +343,7 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 |  Asset . WorkOrder . FailureMode . SparePart . Alarm  |
 +-------------------------------------------------------+
 |                  CONNECTOR LAYER                       |
-|  CMMS . IoT . ERP . Communication . Documents         |
+|  CMMS . Excel/SQL . IoT . Messaging . Documents       |
 +-------------------------------------------------------+
 |                    CORE LAYER                          |
 |      LLM Abstraction . Config . Observability         |
@@ -438,7 +446,33 @@ The server registers tools only for the capabilities your connectors declare (15
 
 **v0.2** -- Workflow engine, IoT connectors (OPC-UA, MQTT), Slack, Email, Calendar, sandbox mode, security hardening
 
-**v0.3** *(in progress)* -- MCP Server layer, MaintainX/Limble/Fiix connectors, plugin system, anomaly detection, multi-agent orchestration, RUL estimation, WhatsApp, Teams
+**v0.3** -- MCP server layer, typed connector capabilities, Excel/CSV and SQL substrates, Generic CMMS YAML mapper, deployment story, starter kit; v0.3.1 added write-path safety and the RAG upgrade
+
+**v0.4** *(current)* -- Runnable MCP server (`machina mcp serve`, stdio and streamable HTTP), human-in-the-loop write confirmation and resolution-authority gates, failure-mode catalogs as a capability, YAML-buildable substrates, documentation checked against the code
+
+**v0.5** *(next)* -- MaintainX/Limble/Fiix connectors, WhatsApp and Teams, anomaly detection and RUL estimation, multi-agent orchestration
+
+Details in the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
+
+## Citing Machina
+
+If you use Machina in your research, please cite the software:
+
+<!-- TODO: replace 10.5281/zenodo.XXXXXXX with the v0.4.0 version DOI once Zenodo mints it. -->
+
+```bibtex
+@software{dimaggio_machina_2026,
+  author    = {Di Maggio, Luigi Gianpio},
+  title     = {{Machina: An AI Agent Framework for Industrial Maintenance}},
+  version   = {0.4.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.XXXXXXX},
+  url       = {https://github.com/LGDiMaggio/machina}
+}
+```
+
+The concept DOI [10.5281/zenodo.19456867](https://doi.org/10.5281/zenodo.19456867) always resolves to the latest version. GitHub's "Cite this repository" button reads [`CITATION.cff`](CITATION.cff).
 
 ## Contributing
 
@@ -448,7 +482,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full gu
 git clone https://github.com/LGDiMaggio/machina.git
 cd machina
 pip install -e ".[dev,all]"
-make ci   # lint + typecheck + test
+make ci   # lint + typecheck + spine drift check + tests
 ```
 
 ## Community & Support
