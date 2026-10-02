@@ -32,3 +32,10 @@ def test_error_names_the_field_without_echoing_input() -> None:
 def test_missing_field_is_reported() -> None:
     with pytest.raises(ConnectorConfigError, match="dsn"):
         validate_settings(_Model, {})
+
+
+def test_unknown_key_is_refused_by_name_only() -> None:
+    with pytest.raises(ConnectorConfigError, match="retires") as excinfo:
+        validate_settings(_Model, {"dsn": "PWD=hunter2", "retires": 9})
+    assert "hunter2" not in str(excinfo.value)
+    assert "expected: dsn, retries" in str(excinfo.value)

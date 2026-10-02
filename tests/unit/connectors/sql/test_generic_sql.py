@@ -301,6 +301,46 @@ class TestYamlSettingsAndCallContract:
         assert len(await connector.read_work_orders(status="created")) == 3
         assert await connector.read_work_orders(status="closed") == []
 
+    def test_read_write_declares_create_but_not_the_unimplemented_update(self) -> None:
+        from machina.connectors.capabilities import Capability
+
+        connector = GenericSqlConnector(config=_basic_config(capabilities="read_write"))
+        assert Capability.CREATE_WORK_ORDER in connector.capabilities
+        assert Capability.UPDATE_WORK_ORDER not in connector.capabilities
+
+    def test_config_given_as_a_dict_is_validated(self) -> None:
+        connector = GenericSqlConnector(config=_basic_config().model_dump())
+        assert connector.capabilities
+
+    def test_unknown_setting_is_refused(self) -> None:
+        settings = _basic_config().model_dump()
+        settings["capabilites"] = "read_write"  # typo
+        with pytest.raises(ConnectorConfigError, match="capabilites"):
+            GenericSqlConnector(**settings)
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_create_is_idempotent_on_existing_id(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(read_rows=[("WO-001", "P-001", "Existing")])
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+        cursor.execute.reset_mock()
+
+        result = await connector.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="Dup"
+            )
+        )
+
+        assert result.description == "Existing"  # the stored record, not the retry
+        executed = [str(call.args[0]).upper() for call in cursor.execute.call_args_list]
+        assert not any(q.startswith("INSERT") for q in executed)
+        conn_obj.commit.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_keyword_update_raises_connector_error_not_type_error(self) -> None:
         from machina.domain.work_order import WorkOrderStatus
@@ -358,7 +398,13 @@ class TestCreateWorkOrder:
         )
         result = await connector.create_work_order(wo)
         assert result.id == "WO-001"
-        insert_cursor.execute.assert_called_once()
+        # The idempotency check reads first; exactly one INSERT follows.
+        inserts = [
+            call
+            for call in insert_cursor.execute.call_args_list
+            if str(call.args[0]).upper().startswith("INSERT")
+        ]
+        assert len(inserts) == 1
         mock_conn_obj.commit.assert_called()
 
     @pytest.mark.asyncio

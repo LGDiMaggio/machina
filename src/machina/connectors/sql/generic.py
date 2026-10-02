@@ -140,10 +140,18 @@ class GenericSqlConnector:
         {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
     )
 
-    def __init__(self, *, config: SqlConnectorConfig | None = None, **settings: Any) -> None:
-        if config is None:
-            from machina.connectors.sql.schema import SqlConnectorConfig
+    def __init__(
+        self,
+        *,
+        config: SqlConnectorConfig | dict[str, Any] | None = None,
+        **settings: Any,
+    ) -> None:
+        from machina.connectors.sql.schema import SqlConnectorConfig
 
+        if isinstance(config, dict):
+            # ``settings: {config: {...}}`` in YAML — same shape, nested.
+            config = validate_settings(SqlConnectorConfig, config)
+        if config is None:
             config = validate_settings(SqlConnectorConfig, settings)
         elif settings:
             raise ConnectorConfigError(
@@ -155,7 +163,11 @@ class GenericSqlConnector:
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
-            caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
+            # Only the INSERT path exists. UPDATE_WORK_ORDER is not declared:
+            # update_work_order needs a per-schema UPDATE query that is not
+            # implemented, and a declared capability that always raises would
+            # still be offered to MCP clients.
+            caps.add(Capability.CREATE_WORK_ORDER)
         # Declared only when a FailureMode table mapping is configured, so
         # capability discovery is a true signal of "has a catalog source".
         if any(m.entity == "FailureMode" for m in config.tables.values()):
@@ -292,7 +304,13 @@ class GenericSqlConnector:
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Insert a new work order row into the database."""
+        """Insert a new work order row into the database.
+
+        Idempotent on the work-order ID: when a row with the same ID is
+        already readable through the WorkOrder mapping, that record is
+        returned and nothing is inserted. The agent runtime and the MCP tools
+        derive deterministic IDs and rely on this to collapse retries.
+        """
         if Capability.CREATE_WORK_ORDER not in self._capabilities:
             raise ConnectorConfigError(
                 "Write operations not enabled — set capabilities: read_write"
@@ -304,10 +322,23 @@ class GenericSqlConnector:
             raise ConnectorConfigError("No insert_table configured for WorkOrder mapping")
         if not mapping.insert_columns:
             raise ConnectorConfigError("No insert_columns configured for WorkOrder mapping")
+        existing = next(
+            (wo for wo in await self.read_work_orders() if wo.id == work_order.id), None
+        )
+        if existing is not None:
+            logger.info(
+                "work_order_create_idempotent_hit",
+                connector="GenericSqlConnector",
+                operation="create_work_order",
+                work_order_id=work_order.id,
+                asset_id=work_order.asset_id,
+            )
+            return existing
         await self._execute_write(mapping, work_order.model_dump())
         logger.info(
             "work_order_created",
             connector="GenericSqlConnector",
+            operation="create_work_order",
             work_order_id=work_order.id,
             asset_id=work_order.asset_id,
         )
@@ -327,14 +358,10 @@ class GenericSqlConnector:
 
         Accepts the same dict and keyword forms as the other substrates so
         callers get this explicit error rather than a ``TypeError``.
+        ``UPDATE_WORK_ORDER`` is never declared for this connector.
         """
-        if Capability.UPDATE_WORK_ORDER not in self._capabilities:
-            raise ConnectorConfigError(
-                "Write operations not enabled — set capabilities: read_write"
-            )
         # introspect: stub — no per-schema UPDATE query is implemented yet, so
-        # framework introspection must treat UPDATE_WORK_ORDER as unwired here
-        # even though the capability is declared when capabilities: read_write.
+        # framework introspection must treat UPDATE_WORK_ORDER as unwired here.
         raise ConnectorError(
             "Generic SQL update_work_order requires a custom UPDATE query "
             "per schema — not yet implemented. Use create_work_order for new records."

@@ -33,6 +33,8 @@ from machina.domain.asset import AssetType, Criticality
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import (
     ConnectorConfigError,
+    ConnectorError,
+    ConnectorLockedError,
     ConnectorSchemaError,
 )
 
@@ -707,10 +709,10 @@ class TestYamlSettingsAndCallContract:
     @pytest.mark.asyncio
     async def test_read_work_orders_filters(self, tmp_path: Path) -> None:
         conn = await _connected_with_work_orders(tmp_path)
-        await conn.update_work_order("WO-3", status=WorkOrderStatus.CLOSED)
+        await conn.update_work_order("WO-3", status=WorkOrderStatus.CANCELLED)
 
         assert [wo.id for wo in await conn.read_work_orders(asset_id="P-201")] == ["WO-1", "WO-3"]
-        assert [wo.id for wo in await conn.read_work_orders(status="closed")] == ["WO-3"]
+        assert [wo.id for wo in await conn.read_work_orders(status="cancelled")] == ["WO-3"]
         open_on_pump = await conn.read_work_orders(
             asset_id="P-201", status=WorkOrderStatus.CREATED
         )
@@ -727,9 +729,71 @@ class TestYamlSettingsAndCallContract:
         assert updated.status == WorkOrderStatus.ASSIGNED
         assert updated.assigned_to == "Mario Rossi"
 
-        updated = await conn.update_work_order("WO-1", {"description": "new"})
+        # Dict form: the status string is coerced to the enum, not stored raw.
+        updated = await conn.update_work_order(
+            "WO-1", {"description": "new", "status": "in_progress"}
+        )
         assert updated.description == "new"
+        assert updated.status is WorkOrderStatus.IN_PROGRESS
         assert updated.assigned_to == "Mario Rossi"
+
+    @pytest.mark.asyncio
+    async def test_illegal_transition_is_refused_and_leaves_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Cannot transition"):
+            await conn.update_work_order("WO-1", status=WorkOrderStatus.CLOSED)
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.status is WorkOrderStatus.CREATED
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_string_is_refused(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Invalid work order status"):
+            await conn.update_work_order("WO-1", {"status": "done-ish"})
+
+    @pytest.mark.asyncio
+    async def test_failed_rewrite_rolls_the_cache_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _locked(schema: object) -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_rewrite_work_orders", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-1", description="changed")
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.description == "x"
+
+    @pytest.mark.asyncio
+    async def test_create_is_idempotent_on_the_id(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        again = await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="y")
+        )
+        assert again.description == "x"  # the stored record, not the retry
+        assert len(await conn.read_work_orders()) == 3
+        content = (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+        assert content.count("WO-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_get_asset_before_connect_is_an_error(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.get_asset("P-201")
+
+    def test_config_given_as_a_dict_is_validated(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(config=_flat_settings(tmp_path))
+        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+
+    def test_unknown_setting_is_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        settings["file_path"] = "data/asset_registry.xlsx"  # an old, never-valid key
+        with pytest.raises(ConnectorConfigError, match="file_path"):
+            ExcelCsvConnector(**settings)
 
     @pytest.mark.asyncio
     async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:

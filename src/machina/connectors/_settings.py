@@ -32,9 +32,21 @@ def validate_settings(model: type[ModelT], settings: dict[str, Any]) -> ModelT:
     Returns:
         The validated model instance.
 
+    Unknown top-level keys are refused (by name) rather than silently
+    ignored, so a typo such as ``capabilites: read_write`` cannot quietly
+    produce a read-only connector.
+
     Raises:
-        ConnectorConfigError: If ``settings`` do not validate.
+        ConnectorConfigError: If ``settings`` contain unknown keys or do not
+            validate.
     """
+    if model.model_config.get("extra") != "allow":
+        unknown = sorted(set(settings) - set(model.model_fields))
+        if unknown:
+            raise ConnectorConfigError(
+                f"Unknown {model.__name__} settings: {', '.join(unknown)} — "
+                f"expected: {', '.join(sorted(model.model_fields))}"
+            )
     try:
         return model.model_validate(settings)
     except ValidationError as exc:

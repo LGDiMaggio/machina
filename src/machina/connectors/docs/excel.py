@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     )
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
-    from machina.domain.work_order import WorkOrder, WorkOrderStatus
+    from machina.domain.work_order import WorkOrder
+from machina.domain.work_order import WorkOrderStatus
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -372,6 +373,13 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
         writer.writerow(csv_row)
 
 
+def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
+    """Map a write-side OS error onto the connector error contract."""
+    if isinstance(exc, PermissionError):
+        return ConnectorLockedError(f"File is locked by another process: {path.name}")
+    return ConnectorError(f"Could not write {path.name}: {exc.strerror or exc}")
+
+
 # ------------------------------------------------------------------
 # Connector
 # ------------------------------------------------------------------
@@ -437,10 +445,18 @@ class ExcelCsvConnector:
         """
         return self._capabilities
 
-    def __init__(self, *, config: ExcelConnectorConfig | None = None, **settings: Any) -> None:
-        if config is None:
-            from machina.connectors.docs.excel_schema import ExcelConnectorConfig
+    def __init__(
+        self,
+        *,
+        config: ExcelConnectorConfig | dict[str, Any] | None = None,
+        **settings: Any,
+    ) -> None:
+        from machina.connectors.docs.excel_schema import ExcelConnectorConfig
 
+        if isinstance(config, dict):
+            # ``settings: {config: {...}}`` in YAML — same shape, nested.
+            config = validate_settings(ExcelConnectorConfig, config)
+        if config is None:
             config = validate_settings(ExcelConnectorConfig, settings)
         elif settings:
             raise ConnectorConfigError(
@@ -520,7 +536,14 @@ class ExcelCsvConnector:
         return list(self._asset_cache)
 
     async def get_asset(self, asset_id: str) -> Asset | None:
-        """Return one asset from the registry spreadsheet, or ``None``."""
+        """Return one asset from the registry spreadsheet, or ``None``.
+
+        Raises:
+            ConnectorError: If the connector is not connected, so a caller
+                never mistakes "not loaded yet" for "no such asset".
+        """
+        if not self._connected:
+            raise ConnectorError("Not connected — call connect() before reading")
         for asset in self._asset_cache:
             if asset.id == asset_id:
                 return asset
@@ -572,7 +595,18 @@ class ExcelCsvConnector:
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Append a new work order row to the spreadsheet."""
+        """Append a new work order row to the spreadsheet.
+
+        Idempotent on the work-order ID: re-creating a work order whose ID is
+        already in the sheet returns the existing record instead of appending
+        a duplicate row. The agent runtime and the MCP tools derive
+        deterministic IDs and rely on this to collapse retries.
+
+        Raises:
+            ConnectorConfigError: If no writable work-orders sheet is configured.
+            ConnectorLockedError: If the file is open in another program.
+            ConnectorError: If the file cannot be written.
+        """
         schema = self._config.work_orders
         if schema is None:
             raise ConnectorConfigError("No work_orders schema configured for writing")
@@ -583,11 +617,25 @@ class ExcelCsvConnector:
         path = Path(schema.path)
 
         async with self._write_lock:
-            await asyncio.to_thread(self._write_row, path, schema, row_data)
-        self._wo_cache.append(work_order)
+            existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
+            if existing is not None:
+                logger.info(
+                    "work_order_create_idempotent_hit",
+                    connector="ExcelCsvConnector",
+                    operation="create_work_order",
+                    work_order_id=work_order.id,
+                    asset_id=work_order.asset_id,
+                )
+                return existing
+            try:
+                await asyncio.to_thread(self._write_row, path, schema, row_data)
+            except OSError as exc:
+                raise _file_write_error(exc, path) from exc
+            self._wo_cache.append(work_order)
         logger.info(
             "work_order_created",
             connector="ExcelCsvConnector",
+            operation="create_work_order",
             work_order_id=work_order.id,
             asset_id=work_order.asset_id,
         )
@@ -607,50 +655,84 @@ class ExcelCsvConnector:
 
         Accepts the changes as an ``updates`` dict, as keyword arguments (the
         shape the agent runtime and MCP tools use), or both; keyword values
-        override dict entries.
+        override dict entries. A status change goes through
+        :meth:`WorkOrder.transition_to`, so only the work-order lifecycle's
+        allowed transitions succeed.
 
         When ``write_mode`` is configured, a full rewrite from cache is
         performed for both xlsx and csv files, so the change is durable
-        across restarts. When no ``write_mode`` is set, the update is kept
-        in cache only.
+        across restarts; if the rewrite fails, the cached work order is
+        restored. When no ``write_mode`` is set, the update is kept in cache
+        only.
+
+        Raises:
+            ConnectorError: If the work order is unknown, the status is not a
+                valid or allowed transition, or the file cannot be written
+                (:class:`ConnectorLockedError` when it is open elsewhere).
         """
-        updates = dict(updates or {})
+        changes = dict(updates or {})
         for key, value in (
             ("status", status),
             ("assigned_to", assigned_to),
             ("description", description),
         ):
             if value is not None:
-                updates[key] = value
-        for wo in self._wo_cache:
-            if wo.id == work_order_id:
-                schema = self._config.work_orders
-                # Serialise the cache mutation together with the rewrite under
-                # the write lock: the rewrite reads the whole cache from a worker
-                # thread, so a concurrent update mutating the cache must not
-                # interleave with it.
-                async with self._write_lock:
-                    for key, value in updates.items():
-                        if hasattr(wo, key):
-                            setattr(wo, key, value)
-                    if schema and schema.write_mode:
-                        # Full rewrite from cache for both xlsx and csv so the
-                        # change is durable, not cache-only (lost on restart).
+                changes[key] = value
+        new_status: WorkOrderStatus | None = None
+        if "status" in changes:
+            raw_status = changes.pop("status")
+            try:
+                new_status = WorkOrderStatus(getattr(raw_status, "value", raw_status))
+            except ValueError as exc:
+                raise ConnectorError(f"Invalid work order status {raw_status!r}") from exc
+
+        schema = self._config.work_orders
+        # Serialise the cache mutation together with the rewrite under the
+        # write lock: the rewrite reads the whole cache from a worker thread,
+        # so a concurrent update mutating the cache must not interleave.
+        async with self._write_lock:
+            idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
+            if idx is None:
+                raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
+            wo = self._wo_cache[idx]
+            before = wo.model_copy(deep=True)
+            try:
+                if new_status is not None:
+                    try:
+                        wo.transition_to(new_status)
+                    except ValueError as exc:
+                        raise ConnectorError(str(exc)) from exc
+                for key, value in changes.items():
+                    if hasattr(wo, key):
+                        setattr(wo, key, value)
+                if schema and schema.write_mode:
+                    # Full rewrite from cache for both xlsx and csv so the
+                    # change is durable, not cache-only (lost on restart).
+                    path = Path(schema.path)
+                    try:
                         await asyncio.to_thread(self._rewrite_work_orders, schema)
-                if not (schema and schema.write_mode):
-                    logger.warning(
-                        "update_not_persisted",
-                        connector="ExcelCsvConnector",
-                        work_order_id=work_order_id,
-                        hint="no write_mode configured — update kept in cache only",
-                    )
-                logger.info(
-                    "work_order_updated",
-                    connector="ExcelCsvConnector",
-                    work_order_id=work_order_id,
-                )
-                return wo
-        raise ConnectorError(f"Work order '{work_order_id}' not found in cache")
+                    except OSError as exc:
+                        raise _file_write_error(exc, path) from exc
+            except Exception:
+                self._wo_cache[idx] = before
+                raise
+        if not (schema and schema.write_mode):
+            logger.warning(
+                "update_not_persisted",
+                connector="ExcelCsvConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                asset_id=wo.asset_id,
+                hint="no write_mode configured — update kept in cache only",
+            )
+        logger.info(
+            "work_order_updated",
+            connector="ExcelCsvConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+            asset_id=wo.asset_id,
+        )
+        return wo
 
     def _rewrite_work_orders(self, schema: SheetSchema) -> None:
         """Rewrite all work orders from cache, dispatching by file format."""
