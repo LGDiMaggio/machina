@@ -55,11 +55,13 @@ pip install machina-ai[cmms-rest]
     connectors:
       cmms:
         type: maximo
-        url: https://maximo.example.com
-        auth:
-          type: api_key
-          header_name: apikey
-          value: ${MAXIMO_API_KEY}
+        primary: true
+        settings:
+          url: https://maximo.example.com
+          auth:
+            type: api_key
+            header_name: apikey
+            value: ${MAXIMO_API_KEY}
     ```
 
 ## Capabilities

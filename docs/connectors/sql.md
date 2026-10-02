@@ -1,33 +1,94 @@
 # SQL Connector
 
-Read maintenance data from SQL databases (PostgreSQL, SQL Server, SQLite, DB2)
-using YAML-based table-to-entity mapping.
+Read maintenance data from a SQL database — a legacy CMMS, an in-house
+maintenance database, a reporting replica — through ODBC or JDBC, with a
+query-to-entity mapping in configuration.
 
 ## Install
 
 ```bash
-pip install "machina-ai[sql]"
-# Plus your database driver:
-# pip install psycopg2-binary  # PostgreSQL
-# pip install pyodbc            # SQL Server / DB2
+pip install "machina-ai[sql]"        # ODBC, via pyodbc
+pip install "machina-ai[sql-jdbc]"   # JDBC, via jaydebeapi + JPype1
 ```
 
-## Quick Start
+You also need the database's own ODBC driver (or JDBC `.jar`) installed on
+the host — for example Microsoft ODBC Driver 18 for SQL Server, IBM Db2 ODBC,
+or psqlODBC for PostgreSQL.
+
+## Configuration (YAML)
+
+Connector type `sql` (alias `generic_sql`). Each entry under `tables` maps the
+rows of a `SELECT` query to one domain entity:
+
+```yaml
+connectors:
+  cmms:
+    type: sql
+    primary: true
+    settings:
+      dsn: "${MACHINA_SQL_DSN}"     # e.g. Driver={ODBC Driver 18 for SQL Server};Server=...;Database=...;UID=...;PWD=...
+      capabilities: read_write      # default: read_only
+      tables:
+        assets:
+          entity: Asset
+          query: "SELECT * FROM EQUIPMENT"
+          fields:
+            id: {column: EQUIP_ID}
+            name: {column: DESCRIPTION, coerce: strip}
+            type: {column: EQUIP_CAT, enum_map: {POM: rotating_equipment, VAL: instrument}}
+            criticality: {column: CRIT}
+            failure_modes: {column: FAILURE_CODES}   # "BEAR-WEAR-01;SEAL-LEAK-01"
+        work_orders:
+          entity: WorkOrder
+          query: "SELECT * FROM WORK_ORDERS"
+          fields:
+            id: {column: WO_ID}
+            asset_id: {column: EQUIP_ID}
+            description: {column: WO_DESC}
+            status: {column: WO_STATUS, enum_map: {APERTO: created, CHIUSO: closed}}
+          insert_table: WORK_ORDERS
+          insert_columns: {id: WO_ID, asset_id: EQUIP_ID, description: WO_DESC}
+```
+
+Keep the DSN in the environment: it usually carries credentials. Errors never
+echo it, and the connection log shows it redacted. Unknown settings keys are
+refused with an error that names them.
+
+### Mapping reference
+
+| Key | Where | Meaning |
+|-----|-------|---------|
+| `entity` | table | `Asset`, `WorkOrder` or `FailureMode` |
+| `query` | table | The `SELECT` that returns the rows |
+| `fields` | table | Entity field → `{column, coerce, enum_map, default}` |
+| `insert_table`, `insert_columns` | `WorkOrder` table | Target of the parameterized `INSERT` used by `create_work_order` (identifiers are validated) |
+| `coerce` | field | `strip`, `int`, `float`, `decimal`, `iso_date`, `db2_date`, `unix_ts`, `strip_ebcdic` |
+| `enum_map` | field | Database value → domain value (e.g. a status or asset type) |
+| `default` | field | Value used when the column is NULL |
+
+Other settings: `driver_type` (`odbc` or `jdbc`; JDBC needs `jdbc_driver_class`
+and usually `jdbc_driver_path`, the driver `.jar`), `ebcdic_codepage` (default `cp037`, for
+`strip_ebcdic`), and `retry` (`max_retries`, `base_backoff`, `max_backoff`)
+for transient read errors.
+
+`connect()` opens the connection and runs each query to check that every
+mapped column is present; a missing column fails with the list of available
+ones. List-valued fields (the asset `failure_modes` column, and a failure-mode
+catalog's `detection_methods`, `typical_indicators`, `recommended_actions`)
+hold a semicolon-delimited string.
+
+### Python
 
 ```python
 from machina.connectors.sql import GenericSqlConnector
 
 connector = GenericSqlConnector(
-    connection_string="postgresql://user:pass@host/db",
-    table_mapping={
+    dsn=dsn,
+    tables={
         "assets": {
-            "table": "equipment",
-            "fields": {
-                "id": "equipment_id",
-                "name": "display_name",
-                "type": "equipment_type",
-                "location": "install_location",
-            },
+            "entity": "Asset",
+            "query": "SELECT * FROM EQUIPMENT",
+            "fields": {"id": {"column": "EQUIP_ID"}, "name": {"column": "DESCRIPTION"}},
         },
     },
 )
@@ -35,87 +96,27 @@ await connector.connect()
 assets = await connector.read_assets()
 ```
 
-## Configuration (YAML)
-
-```yaml
-connectors:
-  cmms:
-    type: generic_sql
-    primary: true
-    settings:
-      connection_string: "${DATABASE_URL}"
-      table_mapping:
-        assets:
-          table: "equipment"
-          fields:
-            id: "equipment_id"
-            name: "display_name"
-            type: "equipment_type"
-            location: "install_location"
-            criticality: "risk_category"
-        work_orders:
-          table: "maintenance_orders"
-          fields:
-            id: "order_id"
-            asset_id: "equipment_id"
-            type: "order_type"
-            priority: "priority_level"
-            description: "order_description"
-            status: "order_status"
-```
-
-## Table Mapping
-
-Each entity type maps to a database table with field-level column mappings:
-
-| Entity | Machina Field | Your Column |
-|--------|--------------|-------------|
-| Asset | `id` | `equipment_id` |
-| Asset | `name` | `display_name` |
-| WorkOrder | `asset_id` | `equipment_id` |
-| WorkOrder | `priority` | `priority_level` |
-
-The connector translates between your database schema and Machina's domain model
-automatically.
+The keyword arguments are the same as the YAML `settings`; alternatively pass
+a validated `SqlConnectorConfig` (from `machina.connectors.sql.schema`) as
+`config=`.
 
 ## Capabilities
 
-| Capability | Description |
-|-----------|-------------|
-| `READ_ASSETS` | Query asset table |
-| `READ_WORK_ORDERS` | Query work order table |
-| `CREATE_WORK_ORDER` | Insert work order row |
-| `READ_SPARE_PARTS` | Query spare parts table (if mapped) |
-| `READ_MAINTENANCE_HISTORY` | Query work orders filtered by asset |
-| `READ_FAILURE_MODES` | Query failure-mode catalog table — declared only when a `FailureMode` table mapping is configured |
+| Capability | Declared when | Description |
+|-----------|---------------|-------------|
+| `read_assets` | always | Rows of the `Asset` mapping (also `get_asset(id)`) |
+| `read_work_orders` | always | Rows of the `WorkOrder` mapping, optionally filtered by `asset_id` / `status` |
+| `create_work_order` | `capabilities: read_write` | Parameterized `INSERT` into `insert_table` |
+| `read_failure_modes` | a `FailureMode` mapping is configured | The failure-mode catalog |
 
-To map a failure-mode catalog, add a table mapping with `entity: FailureMode`.
-List-valued columns (`detection_methods`, `typical_indicators`,
-`recommended_actions`) and the asset `failure_modes` linkage column use a
-semicolon-delimited string, e.g. `"BEAR-WEAR-01;SEAL-LEAK-01"`.
-
-## Supported Databases
-
-| Database | Driver | Connection String |
-|----------|--------|-------------------|
-| PostgreSQL | `psycopg2` | `postgresql://user:pass@host/db` |
-| SQL Server | `pyodbc` | `mssql+pyodbc://user:pass@host/db?driver=...` |
-| SQLite | built-in | `sqlite:///path/to/file.db` |
-| DB2 | `pyodbc` | `db2+pyodbc://user:pass@host/db` |
-
-## Read-Only Mode
-
-The SQL connector is read-only by default. Write support (for `CREATE_WORK_ORDER`)
-requires explicit configuration:
-
-```yaml
-settings:
-  connection_string: "${DATABASE_URL}"
-  read_only: false  # Enable writes
-```
+`create_work_order` is idempotent on the work-order ID: if the ID already
+exists, the existing record is returned and nothing is inserted. It needs
+`insert_table` and `insert_columns` on the `WorkOrder` mapping. Updating work
+orders is not supported, and spare parts and maintenance history are not read
+from SQL. With sandbox mode on, the insert never runs (`@sandbox_aware`).
 
 ## Use Cases
 
-- **Legacy CMMS migration:** Read from an existing SQL database while evaluating Machina
-- **Custom CMMS:** Connect to in-house maintenance databases
-- **Reporting databases:** Read from data warehouses or replicas
+- **Legacy CMMS:** read an existing maintenance database alongside its own UI
+- **In-house systems:** connect home-grown maintenance tables
+- **Reporting databases:** read from data warehouses or replicas

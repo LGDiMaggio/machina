@@ -31,7 +31,9 @@ pip install machina-ai[cmms-rest]
     connectors:
       cmms:
         type: upkeep
-        api_key: ${UPKEEP_API_KEY}
+        primary: true
+        settings:
+          api_key: ${UPKEEP_API_KEY}
     ```
 
 ## Capabilities

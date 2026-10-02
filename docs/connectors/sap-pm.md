@@ -55,13 +55,15 @@ pip install machina-ai[cmms-rest]
     connectors:
       cmms:
         type: sap_pm
-        url: https://sap.example.com/sap/opu/odata/sap
-        sap_client: "100"
-        auth:
-          type: oauth2_client_credentials
-          token_url: https://sap.example.com/oauth/token
-          client_id: ${SAP_CLIENT_ID}
-          client_secret: ${SAP_CLIENT_SECRET}
+        primary: true
+        settings:
+          url: https://sap.example.com/sap/opu/odata/sap
+          sap_client: "100"
+          auth:
+            type: oauth2_client_credentials
+            token_url: https://sap.example.com/oauth/token
+            client_id: ${SAP_CLIENT_ID}
+            client_secret: ${SAP_CLIENT_SECRET}
     ```
 
 ## Capabilities

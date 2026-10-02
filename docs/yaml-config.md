@@ -55,7 +55,12 @@ agent.run()
 | `channels` | list | `[]` (defaults to CLI) | Communication channels |
 | `llm` | object | `{provider: "ollama:llama3"}` | LLM provider settings |
 | `sandbox` | boolean | `false` | Enable sandbox mode (writes logged, not executed) |
-| `logging` | object | `{}` | Logging configuration overrides |
+| `confirmations` | boolean | `true` | Ask the user to confirm every write before it runs |
+| `mcp` | object | see below | MCP server settings |
+| `logging` | object | `{}` | Logging overrides, e.g. `{level: DEBUG}` |
+
+Unknown top-level keys are accepted and ignored, so check the spelling of
+section names.
 
 ### Plant
 
@@ -67,33 +72,38 @@ plant:
 
 ### Connectors
 
-Each connector has a `type`, optional `enabled` flag, and a `settings` dict:
+Each connector has a `type`, optional `enabled` and `primary` flags, and a
+`settings` dict:
 
 ```yaml
 connectors:
   my_cmms:
     type: generic_cmms
     enabled: true          # default: true
+    primary: true          # the CMMS the MCP tools and resources use
     settings:
       data_dir: "./data/cmms"
 ```
+
+Everything the connector needs goes under `settings`; keys placed next to
+`type` are ignored.
 
 #### Available types
 
 | Type | Class | Extra |
 |------|-------|-------|
-| `generic_cmms` | GenericCmmsConnector | -- |
+| `generic_cmms` | GenericCmmsConnector | `cmms-rest` (REST mode only) |
 | `sap_pm` | SapPmConnector | `cmms-rest` |
 | `maximo` | MaximoConnector | `cmms-rest` |
 | `upkeep` | UpKeepConnector | `cmms-rest` |
-| `sql` / `generic_sql` | GenericSqlConnector | `sql` |
+| `sql` / `generic_sql` | GenericSqlConnector | `sql` (or `sql-jdbc`) |
 | `excel` / `excel_csv` | ExcelCsvConnector | `excel` |
 | `opcua` | OpcUaConnector | `opcua` |
 | `mqtt` | MqttConnector | `mqtt` |
 | `document_store` | DocumentStoreConnector | `docs-rag` |
 | `telegram` | TelegramConnector | `telegram` |
 | `slack` | SlackConnector | `slack` |
-| `email` | EmailConnector | -- |
+| `email` | EmailConnector | -- (SMTP/IMAP); `gmail` for the Gmail API |
 | `calendar` | CalendarConnector | `calendar` |
 
 The canonical, code-derived list of registered YAML connector types is the
@@ -101,8 +111,10 @@ generated [capability matrix](capabilities.md) (run `machina describe`); it is
 generated from `runtime._CONNECTOR_FACTORIES`, so it never drifts from what the
 loader actually accepts.
 
-The `settings` dict is passed as keyword arguments to the connector constructor.
-Check each connector's documentation for available settings.
+The `settings` dict is passed as keyword arguments to the connector
+constructor; nested objects such as `auth` and `pagination` are given as
+dicts selected by their `type`. Check each connector's documentation for
+available settings.
 
 ### Channels
 
@@ -125,6 +137,19 @@ llm:
   max_tokens: 4096
 ```
 
+### MCP
+
+Read by `machina mcp serve`; see [MCP Auth](mcp/auth.md).
+
+```yaml
+mcp:
+  enable_vendor_tools: false          # register the raw SAP PM / Maximo tools
+  allowed_hosts: ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]", "[::1]:*"]
+  allowed_origins: ["http://localhost", "https://localhost", "http://localhost:*",
+                    "https://localhost:*", "http://127.0.0.1:*", "https://127.0.0.1:*"]
+  token_verifier_class: ""            # dotted path under machina.; empty = static bearer tokens
+```
+
 ## Environment Variables
 
 Use `${VAR}` syntax anywhere in the YAML. Variables are resolved at load time:
@@ -133,14 +158,18 @@ Use `${VAR}` syntax anywhere in the YAML. Variables are resolved at load time:
 connectors:
   sap:
     type: sap_pm
+    primary: true
     settings:
-      url: "https://sap.company.com/odata/v4"
+      url: "https://sap.company.com/sap/opu/odata/sap"
       auth:
-        token: "${SAP_TOKEN}"
+        type: basic
+        username: "${SAP_USER}"
+        password: "${SAP_PASSWORD}"
 ```
 
 ```bash
-export SAP_TOKEN=eyJhbGci...
+export SAP_USER=svc-machina
+export SAP_PASSWORD=...
 python agent.py
 ```
 
@@ -177,7 +206,7 @@ arbitrary Python logic in YAML would be fragile and hard to debug.
 |-|-------------|--------|
 | **Agent type** | Knowledge-base / Q&A | Workflow automation |
 | **What you configure** | Connectors, LLM, channels, plant | Everything + workflows with guards, lambdas |
-| **Workflows** | Not supported | Full DSL ([examples 01-04](https://github.com/LGDiMaggio/machina/tree/main/examples/)) |
+| **Workflows** | Not supported | Full DSL ([examples](https://github.com/LGDiMaggio/machina/tree/main/examples/)) |
 | **Best for** | Standard deployments, Docker, ops teams | Complex agents, custom integrations |
 | **Example** | [yaml_config/](https://github.com/LGDiMaggio/machina/tree/main/examples/reference/yaml_config/) | [quickstart/](https://github.com/LGDiMaggio/machina/tree/main/examples/quickstart/), [alarm_to_workorder/](https://github.com/LGDiMaggio/machina/tree/main/examples/alarm_to_workorder/) |
 
