@@ -248,6 +248,69 @@ class TestReadAssets:
         assert assets[1].type == AssetType.INSTRUMENT
 
 
+class TestYamlSettingsAndCallContract:
+    """Built from flat YAML settings; honours the agent/MCP call shapes."""
+
+    def test_flat_settings_build_the_connector(self) -> None:
+        from machina.connectors.capabilities import Capability
+
+        settings = _basic_config(capabilities="read_write").model_dump()
+        connector = GenericSqlConnector(**settings)
+        assert Capability.CREATE_WORK_ORDER in connector.capabilities
+
+    def test_config_and_flat_settings_together_are_refused(self) -> None:
+        config = _basic_config()
+        with pytest.raises(ConnectorConfigError, match="either"):
+            GenericSqlConnector(config=config, dsn=config.dsn)
+
+    def test_invalid_settings_never_echo_the_dsn(self) -> None:
+        secret_dsn = "Driver={ODBC Driver 18};Server=db;UID=svc;PWD=hunter2-secret;"
+        with pytest.raises(ConnectorConfigError, match="tables") as excinfo:
+            GenericSqlConnector(dsn=secret_dsn, capabilities="read_write")
+        assert "hunter2" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_get_asset(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(
+            read_rows=[("P-001", "Pompa 1", "POM", "A"), ("V-001", "Valvola 1", "VAL", "B")]
+        )
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        asset = await connector.get_asset("V-001")
+        assert asset is not None
+        assert asset.name == "Valvola 1"
+        assert await connector.get_asset("NOPE") is None
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_read_work_orders_filters(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(
+            read_rows=[
+                ("WO-1", "P-001", "Seal"),
+                ("WO-2", "V-001", "Valve"),
+                ("WO-3", "P-001", "X"),
+            ]
+        )
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        on_pump = await connector.read_work_orders(asset_id="P-001")
+        assert [wo.id for wo in on_pump] == ["WO-1", "WO-3"]
+        assert len(await connector.read_work_orders(status="created")) == 3
+        assert await connector.read_work_orders(status="closed") == []
+
+    @pytest.mark.asyncio
+    async def test_keyword_update_raises_connector_error_not_type_error(self) -> None:
+        from machina.domain.work_order import WorkOrderStatus
+        from machina.exceptions import ConnectorError
+
+        connector = GenericSqlConnector(config=_basic_config(capabilities="read_write"))
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await connector.update_work_order("WO-1", status=WorkOrderStatus.CLOSED)
+
+
 class TestReadWriteCapabilities:
     def test_read_only_capabilities(self) -> None:
         config = _basic_config(capabilities="read_only")

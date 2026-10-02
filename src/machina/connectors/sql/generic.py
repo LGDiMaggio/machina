@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
+from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
-    from machina.domain.work_order import WorkOrder
+    from machina.domain.work_order import WorkOrder, WorkOrderStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -107,6 +108,14 @@ class GenericSqlConnector:
 
     Args:
         config: Parsed SQL connector configuration.
+        **settings: Alternatively, the same configuration as flat keyword
+            arguments (``dsn=``, ``tables=``, ``capabilities=``, ...) — the
+            shape a ``machina.yaml`` ``settings`` block carries. Pass either
+            ``config`` or settings. Validation errors never echo the DSN.
+
+    Raises:
+        ConnectorConfigError: If both forms are given, or the settings do
+            not validate.
 
     Example:
         ```python
@@ -131,7 +140,15 @@ class GenericSqlConnector:
         {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
     )
 
-    def __init__(self, *, config: SqlConnectorConfig) -> None:
+    def __init__(self, *, config: SqlConnectorConfig | None = None, **settings: Any) -> None:
+        if config is None:
+            from machina.connectors.sql.schema import SqlConnectorConfig
+
+            config = validate_settings(SqlConnectorConfig, settings)
+        elif settings:
+            raise ConnectorConfigError(
+                "GenericSqlConnector takes either config= or flat settings, not both"
+            )
         self._config = config
         self._conn: Any = None
         self._connected = False
@@ -211,13 +228,36 @@ class GenericSqlConnector:
         rows = await self._execute_read(mapping)
         return [_dict_to_asset(r) for r in rows]
 
-    async def read_work_orders(self) -> list[WorkOrder]:
-        """Read work orders from the configured table mapping."""
+    async def get_asset(self, asset_id: str) -> Asset | None:
+        """Return one asset from the configured table mapping, or ``None``."""
+        for asset in await self.read_assets():
+            if asset.id == asset_id:
+                return asset
+        return None
+
+    async def read_work_orders(
+        self,
+        *,
+        asset_id: str = "",
+        status: WorkOrderStatus | str = "",
+    ) -> list[WorkOrder]:
+        """Read work orders from the configured table mapping.
+
+        Args:
+            asset_id: Keep only work orders for this asset.
+            status: Keep only work orders in this status (enum or its value).
+        """
         mapping = self._find_mapping("WorkOrder")
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        return [_dict_to_work_order(r) for r in rows]
+        wanted_status = str(getattr(status, "value", status))
+        return [
+            wo
+            for wo in (_dict_to_work_order(r) for r in rows)
+            if (not asset_id or wo.asset_id == asset_id)
+            and (not wanted_status or getattr(wo.status, "value", wo.status) == wanted_status)
+        ]
 
     async def read_failure_modes(self) -> list[FailureMode]:
         """Read the failure-mode catalog from the configured table mapping.
@@ -274,8 +314,20 @@ class GenericSqlConnector:
         return work_order
 
     @sandbox_aware
-    async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
-        """Update a work order — re-reads after update to return fresh state."""
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        updates: dict[str, Any] | None = None,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update a work order — not implemented for generic SQL schemas.
+
+        Accepts the same dict and keyword forms as the other substrates so
+        callers get this explicit error rather than a ``TypeError``.
+        """
         if Capability.UPDATE_WORK_ORDER not in self._capabilities:
             raise ConnectorConfigError(
                 "Write operations not enabled — set capabilities: read_write"

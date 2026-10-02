@@ -20,6 +20,7 @@ import structlog
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
+from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     )
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
-    from machina.domain.work_order import WorkOrder
+    from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -387,6 +388,14 @@ class ExcelCsvConnector:
 
     Args:
         config: Parsed connector configuration.
+        **settings: Alternatively, the same configuration as flat keyword
+            arguments (``asset_registry=``, ``work_orders=``,
+            ``failure_modes=``, ``watcher=``) — the shape a ``machina.yaml``
+            ``settings`` block carries. Pass either ``config`` or settings.
+
+    Raises:
+        ConnectorConfigError: If both forms are given, or the settings do
+            not validate.
 
     Example:
         ```python
@@ -428,7 +437,15 @@ class ExcelCsvConnector:
         """
         return self._capabilities
 
-    def __init__(self, *, config: ExcelConnectorConfig) -> None:
+    def __init__(self, *, config: ExcelConnectorConfig | None = None, **settings: Any) -> None:
+        if config is None:
+            from machina.connectors.docs.excel_schema import ExcelConnectorConfig
+
+            config = validate_settings(ExcelConnectorConfig, settings)
+        elif settings:
+            raise ConnectorConfigError(
+                "ExcelCsvConnector takes either config= or flat settings, not both"
+            )
         self._config = config
         caps = set(self._BASE_CAPABILITIES)
         # Writes are serviceable only with a writable work_orders sheet: both
@@ -502,11 +519,34 @@ class ExcelCsvConnector:
             return []
         return list(self._asset_cache)
 
-    async def read_work_orders(self) -> list[WorkOrder]:
-        """Return work orders from the work-order spreadsheet."""
+    async def get_asset(self, asset_id: str) -> Asset | None:
+        """Return one asset from the registry spreadsheet, or ``None``."""
+        for asset in self._asset_cache:
+            if asset.id == asset_id:
+                return asset
+        return None
+
+    async def read_work_orders(
+        self,
+        *,
+        asset_id: str = "",
+        status: WorkOrderStatus | str = "",
+    ) -> list[WorkOrder]:
+        """Return work orders from the work-order spreadsheet.
+
+        Args:
+            asset_id: Keep only work orders for this asset.
+            status: Keep only work orders in this status (enum or its value).
+        """
         if self._config.work_orders is None:
             return []
-        return list(self._wo_cache)
+        wanted_status = str(getattr(status, "value", status))
+        return [
+            wo
+            for wo in self._wo_cache
+            if (not asset_id or wo.asset_id == asset_id)
+            and (not wanted_status or getattr(wo.status, "value", wo.status) == wanted_status)
+        ]
 
     async def read_failure_modes(self) -> list[FailureMode]:
         """Return failure modes from the failure-modes spreadsheet.
@@ -554,14 +594,34 @@ class ExcelCsvConnector:
         return work_order
 
     @sandbox_aware
-    async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        updates: dict[str, Any] | None = None,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
         """Update a work order in cache and persist to file.
+
+        Accepts the changes as an ``updates`` dict, as keyword arguments (the
+        shape the agent runtime and MCP tools use), or both; keyword values
+        override dict entries.
 
         When ``write_mode`` is configured, a full rewrite from cache is
         performed for both xlsx and csv files, so the change is durable
         across restarts. When no ``write_mode`` is set, the update is kept
         in cache only.
         """
+        updates = dict(updates or {})
+        for key, value in (
+            ("status", status),
+            ("assigned_to", assigned_to),
+            ("description", description),
+        ):
+            if value is not None:
+                updates[key] = value
         for wo in self._wo_cache:
             if wo.id == work_order_id:
                 schema = self._config.work_orders

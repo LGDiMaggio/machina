@@ -268,6 +268,30 @@ class TestGenericCmmsConnectorLocal:
         disk = json.loads((cmms_dir / "work_orders.json").read_text())
         assert disk == [{"wo_id": "WO-001", "asset_id": "P-201"}]
 
+    def test_yaml_mapping_accepts_an_inline_dict(self) -> None:
+        """A machina.yaml settings block carries the mapping as a plain dict."""
+        from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
+
+        mapping = {
+            "mapping": {
+                "asset": {
+                    "endpoint": {"method": "GET", "path": "/api/v1/machines"},
+                    "fields": {"id": {"source": "machine_code"}, "name": {"source": "label"}},
+                }
+            }
+        }
+        conn = GenericCmmsConnector(url="https://cmms.example.com", yaml_mapping=mapping)
+        assert isinstance(conn._yaml_mapping, GenericCmmsYamlConfig)
+        mapped = conn._apply_yaml_mapping("assets", {"machine_code": "P-9", "label": "Pump 9"})
+        assert mapped["id"] == "P-9"
+        assert mapped["name"] == "Pump 9"
+
+    def test_invalid_inline_yaml_mapping_is_a_config_error(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="GenericCmmsYamlConfig"):
+            GenericCmmsConnector(url="https://cmms.example.com", yaml_mapping={"mapping": {}})
+
     @pytest.mark.asyncio
     async def test_persist_skipped_with_yaml_mapping(self, sample_data_dir: Path) -> None:
         """The yaml_mapping branch of the persist skip-guard also suppresses

@@ -638,6 +638,99 @@ class TestCsvSupport:
         # Original file unchanged — not truncated by the failed rewrite.
         assert csv_file.read_text(encoding="utf-8-sig") == before
 
+
+def _flat_settings(tmp_path: Path) -> dict[str, object]:
+    """The connector settings exactly as a ``machina.yaml`` entry carries them."""
+    assets = tmp_path / "assets.csv"
+    assets.write_text("Codice,Nome\nP-201,Pompa A\nC-3,Caldaia\n", encoding="utf-8")
+    return {
+        "asset_registry": {
+            "path": str(assets),
+            "columns": [
+                {"column": "Codice", "field": "id", "required": True},
+                {"column": "Nome", "field": "name", "required": True},
+            ],
+        },
+        "work_orders": {
+            "path": str(tmp_path / "odl.csv"),
+            "write_mode": "append",
+            "columns": [
+                {"column": "ID", "field": "id", "required": True},
+                {"column": "Codice Asset", "field": "asset_id", "required": True},
+                {"column": "Descrizione", "field": "description"},
+                {"column": "Stato", "field": "status"},
+                {"column": "Assegnato a", "field": "assigned_to"},
+            ],
+        },
+    }
+
+
+async def _connected_with_work_orders(tmp_path: Path) -> ExcelCsvConnector:
+    conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+    await conn.connect()
+    for wo_id, asset_id in (("WO-1", "P-201"), ("WO-2", "C-3"), ("WO-3", "P-201")):
+        await conn.create_work_order(
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id=asset_id, description="x")
+        )
+    return conn
+
+
+class TestYamlSettingsAndCallContract:
+    """Built from flat YAML settings; honours the agent/MCP call shapes."""
+
+    @pytest.mark.asyncio
+    async def test_flat_settings_build_the_connector(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+        assert [a.id for a in await conn.read_assets()] == ["P-201", "C-3"]
+        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+
+    def test_config_and_flat_settings_together_are_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        config = ExcelConnectorConfig.model_validate(settings)
+        with pytest.raises(ConnectorConfigError, match="either"):
+            ExcelCsvConnector(config=config, **settings)
+
+    def test_invalid_flat_settings_raise_config_error(self) -> None:
+        with pytest.raises(ConnectorConfigError, match="ExcelConnectorConfig"):
+            ExcelCsvConnector(watcher={"enabled": False})  # no sheet configured
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+        asset = await conn.get_asset("C-3")
+        assert asset is not None
+        assert asset.name == "Caldaia"
+        assert await conn.get_asset("NOPE") is None
+
+    @pytest.mark.asyncio
+    async def test_read_work_orders_filters(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        await conn.update_work_order("WO-3", status=WorkOrderStatus.CLOSED)
+
+        assert [wo.id for wo in await conn.read_work_orders(asset_id="P-201")] == ["WO-1", "WO-3"]
+        assert [wo.id for wo in await conn.read_work_orders(status="closed")] == ["WO-3"]
+        open_on_pump = await conn.read_work_orders(
+            asset_id="P-201", status=WorkOrderStatus.CREATED
+        )
+        assert [wo.id for wo in open_on_pump] == ["WO-1"]
+        assert len(await conn.read_work_orders()) == 3
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_keyword_and_dict_forms(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        updated = await conn.update_work_order(
+            "WO-1", status=WorkOrderStatus.ASSIGNED, assigned_to="Mario Rossi"
+        )
+        assert updated.status == WorkOrderStatus.ASSIGNED
+        assert updated.assigned_to == "Mario Rossi"
+
+        updated = await conn.update_work_order("WO-1", {"description": "new"})
+        assert updated.description == "new"
+        assert updated.assigned_to == "Mario Rossi"
+
     @pytest.mark.asyncio
     async def test_csv_formula_injection_neutralized_and_roundtrips(self, tmp_path: Path) -> None:
         """A field starting with a formula trigger is written with a leading

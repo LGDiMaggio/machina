@@ -20,6 +20,7 @@ import jmespath
 import structlog
 from pydantic import ValidationError
 
+from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
@@ -97,6 +98,15 @@ class GenericCmmsConnector:
         pagination: Pagination strategy for list-style REST endpoints.
             Defaults to :class:`NoPagination` (single-shot GET) which
             preserves the behaviour of earlier versions.
+        endpoints: Optional REST endpoints that enable optional
+            capabilities (e.g. ``get_work_order``, ``update_work_order``,
+            ``read_maintenance_plans``).
+        yaml_mapping: Declarative field mapping between the CMMS REST
+            payloads and Machina entities — a
+            :class:`~machina.connectors.cmms.generic_schema.GenericCmmsYamlConfig`
+            or the same structure as a plain dict (``mapping:`` with
+            ``asset`` / ``work_order`` entries), as a ``machina.yaml``
+            ``settings`` block carries it.
 
     Example:
         ```python
@@ -201,7 +211,7 @@ class GenericCmmsConnector:
         auth: _AuthUnion | None = None,
         pagination: _PaginationUnion | None = None,
         endpoints: dict[str, dict[str, Any]] | None = None,
-        yaml_mapping: GenericCmmsYamlConfig | None = None,
+        yaml_mapping: GenericCmmsYamlConfig | dict[str, Any] | None = None,
     ) -> None:
         self.url = url
         self._api_key = api_key
@@ -209,7 +219,12 @@ class GenericCmmsConnector:
         self._schema_mapping = schema_mapping or {}
         self._connected = False
         self._endpoints = endpoints or {}
-        self._yaml_mapping = yaml_mapping
+        if isinstance(yaml_mapping, dict):
+            # Inline mapping from a machina.yaml settings block.
+            from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
+
+            yaml_mapping = validate_settings(GenericCmmsYamlConfig, yaml_mapping)
+        self._yaml_mapping: GenericCmmsYamlConfig | None = yaml_mapping
         # Snapshot the failure-mode source presence once (refreshed at
         # connect) — a per-access filesystem stat in the capabilities
         # property would let the declared capability flip mid-session

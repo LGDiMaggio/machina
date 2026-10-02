@@ -161,6 +161,83 @@ class TestMcpEndpoint:
             response = client.post("/mcp", headers=headers, json=_rpc("tools/list", 1))
         assert response.status_code in (400, 421)
 
+    def test_excel_substrate_serves_the_cmms_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An Excel/CSV substrate built from YAML settings backs every CMMS
+        tool it declares: get_asset, list (filtered), create and update."""
+        monkeypatch.setenv("MACHINA_MCP_TOKENS_JSON", json.dumps({TOKEN: "integration-test"}))
+        assets = tmp_path / "assets.csv"
+        assets.write_text("Codice,Nome\nP-201,Pompa A\nC-3,Caldaia\n", encoding="utf-8")
+        orders = tmp_path / "odl.csv"
+        orders.write_text(
+            "ID,Codice Asset,Descrizione,Stato\nWO-1,P-201,Perdita,created\nWO-2,C-3,Rumore,closed\n",
+            encoding="utf-8",
+        )
+        columns = [
+            {"column": "ID", "field": "id", "required": True},
+            {"column": "Codice Asset", "field": "asset_id", "required": True},
+            {"column": "Descrizione", "field": "description"},
+            {"column": "Stato", "field": "status"},
+        ]
+        config = MachinaConfig(
+            sandbox=True,
+            connectors={
+                "registry": ConnectorConfig(
+                    type="excel_csv",
+                    primary=True,
+                    settings={
+                        "asset_registry": {
+                            "path": str(assets),
+                            "columns": [
+                                {"column": "Codice", "field": "id", "required": True},
+                                {"column": "Nome", "field": "name", "required": True},
+                            ],
+                        },
+                        "work_orders": {
+                            "path": str(orders),
+                            "write_mode": "append",
+                            "columns": columns,
+                        },
+                    },
+                )
+            },
+        )
+        headers = {**MCP_HEADERS, "Authorization": f"Bearer {TOKEN}"}
+
+        def call(client: TestClient, name: str, arguments: dict[str, Any]) -> list[Any]:
+            """Call a tool; FastMCP returns one content block per list item."""
+            response = client.post(
+                "/mcp",
+                headers=headers,
+                json=_rpc("tools/call", 1, {"name": name, "arguments": arguments}),
+            )
+            assert response.status_code == 200, response.text
+            result = _sse_result(response)["result"]
+            assert result["isError"] is False, result
+            return [json.loads(block["text"]) for block in result["content"]]
+
+        with _client(config) as client:
+            (asset,) = call(client, "machina_get_asset", {"asset_id": "C-3"})
+            assert asset["name"] == "Caldaia"
+            listed = call(client, "machina_list_work_orders", {"asset_id": "P-201"})
+            assert [wo["id"] for wo in listed] == ["WO-1"]
+            (created,) = call(
+                client,
+                "machina_create_work_order",
+                {"asset_id": "P-201", "description": "Sostituire tenuta"},
+            )
+            assert created["metadata"]["sandbox"] is True
+            (updated,) = call(
+                client,
+                "machina_update_work_order",
+                {"work_order_id": "WO-1", "status": "assigned"},
+            )
+            assert updated["metadata"]["sandbox"] is True
+
+        # Sandbox: nothing was written to the spreadsheet.
+        assert "Sostituire" not in orders.read_text(encoding="utf-8")
+
     def test_configured_bare_hostname_is_accepted(self, http_config: MachinaConfig) -> None:
         """A TLS-terminating proxy forwards a Host without a port; listing it works."""
         config = http_config.model_copy(
