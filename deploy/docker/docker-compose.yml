@@ -4,31 +4,33 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     ports:
-      - "8000:8000"
+      # Loopback only: put a TLS-terminating reverse proxy in front for
+      # clients on other machines.
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
+    environment:
+      # The defaults wire the bundled mock CMMS (it accepts any token).
+      # For a real CMMS, set both in .env.
+      MACHINA_CMMS_URL: ${MACHINA_CMMS_URL:-http://mock-cmms:9000}
+      MACHINA_CMMS_API_KEY: ${MACHINA_CMMS_API_KEY:-mock-cmms-demo-token}
     volumes:
       - ./config.yaml:/home/machina/config.yaml:ro
-      - machina-traces:/home/machina/traces
     depends_on:
-      chromadb:
-        condition: service_started
       mock-cmms:
-        condition: service_started
-
-  chromadb:
-    image: chromadb/chroma:0.5.23
-    ports:
-      - "8001:8000"
-    volumes:
-      - chromadb-data:/chroma/chroma
+        condition: service_healthy
 
   mock-cmms:
     build:
       context: mock-cmms
     ports:
-      - "9000:9000"
-
-volumes:
-  machina-traces:
-  chromadb-data:
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen(u.Request('http://localhost:9000/health', headers={'Authorization': 'Bearer healthcheck'}))"
+      interval: 5s
+      timeout: 3s
+      retries: 10

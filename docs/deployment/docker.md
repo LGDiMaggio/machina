@@ -1,137 +1,148 @@
 # Docker Deployment
 
-Run Machina as a containerized MCP server with Docker Compose.
+Run the Machina MCP server (streamable HTTP) in a container with Docker
+Compose, next to a mock CMMS for a first run.
 
 ## Quick Start
 
 ```bash
 cd deploy/docker
 cp .env.example .env
-# Edit .env with your LLM key, CMMS credentials, MCP tokens
+# In .env, set MACHINA_MCP_TOKENS_JSON to a real token (see below)
 docker compose up -d
 ```
 
-This starts three services:
+This starts two services:
 
-| Service | Port | Description |
-|---------|------|-------------|
-| **machina** | 8000 | MCP server (streamable-http transport) |
-| **chromadb** | 8001 | RAG vector store |
-| **mock-cmms** | 9000 | Mock CMMS with hardcoded sample data |
+| Service | Host port | Description |
+|---------|-----------|-------------|
+| **machina** | `127.0.0.1:8000` | MCP server, streamable-HTTP transport (`/mcp`, `/health`) |
+| **mock-cmms** | `127.0.0.1:9000` | Mock CMMS speaking the Generic CMMS REST contract, with in-memory sample data |
+
+Both ports are published on the host's loopback interface only. The server
+needs no LLM key: the MCP client brings its own model.
+
+The server refuses to start until every bearer token is at least 32
+characters, so the placeholder in `.env.example` does not work as a token.
+Generate one per client:
+
+```bash
+openssl rand -hex 32
+# .env:
+# MACHINA_MCP_TOKENS_JSON={"<64-hex-char token>": "claude-desktop"}
+```
 
 ## Verify
 
 ```bash
 curl http://localhost:8000/health
-# {"status": "healthy", "server": "machina", "transport": "streamable-http"}
+# {"status":"healthy"}
+
+curl -H "Authorization: Bearer <token>" http://localhost:8000/health
+# {"status":"healthy","connectors":["cmms"],"sandbox_mode":true,"version":"0.4.0"}
 ```
+
+Point an MCP client at `http://localhost:8000/mcp` with the
+`Authorization: Bearer <token>` header (see [MCP Auth](../mcp/auth.md)).
 
 ## Architecture
 
 ```
 docker-compose.yml
-├── machina        ← MCP server (streamable-http on :8000)
+├── machina        ← MCP server (streamable HTTP on :8000)
 │   ├── reads config.yaml (mounted read-only)
-│   ├── reads .env for secrets
-│   └── writes traces to machina-traces volume
-├── chromadb       ← Vector store for RAG (:8001)
-│   └── persists to chromadb-data volume
-└── mock-cmms      ← Fake CMMS API (:9000)
-    └── Hardcoded assets, work orders, spare parts
+│   └── reads .env (tokens, CMMS URL and key, sandbox mode, log level)
+└── mock-cmms      ← Fake CMMS REST API (:9000), health-checked before machina starts
 ```
 
 ## Configuration
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and fill in:
-
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `MACHINA_LLM_MODEL` | Yes | LiteLLM model ID (e.g., `openai/gpt-4o`) |
-| `OPENAI_API_KEY` | Yes* | API key for your LLM provider |
-| `MACHINA_MCP_TOKENS_JSON` | Yes (HTTP) | Token-to-client mapping for auth |
-| `MACHINA_CMMS_URL` | No | CMMS URL (defaults to mock-cmms) |
-| `MACHINA_CMMS_TYPE` | No | Connector type (defaults to `generic_cmms`) |
-| `MACHINA_SANDBOX_MODE` | No | `true` for safe experimentation |
-| `MACHINA_LOG_LEVEL` | No | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `MACHINA_MCP_TOKENS_JSON` | Yes | `{"<token>": "<client_id>"}`; every token ≥ 32 characters |
+| `MACHINA_CMMS_URL` | No | CMMS REST base URL; defaults to the mock CMMS |
+| `MACHINA_CMMS_API_KEY` | No | CMMS bearer token; defaults to a demo value the mock CMMS accepts |
+| `MACHINA_SANDBOX_MODE` | No | `true` (default): writes are logged and answered with a `[SANDBOX]` result |
+| `MACHINA_LOG_LEVEL` | No | `DEBUG`, `INFO` (default), `WARNING`, `ERROR` |
 
-*Or `ANTHROPIC_API_KEY` etc. depending on `MACHINA_LLM_MODEL`.
+The CMMS, sandbox and log-level variables take effect because
+`config.yaml` references them as `${VAR}` placeholders; edit the config to
+wire more.
 
 ### Config File
 
-The Machina config (`config.yaml`) is mounted read-only into the container.
-Edit it for connector settings, channels, and agent behavior. See
-[YAML Configuration](../yaml-config.md).
+`config.yaml` is mounted read-only into the container. It configures a
+`generic_cmms` connector in REST mode with the optional work-order and
+maintenance-plan endpoints, so the server offers 11 tools. Edit it to add
+connectors (Excel, SQL, a document store, a vendor CMMS); see
+[YAML Configuration](../yaml-config.md) and the [MCP setup](../mcp/setup.md).
+
+To reach a real CMMS, set `MACHINA_CMMS_URL` and `MACHINA_CMMS_API_KEY` in
+`.env` (or change the connector in `config.yaml`) and remove the
+`mock-cmms` service and the `depends_on` block from `docker-compose.yml`.
 
 ## Docker Image
 
 The Dockerfile (`deploy/docker/Dockerfile`) uses a multi-stage build:
 
 - **Base image:** `python:3.11-slim-bookworm`
-- **Extras installed:** `[cmms-rest,litellm,docs-rag,mcp]`
-- **User:** Non-root `machina`
-- **Healthcheck:** `GET /health` every 30s
-- **Entrypoint:** `python -m machina.mcp --transport streamable-http`
+- **Extras installed:** `[cmms-rest,mcp]` by default — set the
+  `MACHINA_EXTRAS` build argument for more, e.g.
+  `docker compose build --build-arg MACHINA_EXTRAS=cmms-rest,mcp,docs-rag,excel`
+- **User:** non-root `machina`
+- **Healthcheck:** `GET /health` every 30 s
+- **Entrypoint:** `machina mcp serve --transport streamable-http --host 0.0.0.0 --port 8000 --config /home/machina/config.yaml`
 
 ### Building Locally
 
+The build context is the repository root:
+
 ```bash
-cd deploy/docker
-docker build -t machina:latest .
+docker build -f deploy/docker/Dockerfile -t machina:latest .
 ```
 
 ### Pinning the Base Image
 
-For production, pin the base image digest:
+For production, pin the base image digests:
 
 ```dockerfile
-FROM python:3.11-slim-bookworm@sha256:<digest> AS builder
+FROM python:3.11-slim-bookworm@sha256:<digest> AS build
 ```
-
-## Volumes
-
-| Volume | Purpose | Backup? |
-|--------|---------|---------|
-| `machina-traces` | Action trace JSONL files | Recommended |
-| `chromadb-data` | RAG embeddings | Rebuild from source docs if lost |
 
 ## Mock CMMS
 
-The included mock CMMS (`deploy/docker/mock-cmms/`) is a FastAPI app with
-hardcoded data — 3 assets, 2 work orders, spare parts, and maintenance plans.
+The mock CMMS (`deploy/docker/mock-cmms/`) is a FastAPI app with in-memory
+data — 3 assets, 2 work orders and a maintenance plan — that resets on
+restart. It requires a bearer token and accepts any non-empty one.
 
-Endpoints:
+| Method | Path | Used by |
+|--------|------|---------|
+| `GET` | `/health` | connector `connect()` |
+| `GET` | `/assets`, `/assets/{id}` | `read_assets` |
+| `GET` | `/work_orders?asset_id=&status=` | `read_work_orders` |
+| `POST` | `/work_orders` | `create_work_order` (idempotent on `id`) |
+| `GET` | `/work_orders/{id}` | `get_work_order` endpoint |
+| `PATCH` | `/work_orders/{id}` | `update_work_order` endpoint (also close and cancel) |
+| `GET` | `/maintenance_plans` | `read_maintenance_plans` endpoint |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/assets` | List assets |
-| `GET` | `/api/assets/{id}` | Get asset by ID |
-| `GET` | `/api/work-orders` | List work orders |
-| `POST` | `/api/work-orders` | Create work order (echoes payload) |
-| `GET` | `/api/spare-parts` | List spare parts |
-| `GET` | `/api/maintenance-plans` | List plans |
-| `GET` | `/health` | Health check |
-
-Replace with your real CMMS by changing `MACHINA_CMMS_URL` and `MACHINA_CMMS_TYPE`
-in `.env`.
+In REST mode the Generic CMMS connector does not fetch spare parts or
+maintenance history: those two tools return empty lists. See
+[Generic CMMS](../connectors/generic_cmms.md).
 
 ## Logs
 
 ```bash
-# Follow Machina logs
 docker compose logs -f machina
-
-# View trace files
-docker compose exec machina ls /home/machina/traces/
-
-# Copy traces to host
-docker compose cp machina:/home/machina/traces/ ./traces/
 ```
+
+Action traces are not written to disk by the MCP server; see
+[Action Traces](../observability/traces.md) for exporting them from your own
+code.
 
 ## Stopping
 
 ```bash
-docker compose down          # Stop services, keep volumes
-docker compose down -v       # Stop and remove volumes (deletes traces + embeddings)
+docker compose down
 ```

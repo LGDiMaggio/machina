@@ -4,8 +4,9 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
-from machina.config.loader import load_config, load_yaml
+from machina.config.loader import _substitute_env_vars, load_config, load_yaml
 from machina.config.schema import MachinaConfig
 
 
@@ -128,23 +129,62 @@ class TestEnvVarDefaults:
         with pytest.raises(ValueError, match="NOT_SET:typo"):
             self._load(tmp_path, "token: ${NOT_SET:typo}\n")
 
-    def test_deploy_docker_config_loads_without_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The shipped Docker config must load with no variables exported."""
-        for name in (
-            "MACHINA_CMMS_URL",
-            "MACHINA_CMMS_API_KEY",
-            "MACHINA_LLM_MODEL",
-            "MACHINA_SANDBOX_MODE",
-        ):
+    _DEPLOY_DIR = Path(__file__).resolve().parents[2] / "deploy" / "docker"
+    _DEPLOY_VARS = (
+        "MACHINA_CMMS_URL",
+        "MACHINA_CMMS_API_KEY",
+        "MACHINA_SANDBOX_MODE",
+        "MACHINA_LOG_LEVEL",
+    )
+
+    def test_deploy_docker_config_loads_with_compose_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shipped Docker config loads with what `docker compose up` passes.
+
+        With an otherwise empty environment, compose resolves the machina
+        service's ``${VAR:-default}`` entries to the bundled mock CMMS.
+        """
+        for name in self._DEPLOY_VARS:
             monkeypatch.delenv(name, raising=False)
-        repo_root = Path(__file__).resolve().parents[2]
+        compose = yaml.safe_load(
+            (self._DEPLOY_DIR / "docker-compose.yml").read_text(encoding="utf-8")
+        )
+        for name, value in compose["services"]["machina"]["environment"].items():
+            monkeypatch.setenv(name, _substitute_env_vars(str(value)))
 
-        config = load_config(repo_root / "deploy" / "docker" / "config.yaml")
+        config = load_config(self._DEPLOY_DIR / "config.yaml")
 
-        cmms = config.connectors["cmms"]
-        assert cmms.settings["url"] == "http://mock-cmms:9000"
-        assert config.llm.provider == "openai/gpt-4o"
+        settings = config.connectors["cmms"].settings
+        assert settings["url"] == "http://mock-cmms:9000"
+        assert settings["api_key"]
+        assert set(settings["endpoints"]) == {
+            "get_work_order",
+            "update_work_order",
+            "read_maintenance_plans",
+        }
         assert config.sandbox is True
+        assert config.logging["level"] == "INFO"
+
+    def test_deploy_docker_config_requires_the_cmms_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Outside compose, a missing CMMS key fails loudly instead of defaulting."""
+        for name in self._DEPLOY_VARS:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("MACHINA_CMMS_URL", "https://cmms.example.com/api")
+
+        with pytest.raises(ValueError, match="MACHINA_CMMS_API_KEY"):
+            load_config(self._DEPLOY_DIR / "config.yaml")
+
+    def test_deploy_docker_sandbox_follows_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MACHINA_CMMS_URL", "https://cmms.example.com/api")
+        monkeypatch.setenv("MACHINA_CMMS_API_KEY", "k" * 32)
+        monkeypatch.setenv("MACHINA_SANDBOX_MODE", "false")
+
+        assert load_config(self._DEPLOY_DIR / "config.yaml").sandbox is False
 
 
 class TestLoadConfig:

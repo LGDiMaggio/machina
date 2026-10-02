@@ -12,8 +12,10 @@ WorkingDirectory=/var/lib/machina
 
 EnvironmentFile=/etc/machina/machina.env
 
-ExecStart=/opt/machina-venv/bin/python -m machina.mcp \
+ExecStart=/opt/machina-venv/bin/machina mcp serve \
     --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 8000 \
     --config /etc/machina/config.yaml
 
 Restart=on-failure
