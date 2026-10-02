@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sys
 import time
+from types import ModuleType, SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -29,6 +31,7 @@ from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 from machina.exceptions import LLMError
+from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -590,6 +593,45 @@ class TestAgentInit:
         llm = _FakeLLM()
         agent = Agent(llm=llm)  # type: ignore[arg-type]
         assert agent._llm is llm
+
+
+class TestLLMUsageTracing:
+    """An agent built from a model string records LLM token/cost usage."""
+
+    def test_string_llm_shares_agent_tracer(self) -> None:
+        agent = Agent(llm="openai:gpt-4o")
+        assert agent._llm._tracer is agent.tracer
+
+    def test_supplied_provider_is_not_mutated(self) -> None:
+        provider = LLMProvider(model="openai:gpt-4o")
+        Agent(llm=provider)
+        assert provider._tracer is None
+
+    @pytest.mark.asyncio
+    async def test_llm_usage_recorded_in_agent_trace(self) -> None:
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content="All good.", tool_calls=None))
+            ],
+            usage=SimpleNamespace(prompt_tokens=120, completion_tokens=30),
+        )
+        fake_litellm = ModuleType("litellm")
+        fake_litellm.acompletion = AsyncMock(return_value=response)  # type: ignore[attr-defined]
+        agent = Agent(llm="openai:gpt-4o")
+        with (
+            patch.dict(sys.modules, {"litellm": fake_litellm}),
+            patch("machina.observability.cost.estimate_cost", return_value=0.0123),
+        ):
+            await agent.handle_message("hello")
+
+        usage = [e for e in agent.tracer.entries if e.action == "llm_call" and e.model]
+        assert len(usage) == 1
+        entry = usage[0]
+        assert entry.model == "openai/gpt-4o"
+        assert entry.prompt_tokens == 120
+        assert entry.completion_tokens == 30
+        assert entry.total_tokens == 150
+        assert entry.usd_cost == pytest.approx(0.0123)
 
 
 class TestAgentStart:

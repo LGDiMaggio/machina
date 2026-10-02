@@ -605,7 +605,9 @@ class Agent:
         connectors: List of connector instances to register.
         channels: Communication channels (Telegram, CLI, etc.).
         llm: LLM provider string (e.g. ``"openai:gpt-4o"``) or
-             an :class:`LLMProvider` instance.
+             an :class:`LLMProvider` instance. A provider built from a
+             string records token usage and estimated cost on
+             :attr:`tracer`; pass ``tracer=`` when constructing your own.
         temperature: LLM sampling temperature.
         max_history: Maximum conversation turns to keep in memory.
         workflows: List of workflow definitions to register.
@@ -655,9 +657,14 @@ class Agent:
         self._max_history = max_history
         self._max_message_length = 10_000
 
-        # LLM provider
+        # Action tracer — created before the LLM provider so a provider built
+        # here records per-call token usage and estimated cost on it.
+        self.tracer = ActionTracer()
+
+        # LLM provider. A caller-supplied provider is used as-is (never
+        # mutated); it records usage only if it was built with ``tracer=``.
         if isinstance(llm, str):
-            self._llm = LLMProvider(model=llm, temperature=temperature)
+            self._llm = LLMProvider(model=llm, temperature=temperature, tracer=self.tracer)
         else:
             self._llm = llm
 
@@ -683,9 +690,6 @@ class Agent:
 
         # Entity resolver
         self._resolver = EntityResolver(self.plant)
-
-        # Action tracer
-        self.tracer = ActionTracer()
 
         # Sandbox mode — stored on the instance, propagated to the
         # workflow engine via the ``sandbox`` property setter below, and
