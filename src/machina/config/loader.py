@@ -68,7 +68,9 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
         ValueError: If a referenced env var is not set.
     """
     path = Path(path)
-    with path.open() as f:
+    # Always UTF-8: the platform default (cp1252 on Windows) would garble
+    # non-ASCII values such as a column header "Criticità".
+    with path.open(encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     result: dict[str, Any] = _walk_and_substitute(raw)
     return result

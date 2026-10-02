@@ -63,6 +63,14 @@ class TestLoadYaml:
         with pytest.raises(FileNotFoundError):
             load_yaml("/nonexistent/path.yaml")
 
+    def test_utf8_regardless_of_platform_encoding(self, tmp_path: Path) -> None:
+        """Non-ASCII values (e.g. an Italian column header) survive loading."""
+        cfg = tmp_path / "test.yaml"
+        cfg.write_bytes("column: Criticità\nnote: Priorità — alta\n".encode())
+        data = load_yaml(cfg)
+        assert data["column"] == "Criticità"
+        assert data["note"] == "Priorità — alta"
+
 
 class TestEnvVarDefaults:
     """``${VAR:-default}`` follows POSIX/Docker Compose semantics."""
