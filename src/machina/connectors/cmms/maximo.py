@@ -23,10 +23,12 @@ See also:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import structlog
+from pydantic import Field
 
+from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _AuthUnion = ApiKeyHeaderAuth | BasicAuth | BearerAuth
+# The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
+_AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
 
 
 def _require_httpx() -> Any:
@@ -67,7 +71,9 @@ class MaximoConnector:
         url: Base URL of the Maximo instance
             (e.g. ``https://maximo.example.com``).
         auth: Authentication strategy — :class:`ApiKeyHeaderAuth`,
-            :class:`BasicAuth`, or :class:`BearerAuth`.
+            :class:`BasicAuth`, or :class:`BearerAuth`, or the equivalent
+            dict selected by ``type`` (``api_key``, ``basic``, ``bearer``) as
+            a ``machina.yaml`` settings block carries it.
         lean: If ``True`` (default), requests add ``lean=1`` to suppress
             OSLC namespace wrappers in responses.
         asset_type_map: Optional mapping from a Maximo classification
@@ -116,12 +122,16 @@ class MaximoConnector:
         self,
         *,
         url: str,
-        auth: _AuthUnion,
+        auth: _AuthUnion | dict[str, Any],
         lean: bool = True,
         asset_type_map: dict[str, AssetType] | None = None,
     ) -> None:
         self.url = url.rstrip("/")
-        self._auth = auth
+        # From machina.yaml, auth arrives as a dict keyed by ``type``
+        # (``api_key``, ``basic`` or ``bearer``); validate it.
+        self._auth: _AuthUnion = (
+            validate_setting(_AuthSetting, auth, "auth") if isinstance(auth, dict) else auth
+        )
         self._lean = lean
         self._asset_type_map = asset_type_map
         self._connected = False

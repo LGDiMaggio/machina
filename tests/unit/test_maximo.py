@@ -286,3 +286,36 @@ class TestRequireHttpx:
         monkeypatch.setitem(sys.modules, "httpx", None)
         with pytest.raises(ConnectorError, match="pip install machina-ai"):
             _require_httpx()
+
+
+class TestYamlAuthSettings:
+    """A machina.yaml settings block carries ``auth`` as a dict keyed by type."""
+
+    _URL = "https://maximo.example.com"
+
+    def test_api_key_dict(self) -> None:
+        conn = MaximoConnector(
+            url=self._URL, auth={"type": "api_key", "header_name": "apikey", "value": "k"}
+        )
+        assert isinstance(conn._auth, ApiKeyHeaderAuth)
+        assert conn._auth.apply({}) == {"apikey": "k"}
+
+    def test_bearer_dict(self) -> None:
+        from machina.connectors.cmms.auth import BearerAuth
+
+        conn = MaximoConnector(url=self._URL, auth={"type": "bearer", "token": "t"})
+        assert isinstance(conn._auth, BearerAuth)
+
+    def test_auth_type_outside_the_supported_set_is_a_config_error(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="'auth'"):
+            MaximoConnector(url=self._URL, auth={"type": "none"})
+
+    def test_yaml_settings_build_through_the_factory(self) -> None:
+        from machina.connectors.factory import create_connector
+
+        conn = create_connector(
+            "maximo", {"url": self._URL, "auth": {"type": "api_key", "value": "k"}}
+        )
+        assert isinstance(conn._auth, ApiKeyHeaderAuth)

@@ -1,16 +1,16 @@
 """Validate flat YAML ``settings`` into a connector's pydantic config model.
 
 Connectors whose constructor takes a parsed config object (Excel/CSV, SQL,
-the Generic CMMS YAML mapping) also accept the same data as the flat
-``settings`` dict a ``machina.yaml`` entry carries, so every YAML entry point
-can build them.
+the Generic CMMS YAML mapping, auth and pagination strategies) also accept
+the same data as the plain dicts a ``machina.yaml`` entry carries, so every
+YAML entry point can build them.
 """
 
 from __future__ import annotations
 
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from machina.exceptions import ConnectorConfigError
 
@@ -50,8 +50,40 @@ def validate_settings(model: type[ModelT], settings: dict[str, Any]) -> ModelT:
     try:
         return model.model_validate(settings)
     except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc']) or '<settings>'}: {err['msg']}"
-            for err in exc.errors(include_input=False, include_url=False)
-        )
-        raise ConnectorConfigError(f"Invalid {model.__name__} settings — {problems}") from None
+        raise ConnectorConfigError(
+            f"Invalid {model.__name__} settings — {_describe(exc)}"
+        ) from None
+
+
+def validate_setting(annotation: Any, value: Any, name: str) -> Any:
+    """Validate one settings value against ``annotation`` without echoing it.
+
+    For values a constructor accepts either as a model instance or as the
+    plain dict a ``machina.yaml`` settings block carries — e.g. a
+    discriminated union of auth strategies selected by its ``type`` key.
+
+    Args:
+        annotation: The type to validate into (a model, or an ``Annotated``
+            discriminated union).
+        value: The raw value, typically a dict.
+        name: The settings key, used in the error message.
+
+    Returns:
+        The validated value.
+
+    Raises:
+        ConnectorConfigError: If ``value`` does not validate. The message
+            names field paths and problems only, never input values.
+    """
+    try:
+        return TypeAdapter(annotation).validate_python(value)
+    except ValidationError as exc:
+        raise ConnectorConfigError(f"Invalid {name!r} setting — {_describe(exc)}") from None
+
+
+def _describe(exc: ValidationError) -> str:
+    """Render validation problems as ``path: message`` pairs, without inputs."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or '<settings>'}: {err['msg']}"
+        for err in exc.errors(include_input=False, include_url=False)
+    )

@@ -11,16 +11,16 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
 import jmespath
 import structlog
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
-from machina.connectors._settings import validate_settings
+from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
@@ -60,6 +60,11 @@ logger = structlog.get_logger(__name__)
 _AuthUnion = BearerAuth | BasicAuth | ApiKeyHeaderAuth | NoAuth
 _PaginationUnion = NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
 
+# The same unions keyed by ``type``, for ``auth`` / ``pagination`` given as
+# the plain dicts a machina.yaml settings block carries.
+_AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
+_PaginationSetting = Annotated[_PaginationUnion, Field(discriminator="type")]
+
 
 def _require_httpx() -> Any:
     """Import httpx lazily, raising a clear error if the extra is missing."""
@@ -91,11 +96,15 @@ class GenericCmmsConnector:
             * **JMESPath extraction**: ``{"assets": {"_fields":
               {"id": "equipment.id", "name": "meta.display_name"}}}``
               extracts nested fields via JMESPath expressions.
-        auth: Authentication strategy for REST mode. Defaults to deriving
-            a :class:`BearerAuth` from ``api_key`` when the latter is set.
-            Use :class:`NoAuth` explicitly for endpoints that require no
-            credentials.
-        pagination: Pagination strategy for list-style REST endpoints.
+        auth: Authentication strategy for REST mode — a model instance or
+            the equivalent dict selected by ``type`` (``bearer``, ``basic``,
+            ``api_key``, ``none``), as a ``machina.yaml`` settings block
+            carries it. Defaults to deriving a :class:`BearerAuth` from
+            ``api_key`` when the latter is set. Use :class:`NoAuth`
+            explicitly for endpoints that require no credentials.
+        pagination: Pagination strategy for list-style REST endpoints — a
+            model instance or the equivalent dict selected by ``type``
+            (``none``, ``offset_limit``, ``page_number``, ``cursor``).
             Defaults to :class:`NoPagination` (single-shot GET) which
             preserves the behaviour of earlier versions.
         endpoints: Optional REST endpoints that enable optional
@@ -208,11 +217,21 @@ class GenericCmmsConnector:
         api_key: str = "",
         data_dir: str | Path = "",
         schema_mapping: dict[str, dict[str, Any]] | None = None,
-        auth: _AuthUnion | None = None,
-        pagination: _PaginationUnion | None = None,
+        auth: _AuthUnion | dict[str, Any] | None = None,
+        pagination: _PaginationUnion | dict[str, Any] | None = None,
         endpoints: dict[str, dict[str, Any]] | None = None,
         yaml_mapping: GenericCmmsYamlConfig | dict[str, Any] | None = None,
     ) -> None:
+        # From machina.yaml, auth / pagination arrive as plain dicts keyed by
+        # ``type`` (e.g. {"type": "basic", ...}); validate them into the models.
+        auth_strategy: _AuthUnion | None = (
+            validate_setting(_AuthSetting, auth, "auth") if isinstance(auth, dict) else auth
+        )
+        pagination_strategy: _PaginationUnion | None = (
+            validate_setting(_PaginationSetting, pagination, "pagination")
+            if isinstance(pagination, dict)
+            else pagination
+        )
         self.url = url
         self._api_key = api_key
         self._data_dir = Path(data_dir) if data_dir else None
@@ -232,15 +251,15 @@ class GenericCmmsConnector:
         self._has_fm_source = self._detect_failure_mode_source(self._data_dir)
 
         # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
-        if auth is not None:
-            self._auth: _AuthUnion | None = auth
+        if auth_strategy is not None:
+            self._auth: _AuthUnion | None = auth_strategy
         elif api_key:
             self._auth = BearerAuth(token=api_key)
         else:
             self._auth = None
 
         # Pagination: default NoPagination preserves legacy single-shot behaviour
-        self._pagination: _PaginationUnion = pagination or NoPagination()
+        self._pagination: _PaginationUnion = pagination_strategy or NoPagination()
 
         # In-memory store for local mode
         self._assets: dict[str, Asset] = {}
