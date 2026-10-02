@@ -9,6 +9,7 @@ domain services, and handling errors according to per-step policies.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -27,6 +28,31 @@ from machina.workflows.models import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Write verbs matched as plain substrings: deliberately over-gating, so a
+# run-together or mid-name write ("sendmail", "bulk_update_wos") is still
+# caught. See WorkflowEngine._is_write_action for the bias rationale.
+_WRITE_SUBSTRINGS: tuple[str, ...] = (
+    "approve",
+    "assign",
+    "cancel",
+    "close",
+    "complete",
+    "create",
+    "delete",
+    "notify",
+    "publish",
+    "reject",
+    "send",
+    "submit",
+    "update",
+    "write",
+)
+# "set" is too short to match as a substring — it sits inside common nouns
+# ("assets", "dataset", "offset"), which made every asset read look like a
+# write. It (and re-/un-set) only counts when it starts a token.
+_SET_AT_TOKEN_START = re.compile(r"(?:^|[^a-z])(?:re|un)?set")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -518,24 +544,16 @@ class WorkflowEngine:
         direction. A read whose name contains a write-like word (e.g.
         ``get_update_history``) is the acceptable cost — set ``is_write=False``
         on such a step to opt out.
+
+        Write verbs match as substrings, with one exception: ``set`` (also
+        ``reset``/``unset``) must start a token — after the start, a ``.``,
+        ``_`` or a camelCase boundary — because as a bare substring it hits
+        nouns such as ``assets`` and turned every asset read into a write.
         """
         if step is not None and step.is_write is not None:
             return step.is_write
-        write_keywords = {
-            "create",
-            "update",
-            "delete",
-            "send",
-            "publish",
-            "submit",
-            "write",
-            "notify",
-            "close",
-            "cancel",
-            "approve",
-            "reject",
-            "complete",
-            "assign",
-            "set",
-        }
-        return any(kw in action.lower() for kw in write_keywords)
+        lowered = action.lower()
+        if any(verb in lowered for verb in _WRITE_SUBSTRINGS):
+            return True
+        tokenised = _CAMEL_BOUNDARY.sub("_", action).lower()
+        return _SET_AT_TOKEN_START.search(tokenised) is not None
