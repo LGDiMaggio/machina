@@ -8,7 +8,7 @@ Excel and SQL substrates (semicolon-delimited string cells);
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -16,9 +16,18 @@ from pydantic import ValidationError
 from machina.connectors._entity_builders import (
     dict_to_asset,
     dict_to_failure_mode,
+    dict_to_work_order,
     split_list_cell,
 )
 from machina.domain.asset import AssetType, Criticality
+from machina.domain.work_order import (
+    FailureImpact,
+    Priority,
+    SparePartRequirement,
+    WorkOrder,
+    WorkOrderStatus,
+    WorkOrderType,
+)
 
 
 class TestSplitListCell:
@@ -200,3 +209,63 @@ class TestDictToAssetAliases:
             if field != "metadata" and getattr(asset, field) == getattr(defaults, field)
         }
         assert unreached == known_omissions
+
+
+class TestDictToWorkOrder:
+    def test_a_supplied_value_reaches_every_field_or_is_a_known_omission(self) -> None:
+        """The WorkOrder twin of the Asset check above.
+
+        Before this test, ``failure_mode`` and the timestamps were dropped on
+        every Excel/SQL read — and the Excel update then rewrote the file from
+        those reads, blanking them in the user's sheet. ``spare_parts`` has no
+        cell encoding yet, so it is the one deliberate omission.
+        """
+        known_omissions = {"spare_parts"}
+        supplied = {
+            "id": "WO-1",
+            "type": WorkOrderType.PREVENTIVE,
+            "priority": Priority.HIGH,
+            "status": WorkOrderStatus.ASSIGNED,
+            "asset_id": "P-201",
+            "description": "Replace seal",
+            "failure_mode": "SEAL-LEAK-01",
+            "requested_skills": "mechanical;hydraulics",
+            "estimated_duration_hours": 2.5,
+            "spare_parts": [SparePartRequirement(sku="SKF-6310", qty=1)],
+            "created_at": datetime(2026, 1, 2, 3, 4, 5),
+            "updated_at": datetime(2026, 1, 3, 3, 4, 5),
+            "assigned_to": "Rossi",
+            "metadata": {"ignored": True},
+            "failure_impact": "degraded",
+            "failure_cause": "operation-maintenance",
+        }
+        assert set(supplied) == set(WorkOrder.model_fields), (
+            "WorkOrder gained or lost a field — extend this dict so the omission "
+            "check below still covers every field."
+        )
+
+        work_order = dict_to_work_order(supplied)
+        defaults = WorkOrder(id="X", type=WorkOrderType.CORRECTIVE, asset_id="X")
+        unreached = {
+            field
+            for field in WorkOrder.model_fields
+            # ``metadata`` is rebuilt, not copied; the timestamps default to "now".
+            if field not in {"metadata", "created_at", "updated_at"}
+            and getattr(work_order, field) == getattr(defaults, field)
+        }
+        assert unreached == known_omissions
+        assert work_order.created_at == supplied["created_at"]
+        assert work_order.updated_at == supplied["updated_at"]
+        assert work_order.requested_skills == ["mechanical", "hydraulics"]
+        assert work_order.failure_impact is FailureImpact.DEGRADED
+
+    @pytest.mark.parametrize("cell", ["Degraded", " INCIPIENT "])
+    def test_failure_impact_cell_matches_case_insensitively(self, cell: str) -> None:
+        work_order = dict_to_work_order({"id": "WO-1", "asset_id": "P-1", "failure_impact": cell})
+        assert work_order.failure_impact in {FailureImpact.DEGRADED, FailureImpact.INCIPIENT}
+
+    @pytest.mark.parametrize("cell", ["severe", "", None, 3])
+    def test_unknown_failure_impact_reads_as_absent(self, cell: object) -> None:
+        """One odd cell must not make the whole sheet unreadable."""
+        work_order = dict_to_work_order({"id": "WO-1", "asset_id": "P-1", "failure_impact": cell})
+        assert work_order.failure_impact is None

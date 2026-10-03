@@ -73,9 +73,12 @@ runnable example.
 `coerce` name is unknown. An optional column missing from the file is not an
 error: its field reads as the column's `default` on every row. Multi-valued
 cells (the asset
-`failure_modes` and `aliases` columns, and the failure-mode list fields
-`detection_methods`, `typical_indicators`, `recommended_actions`) hold a
-semicolon-delimited string, e.g. `"BEAR-WEAR-01;SEAL-LEAK-01"`. A sample
+`failure_modes` and `aliases` columns, the work-order `requested_skills`
+column, and the failure-mode list fields `detection_methods`,
+`typical_indicators`, `recommended_actions`) hold a semicolon-delimited
+string, e.g. `"BEAR-WEAR-01;SEAL-LEAK-01"`. A work order's `failure_impact`
+cell is read case-insensitively (`critical`, `degraded`, `incipient`; any
+other value reads as empty); `spare_parts` cannot be mapped yet. A sample
 failure-mode catalog lives at `examples/sample_data/failure_modes.csv`.
 
 ### Python

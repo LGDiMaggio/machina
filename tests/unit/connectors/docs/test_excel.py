@@ -948,6 +948,47 @@ class TestYamlSettingsAndCallContract:
                 WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
             )
 
+    @pytest.mark.asyncio
+    async def test_a_file_that_cannot_be_reread_is_mapped_on_both_writes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Writes re-read the sheet first; a locked file fails there, not later."""
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _locked() -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_validate_and_load_work_orders", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-1", description="changed")
+
+    @pytest.mark.asyncio
+    async def test_list_fields_round_trip_as_delimited_cells(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        settings["work_orders"]["columns"].append(  # type: ignore[index]
+            {"column": "Competenze", "field": "requested_skills"}
+        )
+        conn = ExcelCsvConnector(**settings)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-9",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-201",
+                requested_skills=["mechanical", "hydraulics"],
+            )
+        )
+        assert "mechanical;hydraulics" in (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+
+        reread = ExcelCsvConnector(**settings)
+        await reread.connect()
+        (wo,) = await reread.read_work_orders()
+        assert wo.requested_skills == ["mechanical", "hydraulics"]
+
 
 class TestWritesPreserveTheFile:
     """Writes touch only their own row: other sheets, rows and columns survive."""

@@ -74,9 +74,12 @@ for transient read errors.
 
 `connect()` opens the connection and runs each query to check that every
 mapped column is present; a missing column fails with the list of available
-ones. List-valued fields (the asset `failure_modes` column, and a failure-mode
-catalog's `detection_methods`, `typical_indicators`, `recommended_actions`)
-hold a semicolon-delimited string.
+ones. List-valued fields (the asset `failure_modes` column, a work order's
+`requested_skills`, and a failure-mode catalog's `detection_methods`,
+`typical_indicators`, `recommended_actions`) hold a semicolon-delimited
+string. A work order's `failure_impact` is read case-insensitively
+(`critical`, `degraded`, `incipient`; any other value reads as empty);
+`spare_parts` cannot be mapped yet.
 
 ### Python
 

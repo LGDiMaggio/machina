@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
+from machina.connectors._entity_builders import LIST_CELL_DELIMITER
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
@@ -786,7 +787,10 @@ class ExcelCsvConnector:
 
         async with self._write_lock:
             # The file, not the connect-time cache, is the source of truth.
-            await asyncio.to_thread(self._validate_and_load_work_orders)
+            try:
+                await asyncio.to_thread(self._validate_and_load_work_orders)
+            except OSError as exc:
+                raise _file_write_error(exc, path) from exc
             existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
             if existing is not None:
                 logger.info(
@@ -866,7 +870,11 @@ class ExcelCsvConnector:
         # the write lock so concurrent writes cannot interleave.
         async with self._write_lock:
             if persist:
-                await asyncio.to_thread(self._validate_and_load_work_orders)
+                assert schema is not None
+                try:
+                    await asyncio.to_thread(self._validate_and_load_work_orders)
+                except OSError as exc:
+                    raise _file_write_error(exc, Path(schema.path)) from exc
             idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
             if idx is None:
                 raise ConnectorError(f"Work order '{work_order_id}' not found")
@@ -1043,6 +1051,9 @@ class ExcelCsvConnector:
                 value = value.isoformat()
             elif isinstance(value, StrEnum):
                 value = value.value
+            elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+                # The multi-value cell encoding the read side splits on.
+                value = LIST_CELL_DELIMITER.join(value)
             if isinstance(value, str):
                 value = _guard_formula(value)
             row[mapping.field] = value
