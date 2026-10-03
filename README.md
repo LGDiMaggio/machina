@@ -294,8 +294,8 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 
 | Connector | Source | |
 |-----------|--------|---|
-| `ExcelCsv` | Excel (`.xlsx`) and CSV files, mapped column by column | Available |
-| `GenericSql` | SQL databases over ODBC/JDBC, mapped query by query | Available |
+| `ExcelCsvConnector` | Excel (`.xlsx`) and CSV files, mapped column by column | Available |
+| `GenericSqlConnector` | SQL databases over ODBC/JDBC, mapped query by query | Available |
 
 ### IoT & Industrial Protocols
 

@@ -300,6 +300,8 @@ class TestYamlSettingsAndCallContract:
         assert [wo.id for wo in on_pump] == ["WO-1", "WO-3"]
         assert len(await connector.read_work_orders(status="created")) == 3
         assert await connector.read_work_orders(status="closed") == []
+        # None means "no status filter", as the empty string does — not "None".
+        assert len(await connector.read_work_orders(status=None)) == 3  # type: ignore[arg-type]
 
     def test_read_write_declares_create_but_not_the_unimplemented_update(self) -> None:
         from machina.connectors.capabilities import Capability

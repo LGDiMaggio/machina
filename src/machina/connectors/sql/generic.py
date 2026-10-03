@@ -271,7 +271,7 @@ class GenericSqlConnector:
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        wanted_status = str(getattr(status, "value", status))
+        wanted_status = str(getattr(status, "value", status) or "")
         return [
             wo
             for wo in (_dict_to_work_order(r) for r in rows)

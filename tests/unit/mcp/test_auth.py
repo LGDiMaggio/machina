@@ -131,6 +131,12 @@ class TestLoadTokensFromEnv:
             load_tokens_from_env()
         assert placeholder not in str(excinfo.value)  # never echo the secret
 
+    def test_exactly_32_characters_is_accepted(self) -> None:
+        token = "x" * 32
+        env = {"MACHINA_MCP_TOKENS_JSON": json.dumps({token: "client"})}
+        with patch.dict(os.environ, env, clear=False):
+            assert load_tokens_from_env() == {token: "client"}
+
     def test_short_legacy_token_refused(self) -> None:
         env = {"MACHINA_MCP_TOKENS": f"{TOKEN_A},short", "MACHINA_MCP_TOKENS_JSON": ""}
         with (
