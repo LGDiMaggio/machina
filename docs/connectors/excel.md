@@ -121,7 +121,9 @@ Spare parts are not read from spreadsheets.
 
 Reads are served from what `connect()` (or `refresh()`) loaded. Writes
 re-read the work-order sheet first, so rows other programs added or removed
-since then count.
+since then count. A work-order row whose values do not make a valid work order
+— an unknown status typed by hand, for instance — is skipped with a warning
+(`invalid_work_order_row_skipped`) instead of making the sheet unreadable.
 
 - **Create** appends one row, placing each value under its column header in
   the file's own column order; columns the schema does not map stay empty. It
@@ -136,15 +138,23 @@ since then count.
   the file is written to a temporary sibling and atomically replaced, so a
   crash mid-write cannot truncate it. A change to a field that no column is
   mapped to is refused with `ConnectorError` rather than silently dropped. If
-  the write fails, the cached record is restored. Without a `write_mode`,
-  `update_work_order()` changes the in-memory copy only.
+  the write fails, the cached record is restored. A key that is not a
+  work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8
+  BOM, which Excel on Windows needs to read accented text. Without a
+  `write_mode`, `update_work_order()` changes the in-memory copy only.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.
 - `write_mode` accepts `append` or `overwrite`; either one makes the sheet
   writable — new work orders are always appended.
-- An `.xlsx` file is saved back through openpyxl, which drops charts and
-  images it cannot read; keep the work-order sheet in a workbook of its own
-  rather than in one with charts or pictures.
+- An `.xlsx` file is saved back through openpyxl, which drops what it
+  cannot read: charts, images, and data validation or conditional formatting
+  stored as Excel extensions. It also discards the cached results of
+  formulas, and the connector reads cell values, not formulas — after a
+  write, a formula cell in a mapped column reads as empty until Excel
+  recalculates the file. Keep the work-order sheet in a workbook of its own,
+  with plain values.
+- Dates are written as ISO 8601 text (`2026-01-15T10:00:00+00:00`), which
+  the connector reads back as dates.
 
 **Formula injection is neutralised on write.** A cell value that starts with
 a spreadsheet formula trigger (`=`, `+`, `-`, `@`) is written with a leading

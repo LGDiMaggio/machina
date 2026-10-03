@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -302,6 +303,21 @@ class TestYamlSettingsAndCallContract:
         assert await connector.read_work_orders(status="closed") == []
         # None means "no status filter", as the empty string does — not "None".
         assert len(await connector.read_work_orders(status=None)) == 3  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_health_check_waits_for_the_shared_connection(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """The health probe uses the same DB-API connection as reads and writes."""
+        mock_connect.return_value = _make_conn(_make_smart_cursor(read_rows=[]))
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        async with connector._db_lock:
+            probe = asyncio.create_task(connector.health_check())
+            await asyncio.sleep(0.05)
+            assert not probe.done()
+        await probe
 
     def test_read_write_declares_create_but_not_the_unimplemented_update(self) -> None:
         from machina.connectors.capabilities import Capability

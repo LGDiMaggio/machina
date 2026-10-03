@@ -8,6 +8,7 @@ so the user writes zero Python.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import csv
 import re
 from datetime import UTC, date, datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
+from pydantic import ValidationError
 
 from machina.connectors._entity_builders import LIST_CELL_DELIMITER
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
@@ -33,8 +35,7 @@ if TYPE_CHECKING:
     )
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
-    from machina.domain.work_order import WorkOrder
-from machina.domain.work_order import WorkOrderStatus
+from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
@@ -489,6 +490,10 @@ def _update_csv_row(
     Every other row and column is written back unchanged, via a temp sibling
     and an atomic replace.
     """
+    with path.open("rb") as fb:
+        # Excel on Windows reads BOM-less UTF-8 as the ANSI code page and
+        # garbles accented text, so a file that had a BOM keeps it.
+        has_bom = fb.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
     with path.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     if not rows:
@@ -514,7 +519,7 @@ def _update_csv_row(
         target[index[column]] = "" if value is None else value
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with tmp.open("w", newline="", encoding="utf-8") as f:
+        with tmp.open("w", newline="", encoding="utf-8-sig" if has_bom else "utf-8") as f:
             csv.writer(f).writerows(rows)
         tmp.replace(path)
     except Exception:
@@ -787,10 +792,7 @@ class ExcelCsvConnector:
 
         async with self._write_lock:
             # The file, not the connect-time cache, is the source of truth.
-            try:
-                await asyncio.to_thread(self._validate_and_load_work_orders)
-            except OSError as exc:
-                raise _file_write_error(exc, path) from exc
+            await asyncio.to_thread(self._reload_work_orders_for_write, path)
             existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
             if existing is not None:
                 logger.info(
@@ -837,8 +839,9 @@ class ExcelCsvConnector:
         When ``write_mode`` is configured, the sheet is re-read and only the
         changed cells of the work order's row are written, in place: other
         rows, columns and sheets are left as they are, and the write goes
-        through a temp file and an atomic replace. A change to a field that
-        no column is mapped to is refused rather than silently dropped. If
+        through a temp file and an atomic replace. A field that is not a
+        ``WorkOrder`` field, a change of ``id``, and a change to a field that
+        no column is mapped to are refused rather than silently dropped. If
         the write fails, the cached work order is restored. When no
         ``write_mode`` is set, the update is kept in cache only.
 
@@ -863,6 +866,11 @@ class ExcelCsvConnector:
                 new_status = WorkOrderStatus(getattr(raw_status, "value", raw_status))
             except ValueError as exc:
                 raise ConnectorError(f"Invalid work order status {raw_status!r}") from exc
+        unknown = sorted(key for key in changes if key not in WorkOrder.model_fields)
+        if unknown:
+            raise ConnectorError(f"Unknown work order field(s): {', '.join(unknown)}")
+        if "id" in changes and changes["id"] != work_order_id:
+            raise ConnectorError("A work order's id cannot be changed")
 
         schema = self._config.work_orders
         persist = schema is not None and schema.write_mode is not None
@@ -871,10 +879,7 @@ class ExcelCsvConnector:
         async with self._write_lock:
             if persist:
                 assert schema is not None
-                try:
-                    await asyncio.to_thread(self._validate_and_load_work_orders)
-                except OSError as exc:
-                    raise _file_write_error(exc, Path(schema.path)) from exc
+                await asyncio.to_thread(self._reload_work_orders_for_write, Path(schema.path))
             idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
             if idx is None:
                 raise ConnectorError(f"Work order '{work_order_id}' not found")
@@ -889,9 +894,8 @@ class ExcelCsvConnector:
                         raise ConnectorError(str(exc)) from exc
                     changed |= {"status", "updated_at"}
                 for key, value in changes.items():
-                    if hasattr(wo, key):
-                        setattr(wo, key, value)
-                        changed.add(key)
+                    setattr(wo, key, value)
+                    changed.add(key)
                 if persist and changed:
                     assert schema is not None
                     path = Path(schema.path)
@@ -1020,7 +1024,37 @@ class ExcelCsvConnector:
             self._wo_cache = []
             return
         dicts = self._load_sheet_dicts(schema, "Work order")
-        self._wo_cache = [_dict_to_work_order(d) for d in dicts]
+        work_orders: list[WorkOrder] = []
+        for d in dicts:
+            try:
+                work_orders.append(_dict_to_work_order(d))
+            except ValidationError as exc:
+                # A row typed by hand with, e.g., an unknown status must not make
+                # the whole sheet unreadable — nor block every later write.
+                logger.warning(
+                    "invalid_work_order_row_skipped",
+                    connector="ExcelCsvConnector",
+                    source=Path(schema.path).name,
+                    work_order_id=str(d.get("id", "")),
+                    fields=sorted({str(err["loc"][0]) for err in exc.errors() if err["loc"]}),
+                )
+        self._wo_cache = work_orders
+
+    def _reload_work_orders_for_write(self, path: Path) -> None:
+        """Re-read the work-order sheet before a write, inside the write lock.
+
+        Raises:
+            ConnectorLockedError: If the file is open in another program.
+            ConnectorError: If the file cannot be read (unreadable, corrupt).
+        """
+        try:
+            self._validate_and_load_work_orders()
+        except ConnectorError:
+            raise
+        except OSError as exc:
+            raise _file_write_error(exc, path) from exc
+        except Exception as exc:
+            raise ConnectorError(f"Cannot read {path.name} before writing to it: {exc}") from exc
 
     @staticmethod
     def _read_file(path: Path, schema: SheetSchema) -> tuple[list[str], list[dict[str, Any]]]:

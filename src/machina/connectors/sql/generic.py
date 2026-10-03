@@ -206,8 +206,9 @@ class GenericSqlConnector:
     async def disconnect(self) -> None:
         """Close the database connection."""
         if self._conn is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(self._conn.close)
+            async with self._db_lock:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._conn.close)
             self._conn = None
         self._connected = False
 
@@ -219,7 +220,8 @@ class GenericSqlConnector:
                 message="Not connected",
             )
         try:
-            await asyncio.to_thread(self._execute_scalar, "SELECT 1")
+            async with self._db_lock:
+                await asyncio.to_thread(self._execute_scalar, "SELECT 1")
             return ConnectorHealth(
                 status=ConnectorStatus.HEALTHY,
                 message="Database reachable",

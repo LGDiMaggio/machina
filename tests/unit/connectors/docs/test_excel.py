@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import shutil
 from datetime import date, datetime
 from pathlib import Path
@@ -988,6 +989,59 @@ class TestYamlSettingsAndCallContract:
         await reread.connect()
         (wo,) = await reread.read_work_orders()
         assert wo.requested_skills == ["mechanical", "hydraulics"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_and_id_change_are_refused(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Unknown work order field"):
+            await conn.update_work_order("WO-1", {"descrption": "typo"})
+        with pytest.raises(ConnectorError, match="id cannot be changed"):
+            await conn.update_work_order("WO-1", {"id": "WO-X"})
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.description == "x"
+
+    @pytest.mark.asyncio
+    async def test_a_row_typed_with_an_invalid_status_is_skipped(self, tmp_path: Path) -> None:
+        """One bad hand-typed row neither breaks reads nor blocks later writes."""
+        conn = await _connected_with_work_orders(tmp_path)
+        with (tmp_path / "odl.csv").open("a", encoding="utf-8", newline="") as f:
+            f.write("WO-BAD,P-201,typed by hand,aperto,\r\n")
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+        )
+        await conn.update_work_order("WO-1", description="still writable")
+
+        ids = [wo.id for wo in await conn.read_work_orders()]
+        assert ids == ["WO-1", "WO-2", "WO-3", "WO-9"]
+        assert "WO-BAD" in (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_file_on_reread_is_a_connector_error(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        (tmp_path / "odl.csv").write_bytes(b"ID,Codice Asset\r\n\xff\xfe broken\r\n")
+        with pytest.raises(ConnectorError, match="before writing"):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+
+    @pytest.mark.asyncio
+    async def test_csv_update_keeps_a_utf8_bom(self, tmp_path: Path) -> None:
+        """Excel on Windows needs the BOM to read accented text as UTF-8."""
+        orders = tmp_path / "odl.csv"
+        orders.write_bytes(
+            codecs.BOM_UTF8
+            + "ID,Codice Asset,Descrizione,Stato,Assegnato a\r\n"
+            "WO-1,P-201,Criticità alta,created,\r\n".encode()
+        )
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", assigned_to="Rossi")
+
+        content = orders.read_bytes()
+        assert content.startswith(codecs.BOM_UTF8)
+        assert "Criticità alta" in content.decode("utf-8-sig")
 
 
 class TestWritesPreserveTheFile:
