@@ -458,8 +458,6 @@ Details in the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
 
 If you use Machina in your research, please cite the software:
 
-<!-- TODO: replace 10.5281/zenodo.XXXXXXX with the v0.4.0 version DOI once Zenodo mints it. -->
-
 ```bibtex
 @software{dimaggio_machina_2026,
   author    = {Di Maggio, Luigi Gianpio},
@@ -467,12 +465,12 @@ If you use Machina in your research, please cite the software:
   version   = {0.4.0},
   year      = {2026},
   publisher = {Zenodo},
-  doi       = {10.5281/zenodo.XXXXXXX},
+  doi       = {10.5281/zenodo.19456867},
   url       = {https://github.com/LGDiMaggio/machina}
 }
 ```
 
-The concept DOI [10.5281/zenodo.19456867](https://doi.org/10.5281/zenodo.19456867) always resolves to the latest version. GitHub's "Cite this repository" button reads [`CITATION.cff`](CITATION.cff).
+[10.5281/zenodo.19456867](https://doi.org/10.5281/zenodo.19456867) is the concept DOI: it always resolves to the latest version, and the Zenodo record lists the DOI of each release for citing a specific one. GitHub's "Cite this repository" button reads [`CITATION.cff`](CITATION.cff).
 
 ## Contributing
 

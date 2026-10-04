@@ -19,7 +19,7 @@ authors:
     affiliation: "Politecnico di Torino"
 
 version: "0.4.0"
-date-released: "2026-10-02"
+date-released: "2026-10-04"
 
 identifiers:
   - type: doi
@@ -50,7 +50,7 @@ preferred-citation:
       orcid: "https://orcid.org/0000-0002-2295-8944"
       affiliation: "Politecnico di Torino"
   version: "0.4.0"
-  date-released: "2026-10-02"
+  date-released: "2026-10-04"
   doi: "10.5281/zenodo.19456867"
   license: Apache-2.0
   repository-code: "https://github.com/LGDiMaggio/machina"

@@ -2,7 +2,7 @@
 
 ## v0.4 — Current release
 
-Released 2026-10-02. Highlights (full list in the [changelog](changelog.md)):
+Released 2026-10-04. Highlights (full list in the [changelog](changelog.md)):
 
 - **MCP server** you can run: `machina mcp serve` over stdio or streamable HTTP
   with bearer-token auth, 15 capability-gated tools, 4 resources and 3 prompts,
