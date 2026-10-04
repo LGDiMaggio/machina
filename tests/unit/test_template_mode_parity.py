@@ -69,3 +69,14 @@ def test_template_matches_examples_helper(argv: list[str], env_value: str | None
         f"drift: argv={argv} env_value={env_value!r} "
         f"examples={expected_examples} template={expected_template}"
     )
+
+
+@pytest.mark.parametrize("env_value", ["", "  ", "true", "True ", "1", "yes", "on", "garbage"])
+def test_template_env_fails_closed_to_sandbox(env_value: str) -> None:
+    """Blank, true-ish and unrecognised values all keep sandbox on."""
+    assert resolve_template(sandbox_flag=False, live_flag=False, env_value=env_value) is True
+
+
+@pytest.mark.parametrize("env_value", ["false", "FALSE", " 0", "no", "off"])
+def test_template_env_explicit_false_selects_live(env_value: str) -> None:
+    assert resolve_template(sandbox_flag=False, live_flag=False, env_value=env_value) is False

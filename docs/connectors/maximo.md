@@ -55,11 +55,13 @@ pip install machina-ai[cmms-rest]
     connectors:
       cmms:
         type: maximo
-        url: https://maximo.example.com
-        auth:
-          type: api_key
-          header_name: apikey
-          value: ${MAXIMO_API_KEY}
+        primary: true
+        settings:
+          url: https://maximo.example.com
+          auth:
+            type: api_key
+            header_name: apikey
+            value: ${MAXIMO_API_KEY}
     ```
 
 ## Capabilities
@@ -68,6 +70,7 @@ pip install machina-ai[cmms-rest]
 |---|---|
 | `read_assets` | Read asset records (`mxasset` object structure) |
 | `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw Maximo code) |
+| `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description via PATCH |
 | `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
@@ -79,7 +82,6 @@ These methods are available but are **not** declared as agent-discoverable capab
 
 | Method | Description |
 |---|---|
-| `get_work_order(wonum)` | Fetch a single work order by `wonum` |
 | `close_work_order(wonum)` | Transition to CLOSED (Maximo `CLOSE`) via `update_work_order` |
 | `cancel_work_order(wonum)` | Transition to CANCELLED (Maximo `CAN`) via `update_work_order` |
 

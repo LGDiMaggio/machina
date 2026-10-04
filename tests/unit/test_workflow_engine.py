@@ -659,11 +659,68 @@ class TestWriteDetection:
         assert WorkflowEngine._is_write_action("publish_message") is True
 
     def test_read_actions_are_not_gated(self) -> None:
-        # Genuinely keyword-free reads. (Note: the over-gate bias means some
-        # reads collide harmlessly — e.g. "read_assets" contains "set" — which
-        # is the accepted fail-safe cost, not a bug.)
-        for action in ("cmms.read_work_orders", "cmms.get_work_order", "docs.search_documents"):
+        for action in (
+            "cmms.read_work_orders",
+            "cmms.get_work_order",
+            "docs.search_documents",
+            "cmms.read_assets",
+        ):
             assert WorkflowEngine._is_write_action(action) is False
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "cmms.read_assets",
+            "read_assets",
+            "cmms.get_asset_history",
+            "domain.check_asset_criticality",
+            "docs.read_dataset",
+            "cmms.get_offset",
+        ],
+    )
+    def test_set_embedded_in_a_noun_is_not_a_write(self, action: str) -> None:
+        # Regression: "set" used to match as a substring, so any read naming
+        # an asset ("assets", "asset_history") was gated as a write — in a
+        # sandbox run the read returned a placeholder instead of data.
+        assert WorkflowEngine._is_write_action(action) is False
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "cmms.set_point",
+            "scada.setpoint",
+            "cmms.reset_counter",
+            "cmms.unset_flag",
+            "cmms.setWorkOrderStatus",
+            "cmms.read_settings",
+            "plc.preset",
+            "plc.bulkset",
+            "plc.OVERRIDESETPOINT",
+            "cmms.reset_asset_counter",
+            "cmms.upsert_asset",
+        ],
+    )
+    def test_set_outside_those_nouns_is_a_write(self, action: str) -> None:
+        # Over-gating bias: "set" anywhere but inside asset/dataset/offset
+        # gates — mid-word and all-caps included. "read_settings" stays an
+        # accepted over-gate.
+        assert WorkflowEngine._is_write_action(action) is True
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "cmms.get_update_history",
+            "cmms.read_closed_work_orders",
+            "mail.sendmail",
+            "cmms.bulk_update_wos",
+            "notifier.notifyall",
+        ],
+    )
+    def test_other_verbs_keep_substring_matching(self, action: str) -> None:
+        # Every write verb matches as a substring, so run-together and
+        # mid-name writes stay gated (service steps have no @sandbox_aware
+        # backstop).
+        assert WorkflowEngine._is_write_action(action) is True
 
     def test_is_write_override_forces_both_directions(self) -> None:
         write_step = Step("x", action="cmms.read_assets", is_write=True)
@@ -862,6 +919,38 @@ class TestSandboxMode:
         result = await engine.execute(wf)
         assert result.step_results[0].output["sandbox"] is True
         assert mqtt.publish_count == 0  # the live MQTT write was NOT executed
+
+    @pytest.mark.asyncio
+    async def test_sandbox_executes_read_assets_connector_step(self, tracer: ActionTracer) -> None:
+        """A read whose name embeds "set" runs for real in a sandbox run."""
+
+        class _FakeAssetConnector:
+            capabilities: ClassVar[list[str]] = ["read_assets"]
+
+            def __init__(self) -> None:
+                self.read_count = 0
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def health_check(self) -> bool:
+                return True
+
+            async def read_assets(self) -> list[str]:
+                self.read_count += 1
+                return ["P-201"]
+
+        cmms = _FakeAssetConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer, sandbox=True)
+        wf = Workflow(name="SandboxReadAssets", steps=[Step("load", action="cmms.read_assets")])
+        result = await engine.execute(wf)
+        assert result.step_results[0].output == ["P-201"]
+        assert cmms.read_count == 1
 
     @pytest.mark.asyncio
     async def test_sandbox_write_service(self, tracer: ActionTracer) -> None:

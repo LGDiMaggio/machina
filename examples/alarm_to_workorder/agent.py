@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Alarm fires on pump P-201. Agent handles it end-to-end.
 
-Diagnose the failure, check spare parts, create a work order,
-notify the team. 6 steps, only 2 use the LLM.
+Diagnose the failure, check history and spare parts, draft a work order,
+notify the team, submit the work order. 6 deterministic steps — domain
+services and connector calls, no LLM call — so it runs without an LLM.
 
-    python agent.py                     # sandbox (default)
-    python agent.py --live              # execute writes
-    python agent.py --llm openai:gpt-4o
+    python agent.py                     # sandbox (default): writes intercepted
+    python agent.py --live              # execute the notification and submit
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 _repo_root = Path(__file__).resolve().parent.parent.parent
 _examples_dir = Path(__file__).resolve().parent.parent
@@ -42,6 +43,7 @@ agent = Agent(
         DocumentStoreConnector(paths=[SAMPLE_DIR / "manuals"]),
     ],
     channels=[CliChannel()],
+    # The Agent needs a provider, but this workflow never calls it.
     llm="ollama:llama3",
     workflows=[alarm_to_workorder],
     sandbox=True,
@@ -54,9 +56,27 @@ agent = Agent(
 # ────────────────────────────────────────────────────────────────
 
 
-async def run_alarm_demo(llm: str, sandbox: bool) -> None:
+def _summary(output: Any) -> str:
+    """One line per step output, for the console."""
+    if isinstance(output, dict) and output.get("sandbox"):
+        return "sandbox: intercepted, not executed"
+    if isinstance(output, list):
+        if not output:
+            return "none"
+        return ", ".join(
+            f"{item.sku} (stock {item.stock_quantity})" if hasattr(item, "sku") else str(item)
+            for item in output
+        )
+    if hasattr(output, "priority") and hasattr(output, "asset_id"):  # a WorkOrder
+        return (
+            f"{output.id}: {output.type.value}, priority {output.priority.value}, "
+            f"failure mode {output.failure_mode}"
+        )
+    return str(output)
+
+
+async def run_alarm_demo(sandbox: bool) -> None:
     """Simulate an alarm and trigger the workflow."""
-    agent.llm = llm
     agent.sandbox = sandbox
     await agent.start()
 
@@ -95,7 +115,7 @@ async def run_alarm_demo(llm: str, sandbox: bool) -> None:
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
     for sr in result.steps:
         icon = "+" if sr.success else "~" if sr.skipped else "x"
-        print(f"    [{icon}] {sr.name}")
+        print(f"    [{icon}] {sr.name:<20} {_summary(sr.output)}")
 
     await agent.stop()
     print()
@@ -103,13 +123,12 @@ async def run_alarm_demo(llm: str, sandbox: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Alarm Response Agent")
-    parser.add_argument("--llm", default="ollama:llama3", help="LLM provider:model")
     parser.add_argument("--verbose", action="store_true")
 
     add_mode_flags(parser, default_sandbox=True)
     args = parser.parse_args()
 
-    check(llm=args.llm)
+    check(llm=None)  # deterministic workflow: no LLM is called
 
     if args.verbose:
         from machina.observability.logging import configure_logging
@@ -117,7 +136,7 @@ def main() -> None:
         configure_logging(level="DEBUG")
 
     sandbox = resolve_sandbox(args, default=True)
-    asyncio.run(run_alarm_demo(llm=args.llm, sandbox=sandbox))
+    asyncio.run(run_alarm_demo(sandbox=sandbox))
 
 
 if __name__ == "__main__":

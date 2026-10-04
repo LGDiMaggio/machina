@@ -465,6 +465,43 @@ class TestRestGetWorkOrder:
         wo = await conn.get_work_order("NONEXISTENT")
         assert wo is None
 
+    @pytest.mark.asyncio
+    async def test_unknown_asset_is_none_not_an_http_error(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        """A 404 on /assets/{id} means "no such asset", as for work orders."""
+        await _connect_with_health(httpx_mock, rest_connector)
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets/NOPE", status_code=404)
+
+        assert await rest_connector.get_asset("NOPE") is None
+
+    @pytest.mark.asyncio
+    async def test_ids_are_sent_as_one_path_segment(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        """An ID cannot climb out of the configured path or add a query."""
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/..%2Fusers%2F1%3Frole%3Dadmin",
+            status_code=404,
+        )
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets/a%2Fb%23c", status_code=404)
+
+        assert await conn.get_work_order("../users/1?role=admin") is None
+        assert await conn.get_asset("a/b#c") is None
+
+    @pytest.mark.asyncio
+    async def test_dot_segment_ids_are_refused(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn.get_work_order("..")
+
 
 class TestRestUpdateWorkOrder:
     """REST update_work_order exercises PATCH /work_orders/{id}."""

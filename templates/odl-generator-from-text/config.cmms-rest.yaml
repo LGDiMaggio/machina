@@ -1,0 +1,40 @@
+# odl-generator-from-text — alternative substrate: a CMMS over REST
+#
+#   python agent.py --sandbox --config config.cmms-rest.yaml
+#
+# Same agent as config.yaml, but assets and work orders live in a CMMS behind
+# a REST API instead of spreadsheets. The Generic CMMS connector speaks a
+# fixed contract — GET /health, GET /assets, GET and POST /work_orders — plus
+# the optional endpoints listed below. The mock CMMS in deploy/docker/mock-cmms
+# serves exactly this contract on port 9000.
+#
+# For a CMMS whose payloads use other field names, add a `yaml_mapping:` block
+# under settings (see docs/connectors/generic_cmms.md); the paths above stay
+# the same.
+
+name: "OdL Generator (REST CMMS)"
+description: >
+  Turns free-text maintenance requests into structured work orders,
+  reading assets and writing work orders through a CMMS REST API.
+
+plant:
+  name: "Stabilimento Demo"
+  location: "Italia"
+
+connectors:
+  cmms:
+    type: generic_cmms
+    primary: true
+    settings:
+      url: "${MACHINA_CMMS_URL:-http://localhost:9000}"
+      api_key: "${MACHINA_CMMS_API_KEY}"     # required: set it in .env
+      endpoints:
+        get_work_order: {path: "work_orders/{id}"}
+        update_work_order: {path: "work_orders/{id}", method: PATCH}
+        read_maintenance_plans: {path: "maintenance_plans"}
+
+llm:
+  provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"
+  temperature: 0.1
+
+sandbox: true

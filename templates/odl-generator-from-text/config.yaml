@@ -1,66 +1,76 @@
 # odl-generator-from-text — Machina agent configuration
 #
-# Substrate switch: set MACHINA_SUBSTRATE=excel (default) or generic_cmms_yaml
-# All secrets come from .env — never hardcode them here.
+# Default substrate: spreadsheets. The asset registry is read from
+# data/asset_registry.xlsx; new work orders are appended to
+# data/workorders.xlsx (created on the first live write — sandbox mode never
+# writes). Paths are relative to this directory; agent.py runs from here.
+#
+# Every ${VAR:-default} can be overridden from the environment or .env.
+# Secrets (API keys, bot tokens, passwords) never go in this file.
 
 name: "OdL Generator"
 description: >
-  Receives free-text maintenance requests via email or Telegram,
-  resolves assets, and creates structured Work Orders.
+  Turns free-text maintenance requests into structured work orders:
+  resolves the assets named in the message against the plant registry
+  and proposes one work order per asset, confirmed by a human before it
+  is written.
 
 plant:
   name: "Stabilimento Demo"
   location: "Italia"
 
 connectors:
-  # --- Excel substrate (default) ---
-  excel_assets:
+  registry:
     type: excel_csv
     primary: true
     settings:
-      file_path: "data/asset_registry.xlsx"
-      read_only: true
+      asset_registry:
+        path: data/asset_registry.xlsx    # or data/asset_registry_en.xlsx
+        sheet: Asset
+        columns:
+          - {column: Codice, field: id, required: true}
+          - {column: Nome, field: name, required: true}
+          - {column: Tipo, field: type}
+          - {column: Ubicazione, field: location}
+          - {column: Criticità, field: criticality}
+          - {column: Costruttore, field: manufacturer}
+          - {column: Modello, field: model}
+          - {column: Modi di guasto, field: failure_modes}   # "CODE-1;CODE-2"
+          - {column: Alias, field: aliases}                  # "pompa A;circuito A"
+      work_orders:
+        path: data/workorders.xlsx
+        sheet: OdL
+        write_mode: append
+        columns:
+          - {column: ID, field: id, required: true}
+          - {column: Codice Asset, field: asset_id, required: true}
+          - {column: Tipo, field: type}
+          - {column: Priorità, field: priority}
+          - {column: Stato, field: status}
+          - {column: Descrizione, field: description}
+          - {column: Modo di guasto, field: failure_mode}
+          - {column: Data creazione, field: created_at, coerce: datetime_parse}
 
-  excel_workorders:
-    type: excel_csv
-    settings:
-      file_path: "data/workorders.xlsx"
-      write_mode: append
-
-  # --- GenericCmms YAML substrate (alternative) ---
-  # Activate by setting MACHINA_SUBSTRATE=generic_cmms_yaml in .env
-  # generic_cmms:
-  #   type: generic_cmms
-  #   primary: true
-  #   settings:
-  #     url: "${MACHINA_CMMS_URL}"
-  #     yaml_mapping_file: "config/generic_cmms.yaml"
-
-  # --- Email ---
-  email:
-    type: email
-    settings:
-      smtp_host: "${MACHINA_SMTP_HOST}"
-      smtp_port: "${MACHINA_SMTP_PORT}"
-      username: "${MACHINA_EMAIL_USERNAME}"
-      password: "${MACHINA_EMAIL_PASSWORD}"
-      from_address: "${MACHINA_SMTP_FROM}"
-      imap_host: "${MACHINA_IMAP_HOST}"
-      imap_port: "${MACHINA_IMAP_PORT}"
-
-channels:
-  - type: email
-  # Uncomment to add Telegram:
-  # - type: telegram
-  #   settings:
-  #     bot_token: "${MACHINA_TELEGRAM_BOT_TOKEN}"
-  #     allowed_chat_ids: "${MACHINA_TELEGRAM_CHAT_IDS}"
+# No `channels:` entry: the agent talks on the terminal (CLI channel), which
+# can also ask "confirm? [y/N]" before each work order is written.
+#
+# Telegram (pip install "machina-ai[telegram]"). Only the listed chat IDs are
+# served; keep this list explicit:
+#
+# channels:
+#   - type: telegram
+#     settings:
+#       bot_token: "${MACHINA_TELEGRAM_BOT_TOKEN}"
+#       allowed_chat_ids: [123456789]
+#
+# Email works the same way (type: email, see docs/connectors/email.md), but
+# the sender of an email is not authenticated: anyone can forge the From
+# address. Use it for sandbox demos, or keep --live writes on the CLI channel.
 
 llm:
-  provider: "${MACHINA_LLM_MODEL}"
+  provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"
   temperature: 0.1
 
+# agent.py decides the mode: --sandbox / --live, else MACHINA_SANDBOX_MODE
+# (default true). In sandbox mode writes are logged, never executed.
 sandbox: true
-
-logging:
-  level: "${MACHINA_LOG_LEVEL}"

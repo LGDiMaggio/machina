@@ -27,7 +27,7 @@
 How you go beyond the built-in connectors. Each seam below has a fixed location; the [capability matrix](capabilities.md) lists the live seam manifest (Protocol methods + convention seams) derived from code.
 
 - **Add a connector** → create `connectors/{category}/{name}.py` and implement the `BaseConnector` Protocol structurally; declare `capabilities: ClassVar[frozenset[Capability]]`. See [Custom Connectors](connectors/custom.md).
-- **Register the connector type** → add a `type → dotted factory path` entry to `_CONNECTOR_FACTORIES` in `runtime.py` so the runtime and MCP layer discover it.
+- **Register the connector type** → add a `type → dotted factory path` entry to `_CONNECTOR_FACTORIES` in `runtime.py` so `Agent.from_config`, the runtime and the MCP layer can build it from YAML.
 - **Add a capability** → add a member to the `Capability` StrEnum (`connectors/capabilities.py`), then map it to its backing method in `CAPABILITY_TO_METHOD` (`introspect/_methods.py`) — capability values are not always method names.
 - **Expose a capability as an MCP tool** → map it in `CAPABILITY_TO_TOOL` (`mcp/tools.py`).
 - **Add a vendor mapper** → pure payload↔domain functions in `connectors/cmms/mappers/{vendor}.py`.
@@ -43,7 +43,7 @@ How you go beyond the built-in connectors. Each seam below has a fixed location;
 
 ## Optional
 
-- [MCP Server](mcp-server.md): expose any connector to Claude Desktop, Cursor, or any MCP client; the MCP layer is a thin transport adapter over the connector layer, not a separate system.
+- [MCP Server](mcp-server.md): expose any connector to Claude Desktop, Cursor, or any MCP client (`machina mcp serve --config machina.yaml`, over stdio or streamable HTTP); the MCP layer is a thin transport adapter over the connector layer, not a separate system.
 - [Connector guides](connectors/custom.md): per-vendor connector docs (SAP PM, Maximo, UpKeep, Excel/CSV, SQL, GenericCmms YAML, OPC-UA, MQTT, Slack, Email, Calendar, Document Store).
 - [Deployment](deployment/docker.md): Docker, on-premise, secrets, scaling, and security.
 - [Observability](observability/traces.md): action traces and cost tracking.

@@ -8,6 +8,20 @@ if TYPE_CHECKING:
     from machina.observability.tracing import ActionTracer
 
 
+def _normalize_model(model: str) -> str:
+    """Return ``model`` in the ``provider/model`` form LiteLLM requires.
+
+    ``provider:model`` becomes ``provider/model`` (only the first colon, so
+    ``ollama:llama3:8b`` → ``ollama/llama3:8b``). A string already in slash
+    form is left alone — its colons belong to the model tag
+    (``ollama/qwen3:8b``, ``openai/gpt-4o:2024-11-20``).
+    """
+    provider, sep, _rest = model.partition(":")
+    if sep and "/" not in provider:
+        return model.replace(":", "/", 1)
+    return model
+
+
 class LLMProvider:
     """Provider-agnostic LLM interface.
 
@@ -38,7 +52,7 @@ class LLMProvider:
         request_timeout: float = 120.0,
         tracer: ActionTracer | None = None,
     ) -> None:
-        self.model = model.replace(":", "/", 1)
+        self.model = _normalize_model(model)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.request_timeout = request_timeout

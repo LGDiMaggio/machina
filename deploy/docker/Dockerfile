@@ -1,5 +1,4 @@
-# Multi-stage Dockerfile for Machina MCP server
-# Target: <600 MB uncompressed
+# Multi-stage Dockerfile for the Machina MCP server (streamable HTTP)
 
 FROM python:3.11-slim-bookworm AS build
 
@@ -14,7 +13,11 @@ ENV PATH="/opt/machina-venv/bin:$PATH"
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir ".[cmms-rest,litellm,docs-rag,mcp]"
+# The MCP server makes no LLM calls: the default extras are the REST CMMS
+# client and the MCP SDK. Add what your connectors need, e.g.
+#   docker compose build --build-arg MACHINA_EXTRAS=cmms-rest,mcp,docs-rag,excel
+ARG MACHINA_EXTRAS=cmms-rest,mcp
+RUN pip install --no-cache-dir ".[${MACHINA_EXTRAS}]"
 
 # --- Runtime stage ---
 FROM python:3.11-slim-bookworm AS runtime
@@ -34,5 +37,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-ENTRYPOINT ["python", "-m", "machina.mcp"]
-CMD ["--transport", "streamable-http", "--config", "/home/machina/config.yaml"]
+# Listen on all interfaces inside the container; docker-compose.yml publishes
+# the port on the host's loopback only.
+ENTRYPOINT ["machina", "mcp", "serve"]
+CMD ["--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000", "--config", "/home/machina/config.yaml"]

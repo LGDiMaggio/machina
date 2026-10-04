@@ -78,19 +78,26 @@ Behind that single `agent.run()` call, Machina did the following for each questi
 
 1. **Entity resolution** — The `EntityResolver` matched "P-201" against the assets
    loaded from the sample CMMS (`Asset.id == "P-201"`, exact-ID match, confidence 1.0).
-2. **Context gathering** — The agent queried every registered connector in parallel:
+2. **Context gathering** — Because the match was confident and unambiguous, the
+   resolution *committed*, and the agent fetched that asset's data concurrently,
+   each from the first connector that provides it:
    `GenericCmmsConnector.read_work_orders(asset_id="P-201")` for the history,
-   `DocumentStoreConnector.search("bearing replacement")` for the manual section.
-3. **Grounded prompt** — The retrieved asset metadata, work orders, and document
-   chunks were injected into the LLM's system message via `build_context_message`,
-   so the LLM's answer is grounded in real plant data — not hallucinated.
+   `GenericCmmsConnector.read_spare_parts(asset_id="P-201")` for compatible parts,
+   and `DocumentStoreConnector.search(<your question>, asset_id="P-201")` for the
+   manual section. A weak or ambiguous match fetches nothing; the agent asks which
+   asset you mean instead.
+3. **Grounded prompt** — The retrieved asset metadata, work orders, spare parts and
+   document chunks were injected into the LLM's system message via
+   `build_context_message`, so the LLM answers from real plant data. The LLM can
+   also call tools (asset search, work orders, spare parts, documents, diagnosis)
+   for anything the prefetch did not cover.
 
 ## Next steps
 
-- **[Architecture](architecture.md)** — Understand the five layers (connectors,
-  domain, agent, LLM, observability) and how they compose.
+- **[Architecture](architecture.md)** — Understand the layers (connectors, domain,
+  agent runtime, workflows, LLM, observability) and how they compose.
 - **[Domain Model Reference](domain.md)** — Explore `Asset`, `WorkOrder`, `FailureMode`,
-  and the rest of the ISO 14224-aligned entities.
+  and the rest of the domain entities.
 - **[Custom Connectors](connectors/custom.md)** — Build a connector for your own
   CMMS or sensor system using the `BaseConnector` Protocol.
 - **[YAML Configuration](yaml-config.md)** — Prefer declarative config? Define your

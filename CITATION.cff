@@ -6,19 +6,25 @@ title: "Machina: An AI Agent Framework for Industrial Maintenance"
 abstract: >
   Machina is an open-source Python framework for building AI agents
   specialized in industrial maintenance (predictive, preventive, corrective).
-  It provides pre-built connectors for industrial systems (CMMS, IoT sensors, ERP),
-  a domain model, and an LLM-powered agent layer with
-  domain-aware prompting.
+  It provides connectors for maintenance systems (CMMS, spreadsheets and SQL
+  databases, IoT protocols, document stores, messaging), a canonical
+  maintenance domain model, an LLM-powered agent layer with domain-aware
+  prompting, and a Model Context Protocol server.
 
 authors:
   - family-names: "Di Maggio"
     given-names: "Luigi Gianpio"
     email: luigi.dimaggio@polito.it
-    orcid: "https://orcid.org/0000-0002-2295-8944"  # replace with your ORCID
+    orcid: "https://orcid.org/0000-0002-2295-8944"
     affiliation: "Politecnico di Torino"
 
-version: "0.2.0"
-date-released: "2026-04-11"
+version: "0.4.0"
+date-released: "2026-10-04"
+
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19456867"
+    description: "Concept DOI (all versions)"
 
 license: Apache-2.0
 repository-code: "https://github.com/LGDiMaggio/machina"
@@ -29,6 +35,8 @@ keywords:
   - industrial maintenance
   - predictive maintenance
   - LLM agents
+  - agentic AI
+  - model context protocol
   - IoT
   - CMMS
 
@@ -39,8 +47,10 @@ preferred-citation:
     - family-names: "Di Maggio"
       given-names: "Luigi Gianpio"
       email: luigi.dimaggio@polito.it
+      orcid: "https://orcid.org/0000-0002-2295-8944"
       affiliation: "Politecnico di Torino"
-  version: "0.2.0"
-  date-released: "2026-04-11"
+  version: "0.4.0"
+  date-released: "2026-10-04"
+  doi: "10.5281/zenodo.19456867"
   license: Apache-2.0
   repository-code: "https://github.com/LGDiMaggio/machina"

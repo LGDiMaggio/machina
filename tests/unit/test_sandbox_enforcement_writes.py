@@ -82,6 +82,43 @@ class TestOutboundWritesBlockedInSandbox:
             await GenericSqlConnector.update_work_order(MagicMock(), "WO-1", {})
 
 
+@pytest.mark.usefixtures("_sandbox_on")
+class TestIdempotentWritesTouchNothingInSandbox:
+    """The idempotent writes read the substrate before writing (the reload or
+    the existing-ID lookup). In sandbox mode the guard must fire before that
+    read too — not between the read and the write."""
+
+    @pytest.mark.asyncio
+    async def test_excel_create_reads_and_writes_no_file(self) -> None:
+        from machina.connectors.docs.excel import ExcelCsvConnector
+
+        conn = MagicMock()
+        with pytest.raises(SandboxViolationError):
+            await ExcelCsvConnector.create_work_order(conn, MagicMock())
+        conn._validate_and_load_work_orders.assert_not_called()
+        conn._write_row.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_excel_update_reads_and_writes_no_file(self) -> None:
+        from machina.connectors.docs.excel import ExcelCsvConnector
+
+        conn = MagicMock()
+        with pytest.raises(SandboxViolationError):
+            await ExcelCsvConnector.update_work_order(conn, "WO-1", status="assigned")
+        conn._validate_and_load_work_orders.assert_not_called()
+        conn._update_row_in_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sql_create_runs_no_query(self) -> None:
+        from machina.connectors.sql.generic import GenericSqlConnector
+
+        conn = MagicMock()
+        with pytest.raises(SandboxViolationError):
+            await GenericSqlConnector.create_work_order(conn, MagicMock())
+        conn._execute_read.assert_not_called()
+        conn._execute_write.assert_not_called()
+
+
 class TestCliChannelStillWorksInSandbox:
     """The CLI channel only prints to stdout — it must NOT be sandbox-gated,
     otherwise the agent could not reply to the user in sandbox mode."""

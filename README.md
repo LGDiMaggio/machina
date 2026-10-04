@@ -8,6 +8,7 @@
     <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/v/machina-ai.svg" alt="PyPI version"/></a>
     <a href="https://github.com/LGDiMaggio/machina/actions"><img src="https://img.shields.io/github/actions/workflow/status/LGDiMaggio/machina/ci.yml?branch=main" alt="CI"/></a>
     <a href="https://pypi.org/project/machina-ai/"><img src="https://img.shields.io/pypi/dm/machina-ai.svg" alt="Downloads"/></a>
+    <a href="https://doi.org/10.5281/zenodo.19456867"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.19456867.svg" alt="DOI"/></a>
   </p>
   <p>
     <a href="#quick-start">Quick Start</a> &bull;
@@ -70,36 +71,43 @@ agent = Agent(
 agent.run()
 ```
 
-Sample data included: 6 assets, 5 work orders, 6 spare parts, 10 failure modes, 2 equipment manuals. Your technicians can now talk to their plant data:
+Sample data included: 6 assets, 5 work orders, 6 spare parts, 10 failure modes, 2 equipment manuals. Your technicians can now talk to their plant data. An example session, abridged (the wording depends on the model):
 
 ```
 You: What is the bearing replacement procedure for pump P-201?
 
-Agent: Based on the Grundfos CR 32-2 maintenance manual for P-201:
-1. Lock out/tag out and isolate power supply
-2. Drain the pump casing, disconnect piping
-3. Extract drive-end bearing (SKF 6310-2RS) using a bearing puller
-4. Press-fit new bearing using induction heater (110 C)
-5. Reassemble, torque cover bolts to 45 Nm
-6. Verify vibration per ISO 10816-3 after commissioning
-Recommended spare: SKF 6310-2RS (in stock: 4 units)
+Agent: From the Grundfos CR 32-2 manual for P-201 [1]:
+1. Lock out / tag out the motor and verify zero energy state
+2. Disconnect the coupling, remove the bearing housing covers (4x M12 bolts)
+3. Pull the old bearings; clean the shaft journals and inspect for scoring
+4. Heat the new bearings to 110 °C with an induction heater and slide them on
+5. Let them cool naturally; pack the housings with SKF LGMT 3 grease
+6. Refit the covers (80 Nm, star pattern), check alignment, reconnect the coupling
+7. Start up and verify: vibration < 2.5 mm/s, bearing temperature < 60 °C after 1 h
+Parts: 2x SKF 6310 bearing (4 in stock).
+
+— Sources:
+  • [1] pump_p201_manual.md
 
 You: Are there open work orders on that pump?
 
-Agent: Yes, one corrective work order for P-201:
-  WO-2026-0087 | Priority: HIGH | Bearing replacement
-  Status: Scheduled | Assigned to: Maintenance Team A
+Agent: Yes, two on P-201, both in status "created":
+  WO-2026-1842 | corrective | high   | Excessive vibration on the DE bearing, probable bearing wear
+  WO-2026-1840 | preventive | medium | Quarterly pump inspection
 
-You: Create a predictive work order for bearing replacement, priority HIGH
+You: Create a work order for bearing replacement on P-201, priority HIGH
 
-Agent: Work order created:
-  WO-2026-0412 | Type: PREDICTIVE | Priority: HIGH
-  Asset: P-201 (Cooling Water Pump)
-  Description: Replace drive-end bearing based on elevated vibration.
-  Spare parts: SKF 6310-2RS reserved (1 of 4 in stock)
+⚠️  Create a work order?
+  • Asset: P-201
+  • Type: corrective
+  • Priority: high
+  • Description: Replace the drive-end bearings (SKF 6310) following the manual procedure; elevated vibration on the drive-end bearing.
+Confirm? [y/N] y
+
+Agent: Created work order WO-AUTO-0B2E8887 on P-201 (corrective, priority high).
 ```
 
-The agent resolves "pump P-201" to the actual asset, retrieves context from your CMMS, searches manuals via RAG, and takes action -- grounded in real data, not hallucinated.
+The agent resolves "pump P-201" to the actual asset, retrieves its work orders and spare parts from your CMMS, searches the manuals via RAG (with citations), and asks before it writes anything. Answer quality depends on the model: small local models (8B) are noticeably less reliable -- in test runs they sometimes returned a tool instruction instead of an answer, or misread the retrieved context -- so use a hosted or larger model when accuracy matters.
 
 Try it now: `cd examples/quickstart && python agent.py` -- [full quickstart guide](examples/quickstart/)
 
@@ -118,17 +126,19 @@ agent = Agent(
 ```
 
 ```
-  Alarm: P-201 | vibration_velocity = 7.8 mm/s (threshold: 6.0)
+  Alarm:  ALM-2026-0412-001  |  Asset: P-201
+  vibration_velocity_mm_s = 7.8 (threshold: 6.0)
 
-    [+] analyze_alarm      — Bearing wear (BEAR-WEAR-01), confidence: HIGH
-    [+] check_spare_parts  — SKF 6310-2RS in stock (4 units)
-    [+] create_work_order  — [LLM] Priority HIGH, est. 4 hours
-    [+] notify_technician  — [SANDBOX] Message logged
-
-  Result: SUCCESS (2.34s)
+  Result: SUCCESS (0.00s)
+    [+] analyze_alarm        BEAR-WEAR-01 (medium), IMP-EROSION-01 (medium), BELT-WEAR-01 (medium)
+    [+] check_history        none
+    [+] check_spare_parts    SKF-6310 (stock 4), SEAL-CR32-KIT (stock 1)
+    [+] generate_work_order  WO-AUTO-3B717CA0: corrective, priority medium, failure mode BEAR-WEAR-01
+    [+] notify_technician    sandbox: intercepted, not executed
+    [+] submit_work_order    sandbox: intercepted, not executed
 ```
 
-6 steps, only 2 use the LLM. The rest are deterministic -- fast, predictable, testable. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
+6 steps, all deterministic -- domain services and connector calls, no LLM call -- so they are fast, predictable and testable; in sandbox mode the notification and the CMMS submit are intercepted. Try it: `cd examples/alarm_to_workorder && python agent.py` -- [full guide](examples/alarm_to_workorder/)
 
 ### Or configure via YAML
 
@@ -170,29 +180,30 @@ Two examples take you from zero to automation. Then deploy with the starter kit.
 |------|---------|--------------|
 | **1. Understand** | [quickstart/](examples/quickstart/) | Agent answers questions about equipment, procedures, spare parts, maintenance history |
 | **2. Automate** | [alarm_to_workorder/](examples/alarm_to_workorder/) | Alarm fires -- agent diagnoses failure, checks parts, creates work order, notifies team |
-| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Italian free-text messages become Work Orders. Docker, sandbox-first, production-ready |
+| **3. Deploy** | [odl-generator-from-text/](templates/odl-generator-from-text/) | Free-text requests become confirmed Work Orders in a spreadsheet (or REST CMMS). Starter kit, sandbox-first |
 
-All examples run with `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`
+The LLM-driven examples default to `ollama:llama3` -- local, free, no API key needed. Override: `--llm openai:gpt-4o`. The alarm workflow needs no LLM at all.
 
 **More patterns** in [examples/reference/](examples/reference/): predictive pipelines, CMMS portability, custom workflows, YAML config, autonomous agents.
 
 ## Starter Kit
 
-Ready to deploy? The **odl-generator-from-text** template is a complete, clone-configure-deploy package:
+Ready to adapt? The **odl-generator-from-text** template is a copy-configure-run starter kit:
 
 ```bash
 cp -r templates/odl-generator-from-text my-agent
 cd my-agent
-cp .env.example .env    # fill in your LLM key
-docker compose up       # sandbox mode by default
+pip install "machina-ai[excel,litellm,examples]"
+cp .env.example .env        # set your LLM model and key
+python agent.py --sandbox   # or: docker compose run --rm machina
 ```
 
-A technician sends an email or Telegram message in their language:
+A technician describes a problem in their language:
 
 > *Italian:* `"pompa P-201 perde acqua, caldaia C-3 rumore anomalo, prego creare OdL"`
 > *English:* `"pump P-201 leaking water, boiler C-3 abnormal noise, please create WO"`
 
-The agent parses the text, resolves assets, creates Work Orders, and replies with confirmation. Supports Excel and REST CMMS substrates. [Full template guide &rarr;](templates/odl-generator-from-text/)
+The agent resolves the assets against the registry, proposes one work order per asset, and — in live mode, after you confirm each one — appends them to a spreadsheet or a REST CMMS. [Full template guide &rarr;](templates/odl-generator-from-text/)
 
 ## Build with Claude Code
 
@@ -259,10 +270,10 @@ Machina provides the missing vertical layer between general-purpose frameworks (
 
 When a user asks *"What's wrong with pump P-201?"*, the agent:
 
-1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset with its domain metadata, failure history, and criticality
-2. **Gathers context** -- parallel async queries to all connectors: work orders from CMMS, readings from sensors, procedures from manuals (RAG)
-3. **Grounds the LLM** -- the retrieved context (real asset data, real inventory, real history) is injected into the prompt, so the LLM reasons with facts, not hallucinations
-4. **Takes action** -- workflows mix deterministic steps (rule-based diagnosis, spare part checks) with LLM reasoning (root cause synthesis, work order drafting)
+1. **Resolves entities** -- "the pump" or "P-201" maps to the actual Asset in the registry, with its failure modes and criticality; when the match is weak or ambiguous, the agent asks which asset you mean instead of guessing
+2. **Gathers context** -- once the asset is resolved, its work orders, compatible spare parts and relevant manual excerpts (RAG) are fetched concurrently, each from the first connector that provides it
+3. **Grounds the LLM** -- the retrieved context (real asset data, real inventory, real history) is injected into the prompt, so the LLM reasons over your data rather than its guesses
+4. **Takes action** -- the LLM calls tools for look-ups, diagnosis and work-order creation; every write asks for your confirmation by default and is a no-op in sandbox mode. Workflows run the same kind of work as fixed steps -- rule-based diagnosis, spare-part checks, work-order drafting -- and can add LLM reasoning steps where judgment is needed
 
 <details>
 <summary><strong>Connector Matrix</strong></summary>
@@ -278,6 +289,13 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 | `MaintainX` | MaintainX | Planned |
 | `Limble` | Limble CMMS | Planned |
 | `Fiix` | Fiix (Rockwell) | Planned |
+
+### Spreadsheets & Databases
+
+| Connector | Source | |
+|-----------|--------|---|
+| `ExcelCsvConnector` | Excel (`.xlsx`) and CSV files, mapped column by column | Available |
+| `GenericSqlConnector` | SQL databases over ODBC/JDBC, mapped query by query | Available |
 
 ### IoT & Industrial Protocols
 
@@ -317,7 +335,7 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 |              YOUR APPLICATION                         |
 |  +---------------------+  +------------------------+ |
 |  |    AGENT LAYER       |  |    MCP SERVER LAYER    | |
-|  | Runtime + Workflows  |  |  (auto-generated from  | |
+|  | Runtime + Workflows  |  |  (tools gated by       | |
 |  | Domain Prompting     |  |   connector caps)      | |
 |  +----------+-----------+  +-----------+------------+ |
 +-----------+----------------------------+--------------+
@@ -325,7 +343,7 @@ When a user asks *"What's wrong with pump P-201?"*, the agent:
 |  Asset . WorkOrder . FailureMode . SparePart . Alarm  |
 +-------------------------------------------------------+
 |                  CONNECTOR LAYER                       |
-|  CMMS . IoT . ERP . Communication . Documents         |
+|  CMMS . Excel/SQL . IoT . Messaging . Documents       |
 +-------------------------------------------------------+
 |                    CORE LAYER                          |
 |      LLM Abstraction . Config . Observability         |
@@ -402,20 +420,23 @@ result = await agent.trigger_workflow("Alarm to Work Order", {"asset_id": "P-201
 
 Or use the built-in template: `from machina.workflows.builtins import alarm_to_workorder`
 
-Features: trigger types (alarm, schedule, manual, condition), error policies (retry/skip/stop/notify), guard conditions, template variables (`{trigger.*}`, `{step_name}`), sandbox mode, and full observability via ActionTracer.
+Features: error policies (retry/skip/stop/notify), guard conditions, template variables (`{trigger.*}`, `{step_name}`), sandbox mode, and step tracing via ActionTracer. A workflow's trigger (alarm, schedule, manual, condition) describes the event it handles; you start a run with `agent.trigger_workflow(...)`, or the agent does through its `execute_workflow` tool.
 
 </details>
 
 <details>
-<summary><strong>MCP Server (v0.3)</strong></summary>
+<summary><strong>MCP Server</strong></summary>
 
-Expose connectors as MCP servers -- let Claude Desktop, Cursor, or any MCP client query your CMMS and sensors directly:
+Expose your connectors as an MCP server -- let Claude Desktop, Cursor, or any MCP client query your CMMS, spreadsheets and manuals directly:
 
 ```bash
+pip install "machina-ai[mcp]"
 machina mcp serve --config machina.yaml
 ```
 
-Ask Claude: *"What's the maintenance history for pump P-201?"* -- and it queries your SAP PM through Machina's MCP server. No agent code required.
+Ask Claude: *"What's the maintenance history for pump P-201?"* -- and it queries your CMMS (SAP PM, Maximo, UpKeep, a REST API or a spreadsheet) through Machina's MCP server. No agent code required.
+
+The server registers tools only for the capabilities your connectors declare (15 domain tools, plus 2 opt-in vendor tools), together with 4 resources and 3 prompt templates. It runs over stdio for a local client, or over streamable HTTP with bearer-token auth for shared deployments; writes respect sandbox mode. See the [MCP docs](docs/mcp-server.md).
 
 </details>
 
@@ -425,7 +446,31 @@ Ask Claude: *"What's the maintenance history for pump P-201?"* -- and it queries
 
 **v0.2** -- Workflow engine, IoT connectors (OPC-UA, MQTT), Slack, Email, Calendar, sandbox mode, security hardening
 
-**v0.3** *(in progress)* -- MCP Server layer, MaintainX/Limble/Fiix connectors, plugin system, anomaly detection, multi-agent orchestration, RUL estimation, WhatsApp, Teams
+**v0.3** -- MCP server layer, typed connector capabilities, Excel/CSV and SQL substrates, Generic CMMS YAML mapper, deployment story, starter kit; v0.3.1 added write-path safety and the RAG upgrade
+
+**v0.4** *(current)* -- Runnable MCP server (`machina mcp serve`, stdio and streamable HTTP), human-in-the-loop write confirmation and resolution-authority gates, failure-mode catalogs as a capability, YAML-buildable substrates, documentation checked against the code
+
+**v0.5** *(next)* -- MaintainX/Limble/Fiix connectors, WhatsApp and Teams, anomaly detection and RUL estimation, multi-agent orchestration
+
+Details in the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
+
+## Citing Machina
+
+If you use Machina in your research, please cite the software:
+
+```bibtex
+@software{dimaggio_machina_2026,
+  author    = {Di Maggio, Luigi Gianpio},
+  title     = {{Machina: An AI Agent Framework for Industrial Maintenance}},
+  version   = {0.4.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.19456867},
+  url       = {https://github.com/LGDiMaggio/machina}
+}
+```
+
+[10.5281/zenodo.19456867](https://doi.org/10.5281/zenodo.19456867) is the concept DOI: it always resolves to the latest version, and the Zenodo record lists the DOI of each release for citing a specific one. GitHub's "Cite this repository" button reads [`CITATION.cff`](CITATION.cff).
 
 ## Contributing
 
@@ -435,7 +480,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full gu
 git clone https://github.com/LGDiMaggio/machina.git
 cd machina
 pip install -e ".[dev,all]"
-make ci   # lint + typecheck + test
+make ci   # lint + typecheck + spine drift check + tests
 ```
 
 ## Community & Support

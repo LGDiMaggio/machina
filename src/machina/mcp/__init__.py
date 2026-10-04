@@ -1,8 +1,9 @@
 """MCP Server layer — expose connectors as Model Context Protocol servers.
 
-The v0.3 MCP server uses FastMCP to expose Machina connectors as
-MCP tools.  Build a server with :func:`build_server` and run it with
-:func:`serve`.
+The MCP server uses FastMCP to expose Machina connectors as MCP tools,
+resources and prompts.  Build a server with :func:`build_server`, or run
+one with :func:`serve` (what ``machina mcp serve`` and
+``python -m machina.mcp`` call).
 
 The legacy ``MCPServer`` placeholder is deprecated — accessing it
 emits a :class:`DeprecationWarning`.

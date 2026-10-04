@@ -34,10 +34,12 @@ See also:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import structlog
+from pydantic import Field
 
+from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
@@ -54,6 +56,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _AuthUnion = OAuth2ClientCredentials | BasicAuth
+# The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
+_AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
 
 
 def _require_httpx() -> Any:
@@ -88,7 +92,9 @@ class SapPmConnector:
         url: Base URL of the SAP OData gateway
             (e.g. ``https://sap.example.com/sap/opu/odata/sap``).
         auth: Authentication strategy — :class:`OAuth2ClientCredentials`
-            or :class:`BasicAuth`.
+            or :class:`BasicAuth`, or the equivalent dict selected by
+            ``type`` (``oauth2_client_credentials``, ``basic``) as a
+            ``machina.yaml`` settings block carries it.
         sap_client: SAP client number (sent as ``sap-client`` header).
         bom_service: OData service group used by :meth:`read_spare_parts`.
             Defaults to ``"API_BILL_OF_MATERIAL_SRV"`` (standard S/4HANA
@@ -148,7 +154,7 @@ class SapPmConnector:
         self,
         *,
         url: str,
-        auth: _AuthUnion,
+        auth: _AuthUnion | dict[str, Any],
         sap_client: str = "",
         bom_service: str = "API_BILL_OF_MATERIAL_SRV",
         bom_entity_set: str = "BillOfMaterialItem",
@@ -156,7 +162,11 @@ class SapPmConnector:
         bom_equipment_field: str = "",
     ) -> None:
         self.url = url.rstrip("/")
-        self._auth = auth
+        # From machina.yaml, auth arrives as a dict keyed by ``type``
+        # (``basic`` or ``oauth2_client_credentials``); validate it.
+        self._auth: _AuthUnion = (
+            validate_setting(_AuthSetting, auth, "auth") if isinstance(auth, dict) else auth
+        )
         self._sap_client = sap_client
         self._bom_service = bom_service
         self._bom_entity_set = bom_entity_set

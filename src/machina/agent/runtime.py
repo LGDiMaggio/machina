@@ -34,6 +34,7 @@ from machina.agent.entity_resolver import (
     match_disambiguation_reply,
     resolution_verdict,
 )
+from machina.agent.maintenance_schedule import get_maintenance_schedule
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
@@ -605,7 +606,9 @@ class Agent:
         connectors: List of connector instances to register.
         channels: Communication channels (Telegram, CLI, etc.).
         llm: LLM provider string (e.g. ``"openai:gpt-4o"``) or
-             an :class:`LLMProvider` instance.
+             an :class:`LLMProvider` instance. A provider built from a
+             string records token usage and estimated cost on
+             :attr:`tracer`; pass ``tracer=`` when constructing your own.
         temperature: LLM sampling temperature.
         max_history: Maximum conversation turns to keep in memory.
         workflows: List of workflow definitions to register.
@@ -655,9 +658,14 @@ class Agent:
         self._max_history = max_history
         self._max_message_length = 10_000
 
-        # LLM provider
+        # Action tracer — created before the LLM provider so a provider built
+        # here records per-call token usage and estimated cost on it.
+        self.tracer = ActionTracer()
+
+        # LLM provider. A caller-supplied provider is used as-is (never
+        # mutated); it records usage only if it was built with ``tracer=``.
         if isinstance(llm, str):
-            self._llm = LLMProvider(model=llm, temperature=temperature)
+            self._llm = LLMProvider(model=llm, temperature=temperature, tracer=self.tracer)
         else:
             self._llm = llm
 
@@ -683,9 +691,6 @@ class Agent:
 
         # Entity resolver
         self._resolver = EntityResolver(self.plant)
-
-        # Action tracer
-        self.tracer = ActionTracer()
 
         # Sandbox mode — stored on the instance, propagated to the
         # workflow engine via the ``sandbox`` property setter below, and
@@ -3035,7 +3040,10 @@ class Agent:
             return await self._tool_diagnose_failure(asset_id, symptoms)
 
         if name == "get_maintenance_schedule":
-            return {"info": "Maintenance schedule lookup not yet connected to a data source."}
+            schedule_asset = args.get("asset_id", "")
+            if not isinstance(schedule_asset, str):
+                return {"error": "asset_id must be a string"}
+            return await get_maintenance_schedule(self._registry, asset_id=schedule_asset)
 
         if name == "execute_workflow":
             return await self._tool_execute_workflow(
@@ -3681,6 +3689,7 @@ class Agent:
             Capability.CREATE_WORK_ORDER: ["create_work_order"],
             Capability.SEARCH_DOCUMENTS: ["search_documents"],
             Capability.READ_SPARE_PARTS: ["check_spare_parts"],
+            Capability.READ_MAINTENANCE_PLANS: ["get_maintenance_schedule"],
         }
 
         enabled_tool_names: set[str] = set()
@@ -3688,9 +3697,9 @@ class Agent:
             for tool_name in cap_to_tool.get(cap, []):
                 enabled_tool_names.add(tool_name)
 
-        # Always include diagnosis and schedule tools
+        # Always include the diagnosis tool: it answers honestly (with an
+        # explanatory note) even when no failure-mode catalog is configured.
         enabled_tool_names.add("diagnose_failure")
-        enabled_tool_names.add("get_maintenance_schedule")
 
         # Include workflow tool only when workflows are registered
         if self._workflows:

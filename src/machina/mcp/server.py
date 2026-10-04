@@ -1,11 +1,20 @@
 """MCP server — FastMCP-based server with capability-driven tool registration.
 
-Uses FastMCP from the MCP Python SDK for JSON-RPC transport, with a
-lifespan that connects all configured connectors at startup and
-disconnects on shutdown.  Tools are auto-registered based on the
-capabilities declared by each connector.
+Uses FastMCP from the MCP Python SDK for JSON-RPC transport. Tools are
+auto-registered based on the capabilities declared by each configured
+connector.
 
-For streamable-http transport, static bearer token auth is required.
+Two transports:
+
+* ``stdio`` — one client per process. The FastMCP lifespan builds and
+  connects a :class:`~machina.runtime.MachinaRuntime` when the session
+  starts and disconnects it when the session ends.
+* ``streamable-http`` — static bearer-token auth is required. Requests are
+  handled statelessly, and the MCP SDK enters the FastMCP lifespan once per
+  request in that mode, so the runtime is owned by the HTTP application
+  instead: :func:`build_http_app` connects it once at startup, every request
+  shares it, and it is disconnected at shutdown. The app also serves an
+  unauthenticated ``GET /health``.
 """
 
 from __future__ import annotations
@@ -26,8 +35,15 @@ from machina.exceptions import ConnectorError
 if TYPE_CHECKING:
     from machina.config.schema import MachinaConfig
     from machina.connectors.capabilities import Capability
+    from machina.runtime import MachinaRuntime
 
 logger = structlog.get_logger(__name__)
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
+
+# Scope every static bearer token carries; also gates the detailed /health.
+_MCP_SCOPE = "mcp:use"
 
 
 def _require_fastmcp() -> Any:
@@ -44,6 +60,8 @@ def build_server(
     config: MachinaConfig,
     *,
     transport: str = "stdio",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
 ) -> Any:
     """Build a FastMCP server wired to Machina connectors.
 
@@ -51,20 +69,44 @@ def build_server(
     only tools whose required capability is present across all
     configured connectors are registered.
 
-    For ``streamable-http`` transport, bearer token auth and origin
-    validation are configured automatically.
+    For ``streamable-http`` transport, bearer token auth, Host/Origin
+    validation and the ``/health`` route are configured automatically. Run
+    the HTTP transport through :func:`build_http_app` (or :func:`serve`),
+    which owns a single runtime for the whole process.
 
     Args:
         config: Parsed Machina configuration.
         transport: Transport type (``"stdio"`` or ``"streamable-http"``).
+        host: Bind address recorded in the server settings (HTTP only).
+        port: Port recorded in the server settings (HTTP only).
 
     Returns:
         A ``FastMCP`` instance ready to run.
     """
+    return _build_server(config, transport=transport, host=host, port=port, shared=None)
+
+
+def _build_server(
+    config: MachinaConfig,
+    *,
+    transport: str,
+    host: str,
+    port: int,
+    shared: dict[str, Any] | None,
+) -> Any:
+    """Build the FastMCP server; ``shared`` carries an app-owned runtime (HTTP)."""
     fastmcp_cls = _require_fastmcp()
 
     @asynccontextmanager
     async def machina_lifespan(server: Any) -> AsyncIterator[dict[str, Any]]:
+        app_runtime = shared.get("runtime") if shared is not None else None
+        if app_runtime is not None:
+            # Streamable HTTP: the app lifespan connected one runtime for the
+            # whole process; this per-request lifespan only hands it out.
+            set_sandbox_mode(app_runtime.sandbox_mode)
+            yield {"runtime": app_runtime}
+            return
+
         from machina.runtime import MachinaRuntime
 
         runtime = MachinaRuntime.from_config(config)
@@ -84,16 +126,78 @@ def build_server(
 
     if transport == "streamable-http":
         kwargs.update(_build_http_kwargs(config))
+        kwargs["host"] = host
+        kwargs["port"] = port
 
     server = fastmcp_cls("machina", **kwargs)
     _register_tools(server, config)
     _register_resources(server)
     _register_prompts(server)
+    if transport == "streamable-http":
+        _register_health_route(server, shared)
     return server
+
+
+def build_http_app(
+    config: MachinaConfig,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+) -> Any:
+    """Build the ASGI app for the streamable-http transport.
+
+    The app connects one :class:`~machina.runtime.MachinaRuntime` when it
+    starts, shares it with every MCP request (so connectors connect once and
+    per-connector state such as write locks is shared), and disconnects it
+    when it stops.
+
+    Args:
+        config: Parsed Machina configuration.
+        host: Bind address recorded in the server settings.
+        port: Port recorded in the server settings.
+
+    Returns:
+        A Starlette application to run under an ASGI server (e.g. uvicorn).
+    """
+    shared: dict[str, Any] = {}
+    server = _build_server(
+        config,
+        transport="streamable-http",
+        host=host,
+        port=port,
+        shared=shared,
+    )
+    app = server.streamable_http_app()
+    session_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def runtime_lifespan(app_: Any) -> AsyncIterator[None]:
+        from machina.runtime import MachinaRuntime
+
+        runtime = MachinaRuntime.from_config(config)
+        set_sandbox_mode(runtime.sandbox_mode)
+        await runtime.connect_all()
+        shared["runtime"] = runtime
+        logger.info(
+            "mcp_server_ready",
+            transport="streamable-http",
+            connectors=list(runtime.connectors.keys()),
+            sandbox=runtime.sandbox_mode,
+        )
+        try:
+            async with session_lifespan(app_):
+                yield
+        finally:
+            shared.pop("runtime", None)
+            await runtime.disconnect_all()
+
+    app.router.lifespan_context = runtime_lifespan
+    return app
 
 
 def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
     """Build FastMCP constructor kwargs for authenticated HTTP transport."""
+    from machina.config.schema import McpConfig
     from machina.mcp.auth import build_verifier
 
     verifier = build_verifier(config)
@@ -105,19 +209,17 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
         TransportSecuritySettings,
     )
 
-    mcp_cfg = getattr(config, "mcp", None)
-    allowed_origins = getattr(
-        mcp_cfg, "allowed_origins", ["http://localhost", "https://localhost"]
-    )
+    mcp_cfg = getattr(config, "mcp", None) or McpConfig()
 
     auth_settings = AuthSettings(
         issuer_url="https://machina.local",
         resource_server_url="https://machina.local",
-        required_scopes=["mcp:use"],
+        required_scopes=[_MCP_SCOPE],
     )
 
     transport_security = TransportSecuritySettings(
-        allowed_origins=allowed_origins,
+        allowed_hosts=list(mcp_cfg.allowed_hosts),
+        allowed_origins=list(mcp_cfg.allowed_origins),
     )
 
     return {
@@ -200,16 +302,59 @@ def _register_prompts(server: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Health endpoint (ASGI)
+# Health endpoint
 # ---------------------------------------------------------------------------
 
 
+def _health_payload(runtime: MachinaRuntime | None, *, authorized: bool) -> dict[str, Any]:
+    """Build the ``/health`` body.
+
+    Anyone gets ``{"status": "healthy"}``. An authorized caller additionally
+    gets the configured connector names, the sandbox mode and the installed
+    ``machina-ai`` version — but only while a runtime is live.
+    """
+    body: dict[str, Any] = {"status": "healthy"}
+    if authorized and runtime is not None:
+        from machina import __version__
+
+        body.update(
+            {
+                "connectors": list(runtime.connectors.keys()),
+                "sandbox_mode": runtime.sandbox_mode,
+                "version": __version__,
+            }
+        )
+    return body
+
+
+def _register_health_route(server: Any, shared: dict[str, Any] | None) -> None:
+    """Mount ``GET /health`` on the HTTP transport.
+
+    The route itself requires no token (container health checks call it
+    bare). The SDK's authentication middleware still runs for every route,
+    so a request carrying a valid bearer token arrives with its scopes on
+    ``request.auth`` — the detailed payload keys off those, keeping
+    ``/health`` and ``/mcp`` on one authorization rule.
+    """
+    from starlette.responses import JSONResponse  # type: ignore[import-not-found,unused-ignore]
+
+    @server.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator,unused-ignore]
+    async def health(request: Any) -> Any:
+        scopes = getattr(request.scope.get("auth"), "scopes", ()) or ()
+        runtime = shared.get("runtime") if shared is not None else None
+        return JSONResponse(_health_payload(runtime, authorized=_MCP_SCOPE in scopes))
+
+
 async def health_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-    """Minimal ASGI health endpoint.
+    """Minimal standalone ASGI health endpoint.
+
+    Kept for callers that mount it themselves; the streamable-http app built
+    by :func:`build_http_app` serves ``/health`` on its own.
 
     Unauthenticated: returns ``{"status": "healthy"}`` only.
-    Authenticated (bearer token): returns full payload with connector
-    details, sandbox mode, and version.
+    Authenticated (bearer token verified by ``scope["app"]._token_verifier``):
+    adds connector names, sandbox mode and the installed package version
+    read from ``scope["app"]._runtime_ref``.
     """
     if scope["type"] != "http" or scope["path"] != "/health":
         await send({"type": "http.response.start", "status": 404, "headers": []})
@@ -222,25 +367,16 @@ async def health_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
             auth_header = header_value.decode()
             break
 
-    body: dict[str, Any] = {"status": "healthy"}
-
+    runtime = None
+    authorized = False
     if auth_header.startswith("Bearer ") and hasattr(scope.get("app"), "_runtime_ref"):
         runtime = scope["app"]._runtime_ref
         verifier = getattr(scope.get("app"), "_token_verifier", None)
         token_value = auth_header[7:]
-        access_token = None
         if verifier and token_value:
-            access_token = await verifier.verify_token(token_value)
-        if runtime and access_token is not None:
-            body.update(
-                {
-                    "connectors": list(runtime.connectors.keys()),
-                    "sandbox_mode": runtime.sandbox_mode,
-                    "version": "0.3.0",
-                }
-            )
+            authorized = await verifier.verify_token(token_value) is not None
 
-    response_body = json.dumps(body).encode()
+    response_body = json.dumps(_health_payload(runtime, authorized=authorized)).encode()
     await send(
         {
             "type": "http.response.start",
@@ -262,26 +398,43 @@ def serve(
     config: MachinaConfig,
     *,
     transport: str = "stdio",
-    host: str = "0.0.0.0",
-    port: int = 8000,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
 ) -> None:
     """Build and run the MCP server (blocking).
 
     Args:
         config: Parsed Machina configuration.
         transport: ``"stdio"`` or ``"streamable-http"``.
-        host: Host for HTTP transport.
+        host: Bind address for HTTP transport (default ``127.0.0.1``; use
+            ``0.0.0.0`` to listen on every interface, e.g. in a container).
         port: Port for HTTP transport.
+
+    Raises:
+        ValueError: If ``transport`` is not supported.
     """
     if transport == "stdio":
+        # stdout carries the JSON-RPC stream, so every log line must go to
+        # stderr: the env flag tells configure_logging() to route there.
         os.environ["MACHINA_MCP_STDIO"] = "1"
-
-    server = build_server(config, transport=transport)
-
-    if transport == "stdio":
-        server.run(transport="stdio")
+        _configure_logging(config)
+        build_server(config, transport="stdio").run(transport="stdio")
     elif transport == "streamable-http":
-        server.run(transport="streamable-http", host=host, port=port)
+        # uvicorn ships with the MCP SDK: check for the SDK first so a missing
+        # extra gets the install hint, not a bare ModuleNotFoundError.
+        _require_fastmcp()
+        import uvicorn  # type: ignore[import-not-found,unused-ignore]
+
+        _configure_logging(config)
+        app = build_http_app(config, host=host, port=port)
+        uvicorn.run(app, host=host, port=port, log_level="info")
     else:
         msg = f"Unknown transport: {transport!r}. Use 'stdio' or 'streamable-http'."
         raise ValueError(msg)
+
+
+def _configure_logging(config: MachinaConfig) -> None:
+    """Configure structured logging for the server process (``logging.level``)."""
+    from machina.observability.logging import configure_logging
+
+    configure_logging(level=str(config.logging.get("level", "INFO")))

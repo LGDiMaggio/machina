@@ -83,6 +83,62 @@ class TestFromConfig:
         }
         assert len(non_channel) == 1
 
+    async def test_excel_csv_substrate_from_yaml(self, tmp_path: Path) -> None:
+        """The Excel/CSV substrate is buildable from YAML through Agent.from_config."""
+        assets = tmp_path / "assets.csv"
+        assets.write_text("Codice,Nome\nP-201,Pompa A\nC-3,Caldaia\n", encoding="utf-8")
+        cfg_path = self._write_yaml(
+            tmp_path,
+            {
+                "connectors": {
+                    "registry": {
+                        "type": "excel_csv",
+                        "settings": {
+                            "asset_registry": {
+                                "path": str(assets),
+                                "columns": [
+                                    {"column": "Codice", "field": "id", "required": True},
+                                    {"column": "Nome", "field": "name", "required": True},
+                                ],
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        agent = Agent.from_config(cfg_path)
+        await agent.start()
+        try:
+            assert {a.id for a in agent.plant.assets.values()} == {"P-201", "C-3"}
+        finally:
+            await agent.stop()
+
+    def test_runtime_and_agent_accept_the_same_excel_entry(self, tmp_path: Path) -> None:
+        """MachinaRuntime (the MCP server path) builds the same YAML entry."""
+        from machina.config.loader import load_config
+        from machina.runtime import MachinaRuntime
+
+        assets = tmp_path / "assets.csv"
+        assets.write_text("Codice,Nome\nP-201,Pompa A\n", encoding="utf-8")
+        cfg_path = self._write_yaml(
+            tmp_path,
+            {
+                "connectors": {
+                    "registry": {
+                        "type": "excel_csv",
+                        "settings": {
+                            "asset_registry": {
+                                "path": str(assets),
+                                "columns": [{"column": "Codice", "field": "id", "required": True}],
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        runtime = MachinaRuntime.from_config(load_config(cfg_path))
+        assert list(runtime.connectors) == ["registry"]
+
     def test_default_cli_channel_when_none_specified(self, tmp_path: Path) -> None:
         cfg_path = self._write_yaml(tmp_path, {"name": "No Channels"})
         agent = Agent.from_config(cfg_path)
