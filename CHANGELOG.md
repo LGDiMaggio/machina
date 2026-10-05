@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tool-call arguments that parse as JSON but not as an object** (`[]`, `"P-201"`, `7`, `null`) are fed back to the model for correction like unparseable arguments, under the same retry budget. They used to reach the write gates and tool handlers, raise `AttributeError` and end the turn with `LLMError`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
