@@ -353,21 +353,33 @@ class MaximoConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read inventory items (spare parts) from Maximo.
 
         Args:
+            asset_id: Not supported (see Note): a non-empty value raises
+                :class:`ConnectorError` rather than being dropped.
             sku: Optional Maximo ``itemnum`` to narrow the lookup via an
                 OSLC ``where`` clause.
 
         Note:
-            Maximo's ``mxinventory`` object structure does not expose a
-            direct asset-compatibility relation, so filtering by asset is
-            not supported here. For asset-specific spare parts, consult
-            the corresponding work-order job plan or ``mxpmpart``.
+            Maximo's ``mxinventory`` object structure does not link items to
+            assets; an asset's spare-parts list lives in the ``SPAREPART``
+            object (the Assets application's Spare Parts tab), which this
+            connector does not read. Dropping the filter would pass the whole
+            inventory (or a bare ``sku`` match) off as the asset's compatible
+            parts, so the read refuses it instead.
         """
         self._ensure_connected()
+        if asset_id:
+            raise ConnectorError(
+                "The Maximo connector cannot filter spare parts by asset: "
+                "mxinventory does not link items to assets, and the connector "
+                "does not read the asset's spare-parts list. Look the part up "
+                "by sku instead."
+            )
         where = f'itemnum="{sku}"' if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]

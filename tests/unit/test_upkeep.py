@@ -7,6 +7,8 @@ without network calls. For HTTP-level integration tests see
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from machina.connectors.cmms.mappers.upkeep import (
@@ -300,3 +302,41 @@ class TestRequireHttpx:
         monkeypatch.setitem(sys.modules, "httpx", None)
         with pytest.raises(ConnectorError, match="pip install machina-ai"):
             _require_httpx()
+
+
+class TestReadSparePartsAssetFilter:
+    """``/api/v2/parts`` has no asset filter, so an asset filter is refused.
+
+    Dropping the filter would return every part (or a bare sku match) as if
+    it were the asset's compatible parts.
+    """
+
+    def _connected(self) -> UpKeepConnector:
+        conn = UpKeepConnector(api_key="tok")
+        conn._connected = True
+        conn._paginated_get = AsyncMock(
+            return_value=[{"id": "p1", "partNumber": "SKF-6205", "name": "Bearing", "quantity": 3}]
+        )
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_raises_before_any_request(self) -> None:
+        conn = self._connected()
+        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+            await conn.read_spare_parts(asset_id="asset-1")
+        conn._paginated_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_raises_even_with_a_sku(self) -> None:
+        """A sku match says nothing about compatibility with the asset."""
+        conn = self._connected()
+        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+            await conn.read_spare_parts(asset_id="asset-1", sku="SKF-6205")
+        conn._paginated_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_no_filter(self) -> None:
+        conn = self._connected()
+        parts = await conn.read_spare_parts(asset_id="", sku="SKF-6205")
+        assert [p.sku for p in parts] == ["SKF-6205"]
+        conn._paginated_get.assert_awaited_once()
