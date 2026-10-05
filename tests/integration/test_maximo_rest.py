@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
@@ -416,6 +417,53 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="BRG-6205")
         assert len(parts) == 1
         assert parts[0].sku == "BRG-6205"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_by_asset_refuses_the_unfiltered_read(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """mxinventory cannot be filtered by asset: no parts and a WARNING.
+
+        Read unfiltered, the whole inventory would pass for the asset's parts.
+        No request is made — the only mocked response is the whoami handshake
+        from ``_connect``.
+        """
+        await _connect(httpx_mock, connector)
+        with capture_logs() as logs:
+            parts = await connector.read_spare_parts(asset_id="PUMP-201")
+        assert parts == []
+        assert len(httpx_mock.get_requests()) == 1
+        [warning] = [e for e in logs if e["log_level"] == "warning"]
+        assert (
+            warning.items()
+            >= {
+                "event": "spare_parts_asset_filter_unsupported",
+                "connector": "MaximoConnector",
+                "operation": "read_spare_parts",
+                "asset_id": "PUMP-201",
+            }.items()
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_by_asset_and_sku_filters_by_sku_alone(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """The sku keeps the read bounded; the where clause carries no asset term."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'itemnum="BRG-6205"'}),
+            json={
+                "member": [{"itemnum": "BRG-6205", "description": "Bearing", "curbal": 5}],
+                "responseInfo": {},
+            },
+        )
+        with capture_logs() as logs:
+            parts = await connector.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        assert [p.sku for p in parts] == ["BRG-6205"]
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------

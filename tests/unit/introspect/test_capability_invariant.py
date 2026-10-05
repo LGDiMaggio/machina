@@ -13,6 +13,9 @@ They pin:
   connectors) resolves through
   :data:`machina.introspect._methods.CAPABILITY_TO_METHOD` to a method that is
   present and not a :class:`NotImplementedError` stub;
+* **declared ⇒ callable as the runtime calls it** — every connector that can
+  declare ``READ_SPARE_PARTS`` accepts the keyword arguments the agent, MCP and
+  workflow callers pass to ``read_spare_parts``;
 * **vocabulary fully mapped** — every :class:`Capability` enum member appears in
   ``CAPABILITY_TO_METHOD`` (``describe().gaps.unmapped_capabilities`` is empty);
 * **no class/runtime base drift** — for the instance-computed connectors whose
@@ -25,6 +28,8 @@ They pin:
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from machina.connectors.capabilities import Capability
@@ -35,7 +40,11 @@ from machina.introspect._methods import (
     is_stub_method,
     method_name_for,
 )
-from machina.introspect.core import _class_base_capabilities, _import_class
+from machina.introspect.core import (
+    _class_base_capabilities,
+    _configurable_capabilities,
+    _import_class,
+)
 from machina.runtime import _CONNECTOR_FACTORIES
 
 
@@ -96,6 +105,49 @@ def test_declared_capabilities_resolve_to_live_methods(conn_type: str, cls: type
         assert has_live_method(cls, cap), (
             f"{cls.__name__} declares {cap.value!r} but has_live_method() is False"
         )
+
+
+# ---------------------------------------------------------------------------
+# declared ⇒ callable with the keyword arguments the runtime passes
+# ---------------------------------------------------------------------------
+
+# What the shipped callers pass to ``read_spare_parts``: the agent's
+# ``check_spare_parts`` tool passes both keywords; its context prefetch, the MCP
+# ``machina_list_spare_parts`` tool and the ``alarm_to_workorder`` workflow step
+# pass ``asset_id``.
+_SPARE_PARTS_CALLER_KWARGS = {"asset_id": "P-201", "sku": "SKF-6310"}
+
+
+def _declarable_capabilities(cls: type, conn_type: str) -> frozenset[Capability]:
+    """The class-readable base set plus whatever configuration can add to it."""
+    base = _class_base_capabilities(cls, conn_type)
+    return base | _configurable_capabilities(conn_type, base)
+
+
+_SPARE_PARTS_CASES = [
+    (conn_type, cls)
+    for conn_type, cls in _CONNECTOR_CASES
+    if Capability.READ_SPARE_PARTS in _declarable_capabilities(cls, conn_type)
+]
+
+
+@pytest.mark.parametrize(
+    ("conn_type", "cls"),
+    _SPARE_PARTS_CASES,
+    ids=[t for t, _ in _SPARE_PARTS_CASES],
+)
+def test_spare_parts_providers_accept_the_caller_keywords(conn_type: str, cls: type) -> None:
+    """``read_spare_parts`` accepts ``asset_id`` and ``sku`` on every provider.
+
+    A provider that rejects either raises ``TypeError`` at the call sites, and
+    the context prefetch and the workflow step swallow it: the spare parts
+    silently go missing instead of failing.
+    """
+    signature = inspect.signature(cls.read_spare_parts)
+    try:
+        signature.bind(None, **_SPARE_PARTS_CALLER_KWARGS)
+    except TypeError as exc:
+        pytest.fail(f"{cls.__name__}.read_spare_parts{signature} rejects the callers: {exc}")
 
 
 # ---------------------------------------------------------------------------
