@@ -8,11 +8,13 @@ Endpoint contract (paths relative to the connector's ``url``):
   GET   /health                  → health check (called on connect)
   GET   /assets                  → list of assets
   GET   /assets/{asset_id}       → single asset
+  GET   /assets/{id}/history     → completed/closed work orders (endpoint read_maintenance_history)
   GET   /work_orders             → list of work orders (?asset_id=, ?status=)
   POST  /work_orders             → create a work order (idempotent on ``id``)
   GET   /work_orders/{wo_id}     → single work order   (endpoint get_work_order)
   PATCH /work_orders/{wo_id}     → update a work order (endpoint update_work_order)
   GET   /maintenance_plans       → maintenance plans   (endpoint read_maintenance_plans)
+  GET   /spare_parts             → spare parts, ?asset_id= / ?sku= (endpoint read_spare_parts)
 
 Data lives in memory and resets when the container restarts.
 """
@@ -83,6 +85,61 @@ WORK_ORDERS: list[dict[str, Any]] = [
         "description": "Quarterly valve stroke test",
         "assigned_to": "Maintenance Team B",
     },
+    {
+        "id": "WO-2025-117",
+        "type": "corrective",
+        "priority": "high",
+        "status": "closed",
+        "asset_id": "P-201",
+        "description": "Replaced mechanical seal — leak at the drive end",
+        "assigned_to": "Maintenance Team A",
+        "failure_mode": "SEAL-LEAK-01",
+    },
+    {
+        "id": "WO-2025-142",
+        "type": "preventive",
+        "priority": "medium",
+        "status": "completed",
+        "asset_id": "M-301",
+        "description": "Bearing regreasing and insulation resistance check",
+        "assigned_to": "Maintenance Team B",
+    },
+]
+
+SPARE_PARTS: list[dict[str, Any]] = [
+    {
+        "sku": "SKF-6310",
+        "name": "Deep Groove Ball Bearing 6310",
+        "manufacturer": "SKF",
+        "compatible_assets": ["P-201"],
+        "stock_quantity": 4,
+        "reorder_point": 2,
+        "lead_time_days": 5,
+        "unit_cost": 45.00,
+        "warehouse_location": "W1-A3",
+    },
+    {
+        "sku": "SEAL-CR32-KIT",
+        "name": "Mechanical Seal Kit — CR 32",
+        "manufacturer": "Grundfos",
+        "compatible_assets": ["P-201"],
+        "stock_quantity": 1,
+        "reorder_point": 1,
+        "lead_time_days": 14,
+        "unit_cost": 280.00,
+        "warehouse_location": "W1-B1",
+    },
+    {
+        "sku": "ABB-FAN-160",
+        "name": "Cooling Fan — M3BP 160",
+        "manufacturer": "ABB",
+        "compatible_assets": ["M-301"],
+        "stock_quantity": 0,
+        "reorder_point": 1,
+        "lead_time_days": 21,
+        "unit_cost": 95.00,
+        "warehouse_location": "W2-C4",
+    },
 ]
 
 MAINTENANCE_PLANS: list[dict[str, Any]] = [
@@ -119,6 +176,16 @@ def list_assets() -> list[dict[str, Any]]:
 @app.get("/assets/{asset_id}", dependencies=[Depends(require_bearer)])
 def get_asset(asset_id: str) -> dict[str, Any]:
     return _find(ASSETS, asset_id, "Asset")
+
+
+@app.get("/assets/{asset_id}/history", dependencies=[Depends(require_bearer)])
+def asset_history(asset_id: str) -> list[dict[str, Any]]:
+    _find(ASSETS, asset_id, "Asset")
+    return [
+        wo
+        for wo in WORK_ORDERS
+        if wo["asset_id"] == asset_id and wo["status"] in ("completed", "closed")
+    ]
 
 
 @app.get("/work_orders", dependencies=[Depends(require_bearer)])
@@ -158,3 +225,13 @@ def update_work_order(wo_id: str, body: dict[str, Any]) -> dict[str, Any]:
 @app.get("/maintenance_plans", dependencies=[Depends(require_bearer)])
 def list_maintenance_plans() -> list[dict[str, Any]]:
     return MAINTENANCE_PLANS
+
+
+@app.get("/spare_parts", dependencies=[Depends(require_bearer)])
+def list_spare_parts(asset_id: str = "", sku: str = "") -> list[dict[str, Any]]:
+    return [
+        part
+        for part in SPARE_PARTS
+        if (not asset_id or asset_id in part["compatible_assets"])
+        and (not sku or part["sku"] == sku)
+    ]

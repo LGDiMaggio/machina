@@ -179,6 +179,8 @@ class TestEnvVarDefaults:
             "get_work_order",
             "update_work_order",
             "read_maintenance_plans",
+            "read_spare_parts",
+            "read_maintenance_history",
         }
         assert config.sandbox is True
         assert config.logging["level"] == "INFO"
