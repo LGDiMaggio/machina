@@ -15,6 +15,7 @@ from typing import Any
 import structlog
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.capabilities import Capability
 from machina.exceptions import WorkflowError
 from machina.observability.tracing import ActionTracer
 from machina.workflows.models import (
@@ -397,7 +398,7 @@ class WorkflowEngine:
             )
             return {"sent": False, "sandbox": True, "message": resolved}
 
-        connectors = self._registry.find_by_capability("send_message")
+        connectors = self._registry.find_by_capability(Capability.SEND_MESSAGE)
         if not connectors:
             logger.warning("no_comms_connector", step=step.name)
             return {"sent": False, "error": "No communication connector available"}
@@ -463,7 +464,13 @@ class WorkflowEngine:
             )
             return _sandbox_placeholder(step.action, resolved_inputs)
 
-        connectors = self._registry.find_by_capability(capability)
+        # Connectors declare frozenset[Capability], so a name outside the
+        # enum can match none: skip the lookup and fail like an empty one.
+        connectors = (
+            self._registry.find_by_capability(Capability(capability))
+            if capability in Capability._value2member_map_
+            else []
+        )
         if not connectors:
             raise WorkflowError(f"Step '{step.name}': no connector with capability '{capability}'")
 

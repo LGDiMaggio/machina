@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from typing import Any, ClassVar
 
 import pytest
@@ -83,7 +84,7 @@ class _FakeCommsConnector:
 class _FakeReadConnector:
     """Connector with read capabilities."""
 
-    capabilities: ClassVar[list[str]] = ["read_work_orders", "check_spare_parts"]
+    capabilities: ClassVar[list[str]] = ["read_assets", "read_work_orders", "check_spare_parts"]
 
     async def connect(self) -> None:
         pass
@@ -93,6 +94,9 @@ class _FakeReadConnector:
 
     async def health_check(self) -> bool:
         return True
+
+    async def read_assets(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return [{"id": "P-201", "name": "Cooling Water Pump"}]
 
     async def read_work_orders(self, **kwargs: Any) -> list[dict[str, Any]]:
         return [{"id": "WO-001", "status": "open"}]
@@ -104,7 +108,7 @@ class _FakeReadConnector:
 class _FakeErrorConnector:
     """Connector that always raises."""
 
-    capabilities: ClassVar[list[str]] = ["flaky_operation"]
+    capabilities: ClassVar[list[str]] = ["read_maintenance_history"]
 
     async def connect(self) -> None:
         pass
@@ -115,7 +119,7 @@ class _FakeErrorConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def flaky_operation(self, **kwargs: Any) -> None:
+    async def read_maintenance_history(self, **kwargs: Any) -> None:
         raise RuntimeError("Connection reset")
 
 
@@ -335,6 +339,63 @@ class TestNotificationDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Tests — capability lookup avoids the deprecated raw-string path
+# ---------------------------------------------------------------------------
+
+
+def _deprecation_messages(caught: list[warnings.WarningMessage]) -> list[str]:
+    return [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+
+
+class TestCapabilityLookup:
+    """Dispatch looks connectors up by ``Capability``, never by raw string.
+
+    ``find_by_capability("...")`` is deprecated and warns. Warnings are
+    recorded rather than escalated with ``filterwarnings("error")``: the
+    per-step ``except Exception`` would swallow an escalated warning into a
+    failed step result.
+    """
+
+    @pytest.mark.asyncio
+    async def test_workflow_steps_emit_no_deprecation_warning(self, tracer: ActionTracer) -> None:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _FakeReadConnector())
+        registry.register("comms", _FakeCommsConnector())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="ReadAndNotify",
+            steps=[
+                Step("assets", action="cmms.read_assets"),
+                Step("notify", action="channels.send_message", template="Assets checked"),
+            ],
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = await engine.execute(wf)
+
+        assert _deprecation_messages(caught) == []
+        # Both steps reached their connector, so both lookups really ran.
+        assert result.step_results[0].output == [{"id": "P-201", "name": "Cooling Water Pump"}]
+        assert result.step_results[1].output["sent"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_capability_fails_without_deprecation_warning(
+        self, engine: WorkflowEngine
+    ) -> None:
+        wf = Workflow(name="Unknown", steps=[Step("po", action="erp.read_purchase_orders")])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = await engine.execute(wf)
+
+        assert _deprecation_messages(caught) == []
+        assert "no connector with capability 'read_purchase_orders'" in (
+            result.step_results[0].error or ""
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests — template variable resolution
 # ---------------------------------------------------------------------------
 
@@ -389,7 +450,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="StopTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.STOP),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.STOP),
                 Step("after", action=""),  # should NOT execute
             ],
         )
@@ -407,7 +468,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="SkipTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.SKIP),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.SKIP),
                 Step("after", action=""),
             ],
         )
@@ -425,7 +486,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="NotifyTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.NOTIFY),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.NOTIFY),
                 Step("after", action=""),
             ],
         )
@@ -441,7 +502,7 @@ class TestErrorPolicies:
         call_count = 0
 
         class _FlakeThenOk:
-            capabilities: ClassVar[list[str]] = ["flaky_then_ok"]
+            capabilities: ClassVar[list[str]] = ["read_spare_parts"]
 
             async def connect(self) -> None:
                 pass
@@ -452,7 +513,7 @@ class TestErrorPolicies:
             async def health_check(self) -> bool:
                 return True
 
-            async def flaky_then_ok(self, **kwargs: Any) -> str:
+            async def read_spare_parts(self, **kwargs: Any) -> str:
                 nonlocal call_count
                 call_count += 1
                 if call_count < 3:
@@ -467,7 +528,7 @@ class TestErrorPolicies:
             steps=[
                 Step(
                     "flaky",
-                    action="svc.flaky_then_ok",
+                    action="svc.read_spare_parts",
                     on_error=ErrorPolicy.RETRY,
                     retries=3,
                 ),
@@ -488,7 +549,7 @@ class TestErrorPolicies:
             steps=[
                 Step(
                     "fail",
-                    action="flaky.flaky_operation",
+                    action="flaky.read_maintenance_history",
                     on_error=ErrorPolicy.RETRY,
                     retries=2,
                 ),
