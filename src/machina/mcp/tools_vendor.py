@@ -20,6 +20,16 @@ import structlog
 from machina.connectors.base import set_sandbox_mode
 from machina.exceptions import SandboxViolationError
 
+# See machina.mcp.tools: FastMCP injects the request context only into a
+# parameter annotated with its bare ``Context`` class (opaque to mypy).
+if TYPE_CHECKING:
+    Context = Any
+else:
+    try:
+        from mcp.server.fastmcp import Context
+    except ImportError:  # pragma: no cover - the MCP SDK is required to register tools
+        Context = Any
+
 logger = structlog.get_logger(__name__)
 
 
@@ -48,7 +58,7 @@ def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
 
 
 async def sap_pm_raw_iw38_notification(
-    ctx: Any,
+    ctx: Context,
     equipment_id: str,
     notification_type: str = "M2",
     description: str = "",
@@ -100,7 +110,7 @@ async def sap_pm_raw_iw38_notification(
 
 
 async def maximo_raw_attribute_update(
-    ctx: Any,
+    ctx: Context,
     resource_type: str,
     resource_id: str,
     attributes: dict[str, Any] | None = None,

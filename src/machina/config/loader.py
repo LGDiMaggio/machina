@@ -1,4 +1,13 @@
-"""Configuration loader — YAML files with ``${ENV_VAR}`` substitution."""
+"""Configuration loader — YAML files with ``${ENV_VAR}`` substitution.
+
+Placeholders:
+
+* ``${VAR}`` — the value of ``VAR``; loading fails if it is not set.
+* ``${VAR:-default}`` — the value of ``VAR``, or ``default`` when ``VAR`` is
+  unset or empty (POSIX shell / Docker Compose semantics). Defaults are meant
+  for non-secret settings: a forgotten secret should fail loudly, not fall
+  back.
+"""
 
 from __future__ import annotations
 
@@ -11,15 +20,21 @@ import yaml
 
 from machina.config.schema import MachinaConfig
 
-_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+# Group 1: the variable name — anything up to ``}`` except the ``:-``
+# separator, so a malformed placeholder such as ``${A:B}`` still fails as an
+# unset variable instead of passing through as literal text.
+# Group 2 (optional): the ``:-`` default.
+_ENV_VAR_PATTERN = re.compile(r"\$\{((?:[^}:]|:(?!-))+)(?::-([^}]*))?\}")
 
 
 def _substitute_env_vars(value: str) -> str:
-    """Replace ``${VAR}`` placeholders with environment variable values."""
+    """Replace ``${VAR}`` / ``${VAR:-default}`` placeholders with values."""
 
     def _replacer(match: re.Match[str]) -> str:
-        var_name = match.group(1)
+        var_name, default = match.group(1), match.group(2)
         env_value = os.environ.get(var_name)
+        if default is not None:
+            return env_value if env_value else default
         if env_value is None:
             msg = f"Environment variable {var_name!r} is not set"
             raise ValueError(msg)
@@ -53,7 +68,9 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
         ValueError: If a referenced env var is not set.
     """
     path = Path(path)
-    with path.open() as f:
+    # Always UTF-8: the platform default (cp1252 on Windows) would garble
+    # non-ASCII values such as a column header "Criticità".
+    with path.open(encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     result: dict[str, Any] = _walk_and_substitute(raw)
     return result

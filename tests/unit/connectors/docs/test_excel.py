@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import shutil
 from datetime import date, datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ from machina.domain.asset import AssetType, Criticality
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import (
     ConnectorConfigError,
+    ConnectorError,
+    ConnectorLockedError,
     ConnectorSchemaError,
 )
 
@@ -721,6 +724,483 @@ class TestCsvSupport:
         await conn2.connect()
         reloaded = await conn2.read_work_orders()
         assert reloaded[0].description == "=HYPERLINK(0)"
+
+
+def _flat_settings(tmp_path: Path) -> dict[str, object]:
+    """The connector settings exactly as a ``machina.yaml`` entry carries them."""
+    assets = tmp_path / "assets.csv"
+    assets.write_text("Codice,Nome\nP-201,Pompa A\nC-3,Caldaia\n", encoding="utf-8")
+    return {
+        "asset_registry": {
+            "path": str(assets),
+            "columns": [
+                {"column": "Codice", "field": "id", "required": True},
+                {"column": "Nome", "field": "name", "required": True},
+            ],
+        },
+        "work_orders": {
+            "path": str(tmp_path / "odl.csv"),
+            "write_mode": "append",
+            "columns": [
+                {"column": "ID", "field": "id", "required": True},
+                {"column": "Codice Asset", "field": "asset_id", "required": True},
+                {"column": "Descrizione", "field": "description"},
+                {"column": "Stato", "field": "status"},
+                {"column": "Assegnato a", "field": "assigned_to"},
+            ],
+        },
+    }
+
+
+async def _connected_with_work_orders(tmp_path: Path) -> ExcelCsvConnector:
+    conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+    await conn.connect()
+    for wo_id, asset_id in (("WO-1", "P-201"), ("WO-2", "C-3"), ("WO-3", "P-201")):
+        await conn.create_work_order(
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id=asset_id, description="x")
+        )
+    return conn
+
+
+class TestYamlSettingsAndCallContract:
+    """Built from flat YAML settings; honours the agent/MCP call shapes."""
+
+    @pytest.mark.asyncio
+    async def test_flat_settings_build_the_connector(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+        assert [a.id for a in await conn.read_assets()] == ["P-201", "C-3"]
+        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+
+    def test_config_and_flat_settings_together_are_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        config = ExcelConnectorConfig.model_validate(settings)
+        with pytest.raises(ConnectorConfigError, match="either"):
+            ExcelCsvConnector(config=config, **settings)
+
+    def test_invalid_flat_settings_raise_config_error(self) -> None:
+        with pytest.raises(ConnectorConfigError, match="ExcelConnectorConfig"):
+            ExcelCsvConnector(watcher={"enabled": False})  # no sheet configured
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+        asset = await conn.get_asset("C-3")
+        assert asset is not None
+        assert asset.name == "Caldaia"
+        assert await conn.get_asset("NOPE") is None
+
+    @pytest.mark.asyncio
+    async def test_read_work_orders_filters(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        await conn.update_work_order("WO-3", status=WorkOrderStatus.CANCELLED)
+
+        assert [wo.id for wo in await conn.read_work_orders(asset_id="P-201")] == ["WO-1", "WO-3"]
+        assert [wo.id for wo in await conn.read_work_orders(status="cancelled")] == ["WO-3"]
+        open_on_pump = await conn.read_work_orders(
+            asset_id="P-201", status=WorkOrderStatus.CREATED
+        )
+        assert [wo.id for wo in open_on_pump] == ["WO-1"]
+        assert len(await conn.read_work_orders()) == 3
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_keyword_and_dict_forms(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        updated = await conn.update_work_order(
+            "WO-1", status=WorkOrderStatus.ASSIGNED, assigned_to="Mario Rossi"
+        )
+        assert updated.status == WorkOrderStatus.ASSIGNED
+        assert updated.assigned_to == "Mario Rossi"
+
+        # Dict form: the status string is coerced to the enum, not stored raw.
+        updated = await conn.update_work_order(
+            "WO-1", {"description": "new", "status": "in_progress"}
+        )
+        assert updated.description == "new"
+        assert updated.status is WorkOrderStatus.IN_PROGRESS
+        assert updated.assigned_to == "Mario Rossi"
+
+    @pytest.mark.asyncio
+    async def test_illegal_transition_is_refused_and_leaves_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Cannot transition"):
+            await conn.update_work_order("WO-1", status=WorkOrderStatus.CLOSED)
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.status is WorkOrderStatus.CREATED
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_string_is_refused(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Invalid work order status"):
+            await conn.update_work_order("WO-1", {"status": "done-ish"})
+
+    @pytest.mark.asyncio
+    async def test_failed_rewrite_rolls_the_cache_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _locked(schema: object, wo: object, fields: object) -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_update_row_in_file", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-1", description="changed")
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.description == "x"
+
+    @pytest.mark.asyncio
+    async def test_create_is_idempotent_on_the_id(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        again = await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="y")
+        )
+        assert again.description == "x"  # the stored record, not the retry
+        assert len(await conn.read_work_orders()) == 3
+        content = (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+        assert content.count("WO-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_get_asset_before_connect_is_an_error(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.get_asset("P-201")
+
+    def test_config_given_as_a_dict_is_validated(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(config=_flat_settings(tmp_path))
+        assert Capability.CREATE_WORK_ORDER in conn.capabilities
+
+    def test_unknown_setting_is_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        settings["file_path"] = "data/asset_registry.xlsx"  # an old, never-valid key
+        with pytest.raises(ConnectorConfigError, match="file_path"):
+            ExcelCsvConnector(**settings)
+
+    @pytest.mark.asyncio
+    async def test_same_status_update_is_a_no_op(self, tmp_path: Path) -> None:
+        """A retried status update succeeds instead of failing the transition."""
+        conn = await _connected_with_work_orders(tmp_path)
+        await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+        again = await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+        assert again.status is WorkOrderStatus.ASSIGNED
+
+    @pytest.mark.asyncio
+    async def test_update_of_an_unmapped_field_is_refused(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        columns = settings["work_orders"]["columns"]  # type: ignore[index]
+        settings["work_orders"]["columns"] = [  # type: ignore[index]
+            c for c in columns if c["field"] != "assigned_to"
+        ]
+        conn = ExcelCsvConnector(**settings)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        with pytest.raises(ConnectorError, match="Cannot persist assigned_to"):
+            await conn.update_work_order("WO-1", assigned_to="Mario Rossi")
+        (wo,) = await conn.read_work_orders()
+        assert wo.assigned_to is None
+
+    @pytest.mark.asyncio
+    async def test_reads_before_connect_are_errors(self, tmp_path: Path) -> None:
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_assets()
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_work_orders()
+
+    @pytest.mark.asyncio
+    async def test_create_maps_a_locked_file_and_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        wo = WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="z")
+
+        def _locked(path: object, schema: object, row: object) -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_write_row", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.create_work_order(wo)
+        assert "WO-9" not in [w.id for w in await conn.read_work_orders()]
+
+        monkeypatch.undo()
+        await conn.create_work_order(wo)
+        content = (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+        assert content.count("WO-9") == 1
+
+    @pytest.mark.asyncio
+    async def test_create_maps_other_os_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _disk_full(path: object, schema: object, row: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(conn, "_write_row", _disk_full)
+        with pytest.raises(ConnectorError, match="Could not write"):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_file_that_cannot_be_reread_is_mapped_on_both_writes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Writes re-read the sheet first; a locked file fails there, not later."""
+        conn = await _connected_with_work_orders(tmp_path)
+
+        def _locked() -> None:
+            raise PermissionError("workbook open in another program")
+
+        monkeypatch.setattr(conn, "_validate_and_load_work_orders", _locked)
+        with pytest.raises(ConnectorLockedError):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-1", description="changed")
+
+    @pytest.mark.asyncio
+    async def test_list_fields_round_trip_as_delimited_cells(self, tmp_path: Path) -> None:
+        settings = _flat_settings(tmp_path)
+        settings["work_orders"]["columns"].append(  # type: ignore[index]
+            {"column": "Competenze", "field": "requested_skills"}
+        )
+        conn = ExcelCsvConnector(**settings)
+        await conn.connect()
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-9",
+                type=WorkOrderType.CORRECTIVE,
+                asset_id="P-201",
+                requested_skills=["mechanical", "hydraulics"],
+            )
+        )
+        assert "mechanical;hydraulics" in (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+
+        reread = ExcelCsvConnector(**settings)
+        await reread.connect()
+        (wo,) = await reread.read_work_orders()
+        assert wo.requested_skills == ["mechanical", "hydraulics"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_and_id_change_are_refused(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="Unknown work order field"):
+            await conn.update_work_order("WO-1", {"descrption": "typo"})
+        with pytest.raises(ConnectorError, match="id cannot be changed"):
+            await conn.update_work_order("WO-1", {"id": "WO-X"})
+        (wo,) = [w for w in await conn.read_work_orders() if w.id == "WO-1"]
+        assert wo.description == "x"
+
+    @pytest.mark.asyncio
+    async def test_a_row_typed_with_an_invalid_status_is_skipped(self, tmp_path: Path) -> None:
+        """One bad hand-typed row neither breaks reads nor blocks later writes."""
+        conn = await _connected_with_work_orders(tmp_path)
+        with (tmp_path / "odl.csv").open("a", encoding="utf-8", newline="") as f:
+            f.write("WO-BAD,P-201,typed by hand,aperto,\r\n")
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+        )
+        await conn.update_work_order("WO-1", description="still writable")
+
+        ids = [wo.id for wo in await conn.read_work_orders()]
+        assert ids == ["WO-1", "WO-2", "WO-3", "WO-9"]
+        assert "WO-BAD" in (tmp_path / "odl.csv").read_text(encoding="utf-8-sig")
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_file_on_reread_is_a_connector_error(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        (tmp_path / "odl.csv").write_bytes(b"ID,Codice Asset\r\n\xff\xfe broken\r\n")
+        with pytest.raises(ConnectorError, match="before writing"):
+            await conn.create_work_order(
+                WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            )
+
+    @pytest.mark.asyncio
+    async def test_csv_update_keeps_a_utf8_bom(self, tmp_path: Path) -> None:
+        """Excel on Windows needs the BOM to read accented text as UTF-8."""
+        orders = tmp_path / "odl.csv"
+        orders.write_bytes(
+            codecs.BOM_UTF8
+            + "ID,Codice Asset,Descrizione,Stato,Assegnato a\r\n"
+            "WO-1,P-201,Criticità alta,created,\r\n".encode()
+        )
+        conn = ExcelCsvConnector(**_flat_settings(tmp_path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", assigned_to="Rossi")
+
+        content = orders.read_bytes()
+        assert content.startswith(codecs.BOM_UTF8)
+        assert "Criticità alta" in content.decode("utf-8-sig")
+
+
+class TestWritesPreserveTheFile:
+    """Writes touch only their own row: other sheets, rows and columns survive."""
+
+    @staticmethod
+    def _workbook(path: Path) -> None:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "OdL"
+        ws.append(["ID", "Note", "Codice Asset", "Stato", "Descrizione"])
+        ws.append(["WO-1", "keep me", "P-201", "created", "first"])
+        ws.append(["WO-2", "and me", "C-3", "created", "second"])
+        other = wb.create_sheet("Asset")
+        other.append(["Codice", "Nome"])
+        other.append(["P-201", "Pompa A"])
+        wb.save(str(path))
+        wb.close()
+
+    @staticmethod
+    def _config(path: Path) -> ExcelConnectorConfig:
+        return ExcelConnectorConfig(
+            work_orders=SheetSchema(
+                path=str(path),
+                sheet="OdL",
+                write_mode="append",
+                columns=[
+                    ColumnMapping(column="ID", field="id", required=True),
+                    ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                    ColumnMapping(column="Stato", field="status"),
+                    ColumnMapping(column="Descrizione", field="description"),
+                ],
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_xlsx_update_keeps_other_sheets_rows_and_columns(self, tmp_path: Path) -> None:
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", description="changed")
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            assert wb.sheetnames == ["OdL", "Asset"]
+            rows = list(wb["OdL"].iter_rows(values_only=True))
+            assert rows[1] == ("WO-1", "keep me", "P-201", "created", "changed")
+            assert rows[2] == ("WO-2", "and me", "C-3", "created", "second")
+            assert list(wb["Asset"].iter_rows(values_only=True))[1] == ("P-201", "Pompa A")
+        finally:
+            wb.close()
+
+    @pytest.mark.asyncio
+    async def test_xlsx_append_follows_the_file_column_order(self, tmp_path: Path) -> None:
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+            )
+        )
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            rows = list(wb["OdL"].iter_rows(values_only=True))
+            assert rows[3] == ("WO-3", None, "P-201", "created", "new")
+        finally:
+            wb.close()
+        fresh = ExcelCsvConnector(config=self._config(path))
+        await fresh.connect()
+        assert [wo.id for wo in await fresh.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_csv_append_follows_the_file_column_order(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_text(
+            "Descrizione,Note,ID,Codice Asset\nfirst,keep me,WO-1,P-201\n", encoding="utf-8"
+        )
+        schema = SheetSchema(
+            path=str(path),
+            sheet="ignored",
+            write_mode="append",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Descrizione", field="description"),
+            ],
+        )
+        conn = ExcelCsvConnector(config=ExcelConnectorConfig(work_orders=schema))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-2", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="new")
+        )
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert lines == [
+            "Descrizione,Note,ID,Codice Asset",
+            "first,keep me,WO-1,P-201",
+            "new,,WO-2,C-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_sees_rows_added_after_connect(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        path = tmp_path / "odl.csv"
+        with path.open("a", encoding="utf-8", newline="") as f:
+            f.write("WO-EXT,C-3,external,created,\r\n")
+
+        updated = await conn.update_work_order("WO-EXT", description="edited")
+
+        assert updated.description == "edited"
+        content = path.read_text(encoding="utf-8-sig")
+        assert "WO-EXT,C-3,edited,created" in content
+        assert content.count("WO-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_update_keeps_failure_mode_and_creation_date(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_text(
+            "ID,Codice Asset,Stato,Modo di guasto,Data creazione\n"
+            "WO-1,P-201,created,BEAR-WEAR-01,2026-01-15T10:00:00\n",
+            encoding="utf-8",
+        )
+        schema = SheetSchema(
+            path=str(path),
+            sheet="ignored",
+            write_mode="append",
+            columns=[
+                ColumnMapping(column="ID", field="id", required=True),
+                ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                ColumnMapping(column="Stato", field="status"),
+                ColumnMapping(column="Modo di guasto", field="failure_mode"),
+                ColumnMapping(
+                    column="Data creazione", field="created_at", coerce="datetime_parse"
+                ),
+            ],
+        )
+        conn = ExcelCsvConnector(config=ExcelConnectorConfig(work_orders=schema))
+        await conn.connect()
+        (wo,) = await conn.read_work_orders()
+        assert wo.failure_mode == "BEAR-WEAR-01"
+        assert wo.created_at.replace(tzinfo=None) == datetime(2026, 1, 15, 10, 0)
+
+        await conn.update_work_order("WO-1", status=WorkOrderStatus.ASSIGNED)
+
+        row = path.read_text(encoding="utf-8").splitlines()[1]
+        assert row == "WO-1,P-201,assigned,BEAR-WEAR-01,2026-01-15T10:00:00"
 
 
 class TestRefresh:

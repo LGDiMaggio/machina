@@ -6,11 +6,13 @@ the dict-to-entity construction logic.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
 from machina.domain.work_order import (
+    FailureImpact,
     Priority,
     WorkOrder,
     WorkOrderStatus,
@@ -102,8 +104,59 @@ def dict_to_failure_mode(d: dict[str, Any]) -> FailureMode:
     )
 
 
+def _timestamp(value: Any) -> datetime | None:
+    """Return a datetime for a coerced cell, or ``None`` when it is not one.
+
+    ``datetime`` and ``date`` values pass (a date becomes midnight), as do
+    ISO 8601 strings; anything else is treated as absent, so one odd cell
+    cannot make a whole sheet unreadable.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _failure_impact(value: Any) -> FailureImpact | None:
+    """Return the failure impact a cell names, or ``None`` when it names none.
+
+    Matching is case-insensitive; an unknown value is treated as absent, as
+    :func:`_timestamp` treats an unreadable date, so one odd cell cannot make
+    a whole sheet unreadable.
+    """
+    if isinstance(value, FailureImpact):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return FailureImpact(value.strip().lower())
+        except ValueError:
+            return None
+    return None
+
+
 def dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
-    """Build a WorkOrder from a coerced field dict."""
+    """Build a WorkOrder from a coerced field dict.
+
+    **Every model field must be passed explicitly here** — see
+    :func:`dict_to_asset`: the ``metadata`` catch-all keeps only keys that are
+    not ``WorkOrder`` fields, so a field missing below is silently dropped.
+    ``failure_mode``, ``failure_cause``, ``failure_impact``, the timestamps and
+    ``requested_skills`` (a list or a delimited cell, see
+    :func:`split_list_cell`) are carried over when the source has them;
+    otherwise the model defaults apply. ``spare_parts`` has no cell encoding
+    yet and is not read from substrates.
+    """
+    timestamps = {
+        field: stamp
+        for field in ("created_at", "updated_at")
+        if (stamp := _timestamp(d.get(field))) is not None
+    }
     return WorkOrder(
         id=str(d.get("id", "")),
         type=d.get("type", WorkOrderType.CORRECTIVE),
@@ -113,5 +166,10 @@ def dict_to_work_order(d: dict[str, Any]) -> WorkOrder:
         description=str(d.get("description", "")),
         assigned_to=d.get("assigned_to"),
         estimated_duration_hours=d.get("estimated_duration_hours"),
+        failure_mode=str(d["failure_mode"]) if d.get("failure_mode") else None,
+        failure_cause=str(d["failure_cause"]) if d.get("failure_cause") else None,
+        failure_impact=_failure_impact(d.get("failure_impact")),
+        requested_skills=split_list_cell(d.get("requested_skills")),
+        **timestamps,
         metadata={k: v for k, v in d.items() if k not in WorkOrder.model_fields},
     )

@@ -62,12 +62,13 @@ pip install machina-ai[gmail]
     connectors:
       email:
         type: email
-        smtp_host: smtp.gmail.com
-        smtp_port: 465
-        imap_host: imap.gmail.com
-        imap_port: 993
-        username: ${EMAIL_USERNAME}
-        password: ${EMAIL_PASSWORD}
+        settings:
+          smtp_host: smtp.gmail.com
+          smtp_port: 465
+          imap_host: imap.gmail.com
+          imap_port: 993
+          username: ${EMAIL_USERNAME}
+          password: ${EMAIL_PASSWORD}
     ```
 
 ## Capabilities

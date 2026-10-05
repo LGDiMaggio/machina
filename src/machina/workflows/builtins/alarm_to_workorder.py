@@ -8,6 +8,10 @@ When a sensor alarm fires, this workflow:
 4. Generates a work order with auto-populated fields
 5. Notifies the maintenance technician
 6. Submits the work order to the CMMS
+
+Every step is deterministic — domain services and connector calls; none
+calls the LLM. In sandbox mode the notification (5) and the CMMS submit (6)
+are intercepted; the diagnosis, lookups and the drafted work order still run.
 """
 
 from machina.workflows.models import (
@@ -59,6 +63,9 @@ alarm_to_workorder = Workflow(
             "generate_work_order",
             action="work_order_factory.create",
             description="Create a work order with auto-populated fields",
+            # Builds the WorkOrder in memory — no external effect — so a sandbox
+            # run still shows the draft. The CMMS write is submit_work_order.
+            is_write=False,
             inputs={
                 "asset_id": "{trigger.asset_id}",
                 # `analyze_alarm` returns a DiagnosisResult; .failure_mode_for_write

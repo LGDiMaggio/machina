@@ -11,15 +11,17 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
 import jmespath
 import structlog
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
+from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import (
@@ -37,6 +39,7 @@ from machina.connectors.cmms.pagination import (
     NoPagination,
     OffsetLimitPagination,
     PageNumberPagination,
+    PaginationStrategy,
 )
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
@@ -58,6 +61,12 @@ logger = structlog.get_logger(__name__)
 # pydantic serialization purposes.
 _AuthUnion = BearerAuth | BasicAuth | ApiKeyHeaderAuth | NoAuth
 _PaginationUnion = NoPagination | OffsetLimitPagination | PageNumberPagination | CursorPagination
+
+# The auth union keyed by ``type``, for ``auth`` given as the plain dict a
+# machina.yaml settings block carries. It is a deliberate subset of
+# auth.AuthStrategy (OAuth2 is not supported here); pagination dicts are
+# validated against pagination.PaginationStrategy as is.
+_AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
 
 
 def _require_httpx() -> Any:
@@ -90,13 +99,26 @@ class GenericCmmsConnector:
             * **JMESPath extraction**: ``{"assets": {"_fields":
               {"id": "equipment.id", "name": "meta.display_name"}}}``
               extracts nested fields via JMESPath expressions.
-        auth: Authentication strategy for REST mode. Defaults to deriving
-            a :class:`BearerAuth` from ``api_key`` when the latter is set.
-            Use :class:`NoAuth` explicitly for endpoints that require no
-            credentials.
-        pagination: Pagination strategy for list-style REST endpoints.
+        auth: Authentication strategy for REST mode — a model instance or
+            the equivalent dict selected by ``type`` (``bearer``, ``basic``,
+            ``api_key``, ``none``), as a ``machina.yaml`` settings block
+            carries it. Defaults to deriving a :class:`BearerAuth` from
+            ``api_key`` when the latter is set. Use :class:`NoAuth`
+            explicitly for endpoints that require no credentials.
+        pagination: Pagination strategy for list-style REST endpoints — a
+            model instance or the equivalent dict selected by ``type``
+            (``none``, ``offset_limit``, ``page_number``, ``cursor``).
             Defaults to :class:`NoPagination` (single-shot GET) which
             preserves the behaviour of earlier versions.
+        endpoints: Optional REST endpoints that enable optional
+            capabilities (e.g. ``get_work_order``, ``update_work_order``,
+            ``read_maintenance_plans``).
+        yaml_mapping: Declarative field mapping between the CMMS REST
+            payloads and Machina entities — a
+            :class:`~machina.connectors.cmms.generic_schema.GenericCmmsYamlConfig`
+            or the same structure as a plain dict (``mapping:`` with
+            ``asset`` / ``work_order`` entries), as a ``machina.yaml``
+            ``settings`` block carries it.
 
     Example:
         ```python
@@ -198,18 +220,33 @@ class GenericCmmsConnector:
         api_key: str = "",
         data_dir: str | Path = "",
         schema_mapping: dict[str, dict[str, Any]] | None = None,
-        auth: _AuthUnion | None = None,
-        pagination: _PaginationUnion | None = None,
+        auth: _AuthUnion | dict[str, Any] | None = None,
+        pagination: _PaginationUnion | dict[str, Any] | None = None,
         endpoints: dict[str, dict[str, Any]] | None = None,
-        yaml_mapping: GenericCmmsYamlConfig | None = None,
+        yaml_mapping: GenericCmmsYamlConfig | dict[str, Any] | None = None,
     ) -> None:
+        # From machina.yaml, auth / pagination arrive as plain dicts keyed by
+        # ``type`` (e.g. {"type": "basic", ...}); validate them into the models.
+        auth_strategy: _AuthUnion | None = (
+            validate_setting(_AuthSetting, auth, "auth") if isinstance(auth, dict) else auth
+        )
+        pagination_strategy: _PaginationUnion | None = (
+            validate_setting(PaginationStrategy, pagination, "pagination")
+            if isinstance(pagination, dict)
+            else pagination
+        )
         self.url = url
         self._api_key = api_key
         self._data_dir = Path(data_dir) if data_dir else None
         self._schema_mapping = schema_mapping or {}
         self._connected = False
         self._endpoints = endpoints or {}
-        self._yaml_mapping = yaml_mapping
+        if isinstance(yaml_mapping, dict):
+            # Inline mapping from a machina.yaml settings block.
+            from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
+
+            yaml_mapping = validate_settings(GenericCmmsYamlConfig, yaml_mapping)
+        self._yaml_mapping: GenericCmmsYamlConfig | None = yaml_mapping
         # Snapshot the failure-mode source presence once (refreshed at
         # connect) — a per-access filesystem stat in the capabilities
         # property would let the declared capability flip mid-session
@@ -217,15 +254,15 @@ class GenericCmmsConnector:
         self._has_fm_source = self._detect_failure_mode_source(self._data_dir)
 
         # Auth: explicit > api_key shortcut > None (raised at connect in REST mode)
-        if auth is not None:
-            self._auth: _AuthUnion | None = auth
+        if auth_strategy is not None:
+            self._auth: _AuthUnion | None = auth_strategy
         elif api_key:
             self._auth = BearerAuth(token=api_key)
         else:
             self._auth = None
 
         # Pagination: default NoPagination preserves legacy single-shot behaviour
-        self._pagination: _PaginationUnion = pagination or NoPagination()
+        self._pagination: _PaginationUnion = pagination_strategy or NoPagination()
 
         # In-memory store for local mode
         self._assets: dict[str, Asset] = {}
@@ -234,7 +271,7 @@ class GenericCmmsConnector:
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
         # Serialises the read-check-mutate-persist sequence in local mode so
-        # concurrent create/update calls (e.g. via asyncio.gather in AgentTeam)
+        # concurrent create/update calls (e.g. tool calls gathered concurrently)
         # cannot race on the in-memory list or the file write.
         self._local_write_lock = asyncio.Lock()
 
@@ -740,6 +777,22 @@ class GenericCmmsConnector:
         """Join the base URL and path parts, stripping trailing slashes."""
         return "/".join([self.url.rstrip("/"), *parts])
 
+    @staticmethod
+    def _path_segment(record_id: str) -> str:
+        """Encode a caller-supplied ID as exactly one URL path segment.
+
+        IDs reach REST paths from LLM and MCP-client input, so ``/``, ``?``,
+        ``#`` and ``%`` are percent-encoded and the dot segments that HTTP
+        clients normalize away are refused — an ID can never address a
+        different endpoint than the one configured.
+
+        Raises:
+            ConnectorError: If the ID is empty, ``.`` or ``..``.
+        """
+        if record_id in ("", ".", ".."):
+            raise ConnectorError(f"Invalid record ID {record_id!r}")
+        return quote(record_id, safe="")
+
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
         if self._auth is None:
@@ -762,15 +815,19 @@ class GenericCmmsConnector:
         """Fetch assets from the REST API.
 
         When ``asset_id`` is provided, GETs ``/assets/{id}`` and expects a
-        single-object response (pagination bypassed). Otherwise GETs
-        ``/assets`` and iterates via the configured pagination strategy.
+        single-object response (pagination bypassed); a 404 means no such
+        asset and yields ``[]``, as ``_rest_get_work_order`` maps 404 to
+        ``None``. Otherwise GETs ``/assets`` and iterates via the configured
+        pagination strategy.
         """
         httpx = _require_httpx()
         headers = self._rest_headers()
         if asset_id:
-            url = self._rest_url("assets", asset_id)
+            url = self._rest_url("assets", self._path_segment(asset_id))
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=headers)
+                if resp.status_code == 404:
+                    return []
                 resp.raise_for_status()
             return [_parse_asset(self._apply_mapping("assets", resp.json()))]
 
@@ -827,7 +884,7 @@ class GenericCmmsConnector:
         """Fetch a single work order from the REST API."""
         config = self._require_endpoint("get_work_order")
         httpx = _require_httpx()
-        path = config["path"].replace("{id}", work_order_id)
+        path = config["path"].replace("{id}", self._path_segment(work_order_id))
         headers = self._rest_headers()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(self._rest_url(path), headers=headers)
@@ -847,7 +904,7 @@ class GenericCmmsConnector:
         """Update a work order via the REST API and re-fetch."""
         config = self._require_endpoint("update_work_order")
         httpx = _require_httpx()
-        path = config["path"].replace("{id}", work_order_id)
+        path = config["path"].replace("{id}", self._path_segment(work_order_id))
         method = config.get("method", "PATCH")
         field_map: dict[str, str] = config.get("field_map", {})
 

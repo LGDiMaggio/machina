@@ -1,4 +1,4 @@
-# 06 — YAML Configuration
+# YAML Configuration
 
 Configure an agent entirely in YAML -- zero Python needed for basic setups.
 
@@ -72,23 +72,29 @@ That's it. Two lines.
 | `channels` | Communication channels (`cli`, `telegram`, `slack`, `email`) |
 | `llm` | LLM provider, temperature, max tokens |
 | `sandbox` | Safe mode -- write actions are logged, not executed |
+| `confirmations` | Ask before every write (default `true`) |
+| `mcp` | MCP server settings (vendor tools, allowed hosts and origins) |
+| `logging` | Log level and other logging overrides |
 
 ## Available Connector Types
 
 | Type | Class | Extra needed |
 |------|-------|-------------|
-| `generic_cmms` | GenericCmmsConnector | -- |
+| `generic_cmms` | GenericCmmsConnector | `cmms-rest` (REST mode only) |
 | `sap_pm` | SapPmConnector | `cmms-rest` |
 | `maximo` | MaximoConnector | `cmms-rest` |
 | `upkeep` | UpKeepConnector | `cmms-rest` |
+| `excel` / `excel_csv` | ExcelCsvConnector | `excel` |
+| `sql` / `generic_sql` | GenericSqlConnector | `sql` (or `sql-jdbc`) |
 | `opcua` | OpcUaConnector | `opcua` |
 | `mqtt` | MqttConnector | `mqtt` |
 | `document_store` | DocumentStoreConnector | `docs-rag` |
 | `telegram` | TelegramConnector | `telegram` |
 | `slack` | SlackConnector | `slack` |
-| `email` | EmailConnector | -- |
+| `email` | EmailConnector | -- (SMTP/IMAP); `gmail` for the Gmail API |
 | `calendar` | CalendarConnector | `calendar` |
-| `simulated_sensor` | SimulatedSensorConnector | -- |
+
+`machina describe` lists the registered types, generated from the code.
 
 ## Environment Variables
 
@@ -98,18 +104,24 @@ Use `${VAR}` syntax in YAML for secrets:
 connectors:
   sap:
     type: sap_pm
+    primary: true
     settings:
-      url: "https://sap.company.com/odata/v4"
+      url: "https://sap.company.com/sap/opu/odata/sap"
       auth:
-        token: "${SAP_TOKEN}"
+        type: basic
+        username: "${SAP_USER}"
+        password: "${SAP_PASSWORD}"
 ```
 
 Then set the variable before running:
 
 ```bash
-export SAP_TOKEN=eyJhbGci...
+export SAP_USER=svc-machina
+export SAP_PASSWORD=...
 python agent.py
 ```
+
+A placeholder whose variable is not set fails the load; `${VAR:-default}` supplies a fallback for non-secret values.
 
 ## When to Use YAML vs Python
 
@@ -117,7 +129,7 @@ YAML config is designed for **knowledge-base agents** — the kind that answer t
 
 For **agents with workflows** (alarm response, predictive pipelines), use Python. Workflows need guards, lambdas, and error policies that YAML can't express. This is by design — encoding Python logic in YAML would be fragile and hard to debug.
 
-| | YAML (this example) | Python (examples 01-05) |
+| | YAML (this example) | Python (quickstart, alarm_to_workorder, reference examples) |
 |-|---------------------|--------------------------|
 | **Agent type** | Knowledge-base / Q&A | Workflow automation |
 | **Configures** | Connectors, LLM, channels, plant | Everything + workflows |

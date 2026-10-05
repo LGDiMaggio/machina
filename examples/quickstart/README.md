@@ -24,11 +24,14 @@ creating a work order) take a little longer; a GPU or a hosted key (Options
 B/C) is noticeably snappier.
 
 > **Why an 8B model?** The agent relies on tool calling, multi-step
-> synthesis, and a citation contract. `llama3` handles all three reliably.
-> Smaller models are tempting for speed, but 3–4B ones (e.g. `qwen2.5:3b`,
-> `qwen3:4b`) often can't keep the contract and return empty or
-> raw-context answers — so they're listed as fast-but-may-struggle options,
-> not the default. Pass any tool-calling model you prefer with `--llm`
+> synthesis, and a citation contract. `llama3` is the smallest model that
+> handles all three in most turns — not every turn: in test runs it
+> occasionally returned a tool instruction instead of an answer, which the
+> agent reports instead of showing. Smaller models are tempting for speed,
+> but 3–4B ones (e.g. `qwen2.5:3b`, `qwen3:4b`) often can't keep the
+> contract and return empty or raw-context answers — so they're listed as
+> fast-but-may-struggle options, not the default. A hosted model (Options
+> B/C) or a larger local one is noticeably more reliable. Pass any tool-calling model you prefer with `--llm`
 > (e.g. `--llm ollama:qwen2.5:7b`).
 
 **On a machine with a GPU?** Pull a larger model for noticeably better
@@ -139,23 +142,27 @@ That's the entire agent. 13 lines. No boilerplate.
 
 ## What a Conversation Looks Like
 
+An example session, abridged (the wording depends on the model):
+
 ```
 You: What is the bearing replacement procedure for pump P-201?
 
-Agent: Based on the Grundfos CR 32-2 maintenance manual for pump P-201
-(Cooling Water Pump), the bearing replacement procedure is:
+Agent: From the Grundfos CR 32-2 manual for pump P-201 (Cooling Water Pump) [1]:
 
-1. Lock out/tag out the pump and isolate power supply [1]
-2. Drain the pump casing and disconnect piping
-3. Remove the coupling guard and motor coupling
-4. Remove the bearing housing cover bolts (6x M12)
-5. Extract the drive-end bearing (SKF 6310-2RS) using a bearing puller [1]
-6. Clean the shaft journal and housing bore
-7. Press-fit the new bearing using an induction heater (target: 110°C) [1]
-8. Reassemble in reverse order, torque cover bolts to 45 Nm
-9. Verify vibration levels per ISO 10816-3 after commissioning
+1. Lock out / tag out the motor and verify zero energy state
+2. Disconnect the coupling
+3. Remove the bearing housing covers (4x M12 bolts)
+4. Support the shaft and pull the old bearings
+5. Clean the shaft journals with solvent; inspect for scoring (max 0.01 mm)
+6. Heat the new bearings to 110 °C with an induction heater
+7. Slide them onto the shaft and let them cool naturally (no water quench)
+8. Pack the housings with SKF LGMT 3 grease (30–40 % of the cavity)
+9. Refit the covers, torque the bolts to 80 Nm in a star pattern
+10. Verify alignment, reconnect the coupling, remove LOTO
+11. Start the pump and check: no abnormal noise, vibration < 2.5 mm/s,
+    bearing temperature stable < 60 °C after 1 hour
 
-Recommended spare: SKF 6310-2RS (currently in stock: 4 units)
+Parts: 2x SKF 6310 deep groove ball bearing (currently in stock: 4).
 
 — Sources:
   • [1] pump_p201_manual.md
@@ -164,22 +171,21 @@ You: Create a work order for bearing replacement on P-201, priority HIGH
 
 ⚠️  Create a work order?
   • Asset: P-201
-  • Type: predictive
+  • Type: corrective
   • Priority: high
-  • Description: Replace drive-end bearing (SKF 6310-2RS) following the
-    manual procedure; elevated vibration on the drive-end bearing.
+  • Description: Replace the drive-end bearings (SKF 6310) following the manual procedure; elevated vibration on the drive-end bearing.
 Confirm? [y/N] y
 
-Agent: Done — created work order WO-2026-0412:
-  Asset: P-201 | Type: PREDICTIVE | Priority: HIGH
-  Description: Replace drive-end bearing (SKF 6310-2RS).
+Agent: Created work order WO-AUTO-0B2E8887 on P-201 (corrective, priority high).
 
 You: List all critical assets
 
-Agent: Critical assets (Criticality A) in the plant:
+Agent: Critical assets (criticality A):
 
-1. P-201 — Cooling Water Pump (Grundfos CR 32-2) — Building A, Line 2
-2. C-301 — Main Air Compressor (Atlas Copco GA 55) — Building B
+1. P-201 — Cooling Water Pump — Building A / Line 2 / Cooling System
+2. COMP-301 — Air Compressor Unit 1 — Building B / Utilities / Compressed Air
+3. CONV-101 — Main Production Conveyor — Building A / Line 1 / Assembly
+4. MOT-201A — Pump P-201 Drive Motor — Building A / Line 2 / Cooling System
 ```
 
 The agent resolves "the pump" to Asset P-201, retrieves context from your CMMS, searches equipment manuals via RAG (note the inline `[1]` citations and the `— Sources` footer tracing each claim back to the manual), and answers in natural language. That's the domain model working for you.
@@ -188,10 +194,10 @@ Notice the **confirmation gate**: the agent did not silently create the work ord
 
 ## What's Happening Under the Hood
 
-1. **Entity resolution** -- "the pump" or "P-201" maps to the actual Asset with its full metadata
-2. **Context injection** -- maintenance history, active alarms, failure modes are gathered automatically from connectors
-3. **RAG retrieval** -- equipment manuals are searched and relevant sections are injected into the LLM prompt
-4. **Domain grounding** -- the LLM works with real Asset, WorkOrder, SparePart data, not hallucinated IDs
+1. **Entity resolution** -- "the pump" or "P-201" maps to the actual Asset with its full metadata; a weak or ambiguous match makes the agent ask which asset you mean
+2. **Context injection** -- once the asset is resolved, its work orders and compatible spare parts are fetched from the CMMS automatically
+3. **RAG retrieval** -- equipment manuals are searched for your question and the relevant sections are injected into the LLM prompt
+4. **Domain grounding** -- the LLM works with real Asset, WorkOrder, SparePart data, and calls tools for anything else it needs (asset search, work orders, spare parts, diagnosis)
 
 ## Safety: the confirmation gate
 
@@ -205,9 +211,9 @@ You: Create a work order for bearing replacement on P-201, priority HIGH
 
 ⚠️  Create a work order?
   • Asset: P-201
-  • Type: predictive
+  • Type: corrective
   • Priority: high
-  • Description: Replace drive-end bearing (SKF 6310-2RS).
+  • Description: Replace the drive-end bearings (SKF 6310) following the manual procedure; elevated vibration on the drive-end bearing.
 Confirm? [y/N]
 ```
 
@@ -264,5 +270,5 @@ The agent logic doesn't change. Only the connectors do.
 ## Next Steps
 
 - [**alarm_to_workorder/**](../alarm_to_workorder/) -- Automate: alarm fires, agent creates a work order (10 min)
-- [**Deploy to production**](../../templates/odl-generator-from-text/) -- Clone-configure-deploy starter kit with Docker
+- [**Starter kit**](../../templates/odl-generator-from-text/) -- Copy, configure, run: free-text requests to confirmed work orders (Python or Docker)
 - [**More examples**](../reference/) -- Predictive pipelines, custom workflows, CMMS portability

@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
+from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.sql.dialect import COERCER_REGISTRY, redact_dsn
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
-    from machina.domain.work_order import WorkOrder
+    from machina.domain.work_order import WorkOrder, WorkOrderStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -107,6 +108,14 @@ class GenericSqlConnector:
 
     Args:
         config: Parsed SQL connector configuration.
+        **settings: Alternatively, the same configuration as flat keyword
+            arguments (``dsn=``, ``tables=``, ``capabilities=``, ...) — the
+            shape a ``machina.yaml`` ``settings`` block carries. Pass either
+            ``config`` or settings. Validation errors never echo the DSN.
+
+    Raises:
+        ConnectorConfigError: If both forms are given, or the settings do
+            not validate.
 
     Example:
         ```python
@@ -120,9 +129,10 @@ class GenericSqlConnector:
         ```
     """
 
-    # Capabilities available regardless of configuration. Write capabilities
-    # (CREATE_WORK_ORDER / UPDATE_WORK_ORDER) and READ_FAILURE_MODES are
-    # config-driven and added in __init__ — they are NOT part of the base set.
+    # Capabilities available regardless of configuration. CREATE_WORK_ORDER
+    # and READ_FAILURE_MODES are config-driven and added in __init__ — they
+    # are NOT part of the base set. UPDATE_WORK_ORDER is never declared
+    # (update_work_order is a stub).
     # Exposed as a ClassVar so framework introspection can read the base set
     # off the class without instantiating the connector (which needs a parsed
     # config). __init__ derives the live capability set from this constant, so
@@ -131,14 +141,41 @@ class GenericSqlConnector:
         {Capability.READ_ASSETS, Capability.READ_WORK_ORDERS}
     )
 
-    def __init__(self, *, config: SqlConnectorConfig) -> None:
+    def __init__(
+        self,
+        *,
+        config: SqlConnectorConfig | dict[str, Any] | None = None,
+        **settings: Any,
+    ) -> None:
+        from machina.connectors.sql.schema import SqlConnectorConfig
+
+        if isinstance(config, dict):
+            # ``settings: {config: {...}}`` in YAML — same shape, nested.
+            config = validate_settings(SqlConnectorConfig, config)
+        if config is None:
+            config = validate_settings(SqlConnectorConfig, settings)
+        elif settings:
+            raise ConnectorConfigError(
+                "GenericSqlConnector takes either config= or flat settings, not both"
+            )
         self._config = config
         self._conn: Any = None
         self._connected = False
+        # One DB-API connection is shared by every caller (the MCP HTTP server
+        # serves concurrent requests from one connector), and DB-API
+        # connections are not safe to use from several threads at once:
+        # every database call goes through _db_lock. _write_lock additionally
+        # holds the idempotency probe and the INSERT together.
+        self._db_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
-            caps |= {Capability.CREATE_WORK_ORDER, Capability.UPDATE_WORK_ORDER}
+            # Only the INSERT path exists. UPDATE_WORK_ORDER is not declared:
+            # update_work_order needs a per-schema UPDATE query that is not
+            # implemented, and a declared capability that always raises would
+            # still be offered to MCP clients.
+            caps.add(Capability.CREATE_WORK_ORDER)
         # Declared only when a FailureMode table mapping is configured, so
         # capability discovery is a true signal of "has a catalog source".
         if any(m.entity == "FailureMode" for m in config.tables.values()):
@@ -169,8 +206,9 @@ class GenericSqlConnector:
     async def disconnect(self) -> None:
         """Close the database connection."""
         if self._conn is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(self._conn.close)
+            async with self._db_lock:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._conn.close)
             self._conn = None
         self._connected = False
 
@@ -182,7 +220,8 @@ class GenericSqlConnector:
                 message="Not connected",
             )
         try:
-            await asyncio.to_thread(self._execute_scalar, "SELECT 1")
+            async with self._db_lock:
+                await asyncio.to_thread(self._execute_scalar, "SELECT 1")
             return ConnectorHealth(
                 status=ConnectorStatus.HEALTHY,
                 message="Database reachable",
@@ -211,13 +250,36 @@ class GenericSqlConnector:
         rows = await self._execute_read(mapping)
         return [_dict_to_asset(r) for r in rows]
 
-    async def read_work_orders(self) -> list[WorkOrder]:
-        """Read work orders from the configured table mapping."""
+    async def get_asset(self, asset_id: str) -> Asset | None:
+        """Return one asset from the configured table mapping, or ``None``."""
+        for asset in await self.read_assets():
+            if asset.id == asset_id:
+                return asset
+        return None
+
+    async def read_work_orders(
+        self,
+        *,
+        asset_id: str = "",
+        status: WorkOrderStatus | str = "",
+    ) -> list[WorkOrder]:
+        """Read work orders from the configured table mapping.
+
+        Args:
+            asset_id: Keep only work orders for this asset.
+            status: Keep only work orders in this status (enum or its value).
+        """
         mapping = self._find_mapping("WorkOrder")
         if mapping is None:
             return []
         rows = await self._execute_read(mapping)
-        return [_dict_to_work_order(r) for r in rows]
+        wanted_status = str(getattr(status, "value", status) or "")
+        return [
+            wo
+            for wo in (_dict_to_work_order(r) for r in rows)
+            if (not asset_id or wo.asset_id == asset_id)
+            and (not wanted_status or getattr(wo.status, "value", wo.status) == wanted_status)
+        ]
 
     async def read_failure_modes(self) -> list[FailureMode]:
         """Read the failure-mode catalog from the configured table mapping.
@@ -252,7 +314,15 @@ class GenericSqlConnector:
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Insert a new work order row into the database."""
+        """Insert a new work order row into the database.
+
+        Idempotent on the work-order ID within this process: the ID probe and
+        the INSERT run under one lock, and when a row with the same ID is
+        already readable through the WorkOrder mapping, that record is
+        returned and nothing is inserted. The agent runtime and the MCP tools
+        derive deterministic IDs and rely on this to collapse retries. Across
+        processes, a unique constraint on the ID column is the backstop.
+        """
         if Capability.CREATE_WORK_ORDER not in self._capabilities:
             raise ConnectorConfigError(
                 "Write operations not enabled — set capabilities: read_write"
@@ -264,25 +334,52 @@ class GenericSqlConnector:
             raise ConnectorConfigError("No insert_table configured for WorkOrder mapping")
         if not mapping.insert_columns:
             raise ConnectorConfigError("No insert_columns configured for WorkOrder mapping")
-        await self._execute_write(mapping, work_order.model_dump())
+        async with self._write_lock:
+            # Probe the mapped rows by ID rather than building every row into
+            # a WorkOrder: one legacy row with an unmapped status must not
+            # block every create.
+            rows = await self._execute_read(mapping)
+            match = next((r for r in rows if str(r.get("id", "")) == work_order.id), None)
+            if match is not None:
+                logger.info(
+                    "work_order_create_idempotent_hit",
+                    connector="GenericSqlConnector",
+                    operation="create_work_order",
+                    work_order_id=work_order.id,
+                    asset_id=work_order.asset_id,
+                )
+                try:
+                    return _dict_to_work_order(match)
+                except (ValidationError, ValueError, TypeError):
+                    return work_order
+            await self._execute_write(mapping, work_order.model_dump())
         logger.info(
             "work_order_created",
             connector="GenericSqlConnector",
+            operation="create_work_order",
             work_order_id=work_order.id,
             asset_id=work_order.asset_id,
         )
         return work_order
 
     @sandbox_aware
-    async def update_work_order(self, work_order_id: str, updates: dict[str, Any]) -> WorkOrder:
-        """Update a work order — re-reads after update to return fresh state."""
-        if Capability.UPDATE_WORK_ORDER not in self._capabilities:
-            raise ConnectorConfigError(
-                "Write operations not enabled — set capabilities: read_write"
-            )
+    async def update_work_order(
+        self,
+        work_order_id: str,
+        updates: dict[str, Any] | None = None,
+        *,
+        status: WorkOrderStatus | None = None,
+        assigned_to: str | None = None,
+        description: str | None = None,
+    ) -> WorkOrder:
+        """Update a work order — not implemented for generic SQL schemas.
+
+        Accepts the same dict and keyword forms as the other substrates so
+        callers get this explicit error rather than a ``TypeError``.
+        ``UPDATE_WORK_ORDER`` is never declared for this connector.
+        """
         # introspect: stub — no per-schema UPDATE query is implemented yet, so
-        # framework introspection must treat UPDATE_WORK_ORDER as unwired here
-        # even though the capability is declared when capabilities: read_write.
+        # framework introspection must treat UPDATE_WORK_ORDER as unwired here.
         raise ConnectorError(
             "Generic SQL update_work_order requires a custom UPDATE query "
             "per schema — not yet implemented. Use create_work_order for new records."
@@ -341,7 +438,8 @@ class GenericSqlConnector:
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                return await asyncio.to_thread(self._read_sync, mapping)
+                async with self._db_lock:
+                    return await asyncio.to_thread(self._read_sync, mapping)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
@@ -379,7 +477,8 @@ class GenericSqlConnector:
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                return await asyncio.to_thread(self._execute_insert, mapping, data)
+                async with self._db_lock:
+                    return await asyncio.to_thread(self._execute_insert, mapping, data)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
@@ -404,7 +503,11 @@ class GenericSqlConnector:
                     raise ConnectorTransientError(
                         f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
                     ) from exc
-                raise
+                if isinstance(exc, ConnectorError):
+                    raise
+                # Same contract as _execute_read: callers handle ConnectorError,
+                # so a raw driver exception must not escape a write either.
+                raise ConnectorError(f"SQL write failed: {exc}") from exc
 
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
         if self._conn is None:

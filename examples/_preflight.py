@@ -27,11 +27,12 @@ EXAMPLES_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = EXAMPLES_DIR / "sample_data"
 
 
-def check(*, llm: str = "ollama:llama3", sample_dir: Path | None = None) -> None:
+def check(*, llm: str | None = "ollama:llama3", sample_dir: Path | None = None) -> None:
     """Run all pre-flight checks and exit with a helpful message on failure.
 
     Args:
-        llm: The ``provider:model`` string the user selected.
+        llm: The ``provider:model`` string the user selected, or ``None``
+            for an example that never calls an LLM (the LLM check is skipped).
         sample_dir: Override for the sample data directory (defaults
             to ``examples/sample_data/``).
     """
@@ -39,7 +40,8 @@ def check(*, llm: str = "ollama:llama3", sample_dir: Path | None = None) -> None
         load_dotenv(EXAMPLES_DIR / ".env")
     sample = sample_dir or SAMPLE_DIR
     _check_sample_data(sample)
-    _check_llm(llm)
+    if llm is not None:
+        _check_llm(llm)
 
 
 def _err(*args: object) -> None:

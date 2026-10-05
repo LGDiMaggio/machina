@@ -1,8 +1,12 @@
-# Machina configuration for Docker deployment
-# Environment variables override these defaults
+# Machina MCP server configuration for the Docker deployment.
+#
+# ${VAR} is read from the environment (docker compose passes .env and the
+# defaults in docker-compose.yml); ${VAR:-default} falls back to the default
+# when VAR is unset or empty. The MCP server makes no LLM calls, so there is
+# no llm: section.
 
-name: "Machina Agent"
-description: "Maintenance AI assistant (Docker deployment)"
+name: "Machina MCP Server"
+description: "Maintenance data over MCP (Docker deployment)"
 
 plant:
   name: "Demo Plant"
@@ -13,13 +17,27 @@ connectors:
     type: generic_cmms
     primary: true
     settings:
-      data_dir: ""
-      url: "${MACHINA_CMMS_URL:-http://mock-cmms:9000}"
+      url: "${MACHINA_CMMS_URL}"
+      api_key: "${MACHINA_CMMS_API_KEY}"
+      # Optional REST endpoints (paths relative to url). Each one adds tools:
+      # get_work_order → machina_get_work_order; update_work_order →
+      # machina_update/close/cancel_work_order; read_maintenance_plans →
+      # machina_get_maintenance_plan.
+      endpoints:
+        get_work_order:
+          path: "work_orders/{id}"
+        update_work_order:
+          path: "work_orders/{id}"
+          method: PATCH
+        read_maintenance_plans:
+          path: "maintenance_plans"
 
-sandbox: true
+# Writes are logged and answered with a [SANDBOX] result until you set
+# MACHINA_SANDBOX_MODE=false.
+sandbox: "${MACHINA_SANDBOX_MODE:-true}"
+
+logging:
+  level: "${MACHINA_LOG_LEVEL:-INFO}"
 
 mcp:
   enable_vendor_tools: false
-
-llm:
-  provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"

@@ -3,11 +3,14 @@
 All Phase 2 CMMS connectors (SAP PM, Maximo, UpKeep) use a thin wrapper
 around ``httpx.AsyncClient.request()`` that retries on:
 
-* ``429 Too Many Requests`` — honouring the ``Retry-After`` header when
-  present (numeric seconds only).
-* ``503 Service Unavailable`` — transient upstream failures.
+* ``429 Too Many Requests`` — for every method.
+* ``503 Service Unavailable`` — transient upstream failures, for idempotent
+  methods only.
 * ``httpx.TimeoutException``, ``httpx.ConnectError``, ``httpx.ReadError``
-  — common transient network errors.
+  — common transient network errors, for idempotent methods only.
+
+A numeric ``Retry-After`` header on a retried response replaces the
+computed backoff.
 
 Retries use exponential backoff with a cap. Non-retryable status codes
 (4xx other than 429, 5xx other than 503) are returned to the caller
@@ -87,9 +90,10 @@ async def request_with_retry(
             ``None`` (default) derives it from the method: idempotent methods
             (GET/HEAD/OPTIONS/PUT/DELETE) retry, non-idempotent ones
             (POST/PATCH) do not — because a timeout-after-success on a create
-            would silently duplicate the resource. 429/503 responses are always
-            retried regardless, since they mean the server did not process the
-            request.
+            would silently duplicate the resource. The same flag gates
+            retrying a 503, which a gateway can return after the backend
+            processed the request; a 429 is retried for every method, since
+            the server refused it unprocessed.
 
     Returns:
         The final ``httpx.Response``. This is either the first success,

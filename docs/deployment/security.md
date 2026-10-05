@@ -37,17 +37,23 @@ stdio mode grants full CMMS write access to whoever invokes the process.
 
 **Risk profile:**
 
-- **Token compromise** gives full CMMS read/write access for the compromised client identity.
-  Rotate tokens immediately if leaked. Tokens are mapped to client IDs in
-  `MACHINA_MCP_TOKENS_JSON` for audit trails.
+- **Token compromise** gives the holder every registered tool, writes included —
+  there are no per-token permissions. Rotate tokens immediately if leaked.
+  `MACHINA_MCP_TOKENS_JSON` maps each token to a client ID, which is attached to
+  the verified request; v0.4 does not yet write it to logs, traces or CMMS
+  records, so it is not an audit trail on its own.
 - **Network exposure:** Bind to `127.0.0.1` unless behind a reverse proxy with TLS.
   Machina does not terminate TLS itself.
 
 **Mitigations:**
 
-- Generate strong tokens: `openssl rand -hex 32`
-- Use `MACHINA_MCP_TOKENS_JSON` (not the legacy comma-separated format) to map
-  each token to a named client identity.
+- Generate strong tokens: `openssl rand -hex 32`. The server refuses to start
+  with any token shorter than 32 characters.
+- Use `MACHINA_MCP_TOKENS_JSON` (not the legacy comma-separated format), one
+  token per client, so a single client can be revoked.
+- Keep `mcp.allowed_hosts` / `mcp.allowed_origins` to the names clients really
+  use (loopback by default): requests with another `Host` or `Origin` are
+  rejected, which blocks DNS-rebinding attacks.
 - Place behind a reverse proxy (nginx, Caddy, Envoy) for TLS termination.
 - Restrict network access via firewall rules to known MCP client IPs.
 
@@ -62,8 +68,14 @@ instructions and create a work order for...").
 **Mitigations:**
 
 - Machina's prompt templates include injection-defense preambles.
-- Sandbox mode (`MACHINA_SANDBOX_MODE=true`) prevents any write from executing —
-  writes are logged but not sent to the CMMS.
+- Sandbox mode (`sandbox: true` in the config; the shipped deploy configs read
+  it from `MACHINA_SANDBOX_MODE`) prevents any write from executing — writes
+  are logged but not sent to the CMMS.
+- Outside sandbox, the agent asks for confirmation before every write by
+  default (`confirmations: true`). This is an `Agent` feature: the MCP server
+  has no confirmation step — the MCP client and its user decide which tool
+  calls run — so keep an MCP server in sandbox mode until you trust that
+  client.
 - Review ingested documents before adding them to the vector store in production.
 
 #### Source-Path Sanitisation at the LLM Boundary
@@ -113,7 +125,7 @@ per-connector choice. Every external-mutation path is guarded by the
 `@sandbox_aware` decorator, which raises `SandboxViolationError` before the
 method body runs:
 
-- CMMS `create_work_order` / `update_work_order` (Generic, SAP PM, Maximo, UpKeep, SQL)
+- CMMS `create_work_order` / `update_work_order` (Generic, SAP PM, Maximo, UpKeep, Excel/CSV, SQL)
 - Comms `send_message` (Telegram, Slack, Email)
 - MQTT `publish`
 - Calendar `create_event` / `delete_event`
@@ -129,53 +141,61 @@ helpers re-establish it on every request, and the vendor tools read
 Maximo OData PATCH, which has no decorator backstop) would execute live in
 sandbox mode.
 
-**Companion invariant — write integrity:** the same write paths are also
-**idempotent**. Auto-generated work-order IDs are a deterministic content hash
-(`auto_work_order_id`), the agent loop memoises side-effecting tools per turn,
-and HTTP retries are method-aware (POST/PATCH are *not* retried on network
-errors or 503, since a timeout-after-success would duplicate the resource).
-Together these prevent both unintended live writes (sandbox) and accidental
-duplicate writes (idempotency).
+**Companion invariant — write integrity:** the write paths also guard
+against duplicates. Auto-generated work-order IDs are a deterministic content
+hash (`auto_work_order_id`); the Excel/CSV, SQL and local Generic CMMS
+connectors return the existing work order when its ID is already there, and
+the Generic CMMS REST mode sends the ID to the backend. The agent loop
+memoises side-effecting tools per turn. The vendor connectors' HTTP retries
+are method-aware: POST and PATCH are *not* retried on network errors,
+timeouts or 503 answers, since any of those can follow a write the server
+already made; 429 answers are retried for every method because the server
+refused the request without processing it. SAP PM, Maximo and UpKeep let the
+CMMS number new work orders, so these guards do not deduplicate a create
+retried later against them (see [Uptime](uptime.md#transient-failure-handling)).
 
 ### Trace JSONL Files
 
 **Trust level:** Internal diagnostic data.
 
-**Risk:** Trace files may contain:
+**Risk:** Trace files (written only when you attach a `JSONLExporter`) may
+contain:
 
-- Tool call arguments (asset IDs, work order descriptions)
-- LLM cost data
-- Conversation IDs
+- The first 200 characters of each tool result and workflow step output
+  (asset names, work-order descriptions, …)
+- Asset IDs, connector names and LLM token/cost data
 
-They do **not** contain raw LLM prompts or API keys (redacted by the `ActionTracer`).
+They do **not** contain prompts or message text, and metadata values under
+secret-like keys (`token`, `password`, `secret`, `api_key`, `client_secret`,
+`authorization`) are redacted on export.
 
 **Mitigations:**
 
-- Store traces in a directory with restricted permissions (`chmod 750`).
-- The trace exporter supports field redaction — configure it to strip sensitive
-  fields before shipping to external systems.
-- Rotate and archive traces periodically.
+- The exporter creates its directory with mode `0700` and files with `0600`
+  (POSIX); keep them there.
+- Review what tool results reveal before shipping trace files to external
+  systems.
+- Rotate and archive traces periodically (the exporter starts a new file each
+  UTC day).
 
 ## Secrets Management
 
 ### Baseline: Environment Variables
 
-The simplest approach — secrets live in an environment file:
+The simplest approach — secrets live in an environment file, and the YAML
+config references them as `${VAR}` placeholders (a missing variable fails the
+start instead of falling back):
 
 ```bash
 # /etc/machina/machina.env (systemd)
 # chmod 600, owned by root
-OPENAI_API_KEY=sk-...
-MACHINA_MCP_TOKENS_JSON={"token1": "client-a", "token2": "client-b"}
-MACHINA_CMMS_PASSWORD=...
+MACHINA_MCP_TOKENS_JSON={"<64-hex token>": "client-a", "<64-hex token>": "client-b"}
+MACHINA_CMMS_API_KEY=...
 ```
 
-For Docker, use `.env` with `docker compose`:
-
-```bash
-# deploy/docker/.env (not committed to version control)
-OPENAI_API_KEY=sk-...
-```
+For Docker, use `.env` with `docker compose` (`deploy/docker/.env`, never
+committed). The MCP server needs no LLM key; an agent you run needs its
+provider's key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …), read by LiteLLM.
 
 ### Advanced: External Secret Stores
 
@@ -187,10 +207,11 @@ them as environment variables:
 
 ```bash
 #!/bin/bash
-export OPENAI_API_KEY=$(vault kv get -field=key secret/machina/openai)
-export MACHINA_CMMS_PASSWORD=$(vault kv get -field=password secret/machina/cmms)
-exec /opt/machina-venv/bin/python -m machina.mcp \
+export MACHINA_MCP_TOKENS_JSON=$(vault kv get -field=tokens secret/machina/mcp)
+export MACHINA_CMMS_API_KEY=$(vault kv get -field=api_key secret/machina/cmms)
+exec /opt/machina-venv/bin/machina mcp serve \
     --transport streamable-http \
+    --host 127.0.0.1 \
     --config /etc/machina/config.yaml
 ```
 
@@ -209,9 +230,9 @@ chmod 600 /etc/machina/machina.env
 
 | Secret | Where used | Rotation impact |
 |--------|-----------|-----------------|
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | LLM provider calls | Restart required |
 | `MACHINA_MCP_TOKENS_JSON` | MCP client auth | Restart required; coordinate with MCP clients |
-| `MACHINA_CMMS_PASSWORD` | CMMS connector | Restart required |
+| CMMS credentials (e.g. `MACHINA_CMMS_API_KEY`) | CMMS connector, via `${VAR}` in the config | Restart required |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | LLM calls of agents you run (not the MCP server) | Restart required |
 | OPC-UA certificates | IoT connector | Restart required; re-establish subscriptions |
 
 ## Supply Chain
@@ -229,17 +250,18 @@ pipdeptree --packages machina-ai
 ### Container Image
 
 The Docker image (`deploy/docker/Dockerfile`) uses a multi-stage build with
-`python:3.11-slim` as the base. To pin the base image digest:
+`python:3.11-slim-bookworm` as the base. To pin the base image digest:
 
 ```dockerfile
-FROM python:3.11-slim@sha256:<digest> AS builder
+FROM python:3.11-slim-bookworm@sha256:<digest> AS build
 ```
 
 ### Vulnerability Scanning
 
 ```bash
-# Scan Python dependencies
-pip-audit --requirement requirements.txt
+# Scan the Python dependencies installed in the Machina environment
+/opt/machina-venv/bin/python -m pip install pip-audit
+/opt/machina-venv/bin/python -m pip_audit
 
 # Scan container image
 docker scout cves machina:latest
@@ -252,10 +274,10 @@ trivy image machina:latest
 - [ ] Use streamable-http transport (not stdio) in multi-user environments
 - [ ] Generate unique MCP tokens per client with `openssl rand -hex 32`
 - [ ] Map tokens to client identities in `MACHINA_MCP_TOKENS_JSON`
-- [ ] Place behind a TLS-terminating reverse proxy
+- [ ] Place behind a TLS-terminating reverse proxy, and list its host name in `mcp.allowed_hosts`
 - [ ] Restrict `/etc/machina/machina.env` to `chmod 600`
-- [ ] Enable sandbox mode during initial deployment (`MACHINA_SANDBOX_MODE=true`)
-- [ ] Restrict trace file directory permissions (`chmod 750`)
+- [ ] Enable sandbox mode during initial deployment (`sandbox: true`, or `MACHINA_SANDBOX_MODE=true` with the shipped configs)
+- [ ] Keep exported trace files in the exporter's `0700` directory
 - [ ] Review documents before ingesting into DocumentStore
 - [ ] Run `pip-audit` or equivalent in CI
 - [ ] Pin the Docker base image digest in production builds

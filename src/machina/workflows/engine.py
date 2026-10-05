@@ -9,6 +9,7 @@ domain services, and handling errors according to per-step policies.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -28,6 +29,32 @@ from machina.workflows.models import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Write verbs matched as plain substrings: deliberately over-gating, so a
+# run-together or mid-name write ("sendmail", "bulk_update_wos") is still
+# caught. See WorkflowEngine._is_write_action for the bias rationale.
+_WRITE_SUBSTRINGS: tuple[str, ...] = (
+    "approve",
+    "assign",
+    "cancel",
+    "close",
+    "complete",
+    "create",
+    "delete",
+    "notify",
+    "publish",
+    "reject",
+    "send",
+    "submit",
+    "update",
+    "upsert",
+    "write",
+)
+# "set" sits inside common read nouns ("assets", "dataset", "offset"), which
+# made every asset read look like a write. Those nouns are removed before the
+# "set" substring check, so "set" keeps over-gating everywhere else: "reset",
+# "plc.preset", "bulkset", all-caps names like "OVERRIDESETPOINT".
+_NOUNS_CONTAINING_SET = re.compile(r"asset|dataset|offset")
 
 
 def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -525,24 +552,14 @@ class WorkflowEngine:
         direction. A read whose name contains a write-like word (e.g.
         ``get_update_history``) is the acceptable cost — set ``is_write=False``
         on such a step to opt out.
+
+        Write verbs match as case-insensitive substrings. ``set`` is matched
+        after removing the nouns that contain it (``asset``, ``dataset``,
+        ``offset``), which otherwise turned every asset read into a write.
         """
         if step is not None and step.is_write is not None:
             return step.is_write
-        write_keywords = {
-            "create",
-            "update",
-            "delete",
-            "send",
-            "publish",
-            "submit",
-            "write",
-            "notify",
-            "close",
-            "cancel",
-            "approve",
-            "reject",
-            "complete",
-            "assign",
-            "set",
-        }
-        return any(kw in action.lower() for kw in write_keywords)
+        lowered = action.lower()
+        if any(verb in lowered for verb in _WRITE_SUBSTRINGS):
+            return True
+        return "set" in _NOUNS_CONTAINING_SET.sub("", lowered)
