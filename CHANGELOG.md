@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Spare-part lookups against Maximo and UpKeep.** `MaximoConnector.read_spare_parts` and `UpKeepConnector.read_spare_parts` accept `asset_id` again, as their callers pass it: the agent's `check_spare_parts` tool failed on every call with a `TypeError`, and so did the context prefetch, the `alarm_to_workorder` workflow step and the MCP `machina_list_spare_parts` tool given an asset. Neither connector can apply that filter (Maximo's `mxinventory` and UpKeep's `/api/v2/parts` do not link parts to assets, and neither connector reads an asset's own parts list), so a non-empty `asset_id` raises a `ConnectorError` saying so, before any request, instead of returning the whole inventory as the asset's compatible parts; unfiltered and `sku` lookups work. `check_spare_parts` now sends only the filters the model gave (as the MCP tool does) and returns a `ConnectorError` as its tool result, so the model can relay it and retry by `sku` rather than the turn ending.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
