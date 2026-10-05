@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Workflow dispatch looks connectors up by `Capability`, not raw strings.** `channels.send_message` and `<category>.<method>` steps no longer go through the deprecated raw-string `find_by_capability` path, so running a workflow emits no `DeprecationWarning`. A step whose method is not a `Capability` value still fails with `no connector with capability ...`, but no longer matches a connector that declares that name in the deprecated `list[str]` format; `list[str]` declarations of `Capability` values keep working until their v0.5 removal.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
