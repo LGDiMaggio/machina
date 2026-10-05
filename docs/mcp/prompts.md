@@ -9,10 +9,17 @@ for common maintenance workflows.
 
 Guides the LLM through a structured fault diagnosis:
 
-1. Look up the asset and its failure mode history
+1. Look up the asset with `machina_get_asset`
 2. Check active alarms and recent sensor readings
-3. Search equipment manuals for relevant procedures
-4. Rank probable failure modes by likelihood
+3. Search equipment manuals for relevant failure patterns
+4. Rank probable failure modes with
+   [`machina_diagnose_failure`](tools.md#failure-diagnosis), keeping the
+   tool's order and passing on any `note` it returns
+5. If nothing ranks, relay the result's `note` (unknown asset, no catalog
+   configured, nothing matched) and ask for refined symptoms — never a
+   synthesized ranking
+6. Recommend corrective actions and spare parts for each failure mode
+7. Highlight urgency for criticality-A assets
 
 **Parameters:**
 

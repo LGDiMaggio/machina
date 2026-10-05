@@ -2,7 +2,8 @@
 
 Machina auto-registers MCP tools based on the capabilities declared by your
 configured connectors. If a connector declares `READ_ASSETS`, the
-`machina_list_assets` and `machina_get_asset` tools become available.
+`machina_list_assets`, `machina_get_asset`, and `machina_diagnose_failure`
+tools become available.
 
 ## Available Tools
 
@@ -12,6 +13,7 @@ configured connectors. If a connector declares `READ_ASSETS`, the
 |------|-----------|-------------|
 | `machina_list_assets` | `READ_ASSETS` | List all assets in the plant registry |
 | `machina_get_asset` | `READ_ASSETS` | Get details for a specific asset by ID |
+| `machina_diagnose_failure` | `READ_ASSETS` | Rank probable failure modes for an asset from observed symptoms (see [Failure Diagnosis](#failure-diagnosis)) |
 | `machina_list_work_orders` | `READ_WORK_ORDERS` | List work orders, optionally filtered by asset or status |
 | `machina_get_work_order` | `GET_WORK_ORDER` | Get a specific work order by ID |
 | `machina_list_spare_parts` | `READ_SPARE_PARTS` | List spare parts, optionally filtered by asset |
@@ -26,6 +28,26 @@ configured connectors. If a connector declares `READ_ASSETS`, the
 |------|-----------|-------------|
 | `machina_create_work_order` | `CREATE_WORK_ORDER` | Create a new work order |
 | `machina_update_work_order` | `UPDATE_WORK_ORDER` | Update an existing work order |
+
+## Failure Diagnosis
+
+`machina_diagnose_failure(asset_id, symptoms)` shares its ranking and notes
+code with the agent's `diagnose_failure` tool. It looks the asset up on the
+primary CMMS (the agent uses its plant registry), then:
+
+- **Catalog:** harvested at call time from every connector declaring
+  `READ_FAILURE_MODES`, then narrowed to the asset's declared `failure_modes`
+  when it has any. The tool registers with `READ_ASSETS` alone — without a
+  catalog it still answers, with a note saying none is configured.
+- **Ranking:** symptoms match a mode's `typical_indicators` by shared tokens
+  ("high vibration" matches `vibration_velocity_mm_s`), ranked by how many
+  indicators matched, top 5. Each entry's `confidence` is the fraction of
+  that mode's indicators that matched — not a probability.
+- **Notes:** an empty `probable_failures` list always carries a `note` saying
+  why — unknown asset, no catalog configured, declared modes missing from the
+  catalog, or nothing matched (listing the indicators the catalog knows). A
+  note can also accompany matches, e.g. when the asset declares no failure
+  modes and the full catalog was searched.
 
 ## Sandbox Behavior
 

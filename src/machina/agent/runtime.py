@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.agent.citations import parse_response, renormalize_markers, strip_markers
+from machina.agent.diagnosis import collect_failure_modes, diagnose_symptoms
 from machina.agent.entity_resolver import (
     BAND_HIGH,
     BAND_LOW,
@@ -54,6 +55,7 @@ from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import _ResolutionVerdict
+    from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
     from machina.workflows.models import Workflow, WorkflowResult
 
@@ -96,41 +98,6 @@ _LEAK_FRAGMENT_NAME_RE = re.compile(r"[\"'](?:name|function)[\"']\s*:\s*[\"']")
 _LEAK_FRAGMENT_MARKER_RE = re.compile(
     r"[\"'](?:arguments|parameters|tool_calls)[\"']\s*:|[\"']function[\"']\s*:\s*\{"
 )
-
-
-# Trivial English stopwords dropped when tokenizing LLM free-text symptoms at
-# the ``diagnose_failure`` tool boundary. Deliberately tiny: only glue words
-# that carry no diagnostic signal. Modifiers like "high"/"low" are kept — they
-# simply never overlap an indicator token, so they cannot cause false hits.
-_SYMPTOM_STOPWORDS: frozenset[str] = frozenset(
-    {"a", "an", "and", "are", "at", "for", "in", "is", "of", "on", "or", "the", "to", "with"}
-)
-
-_SYMPTOM_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _symptom_tokens(text: str) -> set[str]:
-    """Normalize free text into matchable tokens for ``diagnose_failure``.
-
-    Lowercases, splits on non-alphanumerics, drops stopwords and
-    single-character tokens (unit suffixes such as the ``s`` in ``mm_s``
-    or the ``c`` in ``temperature_c`` would otherwise create spurious
-    cross-mode matches).
-
-    This tokenization lives at the LLM tool boundary ONLY: it lets
-    "high vibration" match the canonical indicator
-    ``vibration_velocity_mm_s`` via the shared token ``vibration``.
-    Because indicators are tokenized with the same function, passing an
-    exact canonical indicator name as a symptom still matches — the
-    fuzzy matching is a strict superset of exact matching. The
-    alarm/workflow path (:class:`FailureAnalyzer.diagnose`) keeps its
-    exact-set-intersection semantics untouched.
-    """
-    return {
-        tok
-        for tok in _SYMPTOM_TOKEN_SPLIT_RE.split(text.lower())
-        if len(tok) > 1 and tok not in _SYMPTOM_STOPWORDS
-    }
 
 
 def _strip_code_fence(text: str) -> str:
@@ -1048,41 +1015,15 @@ class Agent:
         Single source for both the workflow path
         (:meth:`_build_domain_services`) and the ``diagnose_failure`` tool —
         factored out so the two sites cannot drift. Discovers providers via
-        :attr:`Capability.READ_FAILURE_MODES` and awaits each connector's
-        public ``read_failure_modes()`` at call time, so it never serves a
-        stale snapshot. A provider that raises :class:`ConnectorError`
-        (e.g. not connected) contributes nothing instead of aborting the
-        whole harvest — the empty-catalog honesty note downstream stays
-        intact. Duplicate codes across connectors keep the first occurrence
-        (registration order).
+        :attr:`Capability.READ_FAILURE_MODES`; the harvest itself (call-time
+        reads, a ``ConnectorError`` provider skipped, first registration wins
+        on duplicate codes) is :func:`machina.agent.diagnosis.collect_failure_modes`,
+        shared with the MCP ``machina_diagnose_failure`` tool.
         """
-        from machina.exceptions import ConnectorError
-
-        providers = self._registry.find_by_capability(Capability.READ_FAILURE_MODES)
-        # Fan out concurrently — one slow/flaky provider must not serialise
-        # the whole harvest. gather() preserves argument order, so the
-        # first-registration-wins dedup below is unchanged.
-        results = await asyncio.gather(
-            *(conn.read_failure_modes() for _name, conn in providers),  # type: ignore[attr-defined]
-            return_exceptions=True,
+        return await collect_failure_modes(
+            self._registry.find_by_capability(Capability.READ_FAILURE_MODES),
+            agent=self.name,
         )
-        by_code: dict[str, FailureMode] = {}
-        for (name, _conn), result in zip(providers, results, strict=True):
-            if isinstance(result, ConnectorError):
-                logger.warning(
-                    "failure_mode_harvest_failed",
-                    agent=self.name,
-                    connector=name,
-                    operation="collect_failure_modes",
-                    error=str(result),
-                )
-                continue
-            if isinstance(result, BaseException):
-                raise result
-            for fm in result:
-                if fm.code not in by_code:
-                    by_code[fm.code] = fm
-        return list(by_code.values())
 
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""
@@ -3493,140 +3434,27 @@ class Agent:
     ) -> dict[str, Any]:
         """Diagnose probable failure modes against the live failure-mode catalog.
 
-        Harvests failure modes from the registered connectors at call time
-        (via :meth:`_collect_failure_modes`, the same source
-        :meth:`_build_domain_services` feeds the workflow analyzer), filters
-        the catalog to the resolved asset's declared ``failure_modes`` when
-        present, and matches the LLM's free-text symptoms by token overlap
-        against each mode's ``typical_indicators``
-        (see :func:`_symptom_tokens`). The alarm/workflow path through
-        :class:`~machina.domain.services.failure_analyzer.FailureAnalyzer`
-        keeps its exact-match semantics — fuzzy matching lives at this tool
-        boundary only.
-
-        An empty ``probable_failures`` list ALWAYS carries an explanatory
-        ``note`` so the model can distinguish "unknown asset" from "no
-        catalog configured" from "catalog present but nothing matched".
+        Resolves the asset in the plant registry, harvests the catalog at call
+        time (via :meth:`_collect_failure_modes`, the same source
+        :meth:`_build_domain_services` feeds the workflow analyzer), and ranks
+        it with :func:`machina.agent.diagnosis.diagnose_symptoms` — shared with
+        the MCP ``machina_diagnose_failure`` tool, so both surfaces return the
+        same ranking and the same explanatory ``note`` on an empty result.
         """
         from machina.exceptions import AssetNotFoundError
 
-        result: dict[str, Any] = {
-            "asset_id": asset_id,
-            "symptoms": symptoms,
-            "probable_failures": [],
-        }
-
-        # Resolve the asset first: an unknown asset gets a distinct, honest
-        # note instead of a full-catalog guess for equipment we know nothing
-        # about. Catch ONLY the lookup failure — a connector/catalog problem
-        # later must not masquerade as "asset not found".
+        # Resolve the asset first. Catch ONLY the lookup failure — a
+        # connector/catalog problem later must not masquerade as "asset not
+        # found".
+        asset: Asset | None
         try:
             asset = self.plant.get_asset(asset_id)
         except AssetNotFoundError:
-            logger.warning(
-                "diagnose_failure_asset_not_found",
-                agent=self.name,
-                asset_id=asset_id,
-                operation="diagnose_failure",
-            )
-            result["note"] = safe_text(f"Asset '{asset_id}' not found in the asset registry.")
-            return result
-        result["asset_name"] = asset.name
-
-        # Call-time harvest: derive the catalog from whatever connectors
-        # declare the capability NOW — never goes stale.
-        catalog = await self._collect_failure_modes()
-        if not catalog:
-            logger.warning(
-                "diagnose_failure_no_catalog",
-                agent=self.name,
-                asset_id=asset_id,
-                operation="diagnose_failure",
-            )
-            result["note"] = "No failure-mode data configured on any connector."
-            return result
-
-        notes: list[str] = []
-
-        # Per-asset applicability filter: when the asset declares its own
-        # failure modes, match ONLY against those — a pump must never get the
-        # conveyor's belt-wear diagnosis just because both list a vibration
-        # indicator. Assets that declare nothing fall back to the full
-        # catalog, and the result says so.
-        declared = set(asset.failure_modes)
-        if declared:
-            candidates = [fm for fm in catalog if fm.code in declared]
-            if not candidates:
-                # The asset names failure modes, but NONE of them exist in the
-                # harvested catalog — an honest configuration-mismatch note,
-                # not a garbled "nothing matched" with an empty indicator list.
-                logger.warning(
-                    "diagnose_failure_declared_modes_not_in_catalog",
-                    agent=self.name,
-                    asset_id=asset_id,
-                    operation="diagnose_failure",
-                    declared=sorted(declared),
-                )
-                result["note"] = safe_text(
-                    f"Asset declares {len(declared)} failure mode(s) "
-                    f"({', '.join(sorted(declared))}) but none are present in "
-                    "the configured catalog (possible configuration mismatch)."
-                )
-                return result
-        else:
-            candidates = catalog
-            notes.append(
-                "Asset declares no failure modes; diagnosis ran against the "
-                "full failure-mode catalog."
-            )
-
-        symptom_tokens: set[str] = set()
-        for symptom in symptoms:
-            symptom_tokens |= _symptom_tokens(symptom)
-
-        ranked: list[dict[str, Any]] = []
-        for fm in candidates:
-            if not fm.typical_indicators:
-                continue
-            matched = [
-                ind for ind in fm.typical_indicators if _symptom_tokens(ind) & symptom_tokens
-            ]
-            if not matched:
-                continue
-            ranked.append(
-                {
-                    "code": fm.code,
-                    "name": fm.name,
-                    "category": fm.category,
-                    # Numeric indicator-match ratio 0-1: the fraction of this
-                    # mode's typical_indicators the symptoms hit. Distinct from
-                    # FailureAnalyzer's CATEGORICAL confidence on the
-                    # alarm/workflow path — do not conflate the two.
-                    "confidence": round(len(matched) / len(fm.typical_indicators), 2),
-                    "matching_indicators": matched,
-                    "recommended_actions": fm.recommended_actions,
-                }
-            )
-        # Rank by evidence first (matched-indicator count DESC), ratio second:
-        # a mode matching 1 of 2 indicators must not outrank one matching 3 of 6.
-        ranked.sort(
-            key=lambda entry: (len(entry["matching_indicators"]), float(entry["confidence"])),
-            reverse=True,
-        )
-        result["probable_failures"] = ranked[:5]
-
-        if not ranked:
-            # Tell the model WHAT it could have matched so it can re-ask the
-            # user in the catalog's vocabulary instead of guessing.
-            known = sorted({ind for fm in candidates for ind in fm.typical_indicators})
-            notes.append(
-                "No catalog entry matched these symptoms. Known indicators: "
-                + safe_text(", ".join(known[:20]))
-                + "."
-            )
-        if notes:
-            result["note"] = " ".join(notes)
-        return result
+            asset = None
+        # Call-time harvest (never stale), skipped for an unknown asset —
+        # its note needs no catalog.
+        catalog = await self._collect_failure_modes() if asset is not None else []
+        return diagnose_symptoms(asset_id, asset, catalog, symptoms, agent=self.name)
 
     async def _tool_execute_workflow(
         self,
