@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP asset lookups work on a primary CMMS without `get_asset()`.** `machina_get_asset`, the asset check in `machina_create_work_order` and the `machina://v1/assets/{asset_id}` resource called `get_asset()` unconditionally, so a connector implementing only `read_assets()` — all that `READ_ASSETS` requires — failed with `AttributeError`. They now scan `read_assets()` when `get_asset()` is absent.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

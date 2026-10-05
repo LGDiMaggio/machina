@@ -59,6 +59,18 @@ def _runtime(ctx: Any) -> Any:
     return runtime
 
 
+async def _find_asset(cmms: Any, asset_id: str) -> Any:
+    """Look up one asset on ``cmms``, or ``None`` when it does not exist.
+
+    ``READ_ASSETS`` guarantees only ``read_assets()``; ``get_asset`` is an
+    optional fast path a connector may leave out, so fall back to scanning
+    the full list.
+    """
+    if hasattr(cmms, "get_asset"):
+        return await cmms.get_asset(asset_id)
+    return next((a for a in await cmms.read_assets() if a.id == asset_id), None)
+
+
 # ---------------------------------------------------------------------------
 # Read tools — CMMS
 # ---------------------------------------------------------------------------
@@ -98,7 +110,7 @@ async def machina_get_asset(ctx: Context, asset_id: str) -> dict[str, Any]:
     """
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
-    asset = await cmms.get_asset(asset_id)
+    asset = await _find_asset(cmms, asset_id)
     if asset is None:
         return {"error": f"Asset {asset_id!r} not found"}
     return {
@@ -202,7 +214,7 @@ async def machina_create_work_order(
     cmms = runtime.get_primary_cmms()
 
     # Sandbox read-validation: verify asset exists before synthesizing
-    asset = await cmms.get_asset(asset_id)
+    asset = await _find_asset(cmms, asset_id)
     if asset is None:
         raise AssetNotFoundError(
             f"Asset {asset_id!r} not found — cannot create work order for non-existent asset"
