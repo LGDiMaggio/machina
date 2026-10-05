@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import sys
@@ -10,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from machina.agent.entity_resolver import ResolvedEntity
@@ -30,7 +32,12 @@ from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import LLMError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorTimeoutError,
+    LLMError,
+)
 from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -346,6 +353,61 @@ class _FakeErrorConnector:
         raise RuntimeError("Connection timeout")
 
 
+class _RaisingReadConnector:
+    """Connector whose every read raises ``exc`` (fault injection).
+
+    Declares each connector-backed read capability, so every read tool
+    dispatches here — a CMMS or document store that is down, times out, or
+    rejects the call.
+    """
+
+    capabilities: ClassVar[list[str]] = [
+        "read_work_orders",
+        "get_work_order",
+        "read_spare_parts",
+        "search_documents",
+        "read_maintenance_plans",
+        "read_failure_modes",
+    ]
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+        raise self._exc
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        raise self._exc
+
+    async def read_spare_parts(self, **kwargs: Any) -> list[SparePart]:
+        raise self._exc
+
+    async def search(self, query: str, **kwargs: Any) -> list[DocumentChunk]:
+        raise self._exc
+
+    async def read_maintenance_plans(self) -> list[Any]:
+        raise self._exc
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        raise self._exc
+
+
+class _SkuOnlySparePartsConnector(_FakeSparePartsConnector):
+    """``read_spare_parts`` with the Maximo/UpKeep signature: no ``asset_id``."""
+
+    async def read_spare_parts(self, *, sku: str = "") -> list[SparePart]:
+        return []
+
+
 class _FakeChannel:
     """Channel stub that delivers one message to the handler and exits.
 
@@ -561,6 +623,53 @@ class _FakeLLMRaises:
         **kwargs: Any,
     ) -> dict[str, Any]:
         raise RuntimeError("LLM service unavailable")
+
+
+class _FakeLLMReadThenAnswer:
+    """Requests one read tool, then answers from whatever it was fed back.
+
+    ``leaked=True`` emits the call as plain-text JSON content (the weak-model
+    leak the runtime recovers) instead of a structured ``tool_call``. The
+    messages on the answering call are kept in :attr:`seen`, so a test can
+    assert what the model was actually shown.
+    """
+
+    def __init__(self, tool: str, args: dict[str, Any], *, leaked: bool = False) -> None:
+        self.model = "fake:model"
+        self._tool = tool
+        self._args = args
+        self._leaked = leaked
+        self._calls = 0
+        self.seen: list[dict[str, Any]] = []
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        return "Forced final answer."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._calls += 1
+        if self._calls == 1:
+            if self._leaked:
+                leak = json.dumps({"name": self._tool, "arguments": self._args})
+                return {"content": leak, "tool_calls": None}
+            tc = MagicMock()
+            tc.function.name = self._tool
+            tc.function.arguments = json.dumps(self._args)
+            tc.id = "call_read"
+            return {"content": "", "tool_calls": [tc]}
+        self.seen = list(messages)
+        return {
+            "content": "The CMMS is not responding, so I cannot list them.",
+            "tool_calls": None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +1050,180 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("get_maintenance_schedule", {"asset_id": 7})
         assert result == {"error": "asset_id must be a string"}
+
+
+class TestReadToolFailureDegrades:
+    """A read tool whose connector raises returns a tool-level error.
+
+    The model sees ``{"error": ...}`` and can tell the user the data is
+    unavailable, instead of the exception escaping ``_llm_loop`` and ending
+    the turn as an ``LLMError``. Write tools keep their own failure semantics.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("read_work_orders", {"asset_id": "P-201", "status": "open"}),
+            ("get_work_order", {"work_order_id": "WO-001"}),
+            ("check_spare_parts", {"asset_id": "P-201"}),
+            ("search_documents", {"query": "bearing", "asset_id": "P-201"}),
+            ("get_maintenance_schedule", {"asset_id": "P-201"}),
+            ("diagnose_failure", {"asset_id": "P-201", "symptoms": ["vibration"]}),
+        ],
+    )
+    async def test_every_connector_read_returns_a_tool_error(
+        self, tool: str, args: dict[str, Any]
+    ) -> None:
+        agent = Agent(
+            plant=_make_plant(),
+            connectors=[_RaisingReadConnector(RuntimeError("CMMS unreachable"))],
+        )
+
+        result = await agent._execute_tool(tool, args)
+
+        assert result == {"error": "CMMS unreachable"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("exc", "error"),
+        [
+            (ConnectorTimeoutError("SAP PM request timed out"), "SAP PM request timed out"),
+            (ConnectorAuthError("Maximo authentication failed"), "Maximo authentication failed"),
+            (
+                httpx.HTTPStatusError(
+                    "Server error '503 Service Unavailable'",
+                    request=httpx.Request("GET", "https://cmms.example/work_orders"),
+                    response=httpx.Response(503),
+                ),
+                "Server error '503 Service Unavailable'",
+            ),
+            # httpx timeouts often carry no message; the type still says what failed.
+            (httpx.ReadTimeout(""), "ReadTimeout"),
+            # Absolute user paths never reach the LLM (LLM-boundary scrubbing).
+            (
+                ConnectorError(r"cannot read C:\Users\ops\cmms\export.json"),
+                "cannot read export.json",
+            ),
+        ],
+        ids=["connector_timeout", "connector_auth", "http_status", "empty_message", "path"],
+    )
+    async def test_failure_reaches_the_model_as_readable_text(
+        self, exc: Exception, error: str
+    ) -> None:
+        agent = Agent(connectors=[_RaisingReadConnector(exc)])
+
+        result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
+
+        assert result == {"error": error}
+
+    @pytest.mark.asyncio
+    async def test_known_signature_mismatch_still_degrades(self) -> None:
+        """Safety net, not endorsement: Maximo/UpKeep ``read_spare_parts`` take no
+        ``asset_id`` (a known mismatch, tracked separately), so
+        ``check_spare_parts`` raises TypeError against them. Until that is fixed
+        the failure must reach the model instead of ending the turn."""
+        agent = Agent(connectors=[_SkuOnlySparePartsConnector()])
+
+        result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
+
+        assert "unexpected keyword argument 'asset_id'" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_non_object_arguments_still_yield_a_tool_error(self) -> None:
+        """Arguments that decode to a JSON array (no ``.get``) fail inside the
+        tool; that failure is reported like any other, never raised."""
+        agent = Agent(connectors=[_FakeConnector()])
+
+        result = await agent._execute_tool("read_work_orders", ["P-201"])
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_cancellation_still_propagates(self) -> None:
+        """Cancellation is not a connector failure: swallowing it would break
+        task cancellation (shutdown, caller-side timeouts)."""
+        agent = Agent(connectors=[_RaisingReadConnector(asyncio.CancelledError())])
+
+        with pytest.raises(asyncio.CancelledError):
+            await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
+
+    @pytest.mark.asyncio
+    async def test_cancellation_a_connector_disguises_still_ends_the_turn(self) -> None:
+        """A connector that turns its own cancellation into an ordinary exception
+        (catching BaseException, or a TaskGroup's ExceptionGroup) must not have it
+        degraded into a tool error and the turn carried on past the caller's
+        deadline."""
+
+        class _AbortingConnector(_FakeConnector):
+            async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError as exc:
+                    raise ConnectorError("request aborted") from exc
+                return []
+
+        agent = Agent(connectors=[_AbortingConnector()])
+        agent._llm = _FakeLLMReadThenAnswer("read_work_orders", {"asset_id": "P-201"})  # type: ignore[assignment]
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await agent.handle_message_full("Which work orders are open?")
+
+    @pytest.mark.asyncio
+    async def test_write_tool_failure_still_raises(self) -> None:
+        """Writes keep their own semantics: a failed create is not turned into
+        an error result the loop would treat as a retryable read."""
+
+        class _FailingCreateConnector(_FakeCreateWoConnector):
+            async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
+                raise ConnectorTimeoutError("CMMS write timed out")
+
+        agent = Agent(connectors=[_FailingCreateConnector()])
+        _authorize_write(agent, "P-201")
+
+        with pytest.raises(ConnectorTimeoutError, match="write timed out"):
+            await agent._execute_tool(
+                "create_work_order", {"asset_id": "P-201", "description": "Replace bearing"}
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("leaked", [False, True], ids=["tool_call", "leaked_call"])
+    async def test_turn_completes_with_the_error_shown_to_the_model(self, leaked: bool) -> None:
+        import structlog
+
+        conn = _RaisingReadConnector(ConnectorTimeoutError("CMMS request timed out"))
+        agent = Agent(plant=_make_plant(), connectors=[conn])
+        llm = _FakeLLMReadThenAnswer("read_work_orders", {"asset_id": "P-201"}, leaked=leaked)
+        agent._llm = llm  # type: ignore[assignment]
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        def _capture(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append((method, dict(event_dict)))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            resp = await agent.handle_message_full("Which work orders are open?")
+        finally:
+            structlog.reset_defaults()
+
+        # The turn ended on the model's own answer: no LLMError, no fallback.
+        assert resp.text == "The CMMS is not responding, so I cannot list them."
+        assert resp.is_fallback is False
+        # The model was shown the failure as a tool-level error.
+        shown = "\n".join(str(m.get("content", "")) for m in llm.seen)
+        assert '{"error": "CMMS request timed out"}' in shown
+        # Logged once as degraded functionality, with structured context.
+        failures = [(m, e) for m, e in events if e.get("event") == "read_tool_failed"]
+        assert len(failures) == 1
+        method, failure = failures[0]
+        assert method == "warning"
+        assert failure["tool"] == "read_work_orders"
+        assert failure["connector"] == "_RaisingReadConnector_0"
+        assert failure["asset_id"] == "P-201"
+        assert failure["operation"] == "execute_tool"
+        assert failure["error_type"] == "ConnectorTimeoutError"
 
 
 class TestDiagnoseFailureCatalog:
@@ -2234,6 +2517,55 @@ class TestReadOnlyLoopTermination:
         # The errored read was re-executed (not served from cache) on the retry.
         assert exec_calls["n"] == 2
         assert result == "Recovered."
+
+    @pytest.mark.asyncio
+    async def test_persistently_failing_read_is_retried_once_then_replayed(self) -> None:
+        """A read that keeps failing gets ONE verbatim retry (a transient failure
+        can still recover), then its error is replayed from the read cache: a
+        dead backend is not re-queried — a full connector timeout each — on
+        every iteration up to max_iterations."""
+
+        class _FakeLLMSameReadForever:
+            def __init__(self) -> None:
+                self.model = "fake:model"
+                self._n = 0
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "The CMMS is unavailable."
+
+            async def complete_with_tools(
+                self, messages: list[dict[str, str]], tools: list[dict[str, Any]], **kwargs: Any
+            ) -> dict[str, Any]:
+                self._n += 1
+                tc = MagicMock()
+                tc.function.name = "read_work_orders"
+                tc.function.arguments = json.dumps({"asset_id": "P-201"})
+                tc.id = f"call_{self._n:03d}"
+                return {"content": "", "tool_calls": [tc]}
+
+        class _DownCmms(_FakeConnector):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+                self.calls += 1
+                raise ConnectorTimeoutError("CMMS request timed out")
+
+        conn = _DownCmms()
+        agent = Agent(plant=_make_plant(), connectors=[conn])
+        agent._llm = _FakeLLMSameReadForever()  # type: ignore[assignment]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "open WOs for P-201?"}]
+        result = await agent._llm_loop(messages, "chat1", max_iterations=5)
+
+        # The first attempt and one retry reached the connector; the third
+        # request was served from cache, so the no-progress break forced a
+        # final answer instead of a fourth and fifth timeout.
+        assert conn.calls == 2
+        assert result == "The CMMS is unavailable."
+        replayed = json.loads([m for m in messages if m.get("role") == "tool"][-1]["content"])
+        assert replayed["already_retrieved"] is True
+        assert replayed["result"] == {"error": "CMMS request timed out"}
 
     @pytest.mark.asyncio
     async def test_mixed_new_and_repeat_does_not_break_early(self) -> None:
