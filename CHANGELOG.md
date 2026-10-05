@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Generic CMMS in REST mode declares `read_spare_parts` and `read_maintenance_history` only when their endpoint is configured.** Both were in the always-declared base set although REST mode had no source for them: the MCP server registered `machina_list_spare_parts` and `machina_get_maintenance_history`, and the agent offered `check_spare_parts`, all answering with an empty list. REST deployments that want these tools now configure the new endpoints (see Added); calling either method without its endpoint raises `ConnectorError` instead of returning `[]`. Local mode (`data_dir`) is unchanged.
+
+### Added
+
+- **Generic CMMS REST endpoints for spare parts and maintenance history.** `endpoints.read_spare_parts` sends the `asset_id` / `sku` filters as query parameters and drops returned records that contradict them; `endpoints.read_maintenance_history` takes `{asset_id}` in its path or query string (otherwise `?asset_id=`). Both read with the configured pagination and mapping. The Docker demo's mock CMMS serves both, so its 11 tools stay backed by data.
+
+### Fixed
+
+- **A query string in a Generic CMMS endpoint `path` is no longer dropped.** httpx replaces a URL's query whenever request params are passed, which every pagination strategy does, so `read_maintenance_plans: {path: "maintenance_plans?active=true"}` silently lost its filter; the query is now sent along with the call's own params.
+- **Generic CMMS spare-part records with `null` fields read as defaults** instead of failing the read (`int(None)`), and a `null` SKU fails validation instead of becoming the string `'None'`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

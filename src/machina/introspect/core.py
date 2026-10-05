@@ -416,13 +416,16 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
         }
     elif conn_type == "generic_cmms":
         # Local mode / configured endpoints add the optional WO lifecycle and
-        # maintenance-plan reads; a catalog source adds READ_FAILURE_MODES.
+        # the maintenance-plan, spare-part and maintenance-history reads; a
+        # catalog source adds READ_FAILURE_MODES.
         full = {
             Capability.GET_WORK_ORDER,
             Capability.UPDATE_WORK_ORDER,
             Capability.CLOSE_WORK_ORDER,
             Capability.CANCEL_WORK_ORDER,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_SPARE_PARTS,
+            Capability.READ_MAINTENANCE_HISTORY,
             Capability.READ_FAILURE_MODES,
         }
     else:
