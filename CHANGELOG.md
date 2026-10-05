@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Maximo and UpKeep spare-part reads accept `asset_id` again.** `MaximoConnector.read_spare_parts` and `UpKeepConnector.read_spare_parts` lost the parameter in 0.2.0, but the agent's `check_spare_parts` tool and context prefetch, the MCP `machina_list_spare_parts` tool and the built-in `alarm_to_workorder` workflow all still pass it. Every such call raised `TypeError`, and the prefetch and the workflow step swallowed it, so spare parts silently went missing. Neither API relates parts to assets, so `asset_id` is dropped with a WARNING (`spare_parts_asset_filter_unsupported`): on its own the read returns no parts instead of passing the whole inventory off as the asset's; with a `sku` it narrows by `sku` alone — what `SapPmConnector` does when no `bom_equipment_field` is configured.
+- **The custom-workflows reference example looks its part up by `sku`.** Its `lookup_part` step passed `part_id` to `cmms.read_spare_parts`, which no connector accepts, so the reorder workflow stopped at its first step.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
