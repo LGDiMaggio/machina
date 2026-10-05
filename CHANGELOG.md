@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`diagnose_failure` reports a failing failure-mode source instead of calling it unconfigured.** When every provider of the catalog raised `ConnectorError` (a timeout, an authentication or schema error, a provider that is not connected), the tool answered "No failure-mode data configured on any connector."; it now returns an `error` naming each failed provider and its error. When only some providers fail, diagnosis runs on the catalog the others served and the result's `note` names the failed providers — previously a partial outage silently shrank the catalog. The workflow path (`FailureAnalyzer`) still receives the catalog of the providers that answered.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
