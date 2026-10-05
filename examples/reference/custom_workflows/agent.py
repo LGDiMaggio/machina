@@ -60,7 +60,7 @@ spare_part_reorder = Workflow(
         Step(
             "lookup_part",
             action="cmms.read_spare_parts",
-            inputs={"part_id": "{trigger.part_id}"},
+            inputs={"sku": "{trigger.part_id}"},
             on_error=ErrorPolicy.STOP,
         ),
         Step(

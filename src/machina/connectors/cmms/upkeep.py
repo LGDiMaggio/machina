@@ -332,11 +332,16 @@ class UpKeepConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read spare parts (UpKeep calls them *parts*).
 
         Args:
+            asset_id: Not filterable (see Note), so it is dropped with a
+                WARNING. Without a ``sku`` the read then returns ``[]``
+                rather than every part; with one it is narrowed by ``sku``
+                alone.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
@@ -348,6 +353,23 @@ class UpKeepConnector:
             associated with a specific asset.
         """
         self._ensure_connected()
+        if asset_id:
+            # Unfiltered, the read would pass every part off as this asset's
+            # spare parts — refuse it unless a sku narrows the result.
+            logger.warning(
+                "spare_parts_asset_filter_unsupported",
+                connector="UpKeepConnector",
+                operation="read_spare_parts",
+                asset_id=asset_id,
+                hint=(
+                    "/api/v2/parts has no asset relation; narrowing by sku alone"
+                    if sku
+                    else "/api/v2/parts has no asset relation; returning no parts "
+                    "rather than every part"
+                ),
+            )
+            if not sku:
+                return []
         raw = await self._paginated_get("/api/v2/parts")
         parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:
