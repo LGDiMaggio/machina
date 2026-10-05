@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from machina.config.schema import MachinaConfig
 from machina.connectors.capabilities import Capability
+
+SAMPLE_CMMS = Path(__file__).resolve().parents[3] / "examples" / "sample_data" / "cmms"
 
 
 class TestBuildServer:
@@ -59,6 +62,39 @@ class TestBuildServer:
         for tool in tools:
             assert "ctx" not in tool.parameters.get("properties", {}), tool.name
             assert tool.context_kwarg == "ctx", tool.name
+
+    @pytest.mark.asyncio
+    async def test_real_client_calls_tool_without_ctx(self) -> None:
+        """The same regression, end to end through an in-memory MCP client
+        session: the client sees no ``ctx`` in any tool's input schema, and a
+        call carrying only the tool's own arguments reaches the runtime."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.config.schema import ConnectorConfig, McpConfig
+        from machina.mcp.server import build_server
+        from machina.mcp.tools_vendor import VENDOR_TOOLS
+
+        config = MachinaConfig(
+            connectors={
+                "cmms": ConnectorConfig(
+                    type="generic_cmms", primary=True, settings={"data_dir": str(SAMPLE_CMMS)}
+                )
+            },
+            mcp=McpConfig(enable_vendor_tools=True),
+        )
+
+        async with create_connected_server_and_client_session(build_server(config)) as client:
+            tools = (await client.list_tools()).tools
+            result = await client.call_tool("machina_get_asset", {"asset_id": "P-201"})
+
+        assert {"machina_get_asset", *(fn.__name__ for fn in VENDOR_TOOLS)} <= {
+            tool.name for tool in tools
+        }
+        leaked = [tool.name for tool in tools if "ctx" in tool.inputSchema.get("properties", {})]
+        assert leaked == []
+        assert result.isError is False, result.content
+        assert result.structuredContent is not None
+        assert result.structuredContent["id"] == "P-201"
 
 
 class TestDeprecationShim:
