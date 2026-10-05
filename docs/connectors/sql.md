@@ -69,8 +69,10 @@ table or field mapping is ignored, so check those by hand.
 
 Other settings: `driver_type` (`odbc` or `jdbc`; JDBC needs `jdbc_driver_class`
 and usually `jdbc_driver_path`, the driver `.jar`), `ebcdic_codepage` (default `cp037`, for
-`strip_ebcdic`), and `retry` (`max_retries`, `base_backoff`, `max_backoff`)
-for transient read errors.
+`strip_ebcdic`), `query_timeout` (seconds one statement may run, unset by
+default; see [Statement timeout](#statement-timeout)), and `retry`
+(`max_retries`, `base_backoff`, `max_backoff`) for transient errors such as
+deadlocks.
 
 `connect()` opens the connection and runs each query to check that every
 mapped column is present; a missing column fails with the list of available
@@ -126,6 +128,72 @@ large table.
 Updating work orders is not supported, and spare parts and maintenance history
 are not read from SQL. With sandbox mode on, neither the check nor the insert
 runs (`@sandbox_aware`).
+
+## Statement timeout
+
+Every call goes through one shared database connection, one statement at a
+time. A statement that does not return, such as a `SELECT` waiting on a row
+lock that another application holds, holds up every later read, write and
+health check. `query_timeout` has the driver stop a statement after that many
+seconds:
+
+```yaml
+    settings:
+      query_timeout: 30   # seconds, 1 to 3600; unset keeps the driver's own setting
+```
+
+On ODBC the connector sets pyodbc's `Connection.timeout`: the query timeout of
+every statement, and also the connection's timeout, a limit on any reply from
+the server. On JDBC it calls `Statement.setQueryTimeout` on every statement.
+If the driver refuses it, `connect()` fails with a `ConnectorConfigError`
+rather than run without the limit. While it is set, it replaces a statement
+timeout set in the DSN or JDBC URL, such as mssql-jdbc's `queryTimeout`.
+
+It is unset by default because drivers apply it differently:
+
+- **SQL Server** (ODBC Driver 17/18, mssql-jdbc): the statement is cancelled
+  when the time is up. SQL Server waits for locks indefinitely by default, so
+  set it here.
+- **PostgreSQL:** pgjdbc cancels the statement. psqlODBC refuses it, since it
+  does not support the connection timeout pyodbc sets with it; use the
+  server's `lock_timeout` or `statement_timeout` instead, for example
+  `ALTER ROLE machina SET lock_timeout = '30s'`.
+- **Db2 for Linux, UNIX and Windows:** the JCC driver cancels the statement.
+  The CLI/ODBC driver refuses it, like psqlODBC; Db2's `LOCKTIMEOUT` database
+  setting bounds lock waits instead, and the connector retries the SQL0911
+  that ends them.
+- **IBM i:** the IBM i Access ODBC driver checks it against the optimizer's
+  *estimate* before a query starts: a query estimated to take longer is
+  refused (SQL0666), and a running statement is never stopped. The driver
+  also applies the connection timeout pyodbc sets to every reply from the
+  server. Leave it unset: a record-lock wait already ends after the file's
+  record wait time (60 seconds by default) with SQL0913, which the connector
+  retries. The jt400 JDBC driver makes the same estimate check by default,
+  which needs `*JOBCTL` authority; with `;query timeout mechanism=cancel` in
+  the URL it cancels a statement when the time is up instead, though not
+  while the rows are being fetched.
+- **MySQL:** Connector/J 8 and later cancels the statement; Connector/ODBC
+  limits only read-only `SELECT` statements.
+
+A statement stopped by a query timeout (`query_timeout`, one set in the DSN or
+JDBC URL, or PostgreSQL's `statement_timeout`) raises `ConnectorTimeoutError`
+(a `ConnectorError`) and is logged as `sql_statement_timeout`. Lock-wait
+timeouts the database reports as errors of their own keep their usual
+handling: SQL0911 and SQL0913 are retried as transient, and PostgreSQL's
+`lock_timeout` raises a plain `ConnectorError`. Unlike deadlocks and the other errors
+`retry` covers, the connector does not retry it, for reads or writes: the
+retry would likely wait on the same lock and hold the connection that long
+again. Callers that retry reads, such as a workflow step with retries, still
+can. A timed-out `create_work_order` may or may not have stored its row,
+because the timeout can come during the commit. Calling it again with the same
+work order is safe: it checks for the ID before inserting.
+
+`health_check()` waits at most `query_timeout` seconds (30 when it is unset)
+for the connection, then reports it busy (`unhealthy`). `disconnect()` waits as
+long, then logs `sql_disconnect_busy` and drops the connection without closing
+it, since closing a connection under a running statement is not safe; the
+call still running closes it when it ends. If the driver never stops that
+statement, its thread keeps running, and the process waits for it on exit.
 
 ## Use Cases
 
