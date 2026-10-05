@@ -17,16 +17,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
-from machina.agent.prompts import safe_text
+from machina.agent.tool_errors import read_tool_error
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
     from machina.connectors.base import ConnectorRegistry
     from machina.domain.maintenance_plan import MaintenancePlan
-
-logger = structlog.get_logger(__name__)
 
 DUE_DATES_NOTE = (
     "Due dates are not computed: Machina reads each plan's recurrence but "
@@ -75,15 +71,13 @@ async def get_maintenance_schedule(
         # A REST backend fails with httpx errors, not only ConnectorError; any
         # provider failure becomes an error the model can relay, not an
         # exception that aborts the whole turn.
-        logger.warning(
+        return read_tool_error(
+            exc,
             "maintenance_plans_read_failed",
             connector=connector_name,
             asset_id=asset_id,
             operation="get_maintenance_schedule",
-            error_type=type(exc).__name__,
-            error=str(exc),
         )
-        return {"error": safe_text(str(exc))}
 
     if asset_id:
         plans = [plan for plan in plans if plan.asset_id == asset_id]

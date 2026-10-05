@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connector failure in a read tool no longer aborts the turn.** An exception from the connector behind `read_work_orders`, `check_spare_parts` or `search_documents` (an httpx timeout or HTTP error from a REST CMMS, a `ConnectorError`), or a non-`ConnectorError` from a failure-mode provider during `diagnose_failure`, escaped the tool loop and `handle_message` raised `LLMError`. The tool now returns `{"error": ...}`, so the model can tell the user the data is unavailable, and a `read_tool_failed` warning names the tool and connector (it replaces `get_work_order`'s `work_order_lookup_failed`). A caller that treated that `LLMError` as an outage signal now gets the model's answer instead. A read that keeps failing is retried at most once per turn, then its error is replayed rather than re-querying the backend. Write tools keep their existing failure behaviour.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

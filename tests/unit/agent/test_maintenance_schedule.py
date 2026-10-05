@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, ClassVar
 
 import pytest
@@ -131,6 +132,24 @@ async def test_any_provider_failure_degrades_to_a_tool_error() -> None:
     result = await get_maintenance_schedule(_registry(_BrokenRest()))
 
     assert "503 Service Unavailable" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_the_provider_disguises_is_not_a_read_failure() -> None:
+    """A provider that turns its own cancellation into an ordinary exception must
+    not have it reported as a failed read: the caller's deadline still wins."""
+
+    class _AbortingPlans(_PlansConnector):
+        async def read_maintenance_plans(self) -> list[MaintenancePlan]:
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError as exc:
+                raise ConnectorError("request aborted") from exc
+            return []
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await get_maintenance_schedule(_registry(_AbortingPlans()))
 
 
 @pytest.mark.asyncio

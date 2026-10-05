@@ -42,6 +42,7 @@ from machina.agent.prompts import (
     safe_source,
     safe_text,
 )
+from machina.agent.tool_errors import read_tool_error
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
@@ -84,6 +85,17 @@ _SIDE_EFFECTING_TOOLS: frozenset[str] = MUTATING_TOOLS
 # (the two-turn resume path re-enters at the handler without passing through
 # the loop at all).
 _ASSET_TARGETED_WRITE_TOOLS: frozenset[str] = frozenset({"create_work_order"})
+
+# Read tools served by the FIRST connector declaring a capability (the lookup
+# their _dispatch_tool branch does), so a failed read's log can name the
+# connector it came from. Not listed: diagnose_failure fans out to every
+# provider, and get_maintenance_schedule logs its own connector.
+_READ_TOOL_CAPABILITY: dict[str, Capability] = {
+    "read_work_orders": Capability.READ_WORK_ORDERS,
+    "get_work_order": Capability.GET_WORK_ORDER,
+    "search_documents": Capability.SEARCH_DOCUMENTS,
+    "check_spare_parts": Capability.READ_SPARE_PARTS,
+}
 
 # Finalize-only tripwire for tool-call FRAGMENTS (U6, PR #55 gap family 5):
 # payloads that are recognisably tool-call-shaped but do NOT parse — truncated
@@ -264,6 +276,12 @@ _DUPLICATE_READ_NOTE = (
 # annotated duplicate result is only a cooperative hint; a model that ignores it
 # would otherwise loop to ``max_iterations``. Bounds the worst case tightly.
 _MAX_DUPLICATE_SUPPRESSIONS = 2
+
+# How many verbatim retries a FAILED read gets in one turn before its error is
+# replayed from the read cache like any other repeat. One lets a transient
+# failure recover; more would re-query a dead backend — a full connector timeout
+# each — on every iteration up to ``max_iterations``.
+_MAX_FAILED_READ_RETRIES = 1
 
 # Above this many assets, ``list_assets`` returns a count plus a grouped summary
 # instead of every record, so a large plant cannot flood the prompt/answer (R1.2).
@@ -2187,6 +2205,9 @@ class Agent:
         # iteration runs the full max_iterations on redundant reads.
         executed_reads: dict[str, Any] = {}
         seen_call_keys: set[str] = set()
+        # Per-turn count of failed attempts per read key, bounding verbatim
+        # retries of a failing read (see _MAX_FAILED_READ_RETRIES).
+        failed_reads: dict[str, int] = {}
 
         for _iteration in range(max_iterations):
             with self.tracer.trace(
@@ -2409,17 +2430,22 @@ class Agent:
                         )
                     else:
                         tool_result = await self._execute_tool(func_name, args, chat_id=chat_id)
-                        # Only memoise successful results. A failed side effect
+                        # Only memoise successful side effects. A failed one
                         # (e.g. a transient workflow error returned as
                         # {"error": ...}) must not suppress a legitimate retry
                         # of the same call later in the turn.
                         is_error = isinstance(tool_result, dict) and "error" in tool_result
                         if memo_key is not None and not is_error:
                             executed_side_effects[memo_key] = tool_result
-                        elif memo_key is None and not is_error:
-                            # Cache the read so a verbatim re-issue this turn is
-                            # served from here instead of re-querying.
-                            executed_reads[call_key] = tool_result
+                        elif memo_key is None:
+                            if is_error:
+                                failed_reads[call_key] = failed_reads.get(call_key, 0) + 1
+                            if not is_error or failed_reads[call_key] > _MAX_FAILED_READ_RETRIES:
+                                # Cache the read so a verbatim re-issue this turn
+                                # is served from here instead of re-querying. A
+                                # failed read is cached only once its retries
+                                # are spent, so a transient failure can recover.
+                                executed_reads[call_key] = tool_result
                     tool_span.output_summary = str(tool_result)[:200]
                     # Full result, JSON-encoded, for consumers that need more
                     # than the truncated summary (e.g. the conversational eval
@@ -2914,9 +2940,41 @@ class Agent:
         ``chat_id`` scopes any side effects that touch per-turn state
         (currently the citation chunk registry) so concurrent chats stay
         isolated.
+
+        A READ tool that raises — a connector timeout or auth failure, an httpx
+        error from a REST backend — returns ``{"error": ...}`` (see
+        :func:`~machina.agent.tool_errors.read_tool_error`) for the model to
+        relay instead of escaping :meth:`_llm_loop` and ending the turn as an
+        :class:`LLMError`. A write tool's exception propagates unchanged: its
+        failure semantics (sandbox, confirmation, idempotency) are its own.
         """
         logger.debug("executing_tool", tool=name, args=args)
+        try:
+            return await self._dispatch_tool(name, args, chat_id=chat_id)
+        except Exception as exc:
+            if name in _SIDE_EFFECTING_TOOLS:
+                raise
+            capability = _READ_TOOL_CAPABILITY.get(name)
+            providers = self._registry.find_by_capability(capability) if capability else []
+            return read_tool_error(
+                exc,
+                "read_tool_failed",
+                agent=self.name,
+                tool=name,
+                connector=providers[0][0] if providers else "",
+                asset_id=args.get("asset_id", "") if isinstance(args, dict) else "",
+                args=args,
+                operation="execute_tool",
+            )
 
+    async def _dispatch_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        chat_id: str,
+    ) -> Any:
+        """Route a tool call to its handler (failures: see :meth:`_execute_tool`)."""
         if name == "search_assets":
             return self._tool_search_assets(args.get("query", ""))
 
@@ -2946,23 +3004,7 @@ class Agent:
                 # provider schema enforcement), so validate before dispatch.
                 if not isinstance(work_order_id, str) or not work_order_id:
                     return {"error": "work_order_id must be a non-empty string"}
-                try:
-                    wo = await conn.get_work_order(  # type: ignore[attr-defined]
-                        work_order_id
-                    )
-                except Exception as exc:
-                    # A connector failure (ConnectorError/timeout) must degrade
-                    # to a tool-level error the model can react to, not kill the
-                    # whole turn — including the recovered-read re-entry path.
-                    logger.warning(
-                        "work_order_lookup_failed",
-                        agent=self.name,
-                        tool=name,
-                        work_order_id=work_order_id,
-                        operation="execute_tool",
-                        error=str(exc),
-                    )
-                    return {"error": safe_text(str(exc))}
+                wo = await conn.get_work_order(work_order_id)  # type: ignore[attr-defined]
                 if wo is None:
                     return {"error": f"Work order {work_order_id!r} not found"}
                 return wo.model_dump(mode="json")
