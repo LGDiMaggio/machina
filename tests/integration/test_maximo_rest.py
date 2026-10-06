@@ -5,6 +5,8 @@ All HTTP traffic is intercepted by pytest-httpx — no real Maximo API calls.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -13,7 +15,7 @@ from machina.connectors.cmms.maximo import MaximoConnector
 from machina.domain.asset import Asset, AssetType
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 BASE = "https://maximo.example.com"
@@ -659,35 +661,120 @@ class TestOslcWhereValues:
         assert httpx_mock.get_requests()[-1].url.params["oslc.where"] == 'assetnum="201"'
 
 
+# ---------------------------------------------------------------------------
+# Updates: look the order up by wonum, POST to its URI
+# ---------------------------------------------------------------------------
+
+# Maximo addresses a record by a rest id derived from its primary key: here "_"
+# plus the base64 of "WO-001/BEDFORD" (wonum/siteid), with "=" written as "-".
+_REST_ID = "_V08tMDAxL0JFREZPUkQ-"
+# Maximo reports a URI on the host it sees itself on, often an internal name.
+_INTERNAL_URI = f"http://maximo-internal:9080/maximo/oslc/os/mxwo/{_REST_ID}"
+
+
+def _add_lookup(httpx_mock, wonum: str, *members: dict[str, str]) -> None:
+    """Register the answer to the URI lookup an update sends before writing."""
+    httpx_mock.add_response(
+        method="GET",
+        url=_oslc_url(
+            "mxwo",
+            **{"oslc.pageSize": "2", "oslc.select": "siteid", "oslc.where": f'wonum="{wonum}"'},
+        ),
+        json={"member": list(members), "responseInfo": {}},
+    )
+
+
+def _add_reread(httpx_mock, status: str) -> None:
+    """Register the read-back of WO-001 that follows a successful update."""
+    httpx_mock.add_response(
+        method="GET",
+        url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-001"'}),
+        json={
+            "member": [
+                {
+                    "wonum": "WO-001",
+                    "description": "Fix leak",
+                    "wopriority": 2,
+                    "status": status,
+                    "worktype": "CM",
+                    "assetnum": "P1",
+                    "reportdate": "2025-06-01T10:00:00Z",
+                    "changedate": "2025-07-01T10:00:00Z",
+                },
+            ],
+            "responseInfo": {},
+        },
+    )
+
+
 class TestUpdatePathId:
-    """The work-order ID also goes into the PATCH URL path, where it must stay
-    one path segment, and is read back by ``wonum`` after the write."""
+    """An update never puts the ``wonum`` in a URL path: it is a quoted
+    oslc.where value in the lookup, and the POST URL takes the rest id from the
+    URI Maximo returns, which must stay one path segment."""
 
     @pytest.mark.asyncio
-    async def test_update_id_stays_inside_its_path_segment(
+    async def test_wonum_reaches_only_the_where_clause(
         self, httpx_mock, connector: MaximoConnector
     ) -> None:
         hostile = "WO-1/../../mxasset/X"
         await _connect(httpx_mock, connector)
-        httpx_mock.add_response(method="PATCH", status_code=204)
+        _add_lookup(httpx_mock, hostile, {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", status_code=204)
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": f'wonum="{hostile}"'}),
             json={"member": [{"wonum": hostile}], "responseInfo": {}},
         )
         await connector.update_work_order(hostile, description="x")
-        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
-        assert patch_req.url.raw_path == b"/maximo/oslc/os/mxwo/WO-1%2F..%2F..%2Fmxasset%2FX"
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        assert post.url.raw_path == f"/maximo/oslc/os/mxwo/{_REST_ID}?lean=1".encode()
+
+    @pytest.mark.asyncio
+    async def test_rest_id_stays_inside_its_path_segment(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """An encoded ``/`` in the rest id is sent encoded, not as a path separator."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": f"{OSLC}/os/mxwo/_A%2F..%2Fmxasset%2FX"})
+        httpx_mock.add_response(method="POST", status_code=204)
+        _add_reread(httpx_mock, "WAPPR")
+        await connector.update_work_order("WO-001", description="x")
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        assert post.url.raw_path == b"/maximo/oslc/os/mxwo/_A%2F..%2Fmxasset%2FX?lean=1"
+
+    @pytest.mark.parametrize(
+        ("member", "reason"),
+        [
+            pytest.param({"siteid": "BEDFORD"}, "no work-order URI", id="no-href"),
+            pytest.param(
+                {"href": f"{OSLC}/os/mxasset/{_REST_ID}"}, "no work-order URI", id="other-object"
+            ),
+            pytest.param({"href": f"{OSLC}/os/mxwo/"}, "Invalid record ID", id="empty-rest-id"),
+            pytest.param({"href": f"{OSLC}/os/mxwo/.."}, "Invalid record ID", id="dot-segment"),
+            pytest.param(
+                {"href": f"{OSLC}/os/mxwo/%2E%2E"}, "Invalid record ID", id="encoded-dot-segment"
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unexpected_uri_is_refused_before_writing(
+        self, httpx_mock, connector: MaximoConnector, member: dict[str, str], reason: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", member)
+        with pytest.raises(ConnectorError, match=reason):
+            await connector.update_work_order("WO-001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
 
     @pytest.mark.parametrize(
         ("work_order_id", "reason"),
         [
-            pytest.param("WO-1,WO-2", r"oslc\.where", id="unreadable-by-wonum"),
-            pytest.param("..", "Invalid record ID", id="dot-segment"),
+            pytest.param("WO-1,WO-2", r"oslc\.where", id="qbe-comma"),
+            pytest.param("", "empty", id="empty"),
         ],
     )
     @pytest.mark.asyncio
-    async def test_unsafe_id_is_refused_before_writing(
+    async def test_unsafe_wonum_is_refused_before_any_request(
         self, httpx_mock, connector: MaximoConnector, work_order_id: str, reason: str
     ) -> None:
         await _connect(httpx_mock, connector)
@@ -757,43 +844,107 @@ class TestGetWorkOrder:
 
 
 class TestUpdateWorkOrder:
-    @pytest.mark.asyncio
-    async def test_update_work_order_status(self, httpx_mock, connector: MaximoConnector) -> None:
-        await _connect(httpx_mock, connector)
-        httpx_mock.add_response(
-            method="PATCH",
-            url=f"{OSLC}/os/mxwo/WO-001",
-            status_code=204,
-        )
-        # Re-fetch after update
-        httpx_mock.add_response(
-            method="GET",
-            url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-001"'}),
-            json={
-                "member": [
-                    {
-                        "wonum": "WO-001",
-                        "description": "Fix leak",
-                        "wopriority": 2,
-                        "status": "CLOSE",
-                        "worktype": "CM",
-                        "assetnum": "P1",
-                        "reportdate": "2025-06-01T10:00:00Z",
-                        "changedate": "2025-07-01T10:00:00Z",
-                    },
-                ],
-                "responseInfo": {},
-            },
-        )
-        from machina.domain.work_order import WorkOrderStatus
+    """IBM's REST API guide: an update is a POST to the URI Maximo returned for
+    the record, with ``x-method-override: PATCH``; ``patchtype: MERGE`` keeps the
+    child objects the payload does not list."""
 
+    @pytest.mark.parametrize("post_status", [204, 200])
+    @pytest.mark.asyncio
+    async def test_update_posts_to_the_work_order_uri(
+        self, httpx_mock, connector: MaximoConnector, post_status: int
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"siteid": "BEDFORD", "href": _INTERNAL_URI})
+        httpx_mock.add_response(
+            method="POST",
+            url=httpx.URL(f"{OSLC}/os/mxwo/{_REST_ID}", params={"lean": "1"}),
+            status_code=post_status,
+        )
+        _add_reread(httpx_mock, "CLOSE")
         updated = await connector.update_work_order("WO-001", status=WorkOrderStatus.CLOSED)
         assert updated.id == "WO-001"
-        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
-        import json
+        assert updated.status == WorkOrderStatus.CLOSED
+        requests = httpx_mock.get_requests()
+        # connect, URI lookup, update, read-back — never the bare PATCH verb
+        assert [r.method for r in requests] == ["GET", "GET", "POST", "GET"]
+        post = requests[2]
+        # Sent to the configured URL, not to the internal host in Maximo's URI.
+        assert post.url.host == "maximo.example.com"
+        assert post.headers["x-method-override"] == "PATCH"
+        assert post.headers["patchtype"] == "MERGE"
+        assert post.headers["content-type"] == "application/json"
+        assert post.headers["apikey"] == "test-key"
+        assert json.loads(post.content) == {"status": "CLOSE"}
 
-        payload = json.loads(patch_req.content)
-        assert payload["status"] == "CLOSE"
+    @pytest.mark.parametrize(
+        ("transition", "maximo_status"),
+        [
+            pytest.param(lambda c: c.close_work_order("WO-001"), "CLOSE", id="close"),
+            pytest.param(lambda c: c.cancel_work_order("WO-001"), "CAN", id="cancel"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_close_and_cancel_send_the_same_update(
+        self, httpx_mock, connector: MaximoConnector, transition, maximo_status: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", status_code=204)
+        _add_reread(httpx_mock, maximo_status)
+        await transition(connector)
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        assert post.url.path == f"/maximo/oslc/os/mxwo/{_REST_ID}"
+        assert post.headers["x-method-override"] == "PATCH"
+        assert json.loads(post.content) == {"status": maximo_status}
+
+    @pytest.mark.asyncio
+    async def test_update_of_an_unknown_wonum_writes_nothing(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "MISS")
+        with pytest.raises(ConnectorError, match="Work order MISS not found"):
+            await connector.update_work_order("MISS", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
+
+    @pytest.mark.asyncio
+    async def test_update_of_a_wonum_in_several_sites_writes_nothing(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A wonum is unique only within a site; picking one could update the wrong order."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(
+            httpx_mock,
+            "1001",
+            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_MTAwMS9URVhBUw--"},
+            {"siteid": "BEDFORD", "href": f"{OSLC}/os/mxwo/_MTAwMS9CRURGT1JE"},
+        )
+        with pytest.raises(ConnectorError, match=r"more than one site \(BEDFORD, TEXAS\)"):
+            await connector.update_work_order("1001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
+
+    @pytest.mark.parametrize(
+        ("post_status", "error", "match"),
+        [
+            pytest.param(400, ConnectorError, "update work order failed: HTTP 400", id="rejected"),
+            pytest.param(401, ConnectorAuthError, "authentication failed", id="auth"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_refused_update_raises_without_a_read_back(
+        self,
+        httpx_mock,
+        connector: MaximoConnector,
+        post_status: int,
+        error: type[Exception],
+        match: str,
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", status_code=post_status)
+        with pytest.raises(error, match=match):
+            await connector.update_work_order("WO-001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "POST"]
 
 
 class TestAssetTypeMap:

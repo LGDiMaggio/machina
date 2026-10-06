@@ -146,9 +146,10 @@ def _vendor_cmms(kind: str) -> object:
 @pytest.mark.usefixtures("_sandbox_on")
 class TestVendorCmmsUpdatesBlockedInSandbox:
     """The real decorated update/close/cancel of the REST CMMS connectors (not a
-    ``MagicMock`` self). The ID checks inside ``update_work_order`` run behind the
-    guard: in sandbox even an ID live mode refuses raises SandboxViolationError,
-    and no request — SAP's CSRF fetch included — is sent."""
+    ``MagicMock`` self). Everything inside ``update_work_order`` runs behind the
+    guard: in sandbox any ID — one live mode refuses included — raises
+    SandboxViolationError, and no request is sent, SAP's CSRF fetch and Maximo's
+    URI lookup included."""
 
     @pytest.mark.parametrize("kind", ["sap_pm", "maximo", "upkeep"])
     @pytest.mark.parametrize(
@@ -159,7 +160,7 @@ class TestVendorCmmsUpdatesBlockedInSandbox:
             pytest.param(lambda c, i: c.cancel_work_order(i), id="cancel"),
         ],
     )
-    @pytest.mark.parametrize("work_order_id", ["..", "WO-1,WO-2"])
+    @pytest.mark.parametrize("work_order_id", ["WO-1", "..", "WO-1,WO-2"])
     @pytest.mark.asyncio
     async def test_blocked_before_any_request(
         self, httpx_mock, kind: str, write, work_order_id: str

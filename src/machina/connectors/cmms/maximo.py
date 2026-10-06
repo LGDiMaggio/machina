@@ -19,11 +19,13 @@ without HTTP mocks.
 
 See also:
     https://developer.ibm.com/apis/catalog/maximo--maximo-manage-rest-api/Introduction
+    https://ibm-maximo-dev.github.io/maximo-restapi-documentation/
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import unquote, urlsplit
 
 import structlog
 from pydantic import Field
@@ -326,9 +328,14 @@ class MaximoConnector:
         assigned_to: str | None = None,
         description: str | None = None,
     ) -> WorkOrder:
-        """Update an existing work order in Maximo via PATCH.
+        """Update an existing work order in Maximo.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        Maximo addresses a record by the URI it returns for it, not by
+        ``wonum``, so the order is first looked up by ``wonum``. The update is
+        then a ``POST`` to that URI with ``x-method-override: PATCH`` — the form
+        IBM documents for updates — and ``patchtype: MERGE``, which keeps the
+        child objects the payload does not list. Only non-``None`` fields are
+        sent.
 
         Args:
             work_order_id: Maximo work order number (``wonum``).
@@ -338,13 +345,13 @@ class MaximoConnector:
 
         Returns:
             The updated work order.
+
+        Raises:
+            ConnectorError: If no field is given; if the ``wonum`` is refused,
+                matches no work order or matches one in more than one site; or
+                if Maximo rejects the update.
         """
         self._ensure_connected()
-        url = f"{self.url}/maximo/oslc/os/mxwo/{path_segment(work_order_id)}"
-        # The result is read back by wonum; refuse an ID that read would refuse
-        # now, before the PATCH applies, not after.
-        _oslc_string(work_order_id)
-        httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = maximo_mapper.reverse_status(status)
@@ -354,13 +361,21 @@ class MaximoConnector:
             payload["description"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
-        headers = {**self._headers(), "Content-Type": "application/json"}
+        url = await self._work_order_uri(work_order_id)
+        httpx = _require_httpx()
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "x-method-override": "PATCH",
+            "patchtype": "MERGE",
+        }
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await request_with_retry(
                 client,
-                "PATCH",
+                "POST",
                 url,
                 headers=headers,
+                params={"lean": "1"} if self._lean else None,
                 json=payload,
             )
         if resp.status_code == 401:
@@ -506,3 +521,41 @@ class MaximoConnector:
             total=len(all_items),
         )
         return all_items
+
+    async def _work_order_uri(self, work_order_id: str) -> str:
+        """Look up the URI that addresses the work order ``work_order_id``.
+
+        Maximo addresses a record by the URI in its ``href``, whose last
+        segment is a rest id the server derives from the record's primary key
+        — ``wonum`` and ``siteid`` for a work order — so it is looked up, not
+        built. Only the rest id is kept: the URI's host is the one Maximo sees
+        itself on (an internal name behind a proxy unless ``x-public-uri`` is
+        sent), so the update goes to the configured URL like every other
+        request.
+
+        Raises:
+            ConnectorError: If the ``wonum`` is refused, if no work order or
+                more than one (the same ``wonum`` in several sites) has it, or
+                if the URI Maximo returns is not a work-order URI.
+        """
+        members = await self._oslc_get(
+            "mxwo",
+            oslc_where=f"wonum={_oslc_string(work_order_id)}",
+            oslc_select="siteid",
+            page_size=2,
+        )
+        if not members:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        if len(members) > 1:
+            sites = ", ".join(sorted(str(m.get("siteid", "?")) for m in members))
+            raise ConnectorError(
+                f"Work order {work_order_id} exists in more than one site ({sites}) — "
+                "refusing to guess which one to update"
+            )
+        uri = members[0].get("href") or ""
+        collection, _, rest_id = urlsplit(str(uri)).path.rpartition("/")
+        if not collection.lower().endswith("/os/mxwo"):
+            raise ConnectorError(
+                f"Maximo returned no work-order URI for work order {work_order_id} (got {uri!r})"
+            )
+        return f"{self.url}/maximo/oslc/os/mxwo/{path_segment(unquote(rest_id))}"
