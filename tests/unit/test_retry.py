@@ -151,11 +151,22 @@ async def test_retry_after_beyond_max_backoff_returns_response_without_waiting(
 
 
 @pytest.mark.asyncio
-async def test_non_numeric_retry_after_falls_back_to_exponential(sleeps: list[float]) -> None:
-    """Retry-After as an HTTP-date must not crash the helper."""
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        pytest.param("Wed, 21 Oct 2026 07:28:00 GMT", id="http-date"),
+        # str.isdigit() accepts a superscript two, but float() rejects it.
+        pytest.param("\u00b2", id="non-ascii-digit"),
+    ],
+)
+async def test_non_numeric_retry_after_falls_back_to_exponential(
+    retry_after: str, sleeps: list[float]
+) -> None:
+    """A Retry-After that is not delay-seconds (ASCII digits only) must not
+    crash the helper: it falls back to the exponential backoff."""
     client = _SequenceClient(
         [
-            _FakeResponse(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+            _FakeResponse(429, headers={"Retry-After": retry_after}),
             _FakeResponse(200),
         ]
     )

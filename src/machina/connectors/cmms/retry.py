@@ -165,7 +165,9 @@ async def request_with_retry(
             return resp
 
         retry_after = resp.headers.get("Retry-After", "").strip()
-        if retry_after.isdigit():
+        # delay-seconds is ASCII digits; str.isdigit() alone also accepts
+        # characters such as superscripts, which float() rejects.
+        if retry_after.isascii() and retry_after.isdigit():
             backoff = float(retry_after)
             if backoff > max_backoff:
                 # Retrying before the server's window ends would most likely
