@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connector failure inside an agent read tool no longer fails the whole turn.** `read_work_orders`, `search_documents` and `check_spare_parts` let a connector exception (a REST CMMS answering HTTP 500, a document-store error) escape the LLM loop, and `diagnose_failure` did the same for any failure-mode provider error other than `ConnectorError`, so `handle_message` raised `LLMError("LLM call failed: ...")` instead of answering. Every read tool now degrades the way `get_work_order` and `get_maintenance_schedule` already did: a `read_tool_failed` warning (with `agent`, `tool`, `args`, `operation`, `error_type`, `error`) and an `{"error": ...}` tool result the model can relay or retry (naming the exception type when it has no message, as a bare timeout does), on the structured tool-call path and when a leaked tool call is recovered. `get_work_order` failures are now logged under the same event, replacing `work_order_lookup_failed`. Writes are unchanged: a connector exception from `create_work_order` still ends the turn, because the write may have been applied and an error result would invite the model to re-issue it.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
