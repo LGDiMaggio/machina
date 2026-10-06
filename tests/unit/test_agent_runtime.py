@@ -30,7 +30,7 @@ from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorError, LLMError
+from machina.exceptions import ConnectorError, ConnectorUnsupportedFilterError, LLMError
 from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -331,8 +331,9 @@ class _FakeSparePartsConnector:
 class _FakeNoAssetRelationConnector:
     """Spare-parts provider whose inventory has no asset relation.
 
-    Shaped like the Maximo and UpKeep connectors: an ``asset_id`` filter is
-    refused with a ConnectorError instead of being answered with the whole
+    Shaped like the Maximo, UpKeep and (without ``bom_equipment_field``) SAP PM
+    connectors: an ``asset_id`` filter is refused with a
+    ConnectorUnsupportedFilterError instead of being answered with the whole
     inventory. Records the keyword arguments of every call.
     """
 
@@ -353,13 +354,33 @@ class _FakeNoAssetRelationConnector:
     async def read_spare_parts(self, **filters: Any) -> list[SparePart]:
         self.calls.append(filters)
         if filters.get("asset_id"):
-            raise ConnectorError("Inventory cannot be filtered by asset; filter by sku instead")
+            raise ConnectorUnsupportedFilterError(
+                "Inventory cannot be filtered by asset; filter by sku instead"
+            )
         inventory = [
             SparePart(sku="SKF-6310", name="Deep Groove Ball Bearing", stock_quantity=4),
             SparePart(sku="FLT-GA55", name="Oil Filter", stock_quantity=2),
         ]
         sku = filters.get("sku")
         return [p for p in inventory if not sku or p.sku == sku]
+
+
+class _FakeSparePartsOutageConnector:
+    """Spare-parts provider whose backend fails: a real error, not a refusal."""
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, **filters: Any) -> list[SparePart]:
+        raise ConnectorError("Spare-parts backend unavailable: HTTP 503")
 
 
 class _FakeErrorConnector:
@@ -2737,6 +2758,46 @@ class TestGatherContext:
         assert "spare_parts" not in context
         assert parts_conn.calls == [{"asset_id": "P-201"}]
         assert "work_orders" in context  # the other sources are still gathered
+
+    @pytest.mark.asyncio
+    async def test_refused_asset_filter_is_skipped_without_a_warning(self) -> None:
+        """A provider refusing a filter it cannot apply is expected, not a failure.
+
+        It recurs on every turn that resolves an asset (Maximo, UpKeep, SAP PM
+        without ``bom_equipment_field``), so it is logged at INFO rather than
+        as the ``context_gather_error`` warning a real failure gets.
+        """
+        from structlog.testing import capture_logs
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeNoAssetRelationConnector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        with capture_logs() as logs:
+            context = await agent._gather_context("spare parts for P-201", resolved)
+        assert "spare_parts" not in context
+        assert not [e for e in logs if e["event"] == "context_gather_error"]
+        skipped = [e for e in logs if e["event"] == "context_gather_skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["log_level"] == "info"
+        assert skipped[0]["source"] == "spare_parts"
+        assert skipped[0]["asset_id"] == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_spare_parts_backend_failure_still_warns(self) -> None:
+        """Only a refusal is quiet: any other ConnectorError stays a warning."""
+        from structlog.testing import capture_logs
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeSparePartsOutageConnector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        with capture_logs() as logs:
+            context = await agent._gather_context("spare parts for P-201", resolved)
+        assert "spare_parts" not in context
+        assert not [e for e in logs if e["event"] == "context_gather_skipped"]
+        errors = [e for e in logs if e["event"] == "context_gather_error"]
+        assert len(errors) == 1
+        assert errors[0]["log_level"] == "warning"
+        assert errors[0]["source"] == "spare_parts"
 
     @pytest.mark.asyncio
     async def test_with_documents(self) -> None:

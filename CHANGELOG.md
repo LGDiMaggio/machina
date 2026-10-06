@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ConnectorUnsupportedFilterError`**, the `ConnectorError` a connector raises, before any request, for a filter it cannot apply, instead of dropping the filter or answering `[]`. `MaximoConnector`, `UpKeepConnector` and `SapPmConnector` raise it from `read_spare_parts` for an `asset_id` they cannot apply. The agent's context prefetch logs it as an INFO `context_gather_skipped` event, rather than the `context_gather_error` warning it logged on every turn that resolved an asset; any other connector error is still that warning. `docs/connectors/custom.md` states the rule for connector authors.
+
 ### Fixed
 
 - **Spare-part lookups against Maximo and UpKeep.** `MaximoConnector.read_spare_parts` and `UpKeepConnector.read_spare_parts` accept `asset_id` again, as their callers pass it: the agent's `check_spare_parts` tool failed on every call with a `TypeError`, and so did the context prefetch, the `alarm_to_workorder` workflow step and the MCP `machina_list_spare_parts` tool given an asset. Neither connector can apply that filter (Maximo's `mxinventory` and UpKeep's `/api/v2/parts` do not link parts to assets, and neither connector reads an asset's own parts list), so a non-empty `asset_id` raises a `ConnectorError` saying so, before any request, instead of returning the whole inventory as the asset's compatible parts; unfiltered and `sku` lookups work. `check_spare_parts` now sends only the filters the model gave (as the MCP tool does) and returns a `ConnectorError` as its tool result, so the model can relay it and retry by `sku` rather than the turn ending.
+- **SAP PM spare-part lookups by asset without `bom_equipment_field`.** With `bom_equipment_field` unset (the default), `SapPmConnector.read_spare_parts(asset_id=...)` returned `[]`, which the agent's `check_spare_parts` tool, its context prefetch and the `alarm_to_workorder` notification presented as the asset having no spare parts; with a `sku` as well, it dropped the asset filter and returned the `sku` match as if it were compatible with the asset. Both now raise `ConnectorUnsupportedFilterError` before any request, so the unbounded BOM fetch stays refused, and `check_spare_parts` relays the refusal so the model can look the part up by `sku`. With `bom_equipment_field` set, the asset filter is applied server-side as before.
 
 ## [0.4.0] - 2026-10-04
 
