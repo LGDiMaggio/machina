@@ -45,7 +45,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
+| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU; filter by `sku`. `/api/v2/parts` has no asset relation and the connector does not yet read an asset's assigned parts, so a read filtered only by `asset_id` logs a warning and returns `[]` |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
 
 ### Convenience methods

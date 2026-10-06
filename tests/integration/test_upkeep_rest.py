@@ -6,6 +6,7 @@ All HTTP traffic is intercepted by pytest-httpx — no real UpKeep API calls.
 from __future__ import annotations
 
 import pytest
+from structlog.testing import CapturingLogger
 
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
@@ -334,6 +335,49 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="SKF-6205")
         assert len(parts) == 1
         assert parts[0].sku == "SKF-6205"
+
+    @pytest.mark.asyncio
+    async def test_asset_only_read_returns_empty_without_fetching(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        """/api/v2/parts has no asset relation, so an asset filter cannot be applied.
+
+        The read must not widen to the whole inventory: it logs why and returns
+        [] without requesting /api/v2/parts.
+        """
+        await _connect(httpx_mock, connector)
+        log = CapturingLogger()
+        monkeypatch.setattr("machina.connectors.cmms.upkeep.logger", log)
+        parts = await connector.read_spare_parts(asset_id="a1")
+        assert parts == []
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/api/v2/users"]
+        assert [c.args[0] for c in log.calls if c.method_name == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_dropped_when_sku_narrows(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        """With a sku the read stays bounded: the sku filters, the asset is dropped."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "p1", "partNumber": "SKF-6205", "name": "Bearing"},
+                    {"id": "p2", "partNumber": "SKF-7309", "name": "Angular bearing"},
+                ],
+            },
+        )
+        log = CapturingLogger()
+        monkeypatch.setattr("machina.connectors.cmms.upkeep.logger", log)
+        parts = await connector.read_spare_parts(asset_id="a1", sku="SKF-6205")
+        assert [p.sku for p in parts] == ["SKF-6205"]
+        assert [c.args[0] for c in log.calls if c.method_name == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------
