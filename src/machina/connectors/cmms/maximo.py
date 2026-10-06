@@ -418,7 +418,9 @@ class MaximoConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset."""
         self._ensure_connected()
-        where = f'{_oslc_eq("assetnum", asset_id)} and (status="COMP" or status="CLOSE")'
+        # oslc.where has no ``or`` and no grouping parentheses (``and`` is its
+        # only boolean operator), so the two statuses are listed through ``in``.
+        where = f'{_oslc_eq("assetnum", asset_id)} and status in ["COMP","CLOSE"]'
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
 

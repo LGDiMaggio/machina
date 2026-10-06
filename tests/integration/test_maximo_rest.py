@@ -457,9 +457,13 @@ class TestReadMaintenancePlans:
 class TestReadMaintenanceHistory:
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
-        """History query must combine assetnum with completed/closed status."""
+        """History query must combine assetnum with completed/closed status.
+
+        oslc.where has no ``or`` and no grouping parentheses, so the two
+        statuses are listed through ``in``.
+        """
         await _connect(httpx_mock, connector)
-        expected_where = 'assetnum="PUMP-201" and (status="COMP" or status="CLOSE")'
+        expected_where = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxwo", **{"oslc.where": expected_where}),
