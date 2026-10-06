@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Maximo and UpKeep map a work-order `status` filter given as a Machina status value.** The agent's `read_work_orders` tool and the MCP `machina_list_work_orders` tool pass the filter to the connector as given, and these connectors reverse-mapped only a `WorkOrderStatus`: a string such as `"in_progress"` reached Maximo as `IN_PROGRESS` and UpKeep as `in_progress`, values neither of them defines. A string equal to a `WorkOrderStatus` value is now mapped like the enum — by a new `reverse_status_filter()` in the Maximo and UpKeep mapper modules — which is how the Excel/CSV and SQL connectors and the Generic CMMS in local mode already read it; any other string is still sent as the vendor's own status (`WMATL`, `onHold`). The agent tool's description now also lists `cancelled`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

@@ -184,21 +184,17 @@ class UpKeepConnector:
 
         Args:
             asset_id: Filter by UpKeep asset ID.
-            status: Filter by status — accepts a :class:`WorkOrderStatus`
-                enum (reverse-mapped to UpKeep's string) or a raw UpKeep
-                status string for backward compatibility.
+            status: Filter by status — a :class:`WorkOrderStatus` or one of its
+                values such as ``"in_progress"`` (reverse-mapped to UpKeep's
+                status), or any other string, sent to UpKeep as an UpKeep
+                status.
         """
         self._ensure_connected()
         params: dict[str, str] = {}
         if asset_id:
             params["asset"] = asset_id
         if status:
-            upkeep_status = (
-                upkeep_mapper.REVERSE_UPKEEP_STATUS.get(status, status.value)
-                if isinstance(status, WorkOrderStatus)
-                else status
-            )
-            params["status"] = upkeep_status
+            params["status"] = upkeep_mapper.reverse_status_filter(status)
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
         return [upkeep_mapper.parse_work_order(item) for item in raw]
 
