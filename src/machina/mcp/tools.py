@@ -606,7 +606,7 @@ async def _find_asset(cmms: Any, asset_id: str) -> Any:
 
 
 async def machina_diagnose_failure(
-    ctx: Any,
+    ctx: Context,
     asset_id: str,
     symptoms: list[str],
 ) -> dict[str, Any]:
