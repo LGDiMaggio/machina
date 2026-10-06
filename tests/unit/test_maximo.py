@@ -33,7 +33,7 @@ from machina.connectors.cmms.mappers.maximo import (
 from machina.connectors.cmms.mappers.maximo import (
     reverse_worktype as _reverse_worktype,
 )
-from machina.connectors.cmms.maximo import MaximoConnector, _require_httpx
+from machina.connectors.cmms.maximo import MaximoConnector, _oslc_literal, _require_httpx
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -43,7 +43,7 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorError, DomainValidationError
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -246,6 +246,64 @@ class TestReverseMapping:
         assert _reverse_worktype(WorkOrderType.PREVENTIVE) == "PM"
         assert _reverse_worktype(WorkOrderType.PREDICTIVE) == "CP"
         assert _reverse_worktype(WorkOrderType.IMPROVEMENT) == "EV"
+
+
+# ---------------------------------------------------------------------------
+# oslc.where string literals
+# ---------------------------------------------------------------------------
+
+
+class TestOslcLiteral:
+    """Caller values reach an ``oslc.where`` clause only through ``_oslc_literal``.
+
+    Maximo documents no escape syntax inside an ``oslc.where`` string and hands
+    the value to its QBE framework, so a value carrying query syntax is refused
+    rather than escaped.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        ["PUMP-201", "11430", "BRG.6205", "PUMP_201", "BR300/1", "PUMP 201", "O'NEIL", "PUMPE-Ü1"],
+    )
+    def test_identifier_is_double_quoted_verbatim(self, value: str) -> None:
+        assert _oslc_literal(value, field="asset_id") == f'"{value}"'
+
+    @pytest.mark.parametrize("char", list('"\\%*?,[]=!<>~'))
+    def test_query_syntax_character_is_refused(self, char: str) -> None:
+        with pytest.raises(DomainValidationError, match="asset_id") as exc_info:
+            _oslc_literal(f"PUMP{char}201", field="asset_id")
+        assert repr(char) in str(exc_info.value)
+
+    @pytest.mark.parametrize("value", ["PUMP\n201", "PUMP\t201", "PUMP\x00201"])
+    def test_control_character_is_refused(self, value: str) -> None:
+        with pytest.raises(DomainValidationError, match="asset_id"):
+            _oslc_literal(value, field="asset_id")
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_value_is_refused(self, value: str) -> None:
+        # A blank QBE value constrains nothing: the clause would stop filtering.
+        with pytest.raises(DomainValidationError, match="asset_id must not be empty"):
+            _oslc_literal(value, field="asset_id")
+
+    @pytest.mark.parametrize("value", ["null", "NULL", " Null "])
+    def test_qbe_null_keyword_is_refused(self, value: str) -> None:
+        with pytest.raises(DomainValidationError, match="asset_id"):
+            _oslc_literal(value, field="asset_id")
+
+    @pytest.mark.parametrize("value", [201, None, ["PUMP-201"]])
+    def test_non_string_is_refused(self, value: object) -> None:
+        with pytest.raises(DomainValidationError, match="asset_id must be a string"):
+            _oslc_literal(value, field="asset_id")
+
+    def test_refusal_names_the_characters_not_the_value(self) -> None:
+        # The message reaches the LLM as a tool result, so it must not echo the
+        # (possibly injected) value back into the prompt.
+        with pytest.raises(DomainValidationError) as exc_info:
+            _oslc_literal('PUMP-201" or assetnum="%', field="asset_id")
+        message = str(exc_info.value)
+        assert repr('"') in message
+        assert repr("%") in message
+        assert "or assetnum" not in message
 
 
 # ---------------------------------------------------------------------------

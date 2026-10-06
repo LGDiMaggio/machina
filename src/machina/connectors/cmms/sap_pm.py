@@ -26,6 +26,10 @@ The vendor payload ↔ Machina entity mapping lives as pure functions in
 :mod:`machina.connectors.cmms.mappers.sap_pm` so it can be unit-tested
 without HTTP mocks.
 
+Caller-supplied filter values (equipment, order and material numbers, status
+codes) reach a ``$filter`` expression only as OData string literals built by
+:func:`_odata_literal`.
+
 See also:
     https://api.sap.com/api/API_EQUIPMENT/overview
     https://api.sap.com/api/API_MAINTENANCEORDER/overview
@@ -46,7 +50,7 @@ from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, DomainValidationError
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -80,6 +84,33 @@ def _is_csrf_challenge(resp: Any) -> bool:
     and retrying the write once is safe and cannot duplicate the order.
     """
     return bool(resp.headers.get("x-csrf-token", "").lower() == "required")
+
+
+def _odata_literal(value: object, *, field: str) -> str:
+    """Quote a caller-supplied value as an OData string literal.
+
+    OData (v2 and v4) delimits a string literal with single quotes and escapes
+    a quote inside one by doubling it, so every string can be expressed and
+    none is refused for its content. Percent-encoding the query string is left
+    to httpx, which encodes a literal ``%`` as well: a pre-encoded ``%27``
+    reaches the gateway as text, not as a quote.
+
+    Args:
+        value: The caller-supplied value: an equipment, order or material
+            number, or a status code. Typed ``object`` because it often
+            arrives unchecked, from LLM tool arguments or workflow payloads.
+        field: The caller-facing parameter name, used in the error message.
+
+    Returns:
+        The value in single quotes with embedded quotes doubled, for a
+        ``Property eq <literal>`` comparison.
+
+    Raises:
+        DomainValidationError: If the value is not a string.
+    """
+    if not isinstance(value, str):
+        raise DomainValidationError(f"{field} must be a string, got {type(value).__name__}")
+    return "'" + value.replace("'", "''") + "'"
 
 
 class SapPmConnector:
@@ -255,7 +286,7 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_EQUIPMENT",
             "Equipment",
-            odata_filter=f"Equipment eq '{asset_id}'",
+            odata_filter=f"Equipment eq {_odata_literal(asset_id, field='asset_id')}",
             top=1,
         )
         return sap_mapper.parse_asset(raw[0]) if raw else None
@@ -278,14 +309,16 @@ class SapPmConnector:
         self._ensure_connected()
         filters: list[str] = []
         if asset_id:
-            filters.append(f"Equipment eq '{asset_id}'")
+            filters.append(f"Equipment eq {_odata_literal(asset_id, field='asset_id')}")
         if status:
             sap_status = (
                 sap_mapper.REVERSE_SAP_STATUS.get(status, status.value)
                 if isinstance(status, WorkOrderStatus)
                 else status
             )
-            filters.append(f"MaintenanceOrderSystemStatus eq '{sap_status}'")
+            filters.append(
+                f"MaintenanceOrderSystemStatus eq {_odata_literal(sap_status, field='status')}"
+            )
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
@@ -300,7 +333,9 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
-            odata_filter=f"MaintenanceOrder eq '{work_order_id}'",
+            odata_filter=(
+                f"MaintenanceOrder eq {_odata_literal(work_order_id, field='work_order_id')}"
+            ),
             top=1,
         )
         return sap_mapper.parse_work_order(raw[0]) if raw else None
@@ -437,7 +472,9 @@ class SapPmConnector:
         filters: list[str] = []
         if asset_id:
             if self._bom_equipment_field:
-                filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
+                filters.append(
+                    f"{self._bom_equipment_field} eq {_odata_literal(asset_id, field='asset_id')}"
+                )
             elif not sku:
                 # asset_id requested, but it cannot be filtered server-side
                 # (bom_equipment_field unset — the default) and there is no sku to
@@ -469,7 +506,7 @@ class SapPmConnector:
                     ),
                 )
         if sku:
-            filters.append(f"{self._bom_material_field} eq '{sku}'")
+            filters.append(f"{self._bom_material_field} eq {_odata_literal(sku, field='sku')}")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             self._bom_service,
@@ -488,7 +525,7 @@ class SapPmConnector:
         """Return completed/closed maintenance orders for an asset."""
         self._ensure_connected()
         odata_filter = (
-            f"Equipment eq '{asset_id}' and "
+            f"Equipment eq {_odata_literal(asset_id, field='asset_id')} and "
             "(MaintenanceOrderSystemStatus eq 'CNF' or "
             "MaintenanceOrderSystemStatus eq 'TECO' or "
             "MaintenanceOrderSystemStatus eq 'CLSD')"
