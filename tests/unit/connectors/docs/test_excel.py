@@ -1242,10 +1242,12 @@ class _OverlapDetectingWorkbook:
     A sheet read, a row append and a row rewrite each use the file from start
     to end. The first call of the function named by ``hold`` waits for
     ``release`` instead, with ``held`` set while it waits, so a test can act
-    while that write is mid-flight on its worker thread; set ``fail`` before
+    while that call is mid-flight on its thread; set ``fail`` before
     releasing it to make that call raise instead of running. Holding
     ``_save_xlsx_atomically`` stops an append or a rewrite after it has loaded
-    and changed the workbook, just before the save.
+    and changed the workbook, just before the save; holding
+    ``_read_xlsx_rows`` stops the next sheet read, by ``connect()``,
+    ``refresh()`` or a write, before it opens the file.
     """
 
     _USES_THE_FILE = ("_read_xlsx_rows", "_append_xlsx_row", "_update_xlsx_row")
@@ -1511,11 +1513,103 @@ class TestWritesTakeTurns:
         assert await asyncio.to_thread(workbook.held.wait, 5)
         await conn.disconnect()  # returns while the write is still held
 
-        assert [c.args[0] for c in log.warning.call_args_list] == ["write_still_running"]
+        assert [c.args[0] for c in log.warning.call_args_list] == ["file_access_still_running"]
         with pytest.raises(ConnectorError, match="Not connected"):
             await conn.read_work_orders()
         workbook.release.set()
         assert (await update).description == "changed"
+
+
+# The two ways the connector reloads its sheets. refresh() is synchronous: a
+# FileWatcher calls it from its timer thread, as asyncio.to_thread does here.
+_RELOADS = [
+    pytest.param(lambda conn: asyncio.to_thread(conn.refresh), id="refresh"),
+    pytest.param(lambda conn: conn.connect(), id="connect"),
+]
+
+
+class TestReadsTakeTurnsWithWrites:
+    """connect() and refresh() read the files in turn with the writes, so a
+    read never has a workbook open while a write replaces it (on Windows that
+    replace fails, as if another program held the file)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reload", _RELOADS)
+    async def test_a_reload_waits_for_a_write_in_flight(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+        reload: Callable[[ExcelCsvConnector], Any],
+    ) -> None:
+        """The reload reads the file once the write has saved it, so the cache
+        keeps the appended row."""
+        _path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+        wo = WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+        queued = threading.Event()
+        submit = conn._submit_to_file_thread
+
+        def submit_and_signal(*args: Any) -> Any:
+            future = submit(*args)
+            queued.set()
+            return future
+
+        create = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(workbook.held.wait, 5)  # appended, not yet saved
+        monkeypatch.setattr(conn, "_submit_to_file_thread", submit_and_signal)
+        reloading = asyncio.create_task(reload(conn))
+        assert await asyncio.to_thread(queued.wait, 5)  # queued behind the write
+        assert not reloading.done()
+        workbook.release.set()
+        await create
+        await reloading
+
+        assert workbook.max_users == 1
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reload", _RELOADS)
+    async def test_a_write_waits_for_a_reload_in_flight(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        reload: Callable[[ExcelCsvConnector], Any],
+    ) -> None:
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_read_xlsx_rows"
+        wo = WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+
+        reloading = asyncio.create_task(reload(conn))
+        assert await asyncio.to_thread(workbook.held.wait, 5)  # the reload is reading
+        create = asyncio.create_task(conn.create_work_order(wo))
+        await asyncio.sleep(0.05)
+        assert not create.done()
+        assert not reloading.done()  # it returns once the sheets are loaded, not before
+        workbook.release.set()
+        await reloading
+        await create
+
+        assert workbook.max_users == 1
+        assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_connect_reads_off_the_event_loop(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        path = tmp_path / "odl.xlsx"
+        TestWritesPreserveTheFile._workbook(path)
+        conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+        workbook.hold = "_read_xlsx_rows"
+
+        connecting = asyncio.create_task(conn.connect())
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        assert not connecting.done()  # the event loop runs while the sheet is read
+        workbook.release.set()
+        await connecting
+
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2"]
 
 
 class TestRefresh:
