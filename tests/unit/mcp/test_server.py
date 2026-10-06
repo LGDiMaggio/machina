@@ -38,6 +38,21 @@ class TestBuildServer:
         tool_names = [t.name for t in server._tool_manager.list_tools()]
         assert "machina_list_assets" in tool_names
 
+    @pytest.mark.parametrize("conn_type", ["maximo", "sap_pm", "upkeep"])
+    def test_maintenance_history_tool_registered_with_rest_cmms(self, conn_type: str) -> None:
+        """Each REST CMMS reads maintenance history, so MCP must offer the tool.
+
+        Tools register from declared capabilities; these connectors used to
+        serve ``read_maintenance_history`` without declaring it.
+        """
+        from machina.config.schema import ConnectorConfig
+        from machina.mcp.server import build_server
+
+        config = MachinaConfig(connectors={"cmms": ConnectorConfig(type=conn_type, settings={})})
+        server = build_server(config)
+        tool_names = [t.name for t in server._tool_manager.list_tools()]
+        assert "machina_get_maintenance_history" in tool_names
+
     def test_no_tool_exposes_ctx_as_an_argument(self) -> None:
         """Regression: tools annotated ``ctx: Any`` published ``ctx`` as a
         required input, so every tools/call from a real client failed

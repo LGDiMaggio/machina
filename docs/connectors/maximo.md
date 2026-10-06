@@ -75,6 +75,7 @@ pip install machina-ai[cmms-rest]
 | `update_work_order` | Update status, assignee, or description via PATCH |
 | `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
+| `read_maintenance_history` | Read an asset's completed and closed work orders (`mxwo`, status `COMP` or `CLOSE`) |
 
 ### Convenience methods
 
