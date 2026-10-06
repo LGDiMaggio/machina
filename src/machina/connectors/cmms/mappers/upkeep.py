@@ -187,7 +187,11 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     )
 
 
-def parse_maintenance_plans(data: dict[str, Any]) -> list[MaintenancePlan]:
+def parse_maintenance_plans(
+    data: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[MaintenancePlan]:
     """Convert an UpKeep PM template to one :class:`MaintenancePlan` per schedule.
 
     ``GET /api/v2/pm?includes=schedules`` returns PM templates whose
@@ -196,9 +200,16 @@ def parse_maintenance_plans(data: dict[str, Any]) -> list[MaintenancePlan]:
     schedule, the name, tasks and estimated hours from the template. A
     soft-deleted template (``deletedAt`` set) yields no plans. See
     https://developers.onupkeep.com/#get-all-pms.
+
+    Args:
+        data: One PM template with its schedules expanded.
+        now: The moment that decides whether a schedule has ended (its
+            ``endDate`` has passed). Defaults to the current UTC time.
     """
     if data.get("deletedAt"):
         return []
+    if now is None:
+        now = datetime.now(tz=UTC)
     tasks = [str(task["name"]) for task in data.get("tasks") or [] if task.get("name")]
     return [
         MaintenancePlan(
@@ -208,7 +219,7 @@ def parse_maintenance_plans(data: dict[str, Any]) -> list[MaintenancePlan]:
             interval=_schedule_interval(schedule),
             tasks=tasks,
             estimated_duration_hours=data.get("estimatedTime"),
-            active=not schedule.get("scheduleHasEnded"),
+            active=not _schedule_has_ended(schedule, now),
         )
         for schedule in data.get("schedules") or []
     ]
@@ -269,3 +280,15 @@ def _schedule_interval(schedule: dict[str, Any]) -> Interval:
     if frequency == "YEARLY":
         return Interval(months=12 * every)
     return Interval()
+
+
+def _schedule_has_ended(schedule: dict[str, Any], now: datetime) -> bool:
+    """Whether a PM schedule creates no more work orders.
+
+    ``/api/v2/pm`` responses carry the schedule's ``endDate``;
+    ``scheduleHasEnded`` appears on ``/api/v2/pm/schedules`` payloads.
+    """
+    if schedule.get("scheduleHasEnded"):
+        return True
+    end = schedule.get("endDate")
+    return bool(end) and parse_datetime(str(end)) <= now

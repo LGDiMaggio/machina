@@ -137,7 +137,7 @@ await connector.close_work_order("wo-123")
 | `id` / `_id` (PM schedule) | `MaintenancePlan.id` |
 | `asset` (PM schedule) | `MaintenancePlan.asset_id` |
 | `repeatFrequency` × `repeatInterval` (PM schedule) | `MaintenancePlan.interval` (DAILY→days, WEEKLY→weeks, MONTHLY→months, YEARLY→12 months) |
-| `scheduleHasEnded` (PM schedule) | `MaintenancePlan.active` (false once the schedule has ended) |
+| `endDate` / `scheduleHasEnded` (PM schedule) | `MaintenancePlan.active` (false once the end date has passed or UpKeep marks the schedule ended) |
 | `name` (PM template) | `MaintenancePlan.name` |
 | `tasks[].name` (PM template) | `MaintenancePlan.tasks` |
 | `estimatedTime` (PM template, hours) | `MaintenancePlan.estimated_duration_hours` |

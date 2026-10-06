@@ -7,6 +7,8 @@ without network calls. For HTTP-level integration tests see
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from machina.connectors.cmms.mappers.upkeep import (
@@ -284,7 +286,8 @@ class TestParseMaintenancePlans:
             "tasks": [],
             "updatedAt": "2023-11-30T19:43:30.230Z",
         }
-        plans = _parse_maintenance_plans(raw)
+        # A moment between the documented schedules' startDate and endDate.
+        plans = _parse_maintenance_plans(raw, now=datetime(2024, 1, 1, tzinfo=UTC))
         assert len(plans) == 2
         calendar, meter = plans
         assert isinstance(calendar, MaintenancePlan)

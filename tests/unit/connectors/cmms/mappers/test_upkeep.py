@@ -88,6 +88,11 @@ class TestParseSparePartSku:
         assert sp.sku == "internal"
 
 
+# Both documented schedules run from 2023-12-10 to 2024-10-09.
+DURING_SCHEDULES = datetime(2024, 1, 1, tzinfo=UTC)
+AFTER_SCHEDULES = datetime(2024, 10, 10, tzinfo=UTC)
+
+
 def _docs_pm_template() -> dict[str, Any]:
     """Response of "Get a specific PM" (#get-a-specific-pm), GET /api/v2/pm/:id.
 
@@ -190,7 +195,7 @@ class TestParseMaintenancePlans:
         assert {p.asset_id for p in plans} == {"BcmoxOY4mE"}
 
     def test_calendar_schedule_interval_duration_and_active(self) -> None:
-        calendar = parse_maintenance_plans(_docs_pm_template())[0]
+        calendar = parse_maintenance_plans(_docs_pm_template(), now=DURING_SCHEDULES)[0]
         assert calendar.interval == Interval(days=1)
         assert calendar.estimated_duration_hours == 71  # "Duration ... in hours"
         assert calendar.active is True
@@ -242,10 +247,21 @@ class TestParseMaintenancePlans:
         del template["schedules"][0]["asset"]
         assert parse_maintenance_plans(template)[0].asset_id == ""
 
-    def test_ended_schedule_is_inactive(self) -> None:
+    def test_schedule_past_its_end_date_is_inactive(self) -> None:
+        """``endDate`` is the schedule's "End date for trigger"."""
+        plans = parse_maintenance_plans(_docs_pm_template(), now=AFTER_SCHEDULES)
+        assert [p.active for p in plans] == [False, False]
+
+    def test_schedule_without_end_date_stays_active(self) -> None:
+        template = _docs_pm_template()
+        del template["schedules"][0]["endDate"]
+        assert parse_maintenance_plans(template, now=AFTER_SCHEDULES)[0].active is True
+
+    def test_schedule_marked_ended_is_inactive(self) -> None:
+        """``scheduleHasEnded`` appears on GET /api/v2/pm/schedules payloads."""
         template = _docs_pm_template()
         template["schedules"][0]["scheduleHasEnded"] = True
-        assert parse_maintenance_plans(template)[0].active is False
+        assert parse_maintenance_plans(template, now=DURING_SCHEDULES)[0].active is False
 
     def test_deleted_template_yields_no_plans(self) -> None:
         """The "Get all PMs" example shows a soft-deleted template (``deletedAt``)."""
