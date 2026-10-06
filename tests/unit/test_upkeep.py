@@ -16,7 +16,7 @@ from machina.connectors.cmms.mappers.upkeep import (
     parse_datetime as _parse_datetime,
 )
 from machina.connectors.cmms.mappers.upkeep import (
-    parse_maintenance_plan as _parse_maintenance_plan,
+    parse_maintenance_plans as _parse_maintenance_plans,
 )
 from machina.connectors.cmms.mappers.upkeep import (
     parse_spare_part as _parse_spare_part,
@@ -29,7 +29,7 @@ from machina.connectors.cmms.mappers.upkeep import (
 )
 from machina.connectors.cmms.upkeep import UpKeepConnector, _require_httpx
 from machina.domain.asset import Asset, AssetType
-from machina.domain.maintenance_plan import MaintenancePlan
+from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import (
     Priority,
@@ -205,25 +205,98 @@ class TestParseSparePart:
         assert "partNumber" not in sp.metadata
 
 
-class TestParseMaintenancePlan:
-    """Verify UpKeep PM JSON → MaintenancePlan conversion."""
+class TestParseMaintenancePlans:
+    """Verify UpKeep PM template JSON → MaintenancePlan conversion."""
 
-    def test_active_plan(self) -> None:
+    def test_documented_template_maps_one_plan_per_schedule(self) -> None:
+        # One template from "Get all PMs" (developers.onupkeep.com/#get-all-pms),
+        # without the deletedAt/deletedBy markers of the documented example.
         raw = {
-            "id": "pm-1",
-            "title": "Weekly inspection",
-            "assetId": "asset-1",
-            "frequencyDays": 7,
-            "status": "active",
-            "tasks": ["Check pressure", "Inspect seals"],
+            "__v": 0,
+            "_id": "6568e5bf7a771cd3d83b337c",
+            "category": "Inspection",
+            "createFirstWO": True,
+            "createdAt": "2023-11-30T19:42:55.984Z",
+            "createdBy": "N5lbFIv8LW",
+            "estimatedTime": 100,
+            "files": ["trfyrp53kw"],
+            "images": [],
+            "legacyPMId": "t69EvI5kMq",
+            "mainDescription": "Oil change #FP-ZFP-1",
+            "name": "Oil change #FP-ZFP-1",
+            "note": "Oil change for asset #FP-ZFP-1",
+            "partInventories": [],
+            "priority": 3,
+            "requiresSignature": False,
+            "role": "JtdU6sKOwD",
+            "schedules": [
+                {
+                    "asset": "BcmoxOY4mE",
+                    "assignee": "Fu8PEA9P9G",
+                    "bySetPosition": [],
+                    "cadenceFreq": "DAILY",
+                    "cadenceInterval": 3,
+                    "cadenceType": "manual",
+                    "endDate": "2024-10-09T08:42:24.000Z",
+                    "excludedates": [],
+                    "id": "65672e0c90176209662a4fc2",
+                    "includeDates": [],
+                    "isBasedOnCompletion": False,
+                    "location": "c78MVjkbvh",
+                    "monthdays": [],
+                    "nextDueDate": "2023-12-11T08:42:24.000Z",
+                    "nextTriggerDate": "2023-12-10T08:42:24.000Z",
+                    "pmTemplate": "65672e0c90176209662a4fc1",
+                    "repeatFrequency": "MONTHLY",
+                    "repeatInterval": 7,
+                    "role": "PUlegnw3ml",
+                    "scheduleType": "EVERY_N_MONTHS",
+                    "startDate": "2023-12-10T08:42:24.000Z",
+                    "supportUsers": ["IDb8mbMV9l"],
+                    "team": "SFejxVqERT",
+                    "timeZone": "Asia/Kolkata",
+                    "weekdays": [],
+                },
+                {
+                    "asset": "BcmoxOY4mE",
+                    "assignee": "Fu8PEA9P9G",
+                    "bySetPosition": [],
+                    "endDate": "2024-10-09T16:23:35.000Z",
+                    "excludedates": [],
+                    "id": "65672e0c90176209662a4fc4",
+                    "includeDates": [],
+                    "location": "c78MVjkbvh",
+                    "meter": "vXMGBoLMJv",
+                    "meterConditionValue": 10000,
+                    "meterDueFrequency": "weeks",
+                    "meterDueInterval": 1,
+                    "monthdays": [],
+                    "nextMeterReading": 45750,
+                    "pmTemplate": "65672e0c90176209662a4fc1",
+                    "role": "PUlegnw3ml",
+                    "startDate": "2023-12-10T16:23:35.000Z",
+                    "supportUsers": ["IDb8mbMV9l"],
+                    "team": "SFejxVqERT",
+                    "timeZone": "Asia/Kolkata",
+                    "weekdays": [],
+                },
+            ],
+            "tasks": [],
+            "updatedAt": "2023-11-30T19:43:30.230Z",
         }
-        plan = _parse_maintenance_plan(raw)
-        assert isinstance(plan, MaintenancePlan)
-        assert plan.id == "pm-1"
-        assert plan.name == "Weekly inspection"
-        assert plan.interval.days == 7
-        assert plan.active is True
-        assert len(plan.tasks) == 2
+        plans = _parse_maintenance_plans(raw)
+        assert len(plans) == 2
+        calendar, meter = plans
+        assert isinstance(calendar, MaintenancePlan)
+        assert calendar.id == "65672e0c90176209662a4fc2"
+        assert calendar.asset_id == "BcmoxOY4mE"
+        assert calendar.name == "Oil change #FP-ZFP-1"
+        assert calendar.interval == Interval(months=7)
+        assert calendar.tasks == []
+        assert calendar.estimated_duration_hours == 100
+        assert calendar.active is True
+        assert meter.id == "65672e0c90176209662a4fc4"
+        assert meter.interval == Interval()
 
 
 class TestParseDatetime:

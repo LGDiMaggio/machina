@@ -27,7 +27,7 @@ __all__ = [
     "UPKEEP_STATUS_MAP",
     "parse_asset",
     "parse_datetime",
-    "parse_maintenance_plan",
+    "parse_maintenance_plans",
     "parse_spare_part",
     "parse_work_order",
     "reverse_priority",
@@ -187,17 +187,31 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     )
 
 
-def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
-    """Convert an UpKeep preventive-maintenance JSON to a :class:`MaintenancePlan`."""
-    freq_days = int(data.get("frequencyDays", 0))
-    return MaintenancePlan(
-        id=str(data.get("id", "")),
-        asset_id=str(data.get("assetId") or ""),
-        name=str(data.get("title", "")),
-        interval=Interval(days=freq_days),
-        tasks=[str(t) for t in data.get("tasks", [])],
-        active=data.get("status", "active") == "active",
-    )
+def parse_maintenance_plans(data: dict[str, Any]) -> list[MaintenancePlan]:
+    """Convert an UpKeep PM template to one :class:`MaintenancePlan` per schedule.
+
+    ``GET /api/v2/pm?includes=schedules`` returns PM templates whose
+    ``schedules`` each target one asset (or none) with their own recurrence,
+    so a plan models a schedule: its ID, asset and interval come from the
+    schedule, the name, tasks and estimated hours from the template. A
+    soft-deleted template (``deletedAt`` set) yields no plans. See
+    https://developers.onupkeep.com/#get-all-pms.
+    """
+    if data.get("deletedAt"):
+        return []
+    tasks = [str(task["name"]) for task in data.get("tasks") or [] if task.get("name")]
+    return [
+        MaintenancePlan(
+            id=str(schedule.get("id") or schedule.get("_id") or ""),
+            asset_id=str(schedule.get("asset") or ""),
+            name=str(data.get("name", "")),
+            interval=_schedule_interval(schedule),
+            tasks=tasks,
+            estimated_duration_hours=data.get("estimatedTime"),
+            active=not schedule.get("scheduleHasEnded"),
+        )
+        for schedule in data.get("schedules") or []
+    ]
 
 
 def parse_datetime(value: str) -> datetime:
@@ -231,3 +245,27 @@ def reverse_priority(priority: Priority) -> int:
 def reverse_status(status: WorkOrderStatus) -> str:
     """Map Machina work-order status to UpKeep status string."""
     return REVERSE_UPKEEP_STATUS.get(status, "open")
+
+
+# ---------------------------------------------------------------------------
+# Module-private helpers (only used by parse_* / reverse_*)
+# ---------------------------------------------------------------------------
+
+
+def _schedule_interval(schedule: dict[str, Any]) -> Interval:
+    """Map a PM schedule's ``repeatFrequency`` x ``repeatInterval`` to an :class:`Interval`.
+
+    A meter-triggered schedule has no calendar recurrence, and the PM payload
+    names its meter but not the meter's unit, so it maps to an empty interval.
+    """
+    every = int(schedule.get("repeatInterval") or 1)
+    frequency = str(schedule.get("repeatFrequency") or "").upper()
+    if frequency == "DAILY":
+        return Interval(days=every)
+    if frequency == "WEEKLY":
+        return Interval(weeks=every)
+    if frequency == "MONTHLY":
+        return Interval(months=every)
+    if frequency == "YEARLY":
+        return Interval(months=12 * every)
+    return Interval()

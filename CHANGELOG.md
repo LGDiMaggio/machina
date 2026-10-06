@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **UpKeep maintenance plans are read from PM templates (`GET /api/v2/pm`).** `read_maintenance_plans()` parsed `/api/v2/preventive-maintenance` items as flat `{id, assetId, title, frequencyDays, tasks, status}` objects, a shape UpKeep's API reference does not contain: that endpoint returns legacy PM triggers nested as `{"trigger": {...}, "workOrder": {...}}`, so each one parsed to an empty ID and the read raised `ValidationError` on any account with PM triggers — and no documented trigger response names an asset. The connector now pages through `/api/v2/pm` with schedules expanded and returns one plan per PM schedule: ID, asset and recurrence (`repeatFrequency` × `repeatInterval`) from the schedule; name, task names and estimated hours from the template. Meter-triggered schedules have an empty interval, ended schedules are inactive, and soft-deleted templates are skipped. In `machina.connectors.cmms.mappers.upkeep`, `parse_maintenance_plan(item)` is replaced by `parse_maintenance_plans(template)`, which returns a list.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
