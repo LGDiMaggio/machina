@@ -30,16 +30,27 @@ The SAP PM, Maximo and UpKeep connectors send their HTTP calls through
   otherwise produce a duplicate.
 - **Strategy:** exponential backoff — `min(0.5 s × 2^attempt, 8 s)`, up to 3
   retries. A numeric `Retry-After` header on a retried 429 or 503 replaces the
-  computed delay and is not capped.
+  computed delay when it is 8 s or less. A longer one ends the retries at once
+  and the connector raises its error, since a retry inside the server's window
+  would most likely be refused again.
 - **Other errors:** 4xx (except 429) and 5xx (except 503) return immediately —
   the connector raises its own exception.
 
 The Generic CMMS connector's REST mode makes single attempts, without retries.
 
-The retry window is short: about 3.5 seconds of backoff (0.5 + 1 + 2 s) plus
-each attempt's own timeout, longer only when the server sends `Retry-After`. If
-the CMMS stays down past it, the operation fails and the error reaches the
-agent or MCP client. Machina does not queue failed writes.
+The retry window is short and applies to each HTTP request: about 3.5 seconds
+of backoff (0.5 + 1 + 2 s) plus each attempt's own timeout. A server's
+`Retry-After` can stretch the backoff to at most 24 seconds (three waits of
+8 s). An operation that sends several requests, such as a paged read, gets a
+window for each. If the CMMS stays down past the window, the operation fails
+and the error reaches the agent or MCP client. Machina does not queue failed
+writes.
+
+A `Retry-After` longer than 8 s fails the request wherever it comes. A paged
+read that runs into one fails as a whole. At startup, `Agent.start()` fails
+when it meets one during a connection check or the initial asset load, and
+the MCP server marks the connector as failed (see
+[Health Endpoint](#health-endpoint)).
 
 Work-order IDs are deterministic, but only some connectors use them to avoid
 duplicates: the Excel/CSV and SQL connectors and the Generic CMMS connector's
