@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 from urllib.parse import quote
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
 import jmespath
@@ -52,7 +55,12 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorConfigError,
+    ConnectorError,
+    ConnectorTimeoutError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -78,6 +86,57 @@ def _require_httpx() -> Any:
             "httpx is required for REST mode. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+@contextmanager
+def _rest_errors(operation: str, *, write: bool = False) -> Iterator[None]:
+    """Re-raise a REST operation's httpx failure or undecodable body as a connector error.
+
+    An error status becomes :class:`ConnectorAuthError` for 401/403 and
+    :class:`ConnectorError` otherwise; a timeout becomes
+    :class:`ConnectorTimeoutError`, and any other transport failure a
+    :class:`ConnectorError`. A malformed URL raises ``httpx.InvalidURL``,
+    which is not an ``httpx.HTTPError``, and becomes
+    :class:`ConnectorConfigError`. A 2xx body that ``resp.json()`` cannot
+    decode (an HTML login page from a proxy, say) becomes a
+    :class:`ConnectorError` too. For a ``write`` the CMMS may already have
+    applied the change, so that message says so rather than report a failure
+    that invites a duplicating retry. The message names the operation and
+    the status or failure type but never the URL, which httpx puts in its
+    own messages, nor the body; the original exception stays chained as
+    ``__cause__``.
+
+    Wrap only the request, the status check and the decoding: map and parse
+    records after the block, so that an error there (a plugin coercer's
+    included) is not reported as a failed call.
+    """
+    httpx = _require_httpx()
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        message = f"CMMS {operation} failed: HTTP {status}"
+        if status in (401, 403):
+            raise ConnectorAuthError(message) from exc
+        raise ConnectorError(message) from exc
+    except httpx.TimeoutException as exc:
+        raise ConnectorTimeoutError(f"CMMS {operation} timed out") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectorError(f"CMMS {operation} failed: {type(exc).__name__}") from exc
+    except httpx.InvalidURL as exc:
+        raise ConnectorConfigError(
+            f"CMMS {operation} failed: invalid URL (check 'url' and the endpoint paths)"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # resp.json() decodes the raw bytes and ignores the declared charset,
+        # so a body that is not UTF-8 fails before it can fail as JSON.
+        problem = "not UTF-8" if isinstance(exc, UnicodeDecodeError) else "not JSON"
+        if write:
+            raise ConnectorError(
+                f"CMMS {operation}: response is {problem}; the change may have been "
+                "applied, so check the CMMS before retrying"
+            ) from exc
+        raise ConnectorError(f"CMMS {operation} failed: response is {problem}") from exc
 
 
 class GenericCmmsConnector:
@@ -283,9 +342,12 @@ class GenericCmmsConnector:
         """Establish connection or load local data files.
 
         Raises:
-            ConnectorError: If neither ``url`` nor ``data_dir`` is provided.
+            ConnectorError: If neither ``url`` nor ``data_dir`` is provided,
+                or the REST health check fails.
             ConnectorAuthError: In REST mode, if no authentication strategy
-                was supplied.
+                was supplied or the CMMS rejects it (HTTP 401/403).
+            ConnectorTimeoutError: If the REST health check times out.
+            ConnectorConfigError: If ``url`` is malformed.
         """
         if self._data_dir and self._data_dir.exists():
             await self._load_local_data()
@@ -798,11 +860,14 @@ class GenericCmmsConnector:
         if self._auth is None:
             raise ConnectorAuthError("API key or auth strategy is required for REST mode")
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                self._rest_url("health"),
-                headers=self._rest_headers(),
-            )
+        with _rest_errors("health check"):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    self._rest_url("health"),
+                    headers=self._rest_headers(),
+                )
+                resp.raise_for_status()
+        # raise_for_status() lets any 2xx through; the contract asks for 200.
         if resp.status_code != 200:
             raise ConnectorError(f"CMMS health check failed: HTTP {resp.status_code}")
         logger.info(
@@ -824,19 +889,22 @@ class GenericCmmsConnector:
         headers = self._rest_headers()
         if asset_id:
             url = self._rest_url("assets", self._path_segment(asset_id))
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 404:
-                    return []
-                resp.raise_for_status()
-            return [_parse_asset(self._apply_mapping("assets", resp.json()))]
+            with _rest_errors("get asset"):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 404:
+                        return []
+                    resp.raise_for_status()
+                    body = resp.json()
+            return [_parse_asset(self._apply_mapping("assets", body))]
 
         url = self._rest_url("assets")
-        results: list[Asset] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, url, headers):
-                results.append(_parse_asset(self._apply_mapping("assets", raw)))
-        return results
+        raw_items: list[dict[str, Any]] = []
+        with _rest_errors("read assets"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async for raw in self._pagination.iterate(client, url, headers):
+                    raw_items.append(raw)
+        return [_parse_asset(self._apply_mapping("assets", raw)) for raw in raw_items]
 
     async def _rest_read_work_orders(
         self,
@@ -858,11 +926,12 @@ class GenericCmmsConnector:
             params["status"] = status
 
         url = self._rest_url("work_orders")
-        results: list[WorkOrder] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, url, headers, params=params):
-                results.append(_parse_work_order(self._apply_mapping("work_orders", raw)))
-        return results
+        raw_items: list[dict[str, Any]] = []
+        with _rest_errors("read work orders"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async for raw in self._pagination.iterate(client, url, headers, params=params):
+                    raw_items.append(raw)
+        return [_parse_work_order(self._apply_mapping("work_orders", raw)) for raw in raw_items]
 
     async def _rest_create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Submit a new work order to the REST API."""
@@ -871,14 +940,16 @@ class GenericCmmsConnector:
         payload = work_order.model_dump(mode="json")
         if self._yaml_mapping is not None:
             payload = self._yaml_reverse_map("work_order", payload)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                self._rest_url("work_orders"),
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+        with _rest_errors("create work order", write=True):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    self._rest_url("work_orders"),
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        return _parse_work_order(self._apply_mapping("work_orders", body))
 
     async def _rest_get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Fetch a single work order from the REST API."""
@@ -886,12 +957,14 @@ class GenericCmmsConnector:
         httpx = _require_httpx()
         path = config["path"].replace("{id}", self._path_segment(work_order_id))
         headers = self._rest_headers()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(self._rest_url(path), headers=headers)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+        with _rest_errors("get work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(self._rest_url(path), headers=headers)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                body = resp.json()
+        return _parse_work_order(self._apply_mapping("work_orders", body))
 
     async def _rest_update_work_order(
         self,
@@ -921,11 +994,12 @@ class GenericCmmsConnector:
             payload = {field_map.get(k, k): v for k, v in payload.items()}
 
         headers = {**self._rest_headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.request(
-                method, self._rest_url(path), headers=headers, json=payload
-            )
-            resp.raise_for_status()
+        with _rest_errors("update work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.request(
+                    method, self._rest_url(path), headers=headers, json=payload
+                )
+                resp.raise_for_status()
 
         logger.info(
             "work_order_updated",
@@ -942,7 +1016,9 @@ class GenericCmmsConnector:
                 raise ConnectorError(f"Work order {work_order_id} not found after update")
             return updated
         if resp.content:
-            return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+            with _rest_errors("update work order", write=True):
+                body = resp.json()
+            return _parse_work_order(self._apply_mapping("work_orders", body))
         # No response body and no get endpoint — return a minimal WO
         return WorkOrder(
             id=work_order_id,
@@ -957,13 +1033,15 @@ class GenericCmmsConnector:
         httpx = _require_httpx()
         path = config["path"]
         headers = self._rest_headers()
-        results: list[MaintenancePlan] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
-                results.append(
-                    _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
-                )
-        return results
+        raw_items: list[dict[str, Any]] = []
+        with _rest_errors("read maintenance plans"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
+                    raw_items.append(raw)
+        return [
+            _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
+            for raw in raw_items
+        ]
 
     # ------------------------------------------------------------------
     # Endpoint configuration helpers
