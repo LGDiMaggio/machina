@@ -47,7 +47,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorError, LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -592,6 +592,34 @@ def _write_refused(reason: str, explanation: str, **extra: Any) -> dict[str, Any
     }
 
 
+@dataclass(frozen=True)
+class _FailureModeHarvest:
+    """One call-time harvest of the failure-mode catalog.
+
+    ``failure_modes`` is what the providers that answered served, deduped by
+    code. ``failed`` maps the registry name of each provider whose
+    ``read_failure_modes()`` raised :class:`ConnectorError` to that error: the
+    fact that tells a catalog whose backend is down from one that was never
+    configured.
+    """
+
+    failure_modes: list[FailureMode]
+    failed: dict[str, ConnectorError]
+
+    def describe_failed(self) -> str:
+        """Name each failed provider and its error, as text for the model.
+
+        The error text goes through :func:`safe_text`: a connector message can
+        carry a user-home or UNC path (a workbook, a data directory).
+        """
+        parts = []
+        for name, exc in self.failed.items():
+            kind = type(exc).__name__
+            detail = f"{kind}: {safe_text(str(exc))}" if str(exc) else kind
+            parts.append(f"provider '{name}' failed ({detail})")
+        return ", ".join(parts)
+
+
 class Agent:
     """Maintenance AI agent that orchestrates reasoning and actions.
 
@@ -1048,21 +1076,31 @@ class Agent:
             )
 
     async def _collect_failure_modes(self) -> list[FailureMode]:
+        """The harvested catalog alone, as the workflow path consumes it.
+
+        Providers that raised :class:`ConnectorError` are skipped, so
+        :meth:`_build_domain_services` hands ``FailureAnalyzer`` whatever the
+        reachable providers served. See :meth:`_harvest_failure_modes`.
+        """
+        return (await self._harvest_failure_modes()).failure_modes
+
+    async def _harvest_failure_modes(self) -> _FailureModeHarvest:
         """Harvest failure modes from capability-declaring connectors, deduped by code.
 
         Single source for both the workflow path
-        (:meth:`_build_domain_services`) and the ``diagnose_failure`` tool —
-        factored out so the two sites cannot drift. Discovers providers via
+        (:meth:`_build_domain_services`, via :meth:`_collect_failure_modes`)
+        and the ``diagnose_failure`` tool — factored out so the two sites
+        cannot drift. Discovers providers via
         :attr:`Capability.READ_FAILURE_MODES` and awaits each connector's
         public ``read_failure_modes()`` at call time, so it never serves a
         stale snapshot. A provider that raises :class:`ConnectorError`
-        (e.g. not connected) contributes nothing instead of aborting the
-        whole harvest — the empty-catalog honesty note downstream stays
-        intact. Duplicate codes across connectors keep the first occurrence
-        (registration order).
+        (e.g. not connected, timed out) contributes nothing instead of
+        aborting the whole harvest, and is recorded in ``failed`` so the tool
+        can report the catalog as unavailable rather than unconfigured. Any
+        other exception is a bug in the connector and propagates. Duplicate
+        codes across connectors keep the first occurrence (registration
+        order).
         """
-        from machina.exceptions import ConnectorError
-
         providers = self._registry.find_by_capability(Capability.READ_FAILURE_MODES)
         # Fan out concurrently — one slow/flaky provider must not serialise
         # the whole harvest. gather() preserves argument order, so the
@@ -1072,6 +1110,7 @@ class Agent:
             return_exceptions=True,
         )
         by_code: dict[str, FailureMode] = {}
+        failed: dict[str, ConnectorError] = {}
         for (name, _conn), result in zip(providers, results, strict=True):
             if isinstance(result, ConnectorError):
                 logger.warning(
@@ -1081,13 +1120,14 @@ class Agent:
                     operation="collect_failure_modes",
                     error=str(result),
                 )
+                failed[name] = result
                 continue
             if isinstance(result, BaseException):
                 raise result
             for fm in result:
                 if fm.code not in by_code:
                     by_code[fm.code] = fm
-        return list(by_code.values())
+        return _FailureModeHarvest(failure_modes=list(by_code.values()), failed=failed)
 
     async def stop(self) -> None:
         """Disconnect all connectors and channels."""
@@ -3502,7 +3542,7 @@ class Agent:
         """Diagnose probable failure modes against the live failure-mode catalog.
 
         Harvests failure modes from the registered connectors at call time
-        (via :meth:`_collect_failure_modes`, the same source
+        (via :meth:`_harvest_failure_modes`, the same source
         :meth:`_build_domain_services` feeds the workflow analyzer), filters
         the catalog to the resolved asset's declared ``failure_modes`` when
         present, and matches the LLM's free-text symptoms by token overlap
@@ -3515,6 +3555,12 @@ class Agent:
         An empty ``probable_failures`` list ALWAYS carries an explanatory
         ``note`` so the model can distinguish "unknown asset" from "no
         catalog configured" from "catalog present but nothing matched".
+        A catalog left empty because its providers FAILED (raised
+        :class:`ConnectorError`) is none of those: the result is then an
+        ``error`` naming each failed provider and its failure — the catalog
+        is unavailable, not unconfigured. When only some providers failed,
+        diagnosis runs on what the others served and the ``note`` says the
+        catalog was partial, whatever else it reports.
         """
         from machina.exceptions import AssetNotFoundError
 
@@ -3543,7 +3589,27 @@ class Agent:
 
         # Call-time harvest: derive the catalog from whatever connectors
         # declare the capability NOW — never goes stale.
-        catalog = await self._collect_failure_modes()
+        harvest = await self._harvest_failure_modes()
+        catalog = harvest.failure_modes
+        if not catalog and harvest.failed:
+            # Providers ARE configured but could not serve: the catalog is
+            # unavailable, not missing. An error rather than a note, so the
+            # turn loop handles it as the failed read it is, like any other
+            # read tool's backend failure.
+            logger.warning(
+                "diagnose_failure_catalog_unavailable",
+                agent=self.name,
+                asset_id=asset_id,
+                operation="diagnose_failure",
+                failed_connectors=list(harvest.failed),
+            )
+            return {
+                "error": (
+                    f"Failure-mode catalog unavailable: {harvest.describe_failed()}. "
+                    "Diagnosis could not run; this is a connector failure, not a "
+                    "missing configuration."
+                )
+            }
         if not catalog:
             logger.warning(
                 "diagnose_failure_no_catalog",
@@ -3567,7 +3633,8 @@ class Agent:
             if not candidates:
                 # The asset names failure modes, but NONE of them exist in the
                 # harvested catalog — an honest configuration-mismatch note,
-                # not a garbled "nothing matched" with an empty indicator list.
+                # not a garbled "nothing matched" with an empty indicator list
+                # (the no-match note below needs candidates).
                 logger.warning(
                     "diagnose_failure_declared_modes_not_in_catalog",
                     agent=self.name,
@@ -3575,12 +3642,13 @@ class Agent:
                     operation="diagnose_failure",
                     declared=sorted(declared),
                 )
-                result["note"] = safe_text(
-                    f"Asset declares {len(declared)} failure mode(s) "
-                    f"({', '.join(sorted(declared))}) but none are present in "
-                    "the configured catalog (possible configuration mismatch)."
+                notes.append(
+                    safe_text(
+                        f"Asset declares {len(declared)} failure mode(s) "
+                        f"({', '.join(sorted(declared))}) but none are present in "
+                        "the configured catalog (possible configuration mismatch)."
+                    )
                 )
-                return result
         else:
             candidates = catalog
             notes.append(
@@ -3623,7 +3691,7 @@ class Agent:
         )
         result["probable_failures"] = ranked[:5]
 
-        if not ranked:
+        if candidates and not ranked:
             # Tell the model WHAT it could have matched so it can re-ask the
             # user in the catalog's vocabulary instead of guessing.
             known = sorted({ind for fm in candidates for ind in fm.typical_indicators})
@@ -3631,6 +3699,14 @@ class Agent:
                 "No catalog entry matched these symptoms. Known indicators: "
                 + safe_text(", ".join(known[:20]))
                 + "."
+            )
+        if harvest.failed:
+            # Last, as it qualifies every note before it: a declared mode
+            # missing above may live on a failed provider, and a healthy
+            # match list would otherwise hide the shrunken catalog entirely.
+            notes.append(
+                f"Partial catalog: {harvest.describe_failed()}. Failure modes "
+                "served by the failed provider(s) are missing from this result."
             )
         if notes:
             result["note"] = " ".join(notes)
