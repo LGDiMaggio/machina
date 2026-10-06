@@ -332,22 +332,41 @@ class UpKeepConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read spare parts (UpKeep calls them *parts*).
 
         Args:
+            asset_id: Accepted for the shared ``read_spare_parts`` contract
+                but never applied — ``/api/v2/parts`` has no asset relation.
+                Given alone, the read is refused (``[]``, no request): the
+                whole inventory is not the asset's parts. Given with
+                ``sku``, the result is narrowed by ``sku`` only. Both cases
+                log a ``spare_parts_asset_filter_unsupported`` warning.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
 
         Note:
-            UpKeep's ``/api/v2/parts`` endpoint does not expose an
-            asset-compatibility relation, so filtering by asset is not
-            supported here. Use work-order line items to discover parts
-            associated with a specific asset.
+            Use work-order line items to discover parts associated with a
+            specific asset.
         """
         self._ensure_connected()
+        if asset_id:
+            logger.warning(
+                "spare_parts_asset_filter_unsupported",
+                connector="UpKeepConnector",
+                asset_id=asset_id,
+                message=(
+                    "asset_id ignored (UpKeep parts have no asset relation); narrowing by sku"
+                    if sku
+                    else "asset_id ignored and no sku to narrow the read: returning no "
+                    "parts rather than the whole inventory"
+                ),
+            )
+            if not sku:
+                return []
         raw = await self._paginated_get("/api/v2/parts")
         parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:

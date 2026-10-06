@@ -5,6 +5,8 @@ All HTTP traffic is intercepted by pytest-httpx — no real UpKeep API calls.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from machina.connectors.cmms.upkeep import UpKeepConnector
@@ -334,6 +336,46 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="SKF-6205")
         assert len(parts) == 1
         assert parts[0].sku == "SKF-6205"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_only_is_refused(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        """UpKeep parts cannot be filtered by asset: no request, no parts, a warning."""
+        log = MagicMock()
+        monkeypatch.setattr("machina.connectors.cmms.upkeep.logger", log)
+        await _connect(httpx_mock, connector)
+        parts = await connector.read_spare_parts(asset_id="a1")
+        assert parts == []
+        assert len(httpx_mock.get_requests()) == 1  # the connect handshake only
+        assert [c.args[0] for c in log.warning.call_args_list] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
+        assert log.warning.call_args.kwargs["asset_id"] == "a1"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_and_sku_narrows_by_sku_only(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        """With a sku, the result is narrowed by sku and a warning says asset_id was ignored."""
+        log = MagicMock()
+        monkeypatch.setattr("machina.connectors.cmms.upkeep.logger", log)
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "p1", "partNumber": "SKF-6205", "name": "Bearing"},
+                    {"id": "p2", "partNumber": "SKF-7309", "name": "Angular bearing"},
+                ],
+            },
+        )
+        parts = await connector.read_spare_parts(asset_id="a1", sku="SKF-6205")
+        assert [p.sku for p in parts] == ["SKF-6205"]
+        assert [c.args[0] for c in log.warning.call_args_list] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------
