@@ -30,7 +30,7 @@ from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import LLMError
+from machina.exceptions import DomainValidationError, LLMError
 from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -326,6 +326,38 @@ class _FakeSparePartsConnector:
                 warehouse_location="W1",
             )
         ]
+
+
+_FILTER_REFUSAL = "asset_id contains '%', which a Maximo oslc.where value cannot carry"
+
+
+class _RefusingFilterConnector:
+    """CMMS stub whose filtered reads refuse the caller's value.
+
+    Stands in for a connector whose query helper rejects a value its filter
+    syntax cannot carry (Maximo's ``oslc.where``): the read raises
+    ``DomainValidationError`` before any request goes out.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_work_orders", "get_work_order", "read_spare_parts"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+        raise DomainValidationError(_FILTER_REFUSAL)
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        raise DomainValidationError(_FILTER_REFUSAL)
+
+    async def read_spare_parts(self, **kwargs: Any) -> list[SparePart]:
+        raise DomainValidationError(_FILTER_REFUSAL)
 
 
 class _FakeErrorConnector:
@@ -941,6 +973,67 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("get_maintenance_schedule", {"asset_id": 7})
         assert result == {"error": "asset_id must be a string"}
+
+
+class TestRefusedFilterValue:
+    """A connector refusing a filter value degrades to a tool-level error.
+
+    The values come from the model's own tool arguments, so a refusal is the
+    model's to react to — it must not kill the turn.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("read_work_orders", {"asset_id": "%"}),
+            ("get_work_order", {"work_order_id": "%"}),
+            ("check_spare_parts", {"asset_id": "%"}),
+        ],
+    )
+    async def test_refusal_is_returned_as_a_tool_error(
+        self, tool: str, args: dict[str, Any]
+    ) -> None:
+        agent = Agent(connectors=[_RefusingFilterConnector()])
+        result = await agent._execute_tool(tool, args)
+        assert result == {"error": _FILTER_REFUSAL}
+
+    @pytest.mark.asyncio
+    async def test_model_reads_the_refusal_and_the_turn_completes(self) -> None:
+        class _LLMChecksParts:
+            model = "fake:model"
+
+            def __init__(self) -> None:
+                self.tool_messages: list[dict[str, Any]] = []
+
+            async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+                return "unused"
+
+            async def complete_with_tools(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                **kwargs: Any,
+            ) -> dict[str, Any]:
+                self.tool_messages = [m for m in messages if m.get("role") == "tool"]
+                if not self.tool_messages:
+                    tc = MagicMock()
+                    tc.function.name = "check_spare_parts"
+                    tc.function.arguments = json.dumps({"asset_id": "%"})
+                    tc.id = "call_parts"
+                    return {"content": "", "tool_calls": [tc]}
+                return {"content": "That asset ID cannot be looked up.", "tool_calls": None}
+
+        llm = _LLMChecksParts()
+        agent = Agent(connectors=[_RefusingFilterConnector()])
+        agent._llm = llm  # type: ignore[assignment]
+
+        response = await agent.handle_message_full("Which spare parts fit asset %?")
+
+        assert response.text == "That asset ID cannot be looked up."
+        assert [json.loads(m["content"]) for m in llm.tool_messages] == [
+            {"error": _FILTER_REFUSAL}
+        ]
 
 
 class TestDiagnoseFailureCatalog:

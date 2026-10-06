@@ -2930,10 +2930,24 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_WORK_ORDERS)
             if connectors:
                 _, conn = connectors[0]
-                wos = await conn.read_work_orders(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    status=args.get("status", ""),
-                )
+                try:
+                    wos = await conn.read_work_orders(  # type: ignore[attr-defined]
+                        asset_id=args.get("asset_id", ""),
+                        status=args.get("status", ""),
+                    )
+                except Exception as exc:
+                    # Same degrade as get_work_order: a connector failure, or a
+                    # filter value the backend refuses (DomainValidationError),
+                    # is a tool-level error the model can react to.
+                    logger.warning(
+                        "work_orders_read_failed",
+                        agent=self.name,
+                        tool=name,
+                        asset_id=args.get("asset_id", ""),
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
                 return [wo.model_dump(mode="json") for wo in wos]
             return {"error": "No CMMS connector available"}
 
@@ -3018,10 +3032,22 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
-                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    sku=args.get("sku", ""),
-                )
+                try:
+                    parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
+                        asset_id=args.get("asset_id", ""),
+                        sku=args.get("sku", ""),
+                    )
+                except Exception as exc:
+                    # Same degrade as read_work_orders above.
+                    logger.warning(
+                        "spare_parts_read_failed",
+                        agent=self.name,
+                        tool=name,
+                        asset_id=args.get("asset_id", ""),
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
                 return [p.model_dump(mode="json") for p in parts]
             return {"error": "No spare parts connector available"}
 
