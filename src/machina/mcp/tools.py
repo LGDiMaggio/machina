@@ -436,28 +436,37 @@ async def machina_get_maintenance_history(
 async def machina_list_spare_parts(
     ctx: Context,
     asset_id: str = "",
-) -> list[dict[str, Any]]:
-    """List spare parts, optionally filtered by compatible asset.
+    sku: str = "",
+) -> dict[str, Any]:
+    """List spare parts, optionally filtered by compatible asset or by SKU.
+
+    The parts list is capped: ``total`` counts every matching part, and a
+    longer result is flagged ``truncated`` with a note — narrow it by SKU.
 
     Args:
         asset_id: Filter by compatible asset.
+        sku: Filter by part SKU.
     """
+    from machina.agent.prompts import bounded_spare_parts
+
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
     kwargs: dict[str, Any] = {}
     if asset_id:
         kwargs["asset_id"] = asset_id
+    if sku:
+        kwargs["sku"] = sku
     parts = await cmms.read_spare_parts(**kwargs)
-    return [
-        {
+    return bounded_spare_parts(
+        parts,
+        lambda p: {
             "sku": p.sku,
             "name": p.name,
             "stock_quantity": p.stock_quantity,
             "reorder_point": p.reorder_point,
             "unit_cost": p.unit_cost,
-        }
-        for p in parts
-    ]
+        },
+    )
 
 
 async def machina_get_maintenance_plan(ctx: Context) -> list[dict[str, Any]]:

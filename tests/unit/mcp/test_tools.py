@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+from machina.agent.prompts import SPARE_PARTS_RESULT_LIMIT
 from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -352,8 +353,66 @@ class TestListSpareParts:
         conn.read_spare_parts = AsyncMock(return_value=parts)
         runtime = MachinaRuntime(connectors={"cmms": conn})
         result = await machina_list_spare_parts(_make_ctx(runtime))
-        assert len(result) == 1
-        assert result[0]["sku"] == "BRG-6205"
+        assert result == {
+            "parts": [
+                {
+                    "sku": "BRG-6205",
+                    "name": "Bearing 6205",
+                    "stock_quantity": 12,
+                    "reorder_point": 0,
+                    "unit_cost": 0.0,
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_caps_a_large_inventory_and_says_so(self) -> None:
+        from machina.mcp.tools import machina_list_spare_parts
+
+        parts = [SparePart(sku=f"PART-{i:05d}", name=f"Part {i}") for i in range(5_000)]
+        conn = _mock_cmms()
+        conn.read_spare_parts = AsyncMock(return_value=parts)
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        result = await machina_list_spare_parts(_make_ctx(runtime))
+        assert (result["total"], result["truncated"]) == (5_000, True)
+        assert [p["sku"] for p in result["parts"]] == [
+            p.sku for p in parts[:SPARE_PARTS_RESULT_LIMIT]
+        ]
+        assert "sku" in result["note"]
+
+    @pytest.mark.asyncio
+    async def test_sends_only_the_given_filters(self) -> None:
+        """``sku`` narrows the lookup; an empty filter is not sent."""
+        from machina.mcp.tools import machina_list_spare_parts
+
+        conn = _mock_cmms()
+        conn.read_spare_parts = AsyncMock(return_value=[])
+        ctx = _make_ctx(MachinaRuntime(connectors={"cmms": conn}))
+        await machina_list_spare_parts(ctx)
+        await machina_list_spare_parts(ctx, sku="BRG-6205")
+        await machina_list_spare_parts(ctx, asset_id="P-201", sku="BRG-6205")
+        assert conn.read_spare_parts.await_args_list == [
+            call(),
+            call(sku="BRG-6205"),
+            call(asset_id="P-201", sku="BRG-6205"),
+        ]
+
+    def test_the_registered_tool_takes_sku_and_returns_an_object(self) -> None:
+        """MCP clients see a ``sku`` input and the result object itself as the
+        structured output, not a list wrapped under ``result``."""
+        from mcp.server.fastmcp import FastMCP
+
+        from machina.mcp.tools import machina_list_spare_parts
+
+        server = FastMCP("test")
+        server.add_tool(machina_list_spare_parts)
+        [tool] = server._tool_manager.list_tools()
+        assert set(tool.parameters["properties"]) == {"asset_id", "sku"}
+        assert tool.output_schema is not None
+        assert tool.output_schema["type"] == "object"
+        assert "result" not in tool.output_schema.get("properties", {})
 
 
 class TestGetMaintenancePlan:

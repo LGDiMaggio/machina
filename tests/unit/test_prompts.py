@@ -6,7 +6,9 @@ import pytest
 
 from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.prompts import (
+    SPARE_PARTS_RESULT_LIMIT,
     _safe_source,
+    bounded_spare_parts,
     build_context_message,
     build_system_prompt,
     format_alarms_context,
@@ -160,6 +162,62 @@ class TestFormatSpareParts:
         ]
         text = format_spare_parts_context(parts)
         assert "Out of stock" in text
+
+
+def _inventory(size: int) -> list[SparePart]:
+    return [SparePart(sku=f"PART-{i:05d}", name=f"Part {i}") for i in range(size)]
+
+
+def _sku_only(part: SparePart) -> dict[str, str]:
+    return {"sku": part.sku}
+
+
+class TestBoundedSpareParts:
+    """The bounded result both spare-part lookup tools return."""
+
+    def test_a_lookup_within_the_limit_is_complete(self) -> None:
+        result = bounded_spare_parts(_inventory(2), _sku_only)
+        assert result == {
+            "parts": [{"sku": "PART-00000"}, {"sku": "PART-00001"}],
+            "total": 2,
+            "truncated": False,
+        }
+
+    def test_no_parts_is_a_complete_empty_result(self) -> None:
+        assert bounded_spare_parts([], _sku_only) == {"parts": [], "total": 0, "truncated": False}
+
+    @pytest.mark.parametrize(
+        ("size", "truncated"),
+        [(SPARE_PARTS_RESULT_LIMIT, False), (SPARE_PARTS_RESULT_LIMIT + 1, True)],
+    )
+    def test_the_limit_itself_is_not_truncated(self, size: int, truncated: bool) -> None:
+        result = bounded_spare_parts(_inventory(size), _sku_only)
+        assert len(result["parts"]) == SPARE_PARTS_RESULT_LIMIT
+        assert result["total"] == size
+        assert result["truncated"] is truncated
+        assert ("note" in result) is truncated
+
+    def test_a_truncated_lookup_says_it_is_partial_and_how_to_narrow_it(self) -> None:
+        result = bounded_spare_parts(_inventory(5_000), _sku_only)
+        assert result["parts"] == [_sku_only(p) for p in _inventory(SPARE_PARTS_RESULT_LIMIT)]
+        assert result["total"] == 5_000
+        assert result["truncated"] is True
+        note = result["note"]
+        assert f"{SPARE_PARTS_RESULT_LIMIT} of 5000" in note
+        assert "incomplete" in note
+        assert "not listed" in note
+        assert "sku" in note
+
+    def test_only_the_listed_parts_are_serialized(self) -> None:
+        """The cost of a lookup scales with the limit, not with the inventory."""
+        serialized: list[str] = []
+
+        def serialize(part: SparePart) -> dict[str, str]:
+            serialized.append(part.sku)
+            return _sku_only(part)
+
+        bounded_spare_parts(_inventory(5_000), serialize)
+        assert len(serialized) == SPARE_PARTS_RESULT_LIMIT
 
 
 class TestFormatDocumentResults:

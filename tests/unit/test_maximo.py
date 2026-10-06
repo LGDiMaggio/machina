@@ -6,6 +6,8 @@ lifecycle without network calls.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
@@ -286,6 +288,47 @@ class TestRequireHttpx:
         monkeypatch.setitem(sys.modules, "httpx", None)
         with pytest.raises(ConnectorError, match="pip install machina-ai"):
             _require_httpx()
+
+
+class TestReadSparePartsAssetFilter:
+    """``mxinventory`` has no asset relation, so an asset filter is refused.
+
+    Dropping the filter would return the whole inventory (or a bare sku match)
+    as if it were the asset's compatible parts.
+    """
+
+    def _connected(self) -> MaximoConnector:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="test"),
+        )
+        conn._connected = True
+        conn._oslc_get = AsyncMock(
+            return_value=[{"itemnum": "BRG-6205", "description": "Bearing", "curbal": 5}]
+        )
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_raises_before_any_request(self) -> None:
+        conn = self._connected()
+        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+            await conn.read_spare_parts(asset_id="PUMP-201")
+        conn._oslc_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_raises_even_with_a_sku(self) -> None:
+        """A sku match says nothing about compatibility with the asset."""
+        conn = self._connected()
+        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+            await conn.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        conn._oslc_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_no_filter(self) -> None:
+        conn = self._connected()
+        parts = await conn.read_spare_parts(asset_id="", sku="BRG-6205")
+        assert [p.sku for p in parts] == ["BRG-6205"]
+        conn._oslc_get.assert_awaited_once()
 
 
 class TestYamlAuthSettings:
