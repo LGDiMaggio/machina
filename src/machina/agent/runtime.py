@@ -37,6 +37,7 @@ from machina.agent.entity_resolver import (
 from machina.agent.maintenance_schedule import get_maintenance_schedule
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
+    bounded_spare_parts,
     build_context_message,
     build_system_prompt,
     safe_source,
@@ -3039,7 +3040,8 @@ class Agent:
                         error=str(exc),
                     )
                     return {"error": safe_text(str(exc))}
-                return [p.model_dump(mode="json") for p in parts]
+                # Capped: an unfiltered lookup returns the whole inventory.
+                return bounded_spare_parts(parts, lambda part: part.model_dump(mode="json"))
             return {"error": "No spare parts connector available"}
 
         if name == "diagnose_failure":

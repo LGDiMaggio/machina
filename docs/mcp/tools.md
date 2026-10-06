@@ -28,7 +28,7 @@ which connector declares what.
 | `machina_list_work_orders` | `read_work_orders` | `asset_id=""`, `status=""` | Work orders, optionally filtered |
 | `machina_get_work_order` | `get_work_order` | `work_order_id` | One work order |
 | `machina_get_maintenance_history` | `read_maintenance_history` | `asset_id` | Past work orders on the asset |
-| `machina_list_spare_parts` | `read_spare_parts` | `asset_id=""` | Spare parts with stock, reorder point and unit cost |
+| `machina_list_spare_parts` | `read_spare_parts` | `asset_id=""`, `sku=""` | Up to 50 spare parts with stock, reorder point and unit cost, and the number that matched |
 | `machina_get_maintenance_plan` | `read_maintenance_plans` | — | All preventive-maintenance plans (id, asset, name, interval in days, tasks) |
 | `machina_search_manuals` | `search_documents` | `query`, `top_k=5`, `asset_id=""`, `filters=None` | Matching document chunks with source, page, section and score |
 | `machina_get_sensor_reading` | `get_latest_reading` | `asset_id` | Latest sensor reading |
@@ -37,6 +37,13 @@ which connector declares what.
 `machina_search_manuals` returns document sources as bare file names, never
 host paths. Its `filters` keys are `asset_id`, `doc_type`,
 `equipment_class_code` and `section_title`.
+
+`machina_list_spare_parts` returns `{"parts": [...], "total": n, "truncated": false}`.
+An unfiltered lookup reads the CMMS's whole inventory, so `parts` holds at most
+50 entries: `total` counts every part that matched, and a longer result comes
+back with `"truncated": true` and a `note` asking the model not to present it as
+complete. Narrow the lookup with `sku`; [Maximo](../connectors/maximo.md) and
+[UpKeep](../connectors/upkeep.md) refuse an `asset_id` filter.
 
 !!! note "Sensor tools in v0.4"
     No connector type that a config file can create declares

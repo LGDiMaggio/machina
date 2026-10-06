@@ -18,6 +18,8 @@ from machina.agent.entity_resolver import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from machina.agent.entity_resolver import ResolvedEntity
     from machina.domain.alarm import Alarm
     from machina.domain.asset import Asset
@@ -258,6 +260,54 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
         status = "✅ In stock" if part.stock_quantity > 0 else "❌ Out of stock"
         lines.append(f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}")
     return "\n".join(lines)
+
+
+# Most spare parts one lookup hands to a model, through the agent's
+# check_spare_parts tool and the MCP machina_list_spare_parts tool alike. An
+# unfiltered lookup returns the connector's whole inventory — thousands of parts
+# on a real CMMS — and serializing all of it stalls the event loop and overflows
+# the model's context. 50 matches list_assets' bound and still lists an asset's
+# parts, or a sku stocked in several storerooms, in full.
+SPARE_PARTS_RESULT_LIMIT = 50
+
+_SPARE_PARTS_TRUNCATED_NOTE = (
+    "Showing {shown} of {total} matching spare parts: the list is incomplete. "
+    "Say so if you present it, and do not conclude that a part is missing or out "
+    "of stock because it is not listed. Narrow the lookup, e.g. by sku, for a "
+    "complete answer."
+)
+
+
+def bounded_spare_parts(
+    parts: Sequence[SparePart],
+    serialize: Callable[[SparePart], dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a spare-part lookup result capped at :data:`SPARE_PARTS_RESULT_LIMIT`.
+
+    Returns ``{"parts": [...], "total": n, "truncated": bool}``: ``total``
+    counts every part the lookup matched, and ``parts`` holds the first
+    :data:`SPARE_PARTS_RESULT_LIMIT` of them in the connector's order. Only
+    those are passed to ``serialize``, so the work stays bounded however large
+    the inventory. A truncated result also carries a ``note`` saying the list
+    is partial and how to narrow it, so the model cannot present the first
+    parts as the whole inventory.
+
+    Args:
+        parts: Every part the connector returned for the lookup.
+        serialize: Turns one part into the dict the caller exposes.
+    """
+    total = len(parts)
+    truncated = total > SPARE_PARTS_RESULT_LIMIT
+    result: dict[str, Any] = {
+        "parts": [serialize(part) for part in parts[:SPARE_PARTS_RESULT_LIMIT]],
+        "total": total,
+        "truncated": truncated,
+    }
+    if truncated:
+        result["note"] = _SPARE_PARTS_TRUNCATED_NOTE.format(
+            shown=SPARE_PARTS_RESULT_LIMIT, total=total
+        )
+    return result
 
 
 def format_resolved_entities(
