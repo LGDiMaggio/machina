@@ -19,11 +19,13 @@ without HTTP mocks.
 
 See also:
     https://developer.ibm.com/apis/catalog/maximo--maximo-manage-rest-api/Introduction
+    https://ibm-maximo-dev.github.io/maximo-restapi-documentation/
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import unquote, urlsplit
 
 import structlog
 from pydantic import Field
@@ -33,6 +35,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
+from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import ConnectorAuthError, ConnectorError
@@ -59,6 +62,38 @@ def _require_httpx() -> Any:
             "Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+# Characters a quoted oslc.where value cannot carry as plain data: ``"`` and
+# ``\`` are OSLC string syntax, ``%`` turns the match into a LIKE and ``*``
+# means "any non-null value"; oslc.where maps onto Maximo's QBE framework,
+# which reads ``,`` as OR and ``=``, ``!``, ``<``, ``>``, ``~`` as operators.
+_OSLC_RESERVED_CHARS = frozenset('"\\%*,=!<>~')
+
+
+def _oslc_string(value: object) -> str:
+    """Render ``value`` as a double-quoted oslc.where string value.
+
+    IDs and codes reach the connector from LLM or MCP-client input. Maximo
+    documents no escape for the reserved characters, so a value carrying one
+    is refused rather than sent: it could end the value early and add clauses,
+    or turn an exact match into a pattern. An empty value, which would put no
+    restriction on the attribute, is refused too. A non-string ID (a number
+    from a workflow event) is formatted with ``str()`` first.
+
+    Raises:
+        ConnectorError: If the value is empty or contains a reserved character.
+    """
+    text = str(value)
+    if not text:
+        raise ConnectorError("Maximo oslc.where value is empty — refusing to send it")
+    reserved = "".join(sorted(set(text) & _OSLC_RESERVED_CHARS))
+    if reserved:
+        raise ConnectorError(
+            f"Maximo value {text!r} contains {reserved!r}, which oslc.where reads "
+            "as query syntax — refusing to send it"
+        )
+    return f'"{text}"'
 
 
 class MaximoConnector:
@@ -113,6 +148,7 @@ class MaximoConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -197,7 +233,7 @@ class MaximoConnector:
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxasset",
-            oslc_where=f'assetnum="{asset_id}"',
+            oslc_where=f"assetnum={_oslc_string(asset_id)}",
             page_size=1,
         )
         return maximo_mapper.parse_asset(raw[0], self._asset_type_map) if raw else None
@@ -219,14 +255,14 @@ class MaximoConnector:
         self._ensure_connected()
         clauses: list[str] = []
         if asset_id:
-            clauses.append(f'assetnum="{asset_id}"')
+            clauses.append(f"assetnum={_oslc_string(asset_id)}")
         if status:
             maximo_status = (
                 maximo_mapper.REVERSE_MAXIMO_STATUS.get(status, status.value.upper())
                 if isinstance(status, WorkOrderStatus)
                 else status.upper()
             )
-            clauses.append(f'status="{maximo_status}"')
+            clauses.append(f"status={_oslc_string(maximo_status)}")
         where = " and ".join(clauses) if clauses else ""
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
@@ -236,7 +272,7 @@ class MaximoConnector:
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxwo",
-            oslc_where=f'wonum="{work_order_id}"',
+            oslc_where=f"wonum={_oslc_string(work_order_id)}",
             page_size=1,
         )
         return maximo_mapper.parse_work_order(raw[0]) if raw else None
@@ -292,9 +328,14 @@ class MaximoConnector:
         assigned_to: str | None = None,
         description: str | None = None,
     ) -> WorkOrder:
-        """Update an existing work order in Maximo via PATCH.
+        """Update an existing work order in Maximo.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        Maximo addresses a record by the URI it returns for it, not by
+        ``wonum``, so the order is first looked up by ``wonum``. The update is
+        then a ``POST`` to that URI with ``x-method-override: PATCH`` — the form
+        IBM documents for updates — and ``patchtype: MERGE``, which keeps the
+        child objects the payload does not list. Only non-``None`` fields are
+        sent.
 
         Args:
             work_order_id: Maximo work order number (``wonum``).
@@ -304,9 +345,13 @@ class MaximoConnector:
 
         Returns:
             The updated work order.
+
+        Raises:
+            ConnectorError: If no field is given; if the ``wonum`` is refused,
+                matches no work order or matches one in more than one site; or
+                if Maximo rejects the update.
         """
         self._ensure_connected()
-        httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = maximo_mapper.reverse_status(status)
@@ -316,13 +361,21 @@ class MaximoConnector:
             payload["description"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
-        headers = {**self._headers(), "Content-Type": "application/json"}
+        url = await self._work_order_uri(work_order_id)
+        httpx = _require_httpx()
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "x-method-override": "PATCH",
+            "patchtype": "MERGE",
+        }
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await request_with_retry(
                 client,
-                "PATCH",
-                f"{self.url}/maximo/oslc/os/mxwo/{work_order_id}",
+                "POST",
+                url,
                 headers=headers,
+                params={"lean": "1"} if self._lean else None,
                 json=payload,
             )
         if resp.status_code == 401:
@@ -368,7 +421,7 @@ class MaximoConnector:
             the corresponding work-order job plan or ``mxpmpart``.
         """
         self._ensure_connected()
-        where = f'itemnum="{sku}"' if sku else ""
+        where = f"itemnum={_oslc_string(sku)}" if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]
 
@@ -381,7 +434,11 @@ class MaximoConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset."""
         self._ensure_connected()
-        where = f'assetnum="{asset_id}" and (status="COMP" or status="CLOSE")'
+        if not asset_id:
+            raise ConnectorError("read_maintenance_history requires an asset_id")
+        # oslc.where has no ``or`` and no grouping parentheses (``and`` is its
+        # only boolean operator), so the status alternatives go through ``in``.
+        where = f'assetnum={_oslc_string(asset_id)} and status in ["COMP","CLOSE"]'
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
 
@@ -451,9 +508,10 @@ class MaximoConnector:
                 body = resp.json()
                 members = body.get("member", [])
                 all_items.extend(members)
-                # Follow OSLC pagination link
-                response_info = body.get("responseInfo", {})
-                url = response_info.get("nextPage")
+                # Follow OSLC pagination link — given as {"href": ...} by
+                # Maximo's JSON API; a bare URL string is accepted too.
+                next_page = body.get("responseInfo", {}).get("nextPage")
+                url = next_page.get("href") if isinstance(next_page, dict) else next_page
                 # After the first request, params are embedded in nextPage URL
                 params = None
         logger.debug(
@@ -463,3 +521,41 @@ class MaximoConnector:
             total=len(all_items),
         )
         return all_items
+
+    async def _work_order_uri(self, work_order_id: str) -> str:
+        """Look up the URI that addresses the work order ``work_order_id``.
+
+        Maximo addresses a record by the URI in its ``href``, whose last
+        segment is a rest id the server derives from the record's primary key
+        — ``wonum`` and ``siteid`` for a work order — so it is looked up, not
+        built. Only the rest id is kept: the URI's host is the one Maximo sees
+        itself on (an internal name behind a proxy unless ``x-public-uri`` is
+        sent), so the update goes to the configured URL like every other
+        request.
+
+        Raises:
+            ConnectorError: If the ``wonum`` is refused, if no work order or
+                more than one (the same ``wonum`` in several sites) has it, or
+                if the URI Maximo returns is not a work-order URI.
+        """
+        members = await self._oslc_get(
+            "mxwo",
+            oslc_where=f"wonum={_oslc_string(work_order_id)}",
+            oslc_select="siteid",
+            page_size=2,
+        )
+        if not members:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        if len(members) > 1:
+            sites = ", ".join(sorted(str(m.get("siteid", "?")) for m in members))
+            raise ConnectorError(
+                f"Work order {work_order_id} exists in more than one site ({sites}) — "
+                "refusing to guess which one to update"
+            )
+        uri = members[0].get("href") or ""
+        collection, _, rest_id = urlsplit(str(uri)).path.rpartition("/")
+        if not collection.lower().endswith("/os/mxwo"):
+            raise ConnectorError(
+                f"Maximo returned no work-order URI for work order {work_order_id} (got {uri!r})"
+            )
+        return f"{self.url}/maximo/oslc/os/mxwo/{path_segment(unquote(rest_id))}"

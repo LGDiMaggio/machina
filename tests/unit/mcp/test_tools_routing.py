@@ -50,6 +50,39 @@ class TestAutoRegistration:
         tool_names = [t.__name__ for t in tools]
         assert "machina_search_manuals" in tool_names
 
+    @pytest.mark.parametrize(
+        ("conn_type", "settings"),
+        [
+            (
+                "sap_pm",
+                {
+                    "url": "https://sap.example.com/sap/opu/odata/sap",
+                    "auth": {"type": "basic", "username": "svc", "password": "p"},
+                },
+            ),
+            (
+                "maximo",
+                {
+                    "url": "https://maximo.example.com",
+                    "auth": {"type": "api_key", "header_name": "apikey", "value": "k"},
+                },
+            ),
+            ("upkeep", {"api_key": "k"}),
+        ],
+    )
+    def test_vendor_cmms_alone_registers_maintenance_history(
+        self, conn_type: str, settings: dict[str, object]
+    ) -> None:
+        """A deployment whose only CMMS is a vendor connector still gets the
+        history tool — the vendor connector declares the capability itself."""
+        from machina.mcp.server import build_server
+
+        config = MachinaConfig(
+            connectors={"cmms": ConnectorConfig(type=conn_type, settings=settings)}
+        )
+        tool_names = {t.name for t in build_server(config)._tool_manager.list_tools()}
+        assert "machina_get_maintenance_history" in tool_names
+
 
 class TestCapabilityToToolMap:
     def test_capability_mappings_are_lists(self) -> None:

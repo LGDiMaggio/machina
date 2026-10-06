@@ -35,6 +35,7 @@ See also:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import quote
 
 import structlog
 from pydantic import Field
@@ -80,6 +81,29 @@ def _is_csrf_challenge(resp: Any) -> bool:
     and retrying the write once is safe and cannot duplicate the order.
     """
     return bool(resp.headers.get("x-csrf-token", "").lower() == "required")
+
+
+def _odata_string(value: object) -> str:
+    """Render ``value`` as an OData string literal.
+
+    IDs and codes reach the connector from LLM or MCP-client input. OData
+    delimits a string literal with ``'`` and escapes an embedded ``'`` by
+    doubling it, so the value stays one literal: it cannot close the literal
+    early and add clauses to a ``$filter``. A non-string ID (a number from a
+    workflow event) is formatted with ``str()`` first.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _odata_key(value: object) -> str:
+    """Render ``value`` as an OData key literal that stays in one URL path segment.
+
+    On top of :func:`_odata_string`, percent-encodes the characters that would
+    end the segment or the path (``/``, ``?``, ``#``) or start an escape
+    (``%``), so a key such as ``1')/../Equipment('X`` cannot address a
+    different resource.
+    """
+    return quote(_odata_string(value), safe="'")
 
 
 class SapPmConnector:
@@ -140,6 +164,7 @@ class SapPmConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -255,7 +280,7 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_EQUIPMENT",
             "Equipment",
-            odata_filter=f"Equipment eq '{asset_id}'",
+            odata_filter=f"Equipment eq {_odata_string(asset_id)}",
             top=1,
         )
         return sap_mapper.parse_asset(raw[0]) if raw else None
@@ -278,14 +303,14 @@ class SapPmConnector:
         self._ensure_connected()
         filters: list[str] = []
         if asset_id:
-            filters.append(f"Equipment eq '{asset_id}'")
+            filters.append(f"Equipment eq {_odata_string(asset_id)}")
         if status:
             sap_status = (
                 sap_mapper.REVERSE_SAP_STATUS.get(status, status.value)
                 if isinstance(status, WorkOrderStatus)
                 else status
             )
-            filters.append(f"MaintenanceOrderSystemStatus eq '{sap_status}'")
+            filters.append(f"MaintenanceOrderSystemStatus eq {_odata_string(sap_status)}")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
@@ -300,7 +325,7 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
-            odata_filter=f"MaintenanceOrder eq '{work_order_id}'",
+            odata_filter=f"MaintenanceOrder eq {_odata_string(work_order_id)}",
             top=1,
         )
         return sap_mapper.parse_work_order(raw[0]) if raw else None
@@ -380,7 +405,7 @@ class SapPmConnector:
             raise ConnectorError("update_work_order requires at least one field to update")
         resp = await self._write_with_csrf(
             "PATCH",
-            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder('{work_order_id}')",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({_odata_key(work_order_id)})",
             payload,
         )
         if resp.status_code == 401:
@@ -437,7 +462,7 @@ class SapPmConnector:
         filters: list[str] = []
         if asset_id:
             if self._bom_equipment_field:
-                filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
+                filters.append(f"{self._bom_equipment_field} eq {_odata_string(asset_id)}")
             elif not sku:
                 # asset_id requested, but it cannot be filtered server-side
                 # (bom_equipment_field unset — the default) and there is no sku to
@@ -469,7 +494,7 @@ class SapPmConnector:
                     ),
                 )
         if sku:
-            filters.append(f"{self._bom_material_field} eq '{sku}'")
+            filters.append(f"{self._bom_material_field} eq {_odata_string(sku)}")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             self._bom_service,
@@ -487,8 +512,11 @@ class SapPmConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed maintenance orders for an asset."""
         self._ensure_connected()
+        if not asset_id:
+            # ``Equipment eq ''`` would match every order without an equipment.
+            raise ConnectorError("read_maintenance_history requires an asset_id")
         odata_filter = (
-            f"Equipment eq '{asset_id}' and "
+            f"Equipment eq {_odata_string(asset_id)} and "
             "(MaintenanceOrderSystemStatus eq 'CNF' or "
             "MaintenanceOrderSystemStatus eq 'TECO' or "
             "MaintenanceOrderSystemStatus eq 'CLSD')"

@@ -335,6 +335,7 @@ class TestConnectorLifecycle:
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
         assert "read_maintenance_plans" in conn.capabilities
+        assert "read_maintenance_history" in conn.capabilities
 
     def test_sap_client_stored(self) -> None:
         conn = self._make()

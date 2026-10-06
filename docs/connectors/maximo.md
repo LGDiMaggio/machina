@@ -6,7 +6,8 @@ reading and creating maintenance data via the OSLC/JSON REST API.
 ## Prerequisites
 
 - IBM Maximo Manage instance (7.6.0.2+ or Maximo Application Suite)
-- API key (recommended), or Basic/MAXAUTH credentials
+- API key (recommended), or Basic/MAXAUTH credentials on Maximo 7.6 — see
+  [Known Limitations](#known-limitations) for Maximo Application Suite
 - Network access to the Maximo OSLC endpoints (`/maximo/oslc/os/`)
 
 ## Installation
@@ -72,9 +73,10 @@ pip install machina-ai[cmms-rest]
 | `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw Maximo code) |
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
-| `update_work_order` | Update status, assignee, or description via PATCH |
+| `update_work_order` | Update status, assignee, or description — see [How updates are sent](#how-updates-are-sent) |
 | `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
+| `read_maintenance_history` | Read the completed and closed work orders of one asset (`status in ["COMP","CLOSE"]`) |
 
 ### Convenience methods
 
@@ -146,6 +148,34 @@ updated = await connector.update_work_order(
 await connector.close_work_order("WO-001")
 ```
 
+## How updates are sent
+
+Maximo does not address a record by its `wonum`. Each record has a URI whose last
+segment is a *rest id* that the server derives from the record's primary key (`wonum`
+and `siteid` for a work order), and IBM documents an update as a `POST` to that URI
+with an `x-method-override: PATCH` header. So `update_work_order` — and
+`close_work_order` / `cancel_work_order`, which go through it:
+
+1. looks the order up by `wonum`
+   (`GET /maximo/oslc/os/mxwo?oslc.where=wonum="WO-001"&oslc.select=siteid`);
+2. refuses, before writing anything, a `wonum` that matches no work order, or matches
+   one in more than one site (a `wonum` is unique only within a site);
+3. sends `POST /maximo/oslc/os/mxwo/{rest id}?lean=1` with `x-method-override: PATCH`
+   and `patchtype: MERGE`, so child objects the payload does not list are kept, and
+   accepts `204 No Content` or `200 OK`;
+4. reads the order back by `wonum` and returns it.
+
+Only the rest id is taken from the URI Maximo returns. Its host is the one Maximo sees
+itself on (an internal name behind a proxy, unless the client sends `x-public-uri`),
+so the update goes to the configured `url`, like every other request.
+
+Sources: the IBM Maximo REST API guide —
+[Create and update](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/crud/create_and_update),
+[Selecting](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/query/selecting),
+[API keys](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/authentication/apikey) —
+and `update()` in IBM's reference Java client,
+[`MaximoConnector.java`](https://github.com/ibmmaximorestjsonapis/maximorestclient/blob/master/src/com/ibm/maximo/oslc/MaximoConnector.java).
+
 ## Asset Type Mapping
 
 Maximo does not expose a direct equipment-type field. By default, all
@@ -200,6 +230,9 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
 - **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
 - **Pagination**: Uses Maximo's OSLC `responseInfo.nextPage` link-following. Very large result sets may benefit from server-side `oslc.where` filtering.
+- **Characters refused in IDs and codes**: asset numbers, work-order numbers, item numbers and raw status codes go into `oslc.where` as quoted values. Inside one, `"` and `\` are string syntax, `%` makes the match a LIKE, `*` means "any non-null value", and Maximo's QBE framework reads `,` as OR and `=`, `!`, `<`, `>`, `~` as operators. Maximo documents no escape for them, so a value containing any of these characters — or an empty value — is refused with `ConnectorError` instead of being sent.
+- **The same `wonum` in several sites**: there is no site setting yet. An update refuses such a `wonum`; `get_work_order` returns the first match.
+- **Maximo Application Suite (MAS) Manage**: IBM's REST API guide lists API keys (and SAML) as the authentication MAS Manage supports, and marks `MAXAUTH`, Basic and form login unsupported there — use `ApiKeyHeaderAuth`. The guide also documents a separate `/api` route for API-key calls when the application server or an identity provider (SAML/OIDC) handles login, because `/oslc` is then security-constrained; this connector always calls `/maximo/oslc/...`.
 
 ## API Reference
 

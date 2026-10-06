@@ -719,6 +719,187 @@ class TestReadMaintenanceHistory:
         assert all(isinstance(wo, WorkOrder) for wo in history)
         assert history[0].id == "4000010"
 
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_pages_keep_the_filter(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A full page triggers a ``$skip`` request that keeps the history filter."""
+        await _connect(httpx_mock, connector)
+        page1 = [
+            {"MaintenanceOrder": f"40{i:05d}", "MaintenanceOrderSystemStatus": "CNF"}
+            for i in range(100)
+        ]
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'")},
+            ),
+            json={"d": {"results": page1}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'"), "$skip": "100"},
+            ),
+            json={"d": {"results": [{"MaintenanceOrder": "4100000"}]}},
+        )
+        history = await connector.read_maintenance_history("10000001")
+        assert len(history) == 101
+        assert history[-1].id == "4100000"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="authentication failed"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="HTTP 500"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: SapPmConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.parametrize("asset_id", ["", None])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: SapPmConnector, asset_id
+    ) -> None:
+        """``Equipment eq ''`` would match every order without an equipment."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="requires an asset_id"):
+            await connector.read_maintenance_history(asset_id)
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+
+def _history_filter(equipment_literal: str) -> str:
+    """The history ``$filter`` for an already-quoted Equipment literal."""
+    return (
+        f"Equipment eq {equipment_literal} and "
+        "(MaintenanceOrderSystemStatus eq 'CNF' or "
+        "MaintenanceOrderSystemStatus eq 'TECO' or "
+        "MaintenanceOrderSystemStatus eq 'CLSD')"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OData string literals built from caller-supplied IDs
+# ---------------------------------------------------------------------------
+
+
+class TestODataLiteralEscaping:
+    """IDs reach the connector from LLM / MCP-client input. Each one must stay a
+    single OData string literal: an embedded ``'`` is doubled (``''``), so it can
+    neither break the ``$filter`` nor add clauses to it."""
+
+    @pytest.mark.parametrize(
+        ("read", "expected_filter"),
+        [
+            pytest.param(
+                lambda c: c.get_asset("O'NEIL-1"),
+                "Equipment eq 'O''NEIL-1'",
+                id="get_asset",
+            ),
+            pytest.param(
+                lambda c: c.get_work_order("4000'1"),
+                "MaintenanceOrder eq '4000''1'",
+                id="get_work_order",
+            ),
+            pytest.param(
+                lambda c: c.read_work_orders(asset_id="P'1", status="TE'CO"),
+                "Equipment eq 'P''1' and MaintenanceOrderSystemStatus eq 'TE''CO'",
+                id="read_work_orders",
+            ),
+            pytest.param(
+                lambda c: c.read_maintenance_history("x' or Equipment ne 'y"),
+                _history_filter("'x'' or Equipment ne ''y'"),
+                id="read_maintenance_history",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_quote_in_id_is_doubled(
+        self, httpx_mock, connector: SapPmConnector, read, expected_filter: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", json={"d": {"results": []}})
+        await read(connector)
+        assert httpx_mock.get_requests()[-1].url.params["$filter"] == expected_filter
+
+    @pytest.mark.asyncio
+    async def test_spare_part_filter_values_are_escaped(self, httpx_mock) -> None:
+        custom = SapPmConnector(
+            url=BASE,
+            auth=BasicAuth(username="u", password="p"),
+            bom_material_field="Material",
+            bom_equipment_field="Equipment",
+        )
+        await _connect(httpx_mock, custom)
+        httpx_mock.add_response(method="GET", json={"d": {"results": []}})
+        await custom.read_spare_parts(asset_id="E'1", sku="M'1")
+        sent = httpx_mock.get_requests()[-1].url.params["$filter"]
+        assert sent == "Equipment eq 'E''1' and Material eq 'M''1'"
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_is_formatted_as_before(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A workflow event can carry an ID as a number; it is sent as its digits."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", json={"d": {"results": []}})
+        await connector.get_asset(10000001)
+        sent = httpx_mock.get_requests()[-1].url.params["$filter"]
+        assert sent == "Equipment eq '10000001'"
+
+    @pytest.mark.asyncio
+    async def test_update_key_stays_inside_its_path_segment(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A key carrying ``')/../`` must not climb out of ``MaintenanceOrder(...)``."""
+        hostile = "1')/../../API_EQUIPMENT/Equipment('X"
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={"x-csrf-token": "csrf-tok"},
+            json={"d": {"results": []}},
+        )
+        httpx_mock.add_response(method="PATCH", status_code=204)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{
+                    "$top": "1",
+                    "$filter": "MaintenanceOrder eq '1'')/../../API_EQUIPMENT/Equipment(''X'",
+                },
+            ),
+            json={"d": {"results": [{"MaintenanceOrder": hostile}]}},
+        )
+        await connector.update_work_order(hostile, description="x")
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        assert patch_req.url.raw_path == (
+            b"/sap/opu/odata/sap/API_MAINTENANCEORDER/MaintenanceOrder("
+            b"'1''%29%2F..%2F..%2FAPI_EQUIPMENT%2FEquipment%28''X')"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle state transitions
