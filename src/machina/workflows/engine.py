@@ -16,6 +16,7 @@ from typing import Any
 import structlog
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.capabilities import Capability
 from machina.exceptions import WorkflowError
 from machina.observability.tracing import ActionTracer
 from machina.workflows.models import (
@@ -350,8 +351,8 @@ class WorkflowEngine:
           communication connector.
         * ``failure_analyzer.diagnose``, ``work_order_factory.create``,
           ``maintenance_scheduler.*`` — call registered domain services.
-        * ``<category>.<method>`` — find a connector by capability and
-          call the method.
+        * ``<category>.<capability>`` — find a connector by capability and
+          call the method that backs it.
         """
         action = step.action
 
@@ -424,7 +425,7 @@ class WorkflowEngine:
             )
             return {"sent": False, "sandbox": True, "message": resolved}
 
-        connectors = self._registry.find_by_capability("send_message")
+        connectors = self._registry.find_by_capability(Capability.SEND_MESSAGE)
         if not connectors:
             logger.warning("no_comms_connector", step=step.name)
             return {"sent": False, "error": "No communication connector available"}
@@ -474,13 +475,22 @@ class WorkflowEngine:
         step: Step,
         context: WorkflowContext,
     ) -> Any:
-        """Call a connector method looked up by capability."""
+        """Call the connector method that backs the step's capability.
+
+        The part of the action after the first dot names a
+        :class:`Capability` (``cmms.read_assets``), not a method: the engine
+        calls the method mapped to it in ``CAPABILITY_TO_METHOD``, which
+        differs for a few capabilities (``iot.publish_message`` calls
+        ``publish``).
+        """
         parts = step.action.split(".", 1)
-        capability = parts[1] if len(parts) > 1 else step.action
+        capability_name = parts[1] if len(parts) > 1 else step.action
 
         # Resolve inputs
         resolved_inputs = {k: context.resolve_input_value(v) for k, v in step.inputs.items()}
 
+        # Ahead of the capability check, so a write step no connector can
+        # serve yet still returns its placeholder in a sandbox run.
         if self.sandbox and self._is_write_action(step.action, step=step):
             logger.info(
                 "sandbox_connector",
@@ -490,14 +500,30 @@ class WorkflowEngine:
             )
             return _sandbox_placeholder(step.action, resolved_inputs)
 
+        try:
+            capability = Capability(capability_name)
+        except ValueError:
+            raise WorkflowError(
+                f"Step '{step.name}': unknown capability '{capability_name}' in action "
+                f"'{step.action}'; connector actions must name a Capability value"
+            ) from None
+
         connectors = self._registry.find_by_capability(capability)
         if not connectors:
             raise WorkflowError(f"Step '{step.name}': no connector with capability '{capability}'")
 
-        _, conn = connectors[0]
-        method = getattr(conn, capability, None)
+        # Imported here: machina.introspect loads the agent package, which
+        # imports this module.
+        from machina.introspect._methods import method_name_for
+
+        method_name = method_name_for(capability) or capability.value
+        conn_name, conn = connectors[0]
+        method = getattr(conn, method_name, None)
         if method is None:
-            raise WorkflowError(f"Step '{step.name}': connector has no method '{capability}'")
+            raise WorkflowError(
+                f"Step '{step.name}': connector '{conn_name}' has no method "
+                f"'{method_name}' for capability '{capability}'"
+            )
 
         if asyncio.iscoroutinefunction(method):
             return await method(**resolved_inputs)
