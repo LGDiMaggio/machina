@@ -88,7 +88,10 @@ capabilities, `read_failure_modes`, `receive_message`, `retrieve_section`,
 Two non-portable escape hatches reach vendor APIs directly. They are
 registered only with `enable_vendor_tools: true` under `mcp:` in the config;
 outside sandbox mode they answer with an error entry when the matching
-connector is not configured.
+connector is not configured, and `maximo_raw_attribute_update` answers with
+one, before any request, when `resource_type` is not an object-structure name
+(letters, digits and `_`) or `resource_id` is empty, `.` or `..`. Any other
+`resource_id` is sent percent-encoded as one URL path segment.
 
 | Tool | Connector | Parameters |
 |------|-----------|------------|
