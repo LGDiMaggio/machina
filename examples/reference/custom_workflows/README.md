@@ -72,7 +72,7 @@ preventive_scheduling = Workflow(
         Step("create_work_orders",  action="work_order_factory.create_batch",
              is_write=True, on_error=ErrorPolicy.RETRY, retries=3),
         Step("notify_planners",     action="channels.send_message",
-             template="Plans due: {scan_plans.count}..."),
+             template="Plans due: {scan_plans}..."),
     ],
 )
 ```

@@ -92,7 +92,8 @@ spare_part_reorder = Workflow(
             ),
             on_error=ErrorPolicy.SKIP,
         ),
-        # NOTE: requires an ERP connector (planned for v0.3+).
+        # NOTE: Machina ships no ERP connector. Run live, this step needs one
+        # that declares create_purchase_order, or the workflow stops here.
         # In sandbox mode this step is blocked automatically (is_write=True).
         Step(
             "place_order",
@@ -158,9 +159,9 @@ preventive_scheduling = Workflow(
             action="channels.send_message",
             template=(
                 "Weekly Preventive Plan\n"
-                "Plans due: {scan_plans.count}\n"
+                "Plans due: {scan_plans}\n"
                 "Priority: {prioritize_work}\n"
-                "WOs created: {create_work_orders.count}"
+                "WOs created: {create_work_orders}"
             ),
             on_error=ErrorPolicy.NOTIFY,
         ),

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every placeholder in the custom-workflows reference example's planner notification resolves.** Its `notify_planners` template read `{scan_plans.count}` and `{create_work_orders.count}`, but a list output has no fields: `.count` reached the list's `count` method, so the message showed `<built-in method count of list object at 0x…>` and no `template_unresolved` warning was logged. That was `scan_plans` on every run and `create_work_orders` run live; in sandbox mode `create_work_orders` returns a placeholder with no `count` key, so `{create_work_orders.count}` stayed in the message as written. The template now references both outputs whole, as `{scan_plans}` and `{create_work_orders}`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
