@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`MaximoConnector.read_spare_parts` and `UpKeepConnector.read_spare_parts` accept `asset_id`.** Since they were added in 0.2.0 they took only `sku`, while the agent's context prefetch and `check_spare_parts` tool, the MCP `machina_list_spare_parts` tool and the builtin alarm-to-work-order workflow all pass `asset_id` — so each of those calls raised `TypeError` before any request. The prefetch logged it as `context_gather_error` and left spare parts out of the prompt; the tool, which forwards `asset_id=""` even for a sku-only lookup, failed the turn as an `LLMError`; the MCP tool raised; the workflow skipped the step. Both connectors read endpoints with no asset relation (`mxinventory`, `/api/v2/parts`; UpKeep lists an asset's parts on the asset record, which the connector does not read yet), so, as `SapPmConnector` does for an unfilterable BOM read, an asset-only read now logs `spare_parts_asset_filter_unsupported` and returns `[]` without fetching the inventory; with a `sku`, the asset is dropped and the result is filtered by `sku` alone.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from structlog.testing import CapturingLogger
 
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
@@ -416,6 +417,47 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="BRG-6205")
         assert len(parts) == 1
         assert parts[0].sku == "BRG-6205"
+
+    @pytest.mark.asyncio
+    async def test_asset_only_read_returns_empty_without_fetching(
+        self, httpx_mock, monkeypatch, connector: MaximoConnector
+    ) -> None:
+        """mxinventory has no asset relation, so an asset filter cannot be applied.
+
+        The read must not widen to the whole inventory: it logs why and returns
+        [] without requesting mxinventory.
+        """
+        await _connect(httpx_mock, connector)
+        log = CapturingLogger()
+        monkeypatch.setattr("machina.connectors.cmms.maximo.logger", log)
+        parts = await connector.read_spare_parts(asset_id="PUMP-201")
+        assert parts == []
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]
+        assert [c.args[0] for c in log.calls if c.method_name == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_dropped_when_sku_narrows(
+        self, httpx_mock, monkeypatch, connector: MaximoConnector
+    ) -> None:
+        """With a sku the read stays bounded: the sku filters, the asset is dropped."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'itemnum="BRG-6205"'}),
+            json={
+                "member": [{"itemnum": "BRG-6205", "description": "Bearing", "curbal": 5}],
+                "responseInfo": {},
+            },
+        )
+        log = CapturingLogger()
+        monkeypatch.setattr("machina.connectors.cmms.maximo.logger", log)
+        parts = await connector.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        assert [p.sku for p in parts] == ["BRG-6205"]
+        assert [c.args[0] for c in log.calls if c.method_name == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------
