@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The raw Maximo vendor tool can no longer patch a different endpoint.** `maximo_raw_attribute_update` put the MCP client's `resource_type` and `resource_id` into its PATCH URL unencoded, and httpx removes dot segments, so `resource_id="../../script/X"` patched `/maximo/oslc/script/X`, and a `?` or `#` rewrote the query. Outside sandbox mode it now refuses, with an error entry and before any request, a `resource_type` that is not an object-structure name (letters, digits and `_`) and a `resource_id` that is empty, `.` or `..`; any other `resource_id` is percent-encoded as one path segment.
+- **Both MCP vendor tools write through `@sandbox_aware` connector helpers.** SAP PM's `_write_with_csrf`, which the raw IW38 notification tool calls directly, is now guarded itself, before its CSRF token fetch; the Maximo PATCH moved from a raw httpx call in the tool to the guarded `MaximoConnector._patch_resource`, which, like the connector's other writes, retries a 429 but never replays the PATCH after a network error or a 503. A tool's own sandbox check is no longer the only gate.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

@@ -515,6 +515,7 @@ class SapPmConnector:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
 
+    @sandbox_aware
     async def _write_with_csrf(self, method: str, url: str, payload: dict[str, Any]) -> Any:
         """Execute a write request (POST/PATCH) with CSRF token.
 
@@ -529,6 +530,10 @@ class SapPmConnector:
         non-idempotent, so retrying after a possible apply would duplicate the
         order (mirrors the non-idempotent-method policy in ``cmms/retry.py``).
         The token value is never logged.
+
+        Sandbox-guarded itself, not only through its decorated callers: the raw
+        IW38 MCP vendor tool calls it directly. The guard fires before the CSRF
+        fetch.
 
         Raises:
             ConnectorAuthError: If the CSRF fetch returns 401.
