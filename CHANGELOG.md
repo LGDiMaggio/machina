@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Spare-part lookups no longer fail on Maximo and UpKeep.** Their `read_spare_parts` did not accept the `asset_id` keyword that every in-tree caller passes, so each call raised `TypeError`: the `alarm_to_workorder` workflow skipped its spare-parts step and the technician notification showed a raw `{check_spare_parts}` placeholder, the agent's context prefetch dropped spare parts with only a log warning, the agent's `check_spare_parts` tool failed the whole turn (reported as an `LLMError`) even without an asset filter, and the MCP `machina_list_spare_parts` tool failed when given an asset. Both connectors now accept `asset_id` but cannot apply it, since neither inventory API relates parts to assets: alone it returns `[]` without querying the CMMS, rather than the whole inventory; with `sku` the read is narrowed by `sku` only. Both cases log a `spare_parts_asset_filter_unsupported` warning.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

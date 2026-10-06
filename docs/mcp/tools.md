@@ -34,6 +34,11 @@ which connector declares what.
 | `machina_get_sensor_reading` | `get_latest_reading` | `asset_id` | Latest sensor reading |
 | `machina_get_alarms` | `get_latest_reading` | `asset_id=""` | Active alarms |
 
+`machina_list_spare_parts` with an `asset_id` returns no parts when the CMMS
+cannot relate parts to assets (Maximo, UpKeep, and SAP PM without
+`bom_equipment_field`), rather than the whole inventory; the connector logs a
+warning.
+
 `machina_search_manuals` returns document sources as bare file names, never
 host paths. Its `filters` keys are `asset_id`, `doc_type`,
 `equipment_class_code` and `section_title`.

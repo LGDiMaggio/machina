@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 import pytest
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.capabilities import Capability
 from machina.observability.tracing import ActionTracer
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
 from machina.workflows.engine import WorkflowEngine
@@ -70,14 +71,25 @@ class _FakeWoFactory:
         return {"id": "WO-001", "status": "draft", "asset_id": "P-201"}
 
 
-class _FakeCmmsConnector:
-    """CMMS connector providing history, spare parts, and work order creation."""
+_HISTORY = [{"id": "WO-PREV-001", "status": "closed", "type": "corrective"}]
+_SPARE_PARTS = [{"sku": "SKF-6310", "available": True, "stock": 3}]
 
-    capabilities: ClassVar[list[str]] = [
-        "get_asset_history",
-        "check_spare_parts",
-        "create_work_order",
-    ]
+
+class _FakeCmmsConnector:
+    """CMMS connector providing history, spare parts, and work order creation.
+
+    The read methods keep the real connectors' signatures rather than
+    ``**kwargs``, so a workflow input a real connector would reject fails here
+    too instead of passing unnoticed.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {
+            Capability.READ_MAINTENANCE_HISTORY,
+            Capability.READ_SPARE_PARTS,
+            Capability.CREATE_WORK_ORDER,
+        }
+    )
 
     def __init__(self) -> None:
         self.created_work_orders: list[dict[str, Any]] = []
@@ -92,11 +104,11 @@ class _FakeCmmsConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def get_asset_history(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return [{"id": "WO-PREV-001", "status": "closed", "type": "corrective"}]
+    async def read_maintenance_history(self, asset_id: str) -> list[dict[str, Any]]:
+        return _HISTORY
 
-    async def check_spare_parts(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return [{"sku": "SKF-6310", "available": True, "stock": 3}]
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[dict[str, Any]]:
+        return _SPARE_PARTS
 
     async def create_work_order(self, **kwargs: Any) -> dict[str, Any]:
         # Record kwargs so tests can assert the workflow wired the
@@ -188,9 +200,16 @@ class TestAlarmToWorkorderWorkflow:
             "submit_work_order",
         ]
 
-        # All steps succeeded
+        # All steps ran and succeeded. ``success`` alone cannot show that: a
+        # SKIP-policy step whose dispatch fails (no connector declares the
+        # capability, or the call raises) also reports success=True.
         for sr in result.step_results:
             assert sr.success is True, f"Step {sr.step_name} failed: {sr.error}"
+            assert sr.skipped is False, f"Step {sr.step_name} was skipped"
+
+        steps = {sr.step_name: sr for sr in result.step_results}
+        assert steps["check_history"].output == _HISTORY
+        assert steps["check_spare_parts"].output == _SPARE_PARTS
 
     @pytest.mark.asyncio
     async def test_generate_work_order_receives_upstream_inputs(self) -> None:
@@ -280,6 +299,9 @@ class TestAlarmToWorkorderWorkflow:
         assert "P-201" in msg
         # Template should have resolved {analyze_alarm} (DiagnosisResult str())
         assert "BEAR-WEAR-01" in msg
+        # ...and {check_spare_parts}: the parts reach the technician.
+        assert "SKF-6310" in msg
+        assert "{check_spare_parts}" not in msg
 
     @pytest.mark.asyncio
     async def test_diagnosis_failure_stops_workflow(self) -> None:
@@ -309,19 +331,32 @@ class TestAlarmToWorkorderWorkflow:
         """If check_spare_parts fails (ErrorPolicy.SKIP), workflow continues."""
 
         class _FailingCmms(_FakeCmmsConnector):
-            async def check_spare_parts(self, **kwargs: Any) -> None:
+            def __init__(self) -> None:
+                super().__init__()
+                self.spare_parts_calls = 0
+
+            async def read_spare_parts(
+                self, *, asset_id: str = "", sku: str = ""
+            ) -> list[dict[str, Any]]:
+                self.spare_parts_calls += 1
                 raise RuntimeError("CMMS timeout")
 
-        engine, _cmms, _comms = self._build_engine(cmms=_FailingCmms())
+        cmms = _FailingCmms()
+        engine, _cmms, _comms = self._build_engine(cmms=cmms)
         trigger = {"asset_id": "P-201", "severity": "critical"}
 
         result = await engine.execute(alarm_to_workorder, trigger)
 
         # Workflow should still succeed overall
         assert result.success is True
-        # check_spare_parts should be skipped
-        spare_step = next(sr for sr in result.step_results if sr.step_name == "check_spare_parts")
-        assert spare_step.skipped is True
+        steps = {sr.step_name: sr for sr in result.step_results}
+        # check_spare_parts is skipped BECAUSE the connector call failed — it was
+        # reached, not bypassed by a dispatch that never found the method.
+        assert cmms.spare_parts_calls == 1
+        assert steps["check_spare_parts"].skipped is True
+        # The steps around it still ran.
+        assert steps["check_history"].skipped is False
+        assert steps["submit_work_order"].skipped is False
 
     @pytest.mark.asyncio
     async def test_sandbox_mode_blocks_writes(self) -> None:
@@ -426,11 +461,13 @@ class TestAlarmToWorkorderLiveIntegration:
         captured_work_orders: list[WorkOrder] = []
 
         class _CmmsLike:
-            capabilities: ClassVar[list[str]] = [
-                "get_asset_history",
-                "check_spare_parts",
-                "create_work_order",
-            ]
+            capabilities: ClassVar[frozenset[Capability]] = frozenset(
+                {
+                    Capability.READ_MAINTENANCE_HISTORY,
+                    Capability.READ_SPARE_PARTS,
+                    Capability.CREATE_WORK_ORDER,
+                }
+            )
 
             async def connect(self) -> None:
                 pass
@@ -441,10 +478,12 @@ class TestAlarmToWorkorderLiveIntegration:
             async def health_check(self) -> bool:
                 return True
 
-            async def get_asset_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+            async def read_maintenance_history(self, asset_id: str) -> list[dict[str, Any]]:
                 return []
 
-            async def check_spare_parts(self, **kwargs: Any) -> list[dict[str, Any]]:
+            async def read_spare_parts(
+                self, *, asset_id: str = "", sku: str = ""
+            ) -> list[dict[str, Any]]:
                 return []
 
             async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -478,6 +517,9 @@ class TestAlarmToWorkorderLiveIntegration:
             "flows into WorkOrder.failure_mode as a str, and that the factory "
             "auto-generates a non-empty WorkOrder.id."
         )
+        steps = {sr.step_name: sr for sr in result.step_results}
+        assert steps["check_history"].skipped is False
+        assert steps["check_spare_parts"].skipped is False
         assert len(captured_work_orders) == 1
         wo = captured_work_orders[0]
         # Real pydantic validation accepted these — that IS the contract.

@@ -7,6 +7,7 @@ bare strings emit ``DeprecationWarning``.
 
 from __future__ import annotations
 
+import inspect
 import warnings
 
 import pytest
@@ -165,3 +166,26 @@ class TestConnectorsDeclareTypedCapabilities:
 
         assert isinstance(UpKeepConnector.capabilities, frozenset)
         assert Capability.UPDATE_WORK_ORDER in UpKeepConnector.capabilities
+
+
+class TestSparePartsCallContract:
+    """Every in-tree spare-parts provider accepts the keywords its callers pass.
+
+    The ``alarm_to_workorder`` workflow, the agent's context prefetch and its
+    ``check_spare_parts`` tool, and the MCP ``machina_list_spare_parts`` tool
+    call whichever connector declares ``READ_SPARE_PARTS`` with ``asset_id``
+    and/or ``sku``. A provider whose signature drops either keyword raises
+    ``TypeError`` on those paths, and the callers' test fakes, which accept
+    ``**kwargs``, cannot notice.
+    """
+
+    @pytest.mark.parametrize("connector_type", ["generic_cmms", "sap_pm", "maximo", "upkeep"])
+    def test_read_spare_parts_accepts_asset_id_and_sku(self, connector_type: str) -> None:
+        from machina.runtime import _CONNECTOR_FACTORIES, _import_class
+
+        cls = _import_class(_CONNECTOR_FACTORIES[connector_type])
+        params = inspect.signature(cls.read_spare_parts).parameters
+        for name in ("asset_id", "sku"):
+            assert name in params, f"{cls.__name__}.read_spare_parts lacks {name!r}"
+            # Each caller omits the filter it does not use.
+            assert params[name].default == ""

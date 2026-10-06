@@ -5,6 +5,8 @@ All HTTP traffic is intercepted by pytest-httpx — no real Maximo API calls.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import httpx
 import pytest
 
@@ -416,6 +418,43 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="BRG-6205")
         assert len(parts) == 1
         assert parts[0].sku == "BRG-6205"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_only_is_refused(
+        self, httpx_mock, monkeypatch, connector: MaximoConnector
+    ) -> None:
+        """mxinventory cannot filter by asset: no request, no parts, a warning."""
+        log = MagicMock()
+        monkeypatch.setattr("machina.connectors.cmms.maximo.logger", log)
+        await _connect(httpx_mock, connector)
+        parts = await connector.read_spare_parts(asset_id="PUMP-201")
+        assert parts == []
+        assert len(httpx_mock.get_requests()) == 1  # the connect handshake only
+        assert [c.args[0] for c in log.warning.call_args_list] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
+        assert log.warning.call_args.kwargs["asset_id"] == "PUMP-201"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_and_sku_narrows_by_sku_only(
+        self, httpx_mock, monkeypatch, connector: MaximoConnector
+    ) -> None:
+        """With a sku, the asset clause is dropped (not sent) and a warning says so."""
+        log = MagicMock()
+        monkeypatch.setattr("machina.connectors.cmms.maximo.logger", log)
+        await _connect(httpx_mock, connector)
+        # The mocked URL carries ONLY the itemnum clause: an asset clause would
+        # leave the request unmatched.
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'itemnum="BRG-6205"'}),
+            json={"member": [{"itemnum": "BRG-6205", "curbal": 5}], "responseInfo": {}},
+        )
+        parts = await connector.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        assert [p.sku for p in parts] == ["BRG-6205"]
+        assert [c.args[0] for c in log.warning.call_args_list] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------
