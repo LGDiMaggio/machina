@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextvars
 import csv
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, TypeVarTuple
 
 import structlog
 from pydantic import ValidationError
@@ -28,6 +30,9 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from concurrent.futures import Future
+
     from machina.connectors.docs.excel_schema import (
         ColumnMapping,
         ExcelConnectorConfig,
@@ -44,6 +49,12 @@ from machina.exceptions import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
+_Ts = TypeVarTuple("_Ts")
+
+# How long disconnect() waits for file access (a write, a refresh) still running.
+_DISCONNECT_WAIT_SEC = 5.0
 
 
 # ------------------------------------------------------------------
@@ -537,6 +548,27 @@ def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
     return ConnectorError(f"Could not write {path.name}: {exc.strerror or exc}")
 
 
+def _log_failure_after_cancel(log_fields: dict[str, str], future: Future[Any]) -> None:
+    """Log the failure of a file-thread call whose caller was cancelled.
+
+    Attached as a done-callback only once the caller is gone, so it runs on
+    the file thread as the call ends (or at once, if it has already ended)
+    and never repeats a failure that a caller received. A call dropped
+    before it ran did nothing, and is not logged.
+    """
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc is not None:
+        logger.error(
+            "failed_after_cancel",
+            connector="ExcelCsvConnector",
+            **log_fields,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
 # ------------------------------------------------------------------
 # Connector
 # ------------------------------------------------------------------
@@ -632,20 +664,23 @@ class ExcelCsvConnector:
         self._asset_cache: list[Asset] = []
         self._wo_cache: list[WorkOrder] = []
         self._fm_cache: list[FailureMode] = []
-        self._write_lock = asyncio.Lock()
+        # Every file access runs on this one thread, one at a time: the loads
+        # of connect() and refresh(), and every work-order write (see
+        # _run_on_file_thread). A write whose caller was cancelled still holds
+        # the file until it is done, and the next access waits for it.
+        self._file_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="machina-excel")
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Validate schemas against file headers and load initial data."""
-        if self._config.asset_registry:
-            self._validate_and_load_assets()
-        if self._config.work_orders:
-            self._validate_and_load_work_orders()
-        if self._config.failure_modes:
-            self._validate_and_load_failure_modes()
+        """Validate schemas against file headers and load initial data.
+
+        The files are read on the connector's file thread, in turn with
+        writes and refreshes, so the event loop runs on meanwhile.
+        """
+        await self._run_on_file_thread(self._load_sheets, operation="connect")
         self._connected = True
         logger.info(
             "connected",
@@ -656,11 +691,28 @@ class ExcelCsvConnector:
         )
 
     async def disconnect(self) -> None:
-        """Release caches."""
-        self._asset_cache.clear()
-        self._wo_cache.clear()
-        self._fm_cache.clear()
-        self._connected = False
+        """Wait for file access still running, then release caches.
+
+        A write keeps running when its caller is cancelled. ``disconnect()``
+        waits up to 5 seconds for it, and for a refresh in progress, so that
+        once it returns the connector is not using its files; past that, it
+        logs ``file_access_still_running`` and goes on.
+        """
+        try:
+            await asyncio.wait_for(
+                self._run_on_file_thread(lambda: None), timeout=_DISCONNECT_WAIT_SEC
+            )
+        except TimeoutError:
+            logger.warning(
+                "file_access_still_running",
+                connector="ExcelCsvConnector",
+                operation="disconnect",
+                timeout_sec=_DISCONNECT_WAIT_SEC,
+            )
+        finally:
+            # New lists, not clear(): a write still running holds the old ones.
+            self._asset_cache, self._wo_cache, self._fm_cache = [], [], []
+            self._connected = False
 
     async def health_check(self) -> ConnectorHealth:
         """Check that configured files are accessible."""
@@ -776,6 +828,11 @@ class ExcelCsvConnector:
         to collapse retries. The new row's values go under the matching
         column headers, whatever the column order in the file.
 
+        Writes run one at a time. Cancelling the caller does not stop a write
+        that has started: it still finishes, and the next write waits for it,
+        so a retry after a cancellation finds the row instead of adding it
+        twice.
+
         Raises:
             ConnectorConfigError: If no writable work-orders sheet is configured.
             ConnectorLockedError: If the file is open in another program.
@@ -788,34 +845,15 @@ class ExcelCsvConnector:
             raise ConnectorConfigError("work_orders schema has no write_mode configured")
 
         row_data = self._work_order_to_row(work_order, schema)
-        path = Path(schema.path)
-
-        async with self._write_lock:
-            # The file, not the connect-time cache, is the source of truth.
-            await asyncio.to_thread(self._reload_work_orders_for_write, path)
-            existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
-            if existing is not None:
-                logger.info(
-                    "work_order_create_idempotent_hit",
-                    connector="ExcelCsvConnector",
-                    operation="create_work_order",
-                    work_order_id=work_order.id,
-                    asset_id=work_order.asset_id,
-                )
-                return existing
-            try:
-                await asyncio.to_thread(self._write_row, path, schema, row_data)
-            except OSError as exc:
-                raise _file_write_error(exc, path) from exc
-            self._wo_cache.append(work_order)
-        logger.info(
-            "work_order_created",
-            connector="ExcelCsvConnector",
+        return await self._run_on_file_thread(
+            self._append_unless_present,
+            schema,
+            work_order,
+            row_data,
             operation="create_work_order",
             work_order_id=work_order.id,
             asset_id=work_order.asset_id,
         )
-        return work_order
 
     @sandbox_aware
     async def update_work_order(
@@ -842,8 +880,10 @@ class ExcelCsvConnector:
         through a temp file and an atomic replace. A field that is not a
         ``WorkOrder`` field, a change of ``id``, and a change to a field that
         no column is mapped to are refused rather than silently dropped. If
-        the write fails, the cached work order is restored. When no
-        ``write_mode`` is set, the update is kept in cache only.
+        the write fails, the cached work order is left as it was. When no
+        ``write_mode`` is set, the update is kept in cache only. As with
+        :meth:`create_work_order`, a write that has started finishes even if
+        the caller is cancelled, and the next write waits for it.
 
         Raises:
             ConnectorError: If the work order is unknown, the status is not a
@@ -874,39 +914,94 @@ class ExcelCsvConnector:
 
         schema = self._config.work_orders
         persist = schema is not None and schema.write_mode is not None
-        # Serialise the reload, the cache mutation and the file write under
-        # the write lock so concurrent writes cannot interleave.
-        async with self._write_lock:
-            if persist:
-                assert schema is not None
-                await asyncio.to_thread(self._reload_work_orders_for_write, Path(schema.path))
-            idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
-            if idx is None:
-                raise ConnectorError(f"Work order '{work_order_id}' not found")
-            wo = self._wo_cache[idx]
-            before = wo.model_copy(deep=True)
-            changed: set[str] = set()
+        return await self._run_on_file_thread(
+            self._apply_update,
+            work_order_id,
+            new_status,
+            changes,
+            schema if persist else None,
+            operation="update_work_order",
+            work_order_id=work_order_id,
+        )
+
+    def _append_unless_present(
+        self, schema: SheetSchema, work_order: WorkOrder, row_data: dict[str, Any]
+    ) -> WorkOrder:
+        """Append a work order's row unless the sheet already holds its ID.
+
+        Returns the stored record when it does, else ``work_order``. Runs on
+        the file thread: the re-read, the ID check, the append, the cache
+        update and the log line are one step that no other write can split
+        and that cancelling the caller does not cut short.
+        """
+        path = Path(schema.path)
+        # The file, not the connect-time cache, is the source of truth.
+        self._reload_work_orders_for_write(path)
+        cache = self._wo_cache  # the list just loaded, even if disconnect() swaps it
+        existing = next((wo for wo in cache if wo.id == work_order.id), None)
+        if existing is not None:
+            logger.info(
+                "work_order_create_idempotent_hit",
+                connector="ExcelCsvConnector",
+                operation="create_work_order",
+                work_order_id=work_order.id,
+                asset_id=work_order.asset_id,
+            )
+            return existing
+        try:
+            self._write_row(path, schema, row_data)
+        except OSError as exc:
+            raise _file_write_error(exc, path) from exc
+        cache.append(work_order)
+        logger.info(
+            "work_order_created",
+            connector="ExcelCsvConnector",
+            operation="create_work_order",
+            work_order_id=work_order.id,
+            asset_id=work_order.asset_id,
+        )
+        return work_order
+
+    def _apply_update(
+        self,
+        work_order_id: str,
+        new_status: WorkOrderStatus | None,
+        changes: dict[str, Any],
+        schema: SheetSchema | None,
+    ) -> WorkOrder:
+        """Update a copy of the cached work order, write it, then cache it.
+
+        ``schema`` is the sheet whose row receives the changed cells, or
+        ``None`` to keep the update in cache only. Runs on the file thread:
+        the re-read, the change, the row rewrite, the cache update and the
+        log lines are one step that no other write can split and that
+        cancelling the caller does not cut short. If any part fails, the
+        cached work order is left as it was.
+        """
+        if schema is not None:
+            self._reload_work_orders_for_write(Path(schema.path))
+        cache = self._wo_cache  # the list just loaded, even if disconnect() swaps it
+        idx = next((i for i, wo in enumerate(cache) if wo.id == work_order_id), None)
+        if idx is None:
+            raise ConnectorError(f"Work order '{work_order_id}' not found")
+        wo = cache[idx].model_copy(deep=True)
+        changed: set[str] = set()
+        if new_status is not None and new_status != wo.status:
             try:
-                if new_status is not None and new_status != wo.status:
-                    try:
-                        wo.transition_to(new_status)
-                    except ValueError as exc:
-                        raise ConnectorError(str(exc)) from exc
-                    changed |= {"status", "updated_at"}
-                for key, value in changes.items():
-                    setattr(wo, key, value)
-                    changed.add(key)
-                if persist and changed:
-                    assert schema is not None
-                    path = Path(schema.path)
-                    try:
-                        await asyncio.to_thread(self._update_row_in_file, schema, wo, changed)
-                    except OSError as exc:
-                        raise _file_write_error(exc, path) from exc
-            except Exception:
-                self._wo_cache[idx] = before
-                raise
-        if not persist:
+                wo.transition_to(new_status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from exc
+            changed |= {"status", "updated_at"}
+        for key, value in changes.items():
+            setattr(wo, key, value)
+            changed.add(key)
+        if schema is not None and changed:
+            try:
+                self._update_row_in_file(schema, wo, changed)
+            except OSError as exc:
+                raise _file_write_error(exc, Path(schema.path)) from exc
+        cache[idx] = wo
+        if schema is None:
             logger.warning(
                 "update_not_persisted",
                 connector="ExcelCsvConnector",
@@ -961,19 +1056,26 @@ class ExcelCsvConnector:
         mid-save, locked, header change), every cache is restored to its
         pre-refresh snapshot so assets and the failure-mode catalog never
         end up mutually inconsistent.
+
+        The files are read on the connector's file thread, in turn with
+        writes: a refresh waits for a write already running or queued, and a
+        later write waits for the refresh. The call blocks until the refresh
+        is done, which is how ``FileWatcher.stop()`` waits for it; from a
+        coroutine, run it with ``asyncio.to_thread``. Never call it from the
+        file thread itself (code run by ``_run_on_file_thread``): it would
+        wait for its own turn forever.
         """
+        self._submit_to_file_thread(self._reload_sheets).result()
+
+    def _reload_sheets(self) -> None:
+        """Body of :meth:`refresh`, on the file thread: reload, all-or-nothing."""
         snapshot = (
             list(self._asset_cache),
             list(self._wo_cache),
             list(self._fm_cache),
         )
         try:
-            if self._config.asset_registry:
-                self._validate_and_load_assets()
-            if self._config.work_orders:
-                self._validate_and_load_work_orders()
-            if self._config.failure_modes:
-                self._validate_and_load_failure_modes()
+            self._load_sheets()
         except Exception:
             self._asset_cache, self._wo_cache, self._fm_cache = snapshot
             raise
@@ -988,6 +1090,15 @@ class ExcelCsvConnector:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _load_sheets(self) -> None:
+        """Load every configured sheet into its cache. Runs on the file thread."""
+        if self._config.asset_registry:
+            self._validate_and_load_assets()
+        if self._config.work_orders:
+            self._validate_and_load_work_orders()
+        if self._config.failure_modes:
+            self._validate_and_load_failure_modes()
 
     def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
         """Shared exists-check → read → validate → parse pipeline for one sheet."""
@@ -1040,8 +1151,34 @@ class ExcelCsvConnector:
                 )
         self._wo_cache = work_orders
 
+    async def _run_on_file_thread(
+        self, func: Callable[[*_Ts], _T], /, *args: *_Ts, **log_fields: str
+    ) -> _T:
+        """Run ``func(*args)`` on the connector's file thread, after earlier calls.
+
+        One thread runs every call, so no two calls overlap, whatever happens
+        to their callers. A cancelled caller (an MCP request cancellation, a
+        workflow step timeout) cannot stop a call that is already running, and
+        the calls behind it wait for it; a call still queued when the
+        cancellation reaches the thread pool, on the event loop's next
+        iteration, is dropped. Nobody reads the outcome of a call that
+        outlives its caller, so if that call fails, the failure is logged as
+        ``failed_after_cancel``, with ``log_fields``.
+        """
+        future = self._submit_to_file_thread(func, *args)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.add_done_callback(lambda done: _log_failure_after_cancel(log_fields, done))
+            raise
+
+    def _submit_to_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> Future[_T]:
+        """Queue ``func(*args)`` on the file thread, in a copy of the caller's context."""
+        context = contextvars.copy_context()  # as asyncio.to_thread does
+        return self._file_thread.submit(lambda: context.run(func, *args))
+
     def _reload_work_orders_for_write(self, path: Path) -> None:
-        """Re-read the work-order sheet before a write, inside the write lock.
+        """Re-read the work-order sheet at the start of a write, on the file thread.
 
         Raises:
             ConnectorLockedError: If the file is open in another program.
