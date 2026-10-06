@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`machina_diagnose_failure` MCP tool.** Ranks probable failure modes for an asset from observed symptoms against the catalog harvested from `READ_FAILURE_MODES` connectors, with the agent's `diagnose_failure` ranking and honest-notes contract: the two surfaces now share one implementation (`machina.agent.diagnosis`); only the asset lookup differs (primary CMMS vs. the agent's plant registry). It registers under `READ_ASSETS`, so a deployment without a catalog gets the explanatory note rather than no tool, and it resolves the asset through `read_assets()` when the CMMS connector has no `get_asset` (Excel/CSV, SQL).
+
+### Fixed
+
+- **The `diagnose_asset_failure` MCP prompt pointed at a diagnosis tool the server never offered.** Its ranking step now names `machina_diagnose_failure` and asks the client to keep the tool's order and pass on its `note`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
