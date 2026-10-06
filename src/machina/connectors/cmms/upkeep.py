@@ -355,10 +355,19 @@ class UpKeepConnector:
         return parts
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-        """Read preventive-maintenance schedules from UpKeep."""
+        """Read preventive-maintenance plans from UpKeep's PM templates.
+
+        Returns one plan per PM schedule: the asset and the recurrence live
+        on each schedule, the name and tasks on its template. Legacy PM
+        triggers (``/api/v2/preventive-maintenance``) are not read — their
+        documented responses carry no asset.
+        """
         self._ensure_connected()
-        raw = await self._paginated_get("/api/v2/preventive-maintenance")
-        return [upkeep_mapper.parse_maintenance_plan(item) for item in raw]
+        return [
+            plan
+            for template in await self._read_pm_templates()
+            for plan in upkeep_mapper.parse_maintenance_plans(template)
+        ]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed work orders for an asset."""
@@ -422,3 +431,46 @@ class UpKeepConnector:
             total=len(all_items),
         )
         return all_items
+
+    async def _read_pm_templates(self) -> list[dict[str, Any]]:
+        """Fetch every PM template, schedules expanded, from ``GET /api/v2/pm``.
+
+        Unlike the offset/limit endpoints, ``/api/v2/pm`` numbers pages from
+        1 (``page`` and ``pageSize`` go together) and wraps results in
+        ``{"data": [...], "pagination": {...}}``; a page shorter than
+        ``pageSize`` is the last. Without ``includes=schedules`` each
+        template lists only its schedule IDs.
+        """
+        httpx = _require_httpx()
+        path = "/api/v2/pm"
+        templates: list[dict[str, Any]] = []
+        page = 1
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}{path}",
+                    headers=self._headers(),
+                    params={
+                        "includes": "schedules",
+                        "page": str(page),
+                        "pageSize": str(self._PAGE_SIZE),
+                    },
+                )
+                if resp.status_code == 401:
+                    raise ConnectorAuthError("UpKeep API key is invalid")
+                if resp.status_code != 200:
+                    raise ConnectorError(f"UpKeep GET {path} failed: HTTP {resp.status_code}")
+                data = resp.json().get("data", [])
+                templates.extend(data)
+                if len(data) < self._PAGE_SIZE:
+                    break
+                page += 1
+        logger.debug(
+            "pm_templates_read",
+            connector="UpKeepConnector",
+            operation="read_maintenance_plans",
+            total=len(templates),
+        )
+        return templates

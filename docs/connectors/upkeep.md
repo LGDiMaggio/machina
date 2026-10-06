@@ -46,7 +46,7 @@ pip install machina-ai[cmms-rest]
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
 | `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
-| `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
+| `read_maintenance_plans` | Read PM templates with their schedules (`/api/v2/pm`) — one plan per PM schedule |
 
 ### Convenience methods
 
@@ -134,7 +134,13 @@ await connector.close_work_order("wo-123")
 | `partNumber` / `barcode` / `id` | `SparePart.sku` (prefers physical identifier, falls back to record ID) |
 | `name` (part) | `SparePart.name` |
 | `quantity` | `SparePart.stock_quantity` |
-| `frequencyDays` | `MaintenancePlan.interval.days` |
+| `id` / `_id` (PM schedule) | `MaintenancePlan.id` |
+| `asset` (PM schedule) | `MaintenancePlan.asset_id` |
+| `repeatFrequency` × `repeatInterval` (PM schedule) | `MaintenancePlan.interval` (DAILY→days, WEEKLY→weeks, MONTHLY→months, YEARLY→12 months) |
+| `endDate` / `scheduleHasEnded` (PM schedule) | `MaintenancePlan.active` (false once the end date has passed or UpKeep marks the schedule ended) |
+| `name` (PM template) | `MaintenancePlan.name` |
+| `tasks[].name` (PM template) | `MaintenancePlan.tasks` |
+| `estimatedTime` (PM template, hours) | `MaintenancePlan.estimated_duration_hours` |
 
 ## Resilience
 
@@ -147,6 +153,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
 - **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
+- **Maintenance plans**: a PM template can schedule several assets, each with its own recurrence, so the connector returns one plan per schedule (soft-deleted templates are skipped). A meter-triggered schedule maps with an empty interval: the PM payload names the meter but not its unit. Legacy PM triggers (`/api/v2/preventive-maintenance`) are not read — their documented responses carry no asset, and PM templates reference them through `legacyPMId`.
 
 ## API Reference
 
