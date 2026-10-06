@@ -876,3 +876,154 @@ class TestUpdateWorkOrder:
         # Verify the PATCH carried the CSRF token
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
         assert patch_req.headers.get("X-CSRF-Token") == "csrf-upd"
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied values stay inside their OData string literal
+# ---------------------------------------------------------------------------
+
+# Closes the literal and appends a clause every row satisfies: interpolated
+# as-is, ``Equipment eq '<value>'`` becomes an unbounded read.
+_BREAKOUT = "X' or Equipment ne '"
+# The same value as an OData string literal, its single quotes doubled.
+_BREAKOUT_LITERAL = "'X'' or Equipment ne '''"
+
+
+class TestFilterValuesStayLiteral:
+    """IDs, SKUs and raw statuses reach these filters from LLM and MCP tool input.
+
+    Each response is mocked only at the escaped URL, so an unescaped request
+    finds no match and fails the test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": f"Equipment eq {_BREAKOUT_LITERAL}"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_asset(_BREAKOUT) is None
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_is_quoted_like_its_string(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Tool arguments parsed from model JSON can carry an equipment number as a number."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": "Equipment eq '10000001'"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_asset(10000001) is None
+
+    @pytest.mark.asyncio
+    async def test_read_work_orders(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{
+                    "$filter": f"Equipment eq {_BREAKOUT_LITERAL} and "
+                    f"MaintenanceOrderSystemStatus eq {_BREAKOUT_LITERAL}"
+                },
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.read_work_orders(asset_id=_BREAKOUT, status=_BREAKOUT) == []
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$top": "1", "$filter": f"MaintenanceOrder eq {_BREAKOUT_LITERAL}"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_work_order(_BREAKOUT) is None
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts(self, httpx_mock) -> None:
+        conn = SapPmConnector(
+            url=BASE,
+            auth=BasicAuth(username="u", password="p"),
+            bom_equipment_field="Equipment",
+        )
+        await _connect(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_BILL_OF_MATERIAL_SRV",
+                "BillOfMaterialItem",
+                **{
+                    "$filter": f"Equipment eq {_BREAKOUT_LITERAL} and "
+                    f"BillOfMaterialComponent eq {_BREAKOUT_LITERAL}"
+                },
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await conn.read_spare_parts(asset_id=_BREAKOUT, sku=_BREAKOUT) == []
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        expected_filter = (
+            f"Equipment eq {_BREAKOUT_LITERAL} and "
+            "(MaintenanceOrderSystemStatus eq 'CNF' or "
+            "MaintenanceOrderSystemStatus eq 'TECO' or "
+            "MaintenanceOrderSystemStatus eq 'CLSD')"
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": expected_filter},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.read_maintenance_history(_BREAKOUT) == []
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_key_predicate(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The key can neither close its literal nor climb to another entity set.
+
+        Interpolated as-is, this ID makes the URL path
+        ``MaintenanceOrder('1')/../../API_EQUIPMENT/Equipment('10000001')``,
+        which the HTTP client normalizes into a PATCH on an equipment record.
+        """
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={"x-csrf-token": "csrf-upd"},
+            json={"d": {"results": []}},
+        )
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder("
+            "'1''%29%2F..%2F..%2FAPI_EQUIPMENT%2FEquipment%28''10000001')",
+            status_code=404,
+        )
+        with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order(
+                "1')/../../API_EQUIPMENT/Equipment('10000001", description="x"
+            )

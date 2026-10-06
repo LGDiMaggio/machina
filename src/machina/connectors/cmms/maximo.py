@@ -31,6 +31,7 @@ from pydantic import Field
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._url import path_segment
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.retry import request_with_retry
@@ -59,6 +60,39 @@ def _require_httpx() -> Any:
             "Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+def _oslc_eq(attribute: str, value: object) -> str:
+    """Build the exact-match ``oslc.where`` term ``attribute="value"``.
+
+    Values reach these terms from LLM and MCP-client input. Maximo documents no
+    escape inside a where literal, and ``oslc.where`` maps onto its QBE
+    framework, where ``%`` is a LIKE wildcard, ``"*"`` means "not null",
+    ``~null~`` matches empty fields, commas separate alternatives and a leading
+    ``!=``, ``<`` or ``>`` changes the comparison. A value using any of these —
+    or a ``"`` or ``\\`` that could end the literal, or a control character a
+    server-side trim could remove in front of an operator — is refused rather
+    than escaped, so a term can only ever match its own value.
+
+    Raises:
+        ConnectorError: If the value is blank or ``*``, contains ``"``, ``\\``,
+            ``%``, ``,``, ``~`` or a non-printable character, or starts with
+            ``=``, ``!``, ``<`` or ``>``.
+    """
+    text = str(value)
+    stripped = text.strip()
+    if (
+        stripped in ("", "*")
+        or stripped.startswith(("=", "!", "<", ">"))
+        or any(char in text for char in '"\\%,~')
+        or not text.isprintable()
+    ):
+        raise ConnectorError(
+            f"Invalid {attribute} {text!r} for a Maximo query: a value to match exactly "
+            "cannot be blank or '*', contain '\"', '\\', '%', ',', '~' or a "
+            "non-printable character, or start with '=', '!', '<' or '>'"
+        )
+    return f'{attribute}="{text}"'
 
 
 class MaximoConnector:
@@ -197,7 +231,7 @@ class MaximoConnector:
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxasset",
-            oslc_where=f'assetnum="{asset_id}"',
+            oslc_where=_oslc_eq("assetnum", asset_id),
             page_size=1,
         )
         return maximo_mapper.parse_asset(raw[0], self._asset_type_map) if raw else None
@@ -219,14 +253,14 @@ class MaximoConnector:
         self._ensure_connected()
         clauses: list[str] = []
         if asset_id:
-            clauses.append(f'assetnum="{asset_id}"')
+            clauses.append(_oslc_eq("assetnum", asset_id))
         if status:
             maximo_status = (
                 maximo_mapper.REVERSE_MAXIMO_STATUS.get(status, status.value.upper())
                 if isinstance(status, WorkOrderStatus)
                 else status.upper()
             )
-            clauses.append(f'status="{maximo_status}"')
+            clauses.append(_oslc_eq("status", maximo_status))
         where = " and ".join(clauses) if clauses else ""
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
@@ -236,7 +270,7 @@ class MaximoConnector:
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxwo",
-            oslc_where=f'wonum="{work_order_id}"',
+            oslc_where=_oslc_eq("wonum", work_order_id),
             page_size=1,
         )
         return maximo_mapper.parse_work_order(raw[0]) if raw else None
@@ -316,12 +350,15 @@ class MaximoConnector:
             payload["description"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
+        # The read-back after the PATCH looks the order up through oslc.where:
+        # refuse an ID it could not express before writing, not after.
+        _oslc_eq("wonum", work_order_id)
         headers = {**self._headers(), "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await request_with_retry(
                 client,
                 "PATCH",
-                f"{self.url}/maximo/oslc/os/mxwo/{work_order_id}",
+                f"{self.url}/maximo/oslc/os/mxwo/{path_segment(work_order_id)}",
                 headers=headers,
                 json=payload,
             )
@@ -368,7 +405,7 @@ class MaximoConnector:
             the corresponding work-order job plan or ``mxpmpart``.
         """
         self._ensure_connected()
-        where = f'itemnum="{sku}"' if sku else ""
+        where = _oslc_eq("itemnum", sku) if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]
 
@@ -381,7 +418,7 @@ class MaximoConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset."""
         self._ensure_connected()
-        where = f'assetnum="{asset_id}" and (status="COMP" or status="CLOSE")'
+        where = f'{_oslc_eq("assetnum", asset_id)} and (status="COMP" or status="CLOSE")'
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
 
