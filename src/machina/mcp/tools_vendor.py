@@ -98,6 +98,7 @@ async def sap_pm_raw_iw38_notification(
             "POST",
             f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
             payload,
+            operation="create maintenance notification",
         )
         return {"status_code": resp.status_code, "body": resp.json()}
     except SandboxViolationError:

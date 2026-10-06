@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from machina.mcp.tools_vendor import VENDOR_TOOLS
@@ -52,6 +53,37 @@ class TestSapRawNotificationNoConnector:
         ctx.request_context.lifespan_context = {"runtime": runtime}
         result = await sap_pm_raw_iw38_notification(ctx, equipment_id="EQ-1", description="test")
         assert "error" in result
+
+
+class TestSapRawNotificationTransportError:
+    @pytest.mark.asyncio
+    async def test_timeout_is_reported_without_the_url(self, httpx_mock) -> None:
+        """A failed write returns the connector's error message, not httpx's (which can
+        carry the URL)."""
+        from machina.connectors.cmms.auth import BasicAuth
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+        from machina.mcp.tools_vendor import sap_pm_raw_iw38_notification
+        from machina.runtime import MachinaRuntime
+
+        base = "https://sap.example.com/sap/opu/odata/sap"
+        conn = SapPmConnector(url=base, auth=BasicAuth(username="u", password="p"))
+        conn._connected = True
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{base}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={"x-csrf-token": "tok"},
+        )
+        httpx_mock.add_exception(
+            httpx.ReadTimeout(f"timed out on {base}"),
+            method="POST",
+            url=f"{base}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
+        )
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {
+            "runtime": MachinaRuntime(connectors={"sap": conn})
+        }
+        result = await sap_pm_raw_iw38_notification(ctx, equipment_id="EQ-1", description="x")
+        assert result == {"error": "SAP PM create maintenance notification timed out"}
 
 
 class TestMaximoRawUpdateNoConnector:
