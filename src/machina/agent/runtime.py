@@ -3018,10 +3018,23 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
-                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    sku=args.get("sku", ""),
-                )
+                try:
+                    parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
+                        asset_id=args.get("asset_id", ""),
+                        sku=args.get("sku", ""),
+                    )
+                except Exception as exc:
+                    # As for get_work_order: a connector failure degrades to a
+                    # tool-level error the model can react to, not a killed turn.
+                    logger.warning(
+                        "spare_parts_lookup_failed",
+                        agent=self.name,
+                        tool=name,
+                        asset_id=args.get("asset_id", ""),
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
                 return [p.model_dump(mode="json") for p in parts]
             return {"error": "No spare parts connector available"}
 

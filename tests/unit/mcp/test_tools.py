@@ -355,6 +355,24 @@ class TestListSpareParts:
         assert len(result) == 1
         assert result[0]["sku"] == "BRG-6205"
 
+    @pytest.mark.asyncio
+    async def test_forwards_asset_filter(self) -> None:
+        """The asset filter reaches a connector with the contract's exact signature."""
+        from machina.mcp.tools import machina_list_spare_parts
+
+        calls: list[dict[str, str]] = []
+
+        async def read_spare_parts(*, asset_id: str = "", sku: str = "") -> list[SparePart]:
+            calls.append({"asset_id": asset_id, "sku": sku})
+            return []
+
+        conn = _mock_cmms()
+        conn.read_spare_parts = read_spare_parts
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        await machina_list_spare_parts(_make_ctx(runtime), asset_id="P-001")
+        await machina_list_spare_parts(_make_ctx(runtime))
+        assert calls == [{"asset_id": "P-001", "sku": ""}, {"asset_id": "", "sku": ""}]
+
 
 class TestGetMaintenancePlan:
     @pytest.mark.asyncio
