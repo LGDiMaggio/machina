@@ -75,6 +75,7 @@ pip install machina-ai[cmms-rest]
 | `update_work_order` | Update status, assignee, or description via PATCH |
 | `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
+| `read_maintenance_history` | Read the completed and closed work orders of one asset (`status in ["COMP","CLOSE"]`) |
 
 ### Convenience methods
 
@@ -200,6 +201,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
 - **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
 - **Pagination**: Uses Maximo's OSLC `responseInfo.nextPage` link-following. Very large result sets may benefit from server-side `oslc.where` filtering.
+- **Characters refused in IDs and codes**: asset numbers, work-order numbers, item numbers and raw status codes go into `oslc.where` as quoted values. Inside one, `"` and `\` are string syntax, `%` makes the match a LIKE, `*` means "any non-null value", and Maximo's QBE framework reads `,` as OR and `=`, `!`, `<`, `>`, `~` as operators. Maximo documents no escape for them, so a value containing any of these characters — or an empty value — is refused with `ConnectorError` instead of being sent.
 
 ## API Reference
 

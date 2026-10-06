@@ -273,6 +273,7 @@ class TestConnectorLifecycle:
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
         assert "read_maintenance_plans" in conn.capabilities
+        assert "read_maintenance_history" in conn.capabilities
 
     @pytest.mark.asyncio
     async def test_connect_raises_without_api_key(self) -> None:
