@@ -1,8 +1,8 @@
 """Unit tests for the shared CMMS retry helper.
 
 Verifies retry behaviour on 429/503 responses and transient network
-errors. ``asyncio.sleep`` is monkey-patched to a no-op so tests run
-fast.
+errors. ``asyncio.sleep`` is monkey-patched to record its delays instead
+of sleeping, so tests run fast and can assert how long a call would wait.
 """
 
 from __future__ import annotations
@@ -16,13 +16,18 @@ from machina.connectors.cmms.retry import request_with_retry
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace asyncio.sleep with a no-op so retry tests are instantaneous."""
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace asyncio.sleep with a recorder so retry tests are instantaneous.
 
-    async def _fake_sleep(_seconds: float) -> None:
-        return None
+    Request the fixture by name to read the delays the helper asked for.
+    """
+    recorded: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        recorded.append(seconds)
 
     monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _fake_sleep)
+    return recorded
 
 
 class _FakeResponse:
@@ -88,22 +93,65 @@ async def test_retries_on_429_then_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_honours_numeric_retry_after_header() -> None:
-    """A numeric Retry-After is parsed and used verbatim (no exponential)."""
+async def test_honours_numeric_retry_after_header(sleeps: list[float]) -> None:
+    """A numeric Retry-After within max_backoff is used verbatim (no exponential)."""
     client = _SequenceClient(
         [
             _FakeResponse(429, headers={"Retry-After": "2"}),
             _FakeResponse(200),
         ]
     )
-    # The fake sleep swallows the value, but we still verify the call sequence works.
     resp = await request_with_retry(client, "GET", "https://example.com/x")
     assert resp.status_code == 200
     assert client.calls == 2
+    assert sleeps == [2.0]
 
 
 @pytest.mark.asyncio
-async def test_non_numeric_retry_after_falls_back_to_exponential() -> None:
+@pytest.mark.parametrize(
+    ("retry_after", "max_backoff"),
+    [
+        pytest.param("8", 8.0, id="equal-to-default-max-backoff"),
+        pytest.param("20", 30.0, id="within-raised-max-backoff"),
+    ],
+)
+async def test_retry_after_up_to_max_backoff_is_honoured(
+    retry_after: str, max_backoff: float, sleeps: list[float]
+) -> None:
+    """A Retry-After equal to max_backoff is still waited out, and a caller
+    that raises max_backoff can honour a longer one."""
+    client = _SequenceClient(
+        [_FakeResponse(429, headers={"Retry-After": retry_after}), _FakeResponse(200)]
+    )
+    resp = await request_with_retry(
+        client, "GET", "https://example.com/x", max_backoff=max_backoff
+    )
+    assert resp.status_code == 200
+    assert sleeps == [float(retry_after)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 503])
+@pytest.mark.parametrize("retry_after", ["9", "300"])
+async def test_retry_after_beyond_max_backoff_returns_response_without_waiting(
+    status_code: int, retry_after: str, sleeps: list[float]
+) -> None:
+    """A server asking for a longer pause than max_backoff would most likely
+    answer an earlier retry the same way, and waiting it out would block the
+    call (Retry-After: 300 over three retries is 15 minutes). The response is
+    returned at once, so the connector raises its ConnectorError."""
+    refusal = _FakeResponse(status_code, headers={"Retry-After": retry_after})
+    client = _SequenceClient([refusal] * 4)
+    resp = await request_with_retry(
+        client, "GET", "https://example.com/x", max_retries=3, max_backoff=8.0
+    )
+    assert resp.status_code == status_code
+    assert client.calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_non_numeric_retry_after_falls_back_to_exponential(sleeps: list[float]) -> None:
     """Retry-After as an HTTP-date must not crash the helper."""
     client = _SequenceClient(
         [
@@ -113,6 +161,7 @@ async def test_non_numeric_retry_after_falls_back_to_exponential() -> None:
     )
     resp = await request_with_retry(client, "GET", "https://example.com/x")
     assert resp.status_code == 200
+    assert sleeps == [0.5]
 
 
 @pytest.mark.asyncio

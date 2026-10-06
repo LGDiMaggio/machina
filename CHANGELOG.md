@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`request_with_retry` no longer waits out an arbitrarily long `Retry-After`.** A numeric `Retry-After` on a retried 429 or 503 was honoured without a cap, so `Retry-After: 300` held a single SAP PM, Maximo or UpKeep request for about 15 minutes over three retries. A `Retry-After` up to `max_backoff` (8 s by default) is still waited out; a longer one ends the retries and returns the response, so the connector raises its `ConnectorError` at once. One call now sleeps at most `max_retries × max_backoff` (24 s by default).
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

@@ -190,7 +190,8 @@ connector = SapPM(
 All HTTP calls route through a shared retry helper with exponential backoff.
 Retries are triggered on:
 
-- **429 Too Many Requests** — honours the `Retry-After` header
+- **429 Too Many Requests** — honours a `Retry-After` of up to 8 s; a longer
+  one fails the call at once instead of retrying inside the server's window
 - **503 Service Unavailable** — transient upstream failures
 - **Network errors** — `TimeoutException`, `ConnectError`, `ReadError`
 
