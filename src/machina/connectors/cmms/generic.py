@@ -9,12 +9,16 @@ for demos and quickstarts.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar, TypeVarTuple
 from urllib.parse import quote
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
 import jmespath
@@ -55,6 +59,12 @@ from machina.domain.work_order import (
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
+_Ts = TypeVarTuple("_Ts")
+
+# How long disconnect() waits for a local-mode write still running on the file thread.
+_DISCONNECT_WAIT_SEC = 5.0
 
 # Plain unions (not Annotated) for use as runtime type annotations.
 # The Annotated discriminated unions live in auth.py / pagination.py for
@@ -270,10 +280,14 @@ class GenericCmmsConnector:
         self._spare_parts: list[SparePart] = []
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
-        # Serialises the read-check-mutate-persist sequence in local mode so
-        # concurrent create/update calls (e.g. tool calls gathered concurrently)
-        # cannot race on the in-memory list or the file write.
-        self._local_write_lock = asyncio.Lock()
+        # Every local-mode write runs on this one thread, one at a time (see
+        # _run_on_file_thread): a write whose caller was cancelled still
+        # finishes, and the next write waits for it. A write replaces
+        # _work_orders with a new list instead of changing it in place, so
+        # reads on the event loop always see a whole, persisted list.
+        self._file_thread = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="machina-generic-cmms"
+        )
 
     # ------------------------------------------------------------------
     # Connector lifecycle
@@ -302,8 +316,27 @@ class GenericCmmsConnector:
         )
 
     async def disconnect(self) -> None:
-        """Close the connection."""
-        self._connected = False
+        """Wait for a local-mode write still running, then close the connection.
+
+        A local-mode write keeps running when its caller is cancelled.
+        ``disconnect()`` waits up to 5 seconds for it, so that once it returns
+        the connector is not writing ``work_orders.json``; past that, it logs
+        ``write_still_running`` and goes on.
+        """
+        try:
+            if self._data_dir:
+                await asyncio.wait_for(
+                    self._run_on_file_thread(lambda: None), timeout=_DISCONNECT_WAIT_SEC
+                )
+        except TimeoutError:
+            logger.warning(
+                "write_still_running",
+                connector="GenericCmmsConnector",
+                operation="disconnect",
+                timeout_sec=_DISCONNECT_WAIT_SEC,
+            )
+        finally:
+            self._connected = False
         logger.info("disconnected", connector="GenericCmmsConnector")
 
     async def health_check(self) -> ConnectorHealth:
@@ -381,40 +414,14 @@ class GenericCmmsConnector:
         record rather than appending a duplicate. New work orders are
         persisted back to ``work_orders.json`` so changes survive process
         restarts (skipped when an inbound ``schema_mapping`` is configured;
-        see :meth:`_persist_work_orders`).
+        see :meth:`_persist_work_orders`). Local writes run one at a time:
+        cancelling the caller does not stop a write that has started — it
+        still finishes, and the next write waits for it, so a retry after a
+        cancellation finds the stored work order.
         """
         self._ensure_connected()
         if self._data_dir:
-            async with self._local_write_lock:
-                existing = next((wo for wo in self._work_orders if wo.id == work_order.id), None)
-                if existing is not None:
-                    logger.info(
-                        "work_order_create_idempotent_hit",
-                        connector="GenericCmmsConnector",
-                        operation="create_work_order",
-                        work_order_id=work_order.id,
-                        asset_id=work_order.asset_id,
-                    )
-                    return existing
-                self._work_orders.append(work_order)
-                try:
-                    await self._persist_work_orders()
-                except Exception:
-                    # Persist failed (disk full, serialization error): roll the
-                    # in-memory append back so the list stays consistent with
-                    # disk. Otherwise the WO lives in memory but not on disk —
-                    # lost on restart, and the idempotency guard above would
-                    # return it as "existing" for a record never durably stored.
-                    self._work_orders.pop()
-                    raise
-            logger.info(
-                "work_order_created",
-                connector="GenericCmmsConnector",
-                operation="create_work_order",
-                work_order_id=work_order.id,
-                asset_id=work_order.asset_id,
-            )
-            return work_order
+            return await self._run_on_file_thread(self._create_local_work_order, work_order)
         return await self._rest_create_work_order(work_order)
 
     async def read_spare_parts(
@@ -469,9 +476,13 @@ class GenericCmmsConnector:
     ) -> WorkOrder:
         """Update an existing work order.
 
-        In local mode the in-memory work order is mutated directly.
-        In REST mode the configured endpoint is called and the work
-        order is re-fetched to return fresh state.
+        In local mode a copy of the stored work order is updated, written
+        to ``work_orders.json``, and only then replaces the stored one, so a
+        failed write leaves it as it was. As with :meth:`create_work_order`,
+        a write that has started finishes even if the caller is cancelled,
+        and the next write waits for it. In REST mode the configured
+        endpoint is called and the work order is re-fetched to return fresh
+        state.
 
         Raises:
             ConnectorError: If the work order is not found, or the
@@ -479,29 +490,9 @@ class GenericCmmsConnector:
         """
         self._ensure_connected()
         if self._data_dir:
-            async with self._local_write_lock:
-                # Snapshot the pre-update state so a persist failure can be
-                # rolled back — _local_update_work_order mutates in place, and
-                # without rollback the in-memory object would diverge from disk
-                # (new state in memory, old state on disk reloaded at restart).
-                idx = next(
-                    (i for i, wo in enumerate(self._work_orders) if wo.id == work_order_id),
-                    None,
-                )
-                before = self._work_orders[idx].model_copy(deep=True) if idx is not None else None
-                updated = self._local_update_work_order(
-                    work_order_id,
-                    status=status,
-                    assigned_to=assigned_to,
-                    description=description,
-                )
-                try:
-                    await self._persist_work_orders()
-                except Exception:
-                    if idx is not None and before is not None:
-                        self._work_orders[idx] = before
-                    raise
-            return updated
+            return await self._run_on_file_thread(
+                self._update_local_work_order, work_order_id, status, assigned_to, description
+            )
         return await self._rest_update_work_order(
             work_order_id,
             status=status,
@@ -529,41 +520,102 @@ class GenericCmmsConnector:
         return await self._rest_read_maintenance_plans()
 
     # ------------------------------------------------------------------
-    # Internal: local work-order updates
+    # Internal: local work-order writes
     # ------------------------------------------------------------------
 
-    def _local_update_work_order(
+    async def _run_on_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
+        """Run ``func(*args)`` on the connector's file thread, after earlier calls.
+
+        One thread runs every call, so no two calls overlap, whatever happens
+        to their callers. A cancelled caller (an MCP request cancellation, a
+        workflow step timeout) cannot stop a call that is already running, and
+        the calls behind it wait for it; a call still queued when the
+        cancellation reaches the thread pool, on the event loop's next
+        iteration, is dropped.
+        """
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()  # as asyncio.to_thread does
+        return await loop.run_in_executor(self._file_thread, context.run, func, *args)
+
+    def _create_local_work_order(self, work_order: WorkOrder) -> WorkOrder:
+        """Store a work order unless one with its ID is already stored.
+
+        Returns the stored record when there is one, else ``work_order``.
+        Runs on the file thread: the ID check, the file write, the in-memory
+        update and the log line are one step that no other write can split
+        and that cancelling the caller does not cut short. The new list
+        replaces the stored one only once it is persisted: a WO kept in memory
+        but not on disk would be lost on restart, and the ID check would
+        return it as "existing" for a record never durably stored.
+        """
+        stored = self._work_orders
+        existing = next((wo for wo in stored if wo.id == work_order.id), None)
+        if existing is not None:
+            logger.info(
+                "work_order_create_idempotent_hit",
+                connector="GenericCmmsConnector",
+                operation="create_work_order",
+                work_order_id=work_order.id,
+                asset_id=work_order.asset_id,
+            )
+            return existing
+        work_orders = [*stored, work_order]
+        self._persist_work_orders(work_orders)
+        self._work_orders = work_orders
+        logger.info(
+            "work_order_created",
+            connector="GenericCmmsConnector",
+            operation="create_work_order",
+            work_order_id=work_order.id,
+            asset_id=work_order.asset_id,
+        )
+        return work_order
+
+    def _update_local_work_order(
         self,
         work_order_id: str,
-        *,
-        status: WorkOrderStatus | None = None,
-        assigned_to: str | None = None,
-        description: str | None = None,
+        status: WorkOrderStatus | None,
+        assigned_to: str | None,
+        description: str | None,
     ) -> WorkOrder:
-        """Mutate an in-memory work order."""
-        for wo in self._work_orders:
-            if wo.id == work_order_id:
-                if status is not None:
-                    try:
-                        wo.transition_to(status)
-                    except ValueError as exc:
-                        raise ConnectorError(str(exc)) from exc
-                if assigned_to is not None:
-                    wo.assigned_to = assigned_to
-                if description is not None:
-                    wo.description = description
-                logger.info(
-                    "work_order_updated",
-                    connector="GenericCmmsConnector",
-                    operation="update_work_order",
-                    work_order_id=work_order_id,
-                    asset_id=wo.asset_id,
-                )
-                return wo
-        raise ConnectorError(f"Work order {work_order_id} not found")
+        """Update a copy of a stored work order, persist it, then store it.
 
-    async def _persist_work_orders(self) -> None:
-        """Write the in-memory work orders back to ``work_orders.json``.
+        Runs on the file thread: the change, the file write, the in-memory
+        update and the log line are one step that no other write can split
+        and that cancelling the caller does not cut short. The copy replaces
+        the stored work order only once it is persisted, so a failed write
+        leaves the stored one as it was, and reads on the event loop never
+        see a half-applied change.
+        """
+        stored = self._work_orders
+        idx = next((i for i, wo in enumerate(stored) if wo.id == work_order_id), None)
+        if idx is None:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        wo = stored[idx].model_copy(deep=True)
+        if status is not None:
+            try:
+                wo.transition_to(status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from exc
+        if assigned_to is not None:
+            wo.assigned_to = assigned_to
+        if description is not None:
+            wo.description = description
+        work_orders = list(stored)
+        work_orders[idx] = wo
+        self._persist_work_orders(work_orders)
+        self._work_orders = work_orders
+        logger.info(
+            "work_order_updated",
+            connector="GenericCmmsConnector",
+            operation="update_work_order",
+            work_order_id=work_order_id,
+            asset_id=wo.asset_id,
+        )
+        return wo
+
+    def _persist_work_orders(self, work_orders: list[WorkOrder]) -> None:
+        """Write ``work_orders`` to ``work_orders.json``, on the file thread.
 
         Local mode is the demo / offline data source: without write-back,
         ``create_work_order`` and ``update_work_order`` only mutate the
@@ -591,21 +643,17 @@ class GenericCmmsConnector:
             )
             return
         path = self._data_dir / "work_orders.json"
-        payload = [wo.model_dump(mode="json") for wo in self._work_orders]
+        payload = [wo.model_dump(mode="json") for wo in work_orders]
         # Write to a temp sibling then atomically replace, so a crash mid-write
         # cannot truncate work_orders.json and break the next connect(). Clean up
         # the temp file if the write or replace fails (e.g. a Windows replace on
         # an open handle) so it doesn't linger and confuse the next write.
         tmp = path.with_name(path.name + ".tmp")
         try:
-            await asyncio.to_thread(
-                tmp.write_text,
-                json.dumps(payload, indent=2, default=str),
-                encoding="utf-8",
-            )
-            await asyncio.to_thread(tmp.replace, path)
+            tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            tmp.replace(path)
         except Exception:
-            await asyncio.to_thread(tmp.unlink, True)
+            tmp.unlink(missing_ok=True)
             raise
 
     # ------------------------------------------------------------------
