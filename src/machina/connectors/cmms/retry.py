@@ -109,7 +109,8 @@ async def request_with_retry(
 
     Raises:
         httpx.TimeoutException, httpx.ConnectError, httpx.ReadError:
-            Only re-raised when retries are exhausted.
+            Re-raised once retries are exhausted, or on the first failure
+            when network-error retries are off (POST/PATCH by default).
     """
     import httpx
 

@@ -190,12 +190,18 @@ connector = SapPM(
 All HTTP calls route through a shared retry helper with exponential backoff.
 Retries are triggered on:
 
-- **429 Too Many Requests** — honours a `Retry-After` of up to 8 s; a longer
-  one fails the call at once instead of retrying inside the server's window
-- **503 Service Unavailable** — transient upstream failures
-- **Network errors** — `TimeoutException`, `ConnectError`, `ReadError`
+- **429 Too Many Requests** — for every method, since the server refused the
+  request without processing it
+- **503 Service Unavailable** — for idempotent methods only, since a gateway
+  can answer 503 after the backend applied a POST or PATCH
+- **Network errors** — `TimeoutException`, `ConnectError`, `ReadError`, for
+  idempotent methods only
 
-Default: 3 retries, 0.5 s → 8 s backoff cap.
+Default: 3 retries, 0.5 s → 8 s backoff cap. A `Retry-After` of up to 8 s on a
+429 or 503 replaces the computed delay; a longer one fails the call at once
+instead of retrying inside the server's window. See
+[Uptime and Resilience](../deployment/uptime.md) for what that means for
+paged reads and startup.
 
 ## Known Limitations
 

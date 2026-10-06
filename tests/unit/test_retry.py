@@ -131,23 +131,45 @@ async def test_retry_after_up_to_max_backoff_is_honoured(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [429, 503])
+@pytest.mark.parametrize(
+    ("method", "status_code"),
+    [("GET", 429), ("GET", 503), ("POST", 429)],
+)
 @pytest.mark.parametrize("retry_after", ["9", "300"])
 async def test_retry_after_beyond_max_backoff_returns_response_without_waiting(
-    status_code: int, retry_after: str, sleeps: list[float]
+    method: str, status_code: int, retry_after: str, sleeps: list[float]
 ) -> None:
     """A server asking for a longer pause than max_backoff would most likely
     answer an earlier retry the same way, and waiting it out would block the
     call (Retry-After: 300 over three retries is 15 minutes). The response is
-    returned at once, so the connector raises its ConnectorError."""
+    returned at once, so the connector raises its ConnectorError, and a write
+    is sent exactly once."""
     refusal = _FakeResponse(status_code, headers={"Retry-After": retry_after})
     client = _SequenceClient([refusal] * 4)
     resp = await request_with_retry(
-        client, "GET", "https://example.com/x", max_retries=3, max_backoff=8.0
+        client, method, "https://example.com/x", max_retries=3, max_backoff=8.0
     )
     assert resp.status_code == status_code
     assert client.calls == 1
     assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_retry_after_beyond_max_backoff_after_an_earlier_retry(
+    sleeps: list[float],
+) -> None:
+    """The limit applies to every retried response, not just the first."""
+    client = _SequenceClient(
+        [
+            _FakeResponse(429, headers={"Retry-After": "2"}),
+            _FakeResponse(503, headers={"Retry-After": "300"}),
+            _FakeResponse(200),
+        ]
+    )
+    resp = await request_with_retry(client, "GET", "https://example.com/x")
+    assert resp.status_code == 503
+    assert client.calls == 2
+    assert sleeps == [2.0]
 
 
 @pytest.mark.asyncio
