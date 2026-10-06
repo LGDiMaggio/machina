@@ -353,22 +353,33 @@ class MaximoConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read inventory items (spare parts) from Maximo.
 
+        Both filters are applied server-side in one OSLC ``where`` clause.
+
         Args:
-            sku: Optional Maximo ``itemnum`` to narrow the lookup via an
-                OSLC ``where`` clause.
+            asset_id: Optional Maximo asset number. Narrows the result to the
+                items on that asset's Spare Parts list (the ``SPAREPART``
+                records), reached through the ``sparepart`` relationship of
+                ``INVENTORY``.
+            sku: Optional Maximo ``itemnum``.
 
         Note:
-            Maximo's ``mxinventory`` object structure does not expose a
-            direct asset-compatibility relation, so filtering by asset is
-            not supported here. For asset-specific spare parts, consult
-            the corresponding work-order job plan or ``mxpmpart``.
+            Like this connector's other asset filters, the asset is matched by
+            ``assetnum`` alone (no ``siteid``). Parts an asset uses without
+            having them on its Spare Parts list (e.g. only in a job plan) are
+            not returned.
         """
         self._ensure_connected()
-        where = f'itemnum="{sku}"' if sku else ""
+        clauses: list[str] = []
+        if asset_id:
+            clauses.append(f'sparepart.assetnum="{asset_id}"')
+        if sku:
+            clauses.append(f'itemnum="{sku}"')
+        where = " and ".join(clauses)
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]
 

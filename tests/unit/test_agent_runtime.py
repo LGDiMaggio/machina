@@ -30,7 +30,7 @@ from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorError, LLMError
 from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -299,7 +299,12 @@ class _FakeDocConnector:
 
 
 class _FakeSparePartsConnector:
-    """Connector stub for spare parts."""
+    """Connector stub for spare parts.
+
+    ``read_spare_parts`` has the connector contract's exact signature (no
+    ``**kwargs``), so a runtime call passing anything else fails here as it
+    would against a real connector.
+    """
 
     capabilities: ClassVar[list[str]] = ["read_spare_parts"]
 
@@ -312,7 +317,7 @@ class _FakeSparePartsConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def read_spare_parts(self, **kwargs: Any) -> list[SparePart]:
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
         return [
             SparePart(
                 sku="SKF-6310",
@@ -887,6 +892,21 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_connector_failure_is_a_tool_error(self) -> None:
+        """A failing connector degrades to a tool-level error, not a dead turn."""
+
+        class _FailingSparePartsConnector(_FakeSparePartsConnector):
+            async def read_spare_parts(
+                self, *, asset_id: str = "", sku: str = ""
+            ) -> list[SparePart]:
+                raise ConnectorError("Maximo GET mxinventory failed: HTTP 400")
+
+        agent = Agent(connectors=[_FailingSparePartsConnector()])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
+        assert result == {"error": "Maximo GET mxinventory failed: HTTP 400"}
 
     @pytest.mark.asyncio
     async def test_diagnose_failure_tool(self) -> None:
