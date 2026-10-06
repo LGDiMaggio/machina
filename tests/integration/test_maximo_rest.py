@@ -238,6 +238,26 @@ class TestReadWorkOrders:
         assert wos == []
 
 
+class TestReadWorkOrdersStatusFilter:
+    """A WorkOrderStatus value is sent as its Maximo code; any other string is a Maximo code."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "maximo_status"),
+        [("in_progress", "INPRG"), ("cancelled", "CAN"), ("WMATL", "WMATL")],
+    )
+    async def test_status_filter_sends_maximo_code(
+        self, httpx_mock, connector: MaximoConnector, status: str, maximo_status: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": f'status="{maximo_status}"'}),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.read_work_orders(status=status) == []
+
+
 # ---------------------------------------------------------------------------
 # Create work order
 # ---------------------------------------------------------------------------

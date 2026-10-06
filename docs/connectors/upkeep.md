@@ -41,7 +41,7 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read all assets (`/api/v2/assets`) |
-| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw UpKeep string) |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value (`"in_progress"`) is mapped to UpKeep's status; any other string is sent as an UpKeep status (`"onHold"`) |
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |

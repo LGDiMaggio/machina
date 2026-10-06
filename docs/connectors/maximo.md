@@ -69,7 +69,7 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read asset records (`mxasset` object structure) |
-| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw Maximo code) |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value (`"in_progress"`) is mapped to the Maximo code; any other string is sent, upper-cased, as a Maximo code (`"WMATL"`) |
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description via PATCH |

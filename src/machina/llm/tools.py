@@ -103,7 +103,7 @@ READ_WORK_ORDERS_TOOL = make_tool(
             },
             "status": {
                 "type": "string",
-                "description": "Filter by status: created, assigned, in_progress, completed, closed.",
+                "description": "Filter by status: created, assigned, in_progress, completed, closed, cancelled.",
             },
         },
     },

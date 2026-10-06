@@ -212,20 +212,16 @@ class MaximoConnector:
 
         Args:
             asset_id: Filter by Maximo asset number.
-            status: Filter by status — accepts a :class:`WorkOrderStatus`
-                enum (reverse-mapped to Maximo code) or a raw Maximo
-                status string for backward compatibility.
+            status: Filter by status — a :class:`WorkOrderStatus` or one of its
+                values such as ``"in_progress"`` (reverse-mapped to the Maximo
+                code), or any other string, sent upper-cased as a Maximo code.
         """
         self._ensure_connected()
         clauses: list[str] = []
         if asset_id:
             clauses.append(f'assetnum="{asset_id}"')
         if status:
-            maximo_status = (
-                maximo_mapper.REVERSE_MAXIMO_STATUS.get(status, status.value.upper())
-                if isinstance(status, WorkOrderStatus)
-                else status.upper()
-            )
+            maximo_status = maximo_mapper.reverse_status_filter(status)
             clauses.append(f'status="{maximo_status}"')
         where = " and ".join(clauses) if clauses else ""
         raw = await self._oslc_get("mxwo", oslc_where=where)
