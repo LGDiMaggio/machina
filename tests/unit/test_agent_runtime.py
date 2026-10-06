@@ -331,9 +331,9 @@ class _FakeSparePartsConnector:
 class _FakeNoAssetRelationConnector:
     """Spare-parts provider whose inventory has no asset relation.
 
-    Shaped like the Maximo and UpKeep connectors: an ``asset_id`` filter is
-    refused with a ConnectorError instead of being answered with the whole
-    inventory. Records the keyword arguments of every call.
+    Shaped like the Maximo connector: an ``asset_id`` filter is refused with a
+    ConnectorError instead of being answered with the whole inventory.
+    Records the keyword arguments of every call.
     """
 
     capabilities: ClassVar[list[str]] = ["read_spare_parts"]

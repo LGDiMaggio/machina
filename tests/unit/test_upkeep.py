@@ -7,6 +7,7 @@ without network calls. For HTTP-level integration tests see
 
 from __future__ import annotations
 
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import pytest
@@ -305,38 +306,78 @@ class TestRequireHttpx:
 
 
 class TestReadSparePartsAssetFilter:
-    """``/api/v2/parts`` has no asset filter, so an asset filter is refused.
+    """An asset filter keeps the parts listed on the asset record.
 
-    Dropping the filter would return every part (or a bare sku match) as if
-    it were the asset's compatible parts.
+    ``/api/v2/parts`` has no asset field or filter; the asset record's
+    ``parts`` holds the IDs of the parts assigned to it. They match a part's
+    record ``id``, which the parsed :class:`SparePart` does not keep (its SKU
+    prefers ``partNumber``), so the filter must run on the raw records.
     """
 
-    def _connected(self) -> UpKeepConnector:
+    _INVENTORY: ClassVar[list[dict[str, Any]]] = [
+        {"id": "p1", "partNumber": "SKF-6205", "name": "Bearing", "quantity": 3},
+        {"id": "p2", "partNumber": "FLT-GA55", "name": "Oil filter", "quantity": 2},
+        {"id": "p3", "partNumber": "SEAL-40", "name": "Shaft seal", "quantity": 5},
+    ]
+
+    def _connected(self, asset: dict[str, Any] | None) -> UpKeepConnector:
         conn = UpKeepConnector(api_key="tok")
         conn._connected = True
-        conn._paginated_get = AsyncMock(
-            return_value=[{"id": "p1", "partNumber": "SKF-6205", "name": "Bearing", "quantity": 3}]
-        )
+        conn._get_asset_record = AsyncMock(return_value=asset)
+        conn._paginated_get = AsyncMock(return_value=self._INVENTORY)
         return conn
 
     @pytest.mark.asyncio
-    async def test_asset_filter_raises_before_any_request(self) -> None:
-        conn = self._connected()
-        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
-            await conn.read_spare_parts(asset_id="asset-1")
+    async def test_keeps_only_the_parts_assigned_to_the_asset(self) -> None:
+        conn = self._connected({"id": "asset-1", "parts": ["p1", "p3"]})
+        parts = await conn.read_spare_parts(asset_id="asset-1")
+        assert [p.sku for p in parts] == ["SKF-6205", "SEAL-40"]
+        conn._get_asset_record.assert_awaited_once_with("asset-1")
+        conn._paginated_get.assert_awaited_once_with("/api/v2/parts")
+
+    @pytest.mark.asyncio
+    async def test_matches_expanded_part_objects_by_id(self) -> None:
+        """With ``includes=parts`` the asset carries part objects, not IDs."""
+        conn = self._connected({"id": "asset-1", "parts": [{"id": "p2", "name": "Oil filter"}]})
+        parts = await conn.read_spare_parts(asset_id="asset-1")
+        assert [p.sku for p in parts] == ["FLT-GA55"]
+
+    @pytest.mark.asyncio
+    async def test_sku_narrows_the_assets_parts(self) -> None:
+        conn = self._connected({"id": "asset-1", "parts": ["p1", "p3"]})
+        parts = await conn.read_spare_parts(asset_id="asset-1", sku="SEAL-40")
+        assert [p.sku for p in parts] == ["SEAL-40"]
+
+    @pytest.mark.asyncio
+    async def test_sku_of_a_part_not_assigned_to_the_asset_matches_nothing(self) -> None:
+        """A sku match alone says nothing about the part's use on the asset."""
+        conn = self._connected({"id": "asset-1", "parts": ["p1"]})
+        parts = await conn.read_spare_parts(asset_id="asset-1", sku="FLT-GA55")
+        assert parts == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "asset",
+        [{"id": "asset-1", "parts": []}, {"id": "asset-1", "parts": None}, {"id": "asset-1"}],
+        ids=["empty", "null", "absent"],
+    )
+    async def test_asset_without_parts_reads_no_inventory(self, asset: dict[str, Any]) -> None:
+        conn = self._connected(asset)
+        assert await conn.read_spare_parts(asset_id="asset-1") == []
         conn._paginated_get.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_asset_filter_raises_even_with_a_sku(self) -> None:
-        """A sku match says nothing about compatibility with the asset."""
-        conn = self._connected()
-        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
-            await conn.read_spare_parts(asset_id="asset-1", sku="SKF-6205")
+    async def test_unknown_asset_raises_naming_it(self) -> None:
+        """An asset UpKeep does not know is not an asset without parts."""
+        conn = self._connected(None)
+        with pytest.raises(ConnectorError, match="asset-404"):
+            await conn.read_spare_parts(asset_id="asset-404")
         conn._paginated_get.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_asset_id_is_no_filter(self) -> None:
-        conn = self._connected()
+        conn = self._connected(None)
         parts = await conn.read_spare_parts(asset_id="", sku="SKF-6205")
         assert [p.sku for p in parts] == ["SKF-6205"]
+        conn._get_asset_record.assert_not_awaited()
         conn._paginated_get.assert_awaited_once()

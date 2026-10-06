@@ -53,6 +53,20 @@ def _require_httpx() -> Any:
     return httpx
 
 
+def _assigned_part_ids(asset: dict[str, Any]) -> set[str]:
+    """Return the IDs of the parts assigned to an UpKeep asset record.
+
+    ``parts`` lists part IDs, or part objects when the response expands it
+    (``includes=parts``).
+    """
+    ids: set[str] = set()
+    for entry in asset.get("parts") or []:
+        part_id = entry.get("id") if isinstance(entry, dict) else entry
+        if part_id:
+            ids.add(str(part_id))
+    return ids
+
+
 class UpKeepConnector:
     """Connector for UpKeep CMMS.
 
@@ -158,21 +172,10 @@ class UpKeepConnector:
     async def get_asset(self, asset_id: str) -> Asset | None:
         """Look up a single asset by ID."""
         self._ensure_connected()
-        httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/api/v2/assets/{asset_id}",
-                headers=self._headers(),
-            )
-        if resp.status_code == 404:
+        record = await self._get_asset_record(asset_id)
+        if record is None:
             return None
-        if resp.status_code != 200:
-            raise ConnectorError(f"UpKeep GET asset failed: HTTP {resp.status_code}")
-        body = resp.json()
-        result = body.get("result", body)
-        return upkeep_mapper.parse_asset(result)
+        return upkeep_mapper.parse_asset(record)
 
     async def read_work_orders(
         self,
@@ -338,27 +341,35 @@ class UpKeepConnector:
         """Read spare parts (UpKeep calls them *parts*).
 
         Args:
-            asset_id: Not supported (see Note): a non-empty value raises
-                :class:`ConnectorError` rather than being dropped.
+            asset_id: Optional UpKeep asset ID: keeps only the parts assigned
+                to that asset (see Note). An asset UpKeep does not know
+                raises :class:`ConnectorError`.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
 
         Note:
             UpKeep's ``/api/v2/parts`` endpoint has no asset field or asset
-            filter; UpKeep lists an asset's parts on the asset record (its
-            ``parts`` IDs), which this connector does not read. Dropping the
-            filter would pass every part (or a bare ``sku`` match) off as the
-            asset's compatible parts, so the read refuses it instead.
+            filter; the parts assigned to an asset are listed on the asset
+            record (``parts`` on ``GET /api/v2/assets/<ID>``: part IDs, or
+            part objects when expanded). The asset filter reads that list and
+            keeps the parts whose record ``id`` is on it; an asset with no
+            parts listed returns none, without reading the inventory.
         """
         self._ensure_connected()
+        assigned: set[str] | None = None
         if asset_id:
-            raise ConnectorError(
-                "The UpKeep connector cannot filter spare parts by asset: "
-                "/api/v2/parts has no asset filter, and the connector does not "
-                "read the asset's parts list. Look the part up by sku instead."
-            )
+            asset = await self._get_asset_record(asset_id)
+            if asset is None:
+                raise ConnectorError(f"UpKeep asset {asset_id!r} not found")
+            assigned = _assigned_part_ids(asset)
+            if not assigned:
+                return []
         raw = await self._paginated_get("/api/v2/parts")
+        if assigned is not None:
+            # Match on the record id before parsing: the parsed SparePart
+            # drops it (its sku prefers partNumber / barcode).
+            raw = [item for item in raw if str(item.get("id", "")) in assigned]
         parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:
             parts = [p for p in parts if p.sku == sku]
@@ -386,6 +397,26 @@ class UpKeepConnector:
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
+
+    async def _get_asset_record(self, asset_id: str) -> dict[str, Any] | None:
+        """Fetch one raw asset record, or ``None`` if UpKeep has no such asset."""
+        httpx = _require_httpx()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client,
+                "GET",
+                f"{self.url}/api/v2/assets/{asset_id}",
+                headers=self._headers(),
+            )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 401:
+            raise ConnectorAuthError("UpKeep API key is invalid")
+        if resp.status_code != 200:
+            raise ConnectorError(f"UpKeep GET asset failed: HTTP {resp.status_code}")
+        body = resp.json()
+        record: dict[str, Any] = body.get("result", body)
+        return record
 
     async def _paginated_get(
         self,

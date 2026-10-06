@@ -3025,9 +3025,10 @@ class Agent:
                 try:
                     parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
                 except ConnectorError as exc:
-                    # E.g. Maximo or UpKeep refusing an asset filter they cannot
-                    # apply. Relay it so the model can say so and look the part
-                    # up by sku, instead of the error ending the turn.
+                    # E.g. Maximo refusing an asset filter it cannot apply, or
+                    # an asset UpKeep does not know. Relay it so the model can
+                    # say so and look the part up by sku, instead of the error
+                    # ending the turn.
                     logger.warning(
                         "spare_parts_lookup_failed",
                         agent=self.name,
