@@ -36,10 +36,11 @@ pip install machina-ai[slack]
     connectors:
       messaging:
         type: slack
-        bot_token: ${SLACK_BOT_TOKEN}
-        app_token: ${SLACK_APP_TOKEN}
-        allowed_channel_ids:
-          - C0123456789
+        settings:
+          bot_token: ${SLACK_BOT_TOKEN}
+          app_token: ${SLACK_APP_TOKEN}
+          allowed_channel_ids:
+            - C0123456789
     ```
 
 ## Capabilities

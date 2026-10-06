@@ -337,6 +337,29 @@ class TestAlarmToWorkorderWorkflow:
         assert len(comms.messages_sent) == 0
 
     @pytest.mark.asyncio
+    async def test_sandbox_still_drafts_the_work_order(self) -> None:
+        """generate_work_order only builds the WorkOrder in memory, so a
+        sandbox run shows the draft; the CMMS submit stays intercepted."""
+        engine, cmms, _comms = self._build_engine(sandbox=True)
+        trigger = {"asset_id": "P-201", "severity": "warning"}
+
+        result = await engine.execute(alarm_to_workorder, trigger)
+
+        steps = {sr.step_name: sr for sr in result.step_results}
+        assert not (
+            isinstance(steps["generate_work_order"].output, dict)
+            and steps["generate_work_order"].output.get("__sandbox__")
+        )
+        assert steps["submit_work_order"].output["__sandbox__"] is True
+        assert cmms.created_work_orders == []
+
+    def test_only_external_effects_are_marked_write(self) -> None:
+        steps = {s.name: s for s in alarm_to_workorder.steps}
+        assert steps["generate_work_order"].is_write is False
+        assert steps["notify_technician"].is_write is True
+        assert steps["submit_work_order"].is_write is True
+
+    @pytest.mark.asyncio
     async def test_trigger_matches_severity_filter(self) -> None:
         """The trigger filter allows only warning and critical severities."""
         trigger = alarm_to_workorder.trigger

@@ -153,3 +153,22 @@ class TestWorkOrderResource:
             assert len(content) == 1
             data = json.loads(content[0].content)
             assert data["id"] == "WO-100"
+
+    @pytest.mark.asyncio
+    async def test_primary_without_single_reads_returns_an_error_entry(self) -> None:
+        """Excel/CSV and SQL primaries have no get_work_order."""
+        from machina.mcp.server import build_server
+        from machina.runtime import MachinaRuntime
+
+        mock_conn = MagicMock(spec=["capabilities", "connect", "disconnect", "read_assets"])
+        mock_conn.capabilities = frozenset({"read_assets"})
+        runtime = MachinaRuntime(connectors={"cmms": mock_conn})
+        server = build_server(MachinaConfig())
+
+        with patch.object(server, "get_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            mock_ctx.return_value.request_context.lifespan_context = {"runtime": runtime}
+
+            results = list(await server.read_resource("machina://v1/work-orders/WO-1"))
+
+        assert "error" in json.loads(results[0].content)

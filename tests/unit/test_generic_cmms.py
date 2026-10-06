@@ -268,6 +268,30 @@ class TestGenericCmmsConnectorLocal:
         disk = json.loads((cmms_dir / "work_orders.json").read_text())
         assert disk == [{"wo_id": "WO-001", "asset_id": "P-201"}]
 
+    def test_yaml_mapping_accepts_an_inline_dict(self) -> None:
+        """A machina.yaml settings block carries the mapping as a plain dict."""
+        from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
+
+        mapping = {
+            "mapping": {
+                "asset": {
+                    "endpoint": {"method": "GET", "path": "/api/v1/machines"},
+                    "fields": {"id": {"source": "machine_code"}, "name": {"source": "label"}},
+                }
+            }
+        }
+        conn = GenericCmmsConnector(url="https://cmms.example.com", yaml_mapping=mapping)
+        assert isinstance(conn._yaml_mapping, GenericCmmsYamlConfig)
+        mapped = conn._apply_yaml_mapping("assets", {"machine_code": "P-9", "label": "Pump 9"})
+        assert mapped["id"] == "P-9"
+        assert mapped["name"] == "Pump 9"
+
+    def test_invalid_inline_yaml_mapping_is_a_config_error(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="GenericCmmsYamlConfig"):
+            GenericCmmsConnector(url="https://cmms.example.com", yaml_mapping={"mapping": {}})
+
     @pytest.mark.asyncio
     async def test_persist_skipped_with_yaml_mapping(self, sample_data_dir: Path) -> None:
         """The yaml_mapping branch of the persist skip-guard also suppresses
@@ -796,6 +820,85 @@ class TestAuthStrategies:
         conn = GenericCmmsConnector(url="http://example.com/api")
         with pytest.raises(ConnectorAuthError, match="API key"):
             await conn.connect()
+
+    @pytest.mark.parametrize(
+        ("auth", "expected"),
+        [
+            ({"type": "bearer", "token": "t-1"}, {"Authorization": "Bearer t-1"}),
+            (
+                {"type": "api_key", "header_name": "api-token", "value": "k-1"},
+                {"api-token": "k-1"},
+            ),
+            ({"type": "none"}, {}),
+        ],
+    )
+    def test_auth_accepts_the_yaml_dict_form(
+        self, auth: dict[str, str], expected: dict[str, str]
+    ) -> None:
+        """A machina.yaml settings block carries auth as a dict keyed by type."""
+        conn = GenericCmmsConnector(url="http://example.com/api", auth=auth)
+        assert conn._rest_headers() == expected
+
+    def test_basic_auth_yaml_dict_wins_over_api_key(self) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="ignored",
+            auth={"type": "basic", "username": "svc", "password": "p"},
+        )
+        assert conn._rest_headers()["Authorization"].startswith("Basic ")
+
+    def test_invalid_auth_dict_is_a_config_error_without_the_secret(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="'auth'") as excinfo:
+            GenericCmmsConnector(
+                url="http://example.com/api",
+                auth={"type": "bearer", "tokn": "super-secret-value"},
+            )
+        assert "super-secret-value" not in str(excinfo.value)
+
+    def test_unknown_auth_type_is_a_config_error(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="'auth'"):
+            GenericCmmsConnector(url="http://example.com/api", auth={"type": "kerberos"})
+
+    def test_pagination_accepts_the_yaml_dict_form(self) -> None:
+        from machina.connectors.cmms import OffsetLimitPagination
+
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            pagination={"type": "offset_limit", "page_size": 50, "items_path": "data"},
+        )
+        assert isinstance(conn._pagination, OffsetLimitPagination)
+        assert conn._pagination.page_size == 50
+
+    def test_invalid_pagination_dict_is_a_config_error(self) -> None:
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="'pagination'"):
+            GenericCmmsConnector(
+                url="http://example.com/api",
+                api_key="k",
+                pagination={"type": "offset_limit", "page_size": 0},
+            )
+
+    def test_yaml_settings_build_a_connector_through_the_factory(self) -> None:
+        """The config-file path (create_connector) gets working auth and pagination."""
+        from machina.connectors.cmms import PageNumberPagination
+        from machina.connectors.factory import create_connector
+
+        conn = create_connector(
+            "generic_cmms",
+            {
+                "url": "http://example.com/api",
+                "auth": {"type": "api_key", "value": "k-2"},
+                "pagination": {"type": "page_number"},
+            },
+        )
+        assert conn._rest_headers() == {"X-API-Key": "k-2"}
+        assert isinstance(conn._pagination, PageNumberPagination)
 
 
 class TestPaginationStrategies:

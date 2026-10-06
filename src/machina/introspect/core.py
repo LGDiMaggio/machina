@@ -400,10 +400,10 @@ def _configurable_capabilities(conn_type: str, base: frozenset[Capability]) -> s
             Capability.DELETE_CALENDAR_EVENT,
         }
     elif conn_type in ("sql", "generic_sql"):
-        # capabilities: read_write adds writes; a FailureMode table adds reads.
+        # capabilities: read_write adds the INSERT write (updates are not
+        # implemented, so not declared); a FailureMode table adds reads.
         full = {
             Capability.CREATE_WORK_ORDER,
-            Capability.UPDATE_WORK_ORDER,
             Capability.READ_FAILURE_MODES,
         }
     elif conn_type in ("excel", "excel_csv"):

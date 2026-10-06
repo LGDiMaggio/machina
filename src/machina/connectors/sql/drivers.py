@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from machina.exceptions import ConnectorDependencyError, ConnectorDriverError
+from machina.connectors.sql.dialect import redact_dsn
+from machina.exceptions import ConnectorDependencyError, ConnectorDriverError, ConnectorError
 
 
 def require_pyodbc() -> Any:
@@ -35,19 +36,40 @@ def require_jaydebeapi() -> tuple[Any, Any]:
     return jaydebeapi, jpype
 
 
+def _safe_error_text(exc: BaseException, dsn: str) -> str:
+    """Return the driver's error text with the DSN and any password redacted.
+
+    Driver messages can quote the connection string verbatim (the standard
+    JDBC "No suitable driver found for <url>" does), so the raw DSN is
+    replaced by its redacted form before the usual password patterns are
+    redacted too.
+    """
+    return redact_dsn(str(exc).replace(dsn, redact_dsn(dsn)))
+
+
 def connect_odbc(dsn: str) -> Any:
-    """Open an ODBC connection via pyodbc."""
+    """Open an ODBC connection via pyodbc.
+
+    Raises:
+        ConnectorDriverError: If the ODBC driver is missing.
+        ConnectorError: If the connection fails for another reason.
+
+    Neither error echoes the DSN's password, and neither chains the driver
+    exception, whose text could.
+    """
     pyodbc = require_pyodbc()
     try:
         return pyodbc.connect(dsn, autocommit=False)
     except pyodbc.InterfaceError as exc:
-        error_msg = str(exc)
+        error_msg = _safe_error_text(exc, dsn)
         if "driver" in error_msg.lower():
             raise ConnectorDriverError(
                 f"ODBC driver not found. Check your DSN and ensure the "
                 f"driver is installed. Error: {error_msg}"
-            ) from exc
-        raise
+            ) from None
+        raise ConnectorError(f"ODBC connection failed: {error_msg}") from None
+    except pyodbc.Error as exc:
+        raise ConnectorError(f"ODBC connection failed: {_safe_error_text(exc, dsn)}") from None
 
 
 def connect_jdbc(
@@ -55,7 +77,13 @@ def connect_jdbc(
     driver_class: str,
     driver_path: str | None = None,
 ) -> Any:
-    """Open a JDBC connection via jaydebeapi."""
+    """Open a JDBC connection via jaydebeapi.
+
+    Raises:
+        ConnectorDriverError: If the connection fails. The message never
+            echoes the DSN's password, and the driver exception is not
+            chained.
+    """
     jaydebeapi, jpype = require_jaydebeapi()
     if not jpype.isJVMStarted():
         jvm_path = jpype.getDefaultJVMPath()
@@ -65,5 +93,6 @@ def connect_jdbc(
         return jaydebeapi.connect(driver_class, dsn)
     except Exception as exc:
         raise ConnectorDriverError(
-            f"JDBC connection failed for driver {driver_class!r}. Error: {exc}"
-        ) from exc
+            f"JDBC connection failed for driver {driver_class!r}. "
+            f"Error: {_safe_error_text(exc, dsn)}"
+        ) from None

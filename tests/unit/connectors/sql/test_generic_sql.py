@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -248,6 +249,126 @@ class TestReadAssets:
         assert assets[1].type == AssetType.INSTRUMENT
 
 
+class TestYamlSettingsAndCallContract:
+    """Built from flat YAML settings; honours the agent/MCP call shapes."""
+
+    def test_flat_settings_build_the_connector(self) -> None:
+        from machina.connectors.capabilities import Capability
+
+        settings = _basic_config(capabilities="read_write").model_dump()
+        connector = GenericSqlConnector(**settings)
+        assert Capability.CREATE_WORK_ORDER in connector.capabilities
+
+    def test_config_and_flat_settings_together_are_refused(self) -> None:
+        config = _basic_config()
+        with pytest.raises(ConnectorConfigError, match="either"):
+            GenericSqlConnector(config=config, dsn=config.dsn)
+
+    def test_invalid_settings_never_echo_the_dsn(self) -> None:
+        secret_dsn = "Driver={ODBC Driver 18};Server=db;UID=svc;PWD=hunter2-secret;"
+        with pytest.raises(ConnectorConfigError, match="tables") as excinfo:
+            GenericSqlConnector(dsn=secret_dsn, capabilities="read_write")
+        assert "hunter2" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_get_asset(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(
+            read_rows=[("P-001", "Pompa 1", "POM", "A"), ("V-001", "Valvola 1", "VAL", "B")]
+        )
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        asset = await connector.get_asset("V-001")
+        assert asset is not None
+        assert asset.name == "Valvola 1"
+        assert await connector.get_asset("NOPE") is None
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_read_work_orders_filters(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(
+            read_rows=[
+                ("WO-1", "P-001", "Seal"),
+                ("WO-2", "V-001", "Valve"),
+                ("WO-3", "P-001", "X"),
+            ]
+        )
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        on_pump = await connector.read_work_orders(asset_id="P-001")
+        assert [wo.id for wo in on_pump] == ["WO-1", "WO-3"]
+        assert len(await connector.read_work_orders(status="created")) == 3
+        assert await connector.read_work_orders(status="closed") == []
+        # None means "no status filter", as the empty string does — not "None".
+        assert len(await connector.read_work_orders(status=None)) == 3  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_health_check_waits_for_the_shared_connection(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """The health probe uses the same DB-API connection as reads and writes."""
+        mock_connect.return_value = _make_conn(_make_smart_cursor(read_rows=[]))
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        async with connector._db_lock:
+            probe = asyncio.create_task(connector.health_check())
+            await asyncio.sleep(0.05)
+            assert not probe.done()
+        await probe
+
+    def test_read_write_declares_create_but_not_the_unimplemented_update(self) -> None:
+        from machina.connectors.capabilities import Capability
+
+        connector = GenericSqlConnector(config=_basic_config(capabilities="read_write"))
+        assert Capability.CREATE_WORK_ORDER in connector.capabilities
+        assert Capability.UPDATE_WORK_ORDER not in connector.capabilities
+
+    def test_config_given_as_a_dict_is_validated(self) -> None:
+        connector = GenericSqlConnector(config=_basic_config().model_dump())
+        assert connector.capabilities
+
+    def test_unknown_setting_is_refused(self) -> None:
+        settings = _basic_config().model_dump()
+        settings["capabilites"] = "read_write"  # typo
+        with pytest.raises(ConnectorConfigError, match="capabilites"):
+            GenericSqlConnector(**settings)
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_create_is_idempotent_on_existing_id(self, mock_connect: MagicMock) -> None:
+        cursor = _make_smart_cursor(read_rows=[("WO-001", "P-001", "Existing")])
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+        cursor.execute.reset_mock()
+
+        result = await connector.create_work_order(
+            WorkOrder(
+                id="WO-001", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="Dup"
+            )
+        )
+
+        assert result.description == "Existing"  # the stored record, not the retry
+        executed = [str(call.args[0]).upper() for call in cursor.execute.call_args_list]
+        assert not any(q.startswith("INSERT") for q in executed)
+        conn_obj.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keyword_update_raises_connector_error_not_type_error(self) -> None:
+        from machina.domain.work_order import WorkOrderStatus
+        from machina.exceptions import ConnectorError
+
+        connector = GenericSqlConnector(config=_basic_config(capabilities="read_write"))
+        with pytest.raises(ConnectorError, match="not yet implemented"):
+            await connector.update_work_order("WO-1", status=WorkOrderStatus.CLOSED)
+
+
 class TestReadWriteCapabilities:
     def test_read_only_capabilities(self) -> None:
         config = _basic_config(capabilities="read_only")
@@ -295,8 +416,105 @@ class TestCreateWorkOrder:
         )
         result = await connector.create_work_order(wo)
         assert result.id == "WO-001"
-        insert_cursor.execute.assert_called_once()
+        # The idempotency check reads first; exactly one INSERT follows.
+        inserts = [
+            call
+            for call in insert_cursor.execute.call_args_list
+            if str(call.args[0]).upper().startswith("INSERT")
+        ]
+        assert len(inserts) == 1
         mock_conn_obj.commit.assert_called()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_concurrent_same_id_creates_insert_once(self, mock_connect: MagicMock) -> None:
+        """The ID probe and the INSERT are serialized, so a race cannot duplicate."""
+        import asyncio
+
+        stored: list[tuple[Any, ...]] = []
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+
+        def _execute(query: str, params: Any = None) -> None:
+            if query.upper().startswith("INSERT"):
+                stored.append(tuple(params))
+                return
+            cursor.description = _WO_COLS if "WORK_ORDERS" in query.upper() else _ALL_COLS
+            cursor.fetchall.return_value = [] if "WHERE 1=0" in query.upper() else list(stored)
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+        wo = WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="P-001", description="x")
+
+        await asyncio.gather(connector.create_work_order(wo), connector.create_work_order(wo))
+
+        assert len(stored) == 1
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_unparseable_existing_row_does_not_block_create(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """The idempotency probe matches IDs on raw rows; it does not validate them."""
+        config = _basic_config(capabilities="read_write", with_insert=True)
+        wo_mapping = config.tables["work_orders"]
+        wo_mapping.fields["status"] = FieldMapping(column="WO_STATUS")
+        columns = [*_WO_COLS, ("WO_STATUS",)]
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+
+        def _execute(query: str, params: Any = None) -> None:
+            cursor.description = columns if "WORK_ORDERS" in query.upper() else _ALL_COLS
+            # A legacy row whose status no WorkOrderStatus value matches.
+            legacy = [("WO-OLD", "P-001", "legacy", "APERTO")]
+            cursor.fetchall.return_value = [] if "WHERE 1=0" in query.upper() else legacy
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+
+        result = await connector.create_work_order(
+            WorkOrder(id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+        )
+
+        assert result.id == "WO-NEW"
+        executed = [str(call.args[0]).upper() for call in cursor.execute.call_args_list]
+        assert any(q.startswith("INSERT") for q in executed)
+        conn_obj.commit.assert_called()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_non_transient_write_error_is_a_connector_error(
+        self, mock_connect: MagicMock
+    ) -> None:
+        from machina.exceptions import ConnectorError
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+
+        def _execute(query: str, params: Any = None) -> None:
+            if query.upper().startswith("INSERT"):
+                raise ValueError("value too long for column WO_DESC")
+            cursor.description = _WO_COLS if "WORK_ORDERS" in query.upper() else _ALL_COLS
+            cursor.fetchall.return_value = []
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+
+        with pytest.raises(ConnectorError, match="SQL write failed"):
+            await connector.create_work_order(
+                WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+            )
 
     @pytest.mark.asyncio
     @patch("machina.connectors.sql.generic.connect_odbc")

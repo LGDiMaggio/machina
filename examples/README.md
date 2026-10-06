@@ -18,16 +18,17 @@ The agent answers questions about equipment, procedures, spare parts, maintenanc
 cd examples/alarm_to_workorder && python agent.py
 ```
 
-A vibration alarm fires on pump P-201. The agent diagnoses the failure, checks spare parts, creates a work order, and notifies the team. No human in the loop. [Details &rarr;](alarm_to_workorder/)
+A vibration alarm fires on pump P-201. The agent diagnoses the failure, checks history and spare parts, drafts and submits a work order, and notifies the team -- six deterministic steps, no LLM call, no human in the loop (sandbox mode intercepts the two writes). [Details &rarr;](alarm_to_workorder/)
 
-## 3. Deploy to Production (15 minutes)
+## 3. Adapt a Starter Kit (15 minutes)
 
 ```bash
 cp -r templates/odl-generator-from-text my-agent
-cd my-agent && cp .env.example .env && docker compose up
+cd my-agent && pip install "machina-ai[excel,litellm,examples]"
+cp .env.example .env && python agent.py --sandbox
 ```
 
-Clone-configure-deploy starter kit. Italian free-text messages become Work Orders. [Details &rarr;](../templates/odl-generator-from-text/)
+Copy-configure-run starter kit: free-text requests become confirmed work orders in a spreadsheet (or a REST CMMS). [Details &rarr;](../templates/odl-generator-from-text/)
 
 ---
 
@@ -68,4 +69,4 @@ pip install -e ".[litellm,docs-rag,examples]"
 | **OpenAI** | `export OPENAI_API_KEY=sk-...` | Pay-per-token |
 | **Anthropic** | `export ANTHROPIC_API_KEY=sk-ant-...` | Pay-per-token |
 
-All examples default to `ollama:llama3`. Override: `python agent.py --llm openai:gpt-4o`
+The LLM-driven examples default to `ollama:llama3`. Override: `python agent.py --llm openai:gpt-4o`. The alarm-to-work-order example makes no LLM call and needs no provider.

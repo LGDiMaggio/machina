@@ -27,6 +27,20 @@ from machina.exceptions import (
     SandboxViolationError,
 )
 
+# FastMCP injects the request context into the parameter annotated with its
+# ``Context`` class and leaves it out of the tool's input schema. Annotated as
+# anything else — including a parametrized ``Context[...]`` — ``ctx`` becomes
+# a required tool argument and no MCP client can call the tool. FastMCP reads
+# the hints at runtime, so the runtime name must be the bare SDK class; for
+# the type checker ``ctx`` stays opaque (it is only handed to ``_runtime``).
+if TYPE_CHECKING:
+    Context = Any
+else:
+    try:
+        from mcp.server.fastmcp import Context
+    except ImportError:  # pragma: no cover - the MCP SDK is required to register tools
+        Context = Any
+
 logger = structlog.get_logger(__name__)
 
 
@@ -50,7 +64,7 @@ def _runtime(ctx: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def machina_list_assets(ctx: Any) -> list[dict[str, Any]]:
+async def machina_list_assets(ctx: Context) -> list[dict[str, Any]]:
     """List all assets from the configured CMMS.
 
     Returns a list of asset dictionaries with id, name, type,
@@ -76,7 +90,7 @@ async def machina_list_assets(ctx: Any) -> list[dict[str, Any]]:
         return [{"error": str(exc)}]
 
 
-async def machina_get_asset(ctx: Any, asset_id: str) -> dict[str, Any]:
+async def machina_get_asset(ctx: Context, asset_id: str) -> dict[str, Any]:
     """Get a single asset by ID.
 
     Args:
@@ -103,7 +117,7 @@ async def machina_get_asset(ctx: Any, asset_id: str) -> dict[str, Any]:
 
 
 async def machina_list_work_orders(
-    ctx: Any,
+    ctx: Context,
     asset_id: str = "",
     status: str = "",
 ) -> list[dict[str, Any]]:
@@ -135,7 +149,7 @@ async def machina_list_work_orders(
     ]
 
 
-async def machina_get_work_order(ctx: Any, work_order_id: str) -> dict[str, Any]:
+async def machina_get_work_order(ctx: Context, work_order_id: str) -> dict[str, Any]:
     """Get a single work order by ID.
 
     Args:
@@ -165,7 +179,7 @@ async def machina_get_work_order(ctx: Any, work_order_id: str) -> dict[str, Any]
 
 
 async def machina_create_work_order(
-    ctx: Any,
+    ctx: Context,
     asset_id: str,
     description: str,
     priority: str = "medium",
@@ -235,7 +249,7 @@ async def machina_create_work_order(
 
 
 async def machina_update_work_order(
-    ctx: Any,
+    ctx: Context,
     work_order_id: str,
     status: str = "",
     assigned_to: str = "",
@@ -291,7 +305,7 @@ async def machina_update_work_order(
 
 
 async def machina_close_work_order(
-    ctx: Any,
+    ctx: Context,
     work_order_id: str,
 ) -> dict[str, Any]:
     """Close a work order (terminal state — marks maintenance complete).
@@ -326,7 +340,7 @@ async def machina_close_work_order(
 
 
 async def machina_cancel_work_order(
-    ctx: Any,
+    ctx: Context,
     work_order_id: str,
     reason: str = "",
 ) -> dict[str, Any]:
@@ -368,7 +382,7 @@ async def machina_cancel_work_order(
 
 
 async def machina_get_maintenance_history(
-    ctx: Any,
+    ctx: Context,
     asset_id: str,
 ) -> list[dict[str, Any]]:
     """Get the maintenance history for an asset — past work orders and interventions.
@@ -420,7 +434,7 @@ async def machina_get_maintenance_history(
 
 
 async def machina_list_spare_parts(
-    ctx: Any,
+    ctx: Context,
     asset_id: str = "",
 ) -> list[dict[str, Any]]:
     """List spare parts, optionally filtered by compatible asset.
@@ -446,7 +460,7 @@ async def machina_list_spare_parts(
     ]
 
 
-async def machina_get_maintenance_plan(ctx: Any) -> list[dict[str, Any]]:
+async def machina_get_maintenance_plan(ctx: Context) -> list[dict[str, Any]]:
     """List all preventive maintenance plans."""
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
@@ -469,7 +483,7 @@ async def machina_get_maintenance_plan(ctx: Any) -> list[dict[str, Any]]:
 
 
 async def machina_search_manuals(
-    ctx: Any,
+    ctx: Context,
     query: str,
     top_k: int = 5,
     asset_id: str = "",
@@ -521,7 +535,7 @@ async def machina_search_manuals(
 
 
 async def machina_get_sensor_reading(
-    ctx: Any,
+    ctx: Context,
     asset_id: str,
 ) -> dict[str, Any]:
     """Get the latest sensor reading for an asset.
@@ -538,7 +552,7 @@ async def machina_get_sensor_reading(
 
 
 async def machina_get_alarms(
-    ctx: Any,
+    ctx: Context,
     asset_id: str = "",
 ) -> list[dict[str, Any]]:
     """Get active alarms, optionally filtered by asset.
@@ -630,7 +644,7 @@ async def machina_diagnose_failure(
 
 
 async def machina_send_message(
-    ctx: Any,
+    ctx: Context,
     channel: str,
     text: str,
 ) -> dict[str, Any]:

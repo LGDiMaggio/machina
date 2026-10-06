@@ -1,6 +1,6 @@
 # Machina Agent Builder (Claude Code plugin)
 
-A thin Claude Code plugin that packages the workflow for **building and extending Machina agents with an LLM**. It carries no capability lists of its own — every command reads Machina's **code-derived self-description spine** (`machina describe`, `docs/capabilities.md`, `docs/llms.txt`), so it never goes stale as the framework changes.
+A thin Claude Code plugin that packages the workflow for **building and extending Machina agents with an LLM**. It carries no capability lists of its own — every command reads Machina's **code-derived self-description spine** (`machina describe` and the generated `docs/capabilities.md`), plus the hand-written `docs/llms.txt` map of conventions and seams, so it does not go stale as the framework changes.
 
 This is the "Form C" surface of Machina's self-description spine: a packaged build experience over the same core that powers the `machina describe` CLI and the `machina://v1/capabilities` MCP resource.
 
@@ -19,7 +19,7 @@ The plugin ships inside the Machina repository (not on PyPI). The repo doubles a
 pip install machina-ai          # or, from a cloned checkout: pip install -e .
 ```
 
-Run the plugin's commands from inside a Machina checkout, where the generated `docs/capabilities.md` / `docs/llms.txt` the commands read also live.
+Run the plugin's commands from inside a Machina checkout, where the `docs/capabilities.md` (generated) and `docs/llms.txt` (hand-written) files the commands read also live.
 
 ### Via marketplace (recommended)
 

@@ -124,7 +124,12 @@ def register_resources(server: Any) -> None:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)
         cmms = runtime.get_primary_cmms()
-        wo = await cmms.get_work_order(wo_id)  # type: ignore[attr-defined]
+        if not hasattr(cmms, "get_work_order"):
+            # Excel/CSV and SQL substrates list work orders but cannot read one.
+            return json.dumps(
+                {"error": "The primary CMMS connector cannot read single work orders"}
+            )
+        wo = await cmms.get_work_order(wo_id)
         if wo is None:
             return json.dumps({"error": f"Work order {wo_id!r} not found"})
         return wo.model_dump_json()  # type: ignore[no-any-return]

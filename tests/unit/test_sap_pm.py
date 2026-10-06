@@ -526,3 +526,52 @@ class TestCsrfWriteRecovery:
         resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
         assert resp.status_code == 403
         assert rwr.await_count == 2
+
+
+class TestYamlAuthSettings:
+    """A machina.yaml settings block carries ``auth`` as a dict keyed by type."""
+
+    _URL = "https://sap.example.com/sap/opu/odata/sap"
+
+    def test_basic_auth_dict(self) -> None:
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+
+        conn = SapPmConnector(
+            url=self._URL, auth={"type": "basic", "username": "svc", "password": "p"}
+        )
+        assert isinstance(conn._auth, BasicAuth)
+
+    def test_oauth2_client_credentials_dict(self) -> None:
+        from machina.connectors.cmms.auth import OAuth2ClientCredentials
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+
+        conn = SapPmConnector(
+            url=self._URL,
+            auth={
+                "type": "oauth2_client_credentials",
+                "token_url": "https://sap.example.com/oauth/token",
+                "client_id": "machina",
+                "client_secret": "s",
+            },
+        )
+        assert isinstance(conn._auth, OAuth2ClientCredentials)
+
+    def test_invalid_auth_dict_is_a_config_error_without_the_secret(self) -> None:
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+        from machina.exceptions import ConnectorConfigError
+
+        with pytest.raises(ConnectorConfigError, match="'auth'") as excinfo:
+            SapPmConnector(
+                url=self._URL,
+                auth={"type": "basic", "username": "svc", "pasword": "hunter2-secret"},
+            )
+        assert "hunter2-secret" not in str(excinfo.value)
+
+    def test_yaml_settings_build_through_the_factory(self) -> None:
+        from machina.connectors.factory import create_connector
+
+        conn = create_connector(
+            "sap_pm",
+            {"url": self._URL, "auth": {"type": "basic", "username": "svc", "password": "p"}},
+        )
+        assert isinstance(conn._auth, BasicAuth)

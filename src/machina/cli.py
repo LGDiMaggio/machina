@@ -4,6 +4,12 @@ Usage::
 
     machina describe          # human-readable self-description
     machina describe --json   # JSON form (identical to docs/capabilities.json)
+    machina mcp serve --config machina.yaml [--transport stdio|streamable-http]
+                      [--host 127.0.0.1] [--port 8000]
+
+``machina mcp serve`` runs the MCP server; it is the same command as
+``python -m machina.mcp`` (both use :mod:`machina.mcp.__main__`, so their
+options cannot drift). The MCP SDK is imported only when the server starts.
 
 The ``describe`` subcommand calls :func:`machina.introspect.describe` and prints
 a readable text summary of the framework's connectors, their capabilities (with
@@ -25,6 +31,7 @@ import sys
 
 from machina.introspect import Spine, describe
 from machina.introspect.render_llms import render_json
+from machina.mcp.__main__ import add_serve_arguments, run_serve
 
 
 def _bool_label(value: bool | None) -> str:
@@ -124,6 +131,11 @@ def _cmd_describe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    """Run the ``mcp serve`` subcommand (delegates to ``machina.mcp.__main__``)."""
+    return run_serve(args)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -142,6 +154,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit the JSON form (identical in shape to docs/capabilities.json).",
     )
     describe_parser.set_defaults(func=_cmd_describe)
+
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Model Context Protocol server commands.",
+    )
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", required=True)
+    serve_parser = mcp_subparsers.add_parser(
+        "serve",
+        help="Run the MCP server (same as `python -m machina.mcp`).",
+    )
+    add_serve_arguments(serve_parser)
+    serve_parser.set_defaults(func=_cmd_mcp_serve)
 
     return parser
 

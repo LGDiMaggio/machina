@@ -38,6 +38,28 @@ class TestBuildServer:
         tool_names = [t.name for t in server._tool_manager.list_tools()]
         assert "machina_list_assets" in tool_names
 
+    def test_no_tool_exposes_ctx_as_an_argument(self) -> None:
+        """Regression: tools annotated ``ctx: Any`` published ``ctx`` as a
+        required input, so every tools/call from a real client failed
+        validation. FastMCP must inject the context instead. Checked on every
+        tool — all core tools (every capability) plus the vendor tools."""
+        from machina.config.schema import McpConfig
+        from machina.mcp.server import build_server
+        from machina.mcp.tools import get_tools_for_capabilities
+        from machina.mcp.tools_vendor import VENDOR_TOOLS
+
+        server = build_server(MachinaConfig(mcp=McpConfig(enable_vendor_tools=True)))
+        core = get_tools_for_capabilities(frozenset(Capability))
+        for tool_fn in core:
+            server.add_tool(tool_fn)
+
+        tools = server._tool_manager.list_tools()
+        assert {tool.name for tool in tools} == {fn.__name__ for fn in [*core, *VENDOR_TOOLS]}
+        assert (len(core), len(VENDOR_TOOLS)) == (15, 2)
+        for tool in tools:
+            assert "ctx" not in tool.parameters.get("properties", {}), tool.name
+            assert tool.context_kwarg == "ctx", tool.name
+
 
 class TestDeprecationShim:
     def test_mcp_server_access_warns_and_raises(self) -> None:
@@ -95,9 +117,62 @@ class TestListAssetsTool:
 
 
 class TestServe:
+    @pytest.fixture(autouse=True)
+    def _no_global_logging_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """serve() configures process-wide logging (structlog with cached
+        loggers); doing that inside the test process would leak into every
+        later test. The real effect is covered by the stdio subprocess test."""
+        import machina.mcp.server as mcp_server
+
+        monkeypatch.setattr(mcp_server, "_configure_logging", lambda config: None)
+
     def test_unknown_transport_raises(self) -> None:
         from machina.mcp.server import serve
 
         config = MachinaConfig()
         with pytest.raises(ValueError, match="Unknown transport"):
             serve(config, transport="grpc")
+
+    def test_streamable_http_runs_uvicorn_with_host_and_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: serve() passed host/port to FastMCP.run(), which only
+        accepts the transport, so the HTTP transport died with a TypeError."""
+        import uvicorn
+
+        from machina.mcp.server import serve
+
+        monkeypatch.setenv("MACHINA_MCP_TOKENS_JSON", '{"' + "t" * 64 + '": "tester"}')
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.append({"app": app, **kw}))
+
+        serve(MachinaConfig(), transport="streamable-http", host="127.0.0.1", port=8765)
+
+        assert len(calls) == 1
+        assert calls[0]["host"] == "127.0.0.1"
+        assert calls[0]["port"] == 8765
+        assert callable(calls[0]["app"])
+
+    def test_stdio_runs_fastmcp_stdio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from machina.mcp.server import serve
+
+        # serve() exports MACHINA_MCP_STDIO for stdio; let monkeypatch undo it.
+        monkeypatch.setenv("MACHINA_MCP_STDIO", "0")
+        transports: list[str] = []
+        monkeypatch.setattr(
+            FastMCP, "run", lambda self, transport="stdio": transports.append(transport)
+        )
+
+        serve(MachinaConfig(), transport="stdio")
+
+        assert transports == ["stdio"]
+
+    def test_default_bind_is_loopback(self) -> None:
+        import inspect
+
+        from machina.mcp.server import build_http_app, serve
+
+        assert inspect.signature(serve).parameters["host"].default == "127.0.0.1"
+        assert inspect.signature(build_http_app).parameters["host"].default == "127.0.0.1"

@@ -107,6 +107,7 @@ nav:
       - Runtime (MCP / Headless): api/runtime.md
       - Exceptions: api/exceptions.md
   - Migration:
+      - v0.3 to v0.4: migration/v0.3-to-v0.4.md
       - v0.2 to v0.3: migration/v0.2-to-v0.3.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md

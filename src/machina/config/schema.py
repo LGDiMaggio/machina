@@ -64,14 +64,42 @@ class McpConfig(BaseModel):
     token_verifier_class: str = Field(
         default="",
         description=(
-            "Dotted path to a custom TokenVerifier class "
-            "(e.g. 'mymodule:VaultTokenVerifier'). When set, replaces the "
-            "default static bearer token verifier."
+            "Dotted path to a custom TokenVerifier class under the 'machina.' "
+            "namespace (e.g. 'machina.contrib.auth.VaultTokenVerifier'); other "
+            "namespaces are refused. When set, replaces the default static "
+            "bearer token verifier."
+        ),
+    )
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: [
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "[::1]",
+            "[::1]:*",
+        ],
+        description=(
+            "Host header values the streamable-http transport accepts "
+            "(DNS-rebinding defense). 'name:*' matches any port; a bare name "
+            "matches a Host sent without a port, as a TLS-terminating proxy "
+            "forwards it. Add the host clients (or your proxy) actually send."
         ),
     )
     allowed_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost", "https://localhost"],
-        description="Allowed origins for streamable-http transport (DNS-rebinding defense)",
+        default_factory=lambda: [
+            "http://localhost",
+            "https://localhost",
+            "http://localhost:*",
+            "https://localhost:*",
+            "http://127.0.0.1:*",
+            "https://127.0.0.1:*",
+        ],
+        description=(
+            "Origin header values the streamable-http transport accepts from "
+            "browser-based clients (DNS-rebinding defense); requests without "
+            "an Origin header are not affected."
+        ),
     )
 
     model_config = {"extra": "allow"}

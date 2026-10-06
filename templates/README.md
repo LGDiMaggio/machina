@@ -1,54 +1,47 @@
 # Machina Starter-Kit Templates
 
-Clone-and-go templates for common maintenance AI use cases.
-Each template is a self-contained directory with its own Dockerfile,
-docker-compose, config, and sample data.
+Copy-and-adapt templates for common maintenance AI use cases. Each template
+is a self-contained directory with its own config, sample data, Dockerfile and
+README.
 
 ## Available Templates
 
-| Template | Description | Status |
-|----------|-------------|--------|
-| [`odl-generator-from-text`](odl-generator-from-text/) | Free-text message → Work Order creation (Italian, email + Telegram) | v0.3.0 |
+| Template | Description |
+|----------|-------------|
+| [`odl-generator-from-text`](odl-generator-from-text/) | Free-text request → structured work orders, on a spreadsheet (or REST CMMS) substrate |
 
 ## Templates vs Examples
 
-- **Templates** (`templates/`) are production-ready starting points. Clone one, fill in
-  `.env`, and `docker compose up`. They include Dockerfiles, sample data, and deployment configs.
-- **Examples** (`examples/`) are learning tools. They demonstrate specific features with
-  minimal code and run directly with `python agent.py`.
+- **Templates** (`templates/`) are starter kits: copy one, point it at your own
+  data, and run it. They include sample data, a Dockerfile and documented
+  configuration.
+- **Examples** (`examples/`) are learning tools. They demonstrate specific
+  features with minimal code and run directly with `python agent.py`.
 
 ## Getting Started
 
 ```bash
-# 1. Clone a template
+# 1. Copy a template
 cp -r templates/odl-generator-from-text my-agent
 cd my-agent
 
 # 2. Configure
-cp .env.example .env
-# Edit .env with your LLM key and CMMS credentials
+pip install "machina-ai[excel,litellm,examples]"
+cp .env.example .env      # set your LLM model and key
 
 # 3. Run in sandbox first
-docker compose up
-
-# 4. Test with a sample message
-# (see the template's README for channel-specific instructions)
+python agent.py --sandbox
 ```
+
+Each template's README covers its data, channels and Docker usage.
 
 ## Sandbox-First Rollout
 
-Every template defaults to `MACHINA_SANDBOX_MODE=true`. This means:
+Every template starts in sandbox mode (`MACHINA_SANDBOX_MODE=true` by default):
 
-1. The agent receives and processes messages normally
-2. Work orders are synthesized and validated
-3. **Writes are logged but not executed** — no data reaches the CMMS
-4. The technician receives a reply prefixed with `[SANDBOX]`
+1. The agent receives and processes requests normally
+2. Work orders are proposed and validated
+3. **Writes are logged but not executed** — nothing reaches your files or CMMS
 
-Flip `MACHINA_SANDBOX_MODE=false` in `.env` when ready for live writes.
-
-## Roadmap
-
-Additional templates planned for v0.3.1 based on design-partner feedback:
-
-- **technician-chatbot** — Interactive Q&A with RAG over manuals and maintenance history
-- **predictive-workflow** — Sensor alarm → diagnosis → work order pipeline
+Run with `--live` (or set `MACHINA_SANDBOX_MODE=false`) when you are ready;
+the agent then asks for confirmation before each write.

@@ -55,13 +55,15 @@ pip install machina-ai[cmms-rest]
     connectors:
       cmms:
         type: sap_pm
-        url: https://sap.example.com/sap/opu/odata/sap
-        sap_client: "100"
-        auth:
-          type: oauth2_client_credentials
-          token_url: https://sap.example.com/oauth/token
-          client_id: ${SAP_CLIENT_ID}
-          client_secret: ${SAP_CLIENT_SECRET}
+        primary: true
+        settings:
+          url: https://sap.example.com/sap/opu/odata/sap
+          sap_client: "100"
+          auth:
+            type: oauth2_client_credentials
+            token_url: https://sap.example.com/oauth/token
+            client_id: ${SAP_CLIENT_ID}
+            client_secret: ${SAP_CLIENT_SECRET}
     ```
 
 ## Capabilities
@@ -70,6 +72,7 @@ pip install machina-ai[cmms-rest]
 |---|---|
 | `read_assets` | Read equipment master records (`API_EQUIPMENT/Equipment`) |
 | `read_work_orders` | Read maintenance orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw SAP code) |
+| `get_work_order` | Fetch a single maintenance order by number |
 | `create_work_order` | Create maintenance orders (CSRF token handled automatically) |
 | `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
 | `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) |
@@ -81,7 +84,6 @@ These methods are available but are **not** declared as agent-discoverable capab
 
 | Method | Description |
 |---|---|
-| `get_work_order(id)` | Fetch a single maintenance order by number |
 | `close_work_order(id)` | Transition to CLOSED (SAP `TECO`) via `update_work_order` |
 | `cancel_work_order(id)` | Transition to CANCELLED (SAP `DLFL`) via `update_work_order` |
 

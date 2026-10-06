@@ -20,7 +20,7 @@ class FieldSpec(BaseModel):
     coerce: str | None = Field(default=None, description="Named coercer to apply")
     enum_map: dict[str, str] | None = Field(default=None, description="Value lookup table")
     default: Any = Field(default=None, description="Default when source is missing/null")
-    required: bool = Field(default=False, description="Skip row if this field is missing")
+    required: bool = Field(default=False, description="A record missing this field fails the read")
     pattern: str | None = Field(
         default=None, description="Regex pattern for regex_extract coercer"
     )

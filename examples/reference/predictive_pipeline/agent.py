@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Autonomous predictive maintenance -- sensor to scheduled work order.
+"""Predictive maintenance pipeline -- alarm to drafted work order and window.
 
-10-step pipeline. 3 LLM steps, 7 deterministic. Zero human intervention.
-This is the kind of agent that replaces a manual 3-hour process.
+10-step workflow: 3 LLM steps, 7 deterministic. The script opens a CLI chat
+with the workflow registered; ask the agent to run it, or call
+agent.trigger_workflow() from your own alarm handler.
 
-    python agent.py
-    python agent.py --sandbox           # log-only mode
+    python agent.py                     # sandbox (default)
+    python agent.py --live              # execute writes
     python agent.py --llm ollama:llama3
 """
 
@@ -36,7 +37,7 @@ SAMPLE_DIR = _examples_dir / "sample_data"
 
 predictive_maintenance = Workflow(
     name="Predictive Maintenance Pipeline",
-    description="Sensor alarm to scheduled work order, autonomously.",
+    description="Alarm to diagnosis, drafted work order and maintenance window.",
     trigger="alarm",
     steps=[
         # Phase 1: Detection
@@ -44,17 +45,25 @@ predictive_maintenance = Workflow(
             "enrich_alarm",
             action="sensors.get_related_readings",
             description="Read correlated sensor values for the alarmed asset",
+            inputs={"asset_id": "{trigger.asset_id}"},
         ),
         # Phase 2: Diagnosis (rule-based + LLM synthesis)
         Step(
             "diagnose_rules",
             action="failure_analyzer.diagnose",
             description="Rule-based diagnosis from failure mode taxonomy",
+            inputs={
+                "asset_id": "{trigger.asset_id}",
+                "parameter": "{trigger.parameter}",
+                "value": "{trigger.value}",
+                "severity": "{trigger.severity}",
+            },
         ),
         Step(
             "search_manuals",
             action="docs.search_documents",
             description="RAG search in equipment manuals",
+            inputs={"query": "{trigger.parameter} {trigger.asset_id}"},
         ),
         Step(
             "diagnose_llm",
@@ -72,11 +81,13 @@ predictive_maintenance = Workflow(
             "check_parts",
             action="cmms.read_spare_parts",
             description="Verify spare parts for the diagnosed failure",
+            inputs={"asset_id": "{trigger.asset_id}"},
         ),
         Step(
             "check_history",
             action="cmms.read_maintenance_history",
             description="Recent maintenance history",
+            inputs={"asset_id": "{trigger.asset_id}"},
         ),
         Step(
             "draft_wo",
@@ -92,13 +103,22 @@ predictive_maintenance = Workflow(
         Step(
             "submit_wo",
             action="work_order_factory.create",
-            description="Create work order in CMMS",
+            description="Draft the work order (in memory)",
+            # Builds the WorkOrder in memory — no external effect — so a sandbox
+            # run still shows the draft. Writing it needs a cmms step.
+            is_write=False,
+            inputs={
+                "asset_id": "{trigger.asset_id}",
+                "failure_mode": "{diagnose_rules.failure_mode_for_write}",
+                "description": "{draft_wo}",
+            },
         ),
         # Phase 4: Optimization
         Step(
             "find_window",
             action="maintenance_scheduler.find_window",
             description="Find next available maintenance window",
+            inputs={"asset_id": "{trigger.asset_id}"},
         ),
         Step(
             "optimize_schedule",

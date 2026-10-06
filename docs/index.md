@@ -34,12 +34,13 @@ pip install machina-ai[all]          # Everything
 - :material-book-open-page-variant: **[Domain Model Reference](domain.md)**
 
     Complete API reference for `Asset`, `WorkOrder`, `FailureMode`, `SparePart`, `Alarm`,
-    `MaintenancePlan`, and `Plant`. Aligned with ISO 14224.
+    `MaintenancePlan`, and `Plant`.
 
 - :material-sitemap: **[Architecture](architecture.md)**
 
-    The five-layer architecture: connectors, domain model, agent runtime,
-    LLM abstraction, and observability. How data flows end-to-end.
+    The layers — connectors, domain model, agent runtime, workflow engine,
+    LLM abstraction and observability — with the MCP server beside them. How
+    data flows end-to-end.
 
 - :material-puzzle: **[Custom Connectors](connectors/custom.md)**
 
@@ -62,7 +63,7 @@ subscriptions, Modbus registers, and MQTT topics. And it means engineering promp
 that understand maintenance — all before writing a single line of business logic.
 
 **That takes months. Machina makes it take minutes.** Pre-built connectors for
-industrial systems, a rich domain model aligned with ISO 14224, and maintenance-aware
+industrial systems, a canonical maintenance domain model, and maintenance-aware
 AI — so you can go from `pip install` to a working agent in under 30 minutes.
 
 ## License
