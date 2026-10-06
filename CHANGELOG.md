@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The SAP PM, Maximo and UpKeep connectors raise `ConnectorError` subclasses instead of httpx exceptions.** When a call fails without a response, a timeout raises `ConnectorTimeoutError` and any other httpx failure (refused connection, protocol error, …) raises `ConnectorError`; a malformed `url` raises `ConnectorConfigError`. The httpx exception is chained as `__cause__`. Retries are unchanged: GET requests still retry up to 3 times first, and creates and updates still fail on the first network error. Messages name the vendor and the operation (`SAP PM create maintenance order timed out`), never the URL or credentials; a failed SAP CSRF token fetch is reported as such, since no write was sent. HTTP status handling is unchanged. Code that caught `httpx.TimeoutException` or other httpx exceptions from these connectors must catch `ConnectorError` (or `ConnectorTimeoutError`) instead. The SAP PM `sap_pm_raw_iw38_notification` vendor MCP tool returns the same messages.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

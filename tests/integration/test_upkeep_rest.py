@@ -5,14 +5,16 @@ All HTTP traffic is intercepted by pytest-httpx — no real UpKeep API calls.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
+from machina.connectors.cmms.retry import DEFAULT_MAX_RETRIES
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
+from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorTimeoutError
 
 BASE = "https://api.onupkeep.com"
 
@@ -575,3 +577,112 @@ class TestRetryBehaviour:
         assets = await connector.read_assets()
         assert len(assets) == 1
         assert assets[0].id == "a1"
+
+
+# ---------------------------------------------------------------------------
+# Transport errors (httpx raises instead of returning a response)
+# ---------------------------------------------------------------------------
+
+
+class TestTransportErrors:
+    """A timeout raises ConnectorTimeoutError, any other httpx failure ConnectorError."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+
+    @staticmethod
+    def _work_order() -> WorkOrder:
+        from datetime import UTC, datetime
+
+        return WorkOrder(
+            id="T",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="a1",
+            description="x",
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_after_retries(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        url = f"{BASE}/api/v2/users?limit=1"
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=url, is_reusable=True)
+        with pytest.raises(
+            ConnectorTimeoutError, match=r"^UpKeep health check timed out$"
+        ) as info:
+            await connector.connect()
+        assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+        assert not connector._connected
+
+    @pytest.mark.asyncio
+    async def test_read_assets_connect_error_after_retries(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/assets?limit=100&offset=0"
+        httpx_mock.add_exception(
+            httpx.ConnectError(f"no route to {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert info.type is ConnectorError
+        assert str(info.value) == "UpKeep GET /api/v2/assets failed: ConnectError"
+        assert isinstance(info.value.__cause__, httpx.ConnectError)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_get_asset_timeout(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/assets/a1"
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=url, is_reusable=True)
+        with pytest.raises(ConnectorTimeoutError, match=r"^UpKeep GET asset timed out$"):
+            await connector.get_asset("a1")
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_protocol_error_fails_at_once(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A transport error the retry helper does not retry surfaces on the first attempt."""
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/work-orders/wo1"
+        httpx_mock.add_exception(httpx.RemoteProtocolError(""), url=url)
+        with pytest.raises(
+            ConnectorError, match=r"^UpKeep GET work order failed: RemoteProtocolError$"
+        ):
+            await connector.get_work_order("wo1")
+        assert len(httpx_mock.get_requests(url=url)) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_work_order_timeout_is_not_retried(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A POST that timed out may have been applied, so it is sent once."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_exception(
+            httpx.ReadTimeout(""), method="POST", url=f"{BASE}/api/v2/work-orders"
+        )
+        with pytest.raises(ConnectorTimeoutError, match=r"^UpKeep create work order timed out$"):
+            await connector.create_work_order(self._work_order())
+        assert len(httpx_mock.get_requests(method="POST")) == 1
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_connect_error_is_not_retried(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_exception(
+            httpx.ConnectError(""), method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1"
+        )
+        with pytest.raises(
+            ConnectorError, match=r"^UpKeep update work order failed: ConnectError$"
+        ):
+            await connector.update_work_order("wo1", status=WorkOrderStatus.CLOSED)
+        assert len(httpx_mock.get_requests(method="PATCH")) == 1
