@@ -2909,14 +2909,61 @@ class Agent:
         *,
         chat_id: str = "default",
     ) -> Any:
-        """Execute a tool call by dispatching to the appropriate connector.
+        """Execute a tool call; a READ that raises becomes a tool-level error.
+
+        A read whose connector fails (a REST CMMS answering HTTP 500, a
+        document store that is down, a timeout) returns ``{"error": ...}``
+        instead of propagating, so the model can relay the failure or work
+        around it and the turn completes. Guarding here rather than in the loop
+        covers the recovered-read re-entry path too. The loop never caches an
+        error result, so a verbatim retry reaches the connector again. Only
+        ``Exception`` is caught: cancellation still propagates.
+
+        Writes (:data:`_SIDE_EFFECTING_TOOLS`) are dispatched unguarded. An
+        exception from a write leaves its outcome unknown: a POST can be
+        applied and still answer 5xx or time out, which is why the connector
+        layer does not retry one (``connectors/cmms/retry.py``). Turned into an
+        error result, it would be retried anyway, by the model, since the
+        per-turn memo skips error results. So ``create_work_order`` still
+        aborts the turn when its connector raises (the two-turn resume pops
+        the pending action first, so a repeated "yes" cannot replay it), and
+        ``execute_workflow`` keeps reporting a failed run as its own error
+        result.
 
         ``chat_id`` scopes any side effects that touch per-turn state
         (currently the citation chunk registry) so concurrent chats stay
         isolated.
         """
         logger.debug("executing_tool", tool=name, args=args)
+        if name in _SIDE_EFFECTING_TOOLS:
+            return await self._dispatch_tool(name, args, chat_id=chat_id)
+        try:
+            return await self._dispatch_tool(name, args, chat_id=chat_id)
+        except Exception as exc:
+            logger.warning(
+                "read_tool_failed",
+                agent=self.name,
+                tool=name,
+                args=args,
+                operation="execute_tool",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            # A bare timeout (httpx, asyncio) stringifies to "": name its type
+            # so the model still has something to relay.
+            return {"error": safe_text(str(exc) or type(exc).__name__)}
 
+    async def _dispatch_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        chat_id: str,
+    ) -> Any:
+        """Dispatch a tool call to its handler or connector.
+
+        No failure handling here: callers go through :meth:`_execute_tool`.
+        """
         if name == "search_assets":
             return self._tool_search_assets(args.get("query", ""))
 
@@ -2946,23 +2993,7 @@ class Agent:
                 # provider schema enforcement), so validate before dispatch.
                 if not isinstance(work_order_id, str) or not work_order_id:
                     return {"error": "work_order_id must be a non-empty string"}
-                try:
-                    wo = await conn.get_work_order(  # type: ignore[attr-defined]
-                        work_order_id
-                    )
-                except Exception as exc:
-                    # A connector failure (ConnectorError/timeout) must degrade
-                    # to a tool-level error the model can react to, not kill the
-                    # whole turn — including the recovered-read re-entry path.
-                    logger.warning(
-                        "work_order_lookup_failed",
-                        agent=self.name,
-                        tool=name,
-                        work_order_id=work_order_id,
-                        operation="execute_tool",
-                        error=str(exc),
-                    )
-                    return {"error": safe_text(str(exc))}
+                wo = await conn.get_work_order(work_order_id)  # type: ignore[attr-defined]
                 if wo is None:
                     return {"error": f"Work order {work_order_id!r} not found"}
                 return wo.model_dump(mode="json")

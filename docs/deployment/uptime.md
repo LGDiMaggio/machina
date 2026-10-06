@@ -96,7 +96,7 @@ model behind your agent, or behind the MCP client for the MCP server.
 | :material-check: Up | :material-close: Down | Off | Yes | In-flight workflow halts at next LLM-dependent step. CMMS state unchanged for unexecuted steps. |
 | :material-check: Up | :material-close: Down | **On** | No | Same as LLM-down + sandbox-off: tools callable, no agent reasoning. |
 | :material-check: Up | :material-close: Down | **On** | Yes | Workflow halts at LLM step. No writes attempted (sandbox). |
-| :material-close: Down | :material-check: Up | Off | No | CMMS reads/writes fail (after the retry window, where retries apply). Agent can still reason and report the outage. |
+| :material-close: Down | :material-check: Up | Off | No | CMMS reads/writes fail (after the retry window, where retries apply). A failed read reaches the agent as a tool error, so it can still reason and report the outage; a failed write ends the turn with an error, since the write may have been applied and must not be retried. |
 | :material-close: Down | :material-check: Up | Off | Yes | Workflow halts at CMMS-dependent step. Agent reports failure. |
 | :material-close: Down | :material-check: Up | **On** | No | CMMS reads fail. Writes would be logged only anyway. Agent can reason about the outage. |
 | :material-close: Down | :material-check: Up | **On** | Yes | Workflow halts at CMMS read step. Write steps would have been logged only. |
