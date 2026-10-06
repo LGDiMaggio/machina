@@ -3652,6 +3652,9 @@ class Agent:
                     {
                         "step": sr.step_name,
                         "success": sr.success,
+                        # A skipped step can still carry the error that caused
+                        # the skip: without this flag it reads as a failure.
+                        "skipped": sr.skipped,
                         # Scrub user-home / UNC paths from step output and error
                         # text before it enters the LLM message history.
                         "output_summary": safe_text(str(sr.output)[:500]) if sr.output else None,

@@ -499,6 +499,140 @@ class TestErrorPolicies:
 
 
 # ---------------------------------------------------------------------------
+# Tests — why a step was skipped
+# ---------------------------------------------------------------------------
+
+
+class _SkuOnlySparePartsConnector:
+    """CMMS whose ``read_spare_parts`` takes ``sku`` only.
+
+    A step passing ``asset_id`` makes the call raise ``TypeError``, as
+    the Maximo and UpKeep connectors did under the alarm workflow.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, sku: str = "") -> list[dict[str, Any]]:
+        return [{"sku": sku}]
+
+
+def _spare_parts_step(**kwargs: Any) -> Step:
+    """A spare-parts read that fails against :class:`_SkuOnlySparePartsConnector`."""
+    return Step(
+        "check_spare_parts",
+        action="cmms.read_spare_parts",
+        inputs={"asset_id": "{trigger.asset_id}"},
+        **kwargs,
+    )
+
+
+class TestSkippedStepErrors:
+    """A step skipped after an error keeps the error; a guard skip has none."""
+
+    @pytest.mark.asyncio
+    async def test_skip_on_error_keeps_the_error(self, tracer: ActionTracer) -> None:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _SkuOnlySparePartsConnector())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="SkipKeepsError", steps=[_spare_parts_step(on_error=ErrorPolicy.SKIP)])
+
+        result = await engine.execute(wf, {"asset_id": "P-201"})
+
+        step = result.step_results[0]
+        assert step.skipped is True
+        assert step.success is True  # SKIP tolerates the failure
+        assert step.error is not None
+        assert step.error.startswith("TypeError:")
+        assert "asset_id" in step.error
+
+    @pytest.mark.asyncio
+    async def test_guard_skip_has_no_error(self, tracer: ActionTracer) -> None:
+        engine = WorkflowEngine(tracer=tracer)
+        wf = Workflow(
+            name="GuardSkip",
+            steps=[Step("gated", guard=GuardCondition(check=lambda _ctx: False))],
+        )
+
+        result = await engine.execute(wf)
+
+        step = result.step_results[0]
+        assert step.skipped is True
+        assert step.error is None
+
+    @pytest.mark.asyncio
+    async def test_guard_exception_skip_keeps_the_error(self, tracer: ActionTracer) -> None:
+        def _guard(ctx: dict[str, Any]) -> bool:
+            return bool(ctx["diagnose"]["confidence"] == "high")  # no "diagnose" step ran
+
+        engine = WorkflowEngine(tracer=tracer)
+        wf = Workflow(name="GuardCrash", steps=[Step("gated", guard=GuardCondition(check=_guard))])
+
+        result = await engine.execute(wf)
+
+        step = result.step_results[0]
+        assert step.skipped is True
+        assert step.error is not None
+        assert "KeyError" in step.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("policy", [ErrorPolicy.SKIP, ErrorPolicy.NOTIFY])
+    async def test_failed_step_renders_as_failed_in_a_later_template(
+        self, tracer: ActionTracer, policy: ErrorPolicy
+    ) -> None:
+        comms = _FakeCommsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", _SkuOnlySparePartsConnector())
+        registry.register("comms", comms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="NotifyAfterFailedRead",
+            steps=[
+                _spare_parts_step(on_error=policy),
+                Step(
+                    "notify",
+                    action="channels.send_message",
+                    template="Spare Parts: {check_spare_parts}",
+                ),
+            ],
+        )
+
+        await engine.execute(wf, {"asset_id": "P-201"})
+
+        assert comms.last_message == "Spare Parts: [check_spare_parts failed]"
+
+    @pytest.mark.asyncio
+    async def test_guard_skipped_step_keeps_its_placeholder(self, tracer: ActionTracer) -> None:
+        comms = _FakeCommsConnector()
+        registry = ConnectorRegistry()
+        registry.register("comms", comms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="NotifyAfterGuardSkip",
+            steps=[
+                _spare_parts_step(guard=GuardCondition(check=lambda _ctx: False)),
+                Step(
+                    "notify",
+                    action="channels.send_message",
+                    template="Spare Parts: {check_spare_parts}",
+                ),
+            ],
+        )
+
+        await engine.execute(wf, {"asset_id": "P-201"})
+
+        assert comms.last_message == "Spare Parts: {check_spare_parts}"
+
+
+# ---------------------------------------------------------------------------
 # Tests — timeout cancellation safety (U10)
 # ---------------------------------------------------------------------------
 

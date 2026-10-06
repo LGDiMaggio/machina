@@ -3118,6 +3118,33 @@ class TestAgentWorkflows:
         with pytest.raises(WorkflowError, match="not registered"):
             await agent.trigger_workflow("Nonexistent")
 
+    @pytest.mark.asyncio
+    async def test_execute_workflow_tool_reports_skipped_steps(self) -> None:
+        """A skipped step is flagged, so the error it keeps is not read as a failure."""
+        from machina.workflows import Step, Workflow
+        from machina.workflows.models import ErrorPolicy, GuardCondition
+
+        wf = Workflow(
+            name="Skips",
+            steps=[
+                # No connector reads spare parts: the step fails and is skipped.
+                Step(
+                    "check_spare_parts", action="cmms.read_spare_parts", on_error=ErrorPolicy.SKIP
+                ),
+                Step("gated", guard=GuardCondition(check=lambda _ctx: False)),
+            ],
+        )
+        agent = Agent(workflows=[wf])
+
+        out = await agent._tool_execute_workflow("Skips")
+
+        assert out["success"] is True
+        steps = {s["step"]: s for s in out["steps"]}
+        assert steps["check_spare_parts"]["skipped"] is True
+        assert "read_spare_parts" in steps["check_spare_parts"]["error"]
+        assert steps["gated"]["skipped"] is True
+        assert steps["gated"]["error"] is None
+
     def test_sandbox_flag(self) -> None:
         agent = Agent(sandbox=True)
         assert agent.sandbox is True

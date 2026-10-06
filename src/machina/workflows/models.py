@@ -238,11 +238,19 @@ class Workflow:
 class StepResult:
     """Outcome of a single step execution.
 
+    ``success`` and ``error`` are independent. A step that failed under
+    :attr:`ErrorPolicy.SKIP` is ``skipped`` with ``success=True``, since the
+    workflow carries on, and keeps its ``error``. A step whose guard
+    returned ``False`` is ``skipped`` with no ``error``.
+
     Args:
         step_name: Name of the step that produced this result.
         output: Arbitrary output data returned by the step action.
-        success: Whether the step completed without error.
-        error: Error message if ``success`` is ``False``.
+        success: ``False`` if the step failed under a policy that counts
+            the failure (``STOP``, ``NOTIFY``, ``RETRY`` out of retries).
+        error: Why the step failed or, on a skipped step, the error that
+            caused the skip (a ``SKIP``-policy failure, or a guard that
+            raised). ``None`` if the step ran or its guard returned ``False``.
         duration_ms: Wall-clock time in milliseconds.
         skipped: Whether the step was skipped (guard or error policy).
     """
@@ -315,12 +323,21 @@ class WorkflowContext:
     def __init__(self, trigger_event: dict[str, Any] | None = None) -> None:
         self._trigger: dict[str, Any] = trigger_event or {}
         self._steps: dict[str, Any] = {}
+        self._failed_steps: set[str] = set()
 
     # -- mutation ---------------------------------------------------
 
     def set_step_output(self, step_name: str, output: Any) -> None:
         """Record the output of a completed step."""
         self._steps[step_name] = output
+
+    def mark_step_failed(self, step_name: str) -> None:
+        """Record that *step_name* failed, so it has no output.
+
+        :meth:`resolve` then renders the step's placeholders as
+        ``[step_name failed]`` instead of leaving them verbatim.
+        """
+        self._failed_steps.add(step_name)
 
     # -- read -------------------------------------------------------
 
@@ -398,12 +415,24 @@ class WorkflowContext:
         Unresolved placeholders are left as-is so the missing
         substitution is visible in the rendered string, and a structured
         warning is logged at the call site.
+
+        A placeholder naming a step that failed (see
+        :meth:`mark_step_failed`) renders as ``[step_name failed]``
+        instead. The reader of a notification or prompt learns that the
+        data is missing because the step failed: a verbatim
+        ``{check_spare_parts}`` reads as a template typo, and a bare
+        "unavailable" after "Spare Parts:" reads as out of stock. The
+        error text itself stays on the step's ``StepResult.error``.
+        Steps skipped by their guard keep the verbatim placeholder.
         """
 
         def _replacer(match: re.Match[str]) -> str:
             expr = match.group(1)
             value = self._lookup(expr)
             if value is _UNRESOLVED:
+                step_name = expr.split(".", 1)[0]
+                if step_name in self._failed_steps:
+                    return f"[{step_name} failed]"
                 logger.warning("template_unresolved", expression=expr)
                 return match.group(0)
             return str(value)
