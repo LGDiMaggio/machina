@@ -70,8 +70,10 @@ channel name (Slack) or the e-mail address (Email).
 
 The `status` filter of `machina_list_work_orders` is passed to the connector
 as given: the Generic CMMS, Excel/CSV and SQL connectors compare it with the
-values above, while SAP PM, Maximo and UpKeep expect their own status codes
-(for example `REL` on SAP PM).
+values above, SAP PM accepts one of them or its own system status code (for
+example `REL`), and Maximo and UpKeep expect their own status codes. On SAP PM,
+`machina_update_work_order` can set only `assigned`, `closed` and `cancelled`;
+SAP sets the other statuses itself.
 
 The MCP server has no human-in-the-loop confirmation: a write tool runs when
 the client calls it, and which calls happen is up to the MCP client and its

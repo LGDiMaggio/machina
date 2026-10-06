@@ -5,6 +5,8 @@ All HTTP traffic is intercepted by pytest-httpx — no real SAP API calls.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -13,7 +15,7 @@ from machina.connectors.cmms.sap_pm import SapPmConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
@@ -26,6 +28,33 @@ def _odata_url(service: str, entity_set: str, **extra: str) -> httpx.URL:
     """Build a URL with the default OData query params."""
     params = {**_ODATA_PARAMS, **extra}
     return httpx.URL(f"{BASE}/{service}/{entity_set}", params=params)
+
+
+def _order(order_id: str, system_status: str) -> dict[str, str]:
+    """A MaintenanceOrder entity of equipment 10000001.
+
+    ``SystemStatusText`` is how API_MAINTENANCEORDER reports an order's
+    system statuses: one line, each code padded to four characters.
+    """
+    return {
+        "MaintenanceOrder": order_id,
+        "MaintenanceOrderType": "PM01",
+        "MaintPriority": "3",
+        "Equipment": "10000001",
+        "SystemStatusText": system_status,
+    }
+
+
+# One order per lifecycle state, as SAP reports them.
+_ORDERS = [
+    _order("4000001", "CRTD MANC NMAT"),  # created
+    _order("4000002", "REL  MANC PRC  SETC"),  # assigned (released)
+    _order("4000003", "REL  PCNF PRC  SETC"),  # in progress (partially confirmed)
+    _order("4000004", "REL  CNF  PRC  SETC"),  # completed (confirmed)
+    _order("4000005", "TECO CNF  PRC  SETC"),  # closed (technically completed)
+    _order("4000006", "CLSD CNF  PRC  SETC"),  # closed (business completed)
+    _order("4000007", "CRTD DLFL MANC"),  # cancelled (deletion flag)
+]
 
 
 @pytest.fixture
@@ -300,7 +329,7 @@ class TestReadWorkOrders:
                             "MaintenanceOrderDesc": "Fix leak",
                             "MaintenanceOrderType": "PM01",
                             "MaintPriority": "2",
-                            "MaintenanceOrderSystemStatus": "REL",
+                            "SystemStatusText": "REL  PRC  SETC",
                             "Equipment": "10000001",
                             "CreationDate": "2025-06-01",
                             "LastChangeDateTime": "2025-06-02",
@@ -315,23 +344,73 @@ class TestReadWorkOrders:
         assert isinstance(wo, WorkOrder)
         assert wo.id == "4000001"
         assert wo.priority == Priority.HIGH
+        assert wo.status == WorkOrderStatus.ASSIGNED
 
+    @pytest.mark.parametrize(
+        ("status", "expected_ids"),
+        [
+            pytest.param(WorkOrderStatus.CLOSED, ["4000005", "4000006"], id="enum"),
+            pytest.param("closed", ["4000005", "4000006"], id="enum-value"),
+            pytest.param("In_Progress", ["4000003"], id="enum-value-any-case"),
+            pytest.param(WorkOrderStatus.CANCELLED, ["4000007"], id="cancelled"),
+            pytest.param("REL", ["4000002", "4000003", "4000004"], id="sap-code"),
+            pytest.param("teco", ["4000005"], id="sap-code-any-case"),
+            pytest.param("MANC", ["4000001", "4000002", "4000007"], id="sap-code-secondary"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_read_work_orders_filtered(self, httpx_mock, connector: SapPmConnector) -> None:
+    async def test_status_is_applied_to_the_equipment_read(
+        self, httpx_mock, connector: SapPmConnector, status, expected_ids: list[str]
+    ) -> None:
+        """SystemStatusText is not filterable (SAP KBA 3614100): the request
+        filters by Equipment only, and ``status`` selects among the orders read."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
             url=_odata_url(
                 "API_MAINTENANCEORDER",
                 "MaintenanceOrder",
-                **{
-                    "$filter": "Equipment eq '10000001' and MaintenanceOrderSystemStatus eq 'TECO'"
-                },
+                **{"$filter": "Equipment eq '10000001'"},
             ),
-            json={"d": {"results": []}},
+            json={"d": {"results": _ORDERS}},
         )
-        wos = await connector.read_work_orders(asset_id="10000001", status="TECO")
-        assert wos == []
+        wos = await connector.read_work_orders(asset_id="10000001", status=status)
+        assert [wo.id for wo in wos] == expected_ids
+
+    @pytest.mark.asyncio
+    async def test_status_without_asset_sends_no_filter(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_MAINTENANCEORDER", "MaintenanceOrder"),
+            json={"d": {"results": _ORDERS}},
+        )
+        wos = await connector.read_work_orders(status=WorkOrderStatus.COMPLETED)
+        assert [wo.id for wo in wos] == ["4000004"]
+
+    @pytest.mark.asyncio
+    async def test_status_applies_across_pages(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Orders on every page are matched, not just the first page."""
+        await _connect(httpx_mock, connector)
+        page1 = [_order(f"40{i:05d}", "CRTD MANC") for i in range(99)] + [
+            _order("4100001", "REL  PRC")
+        ]
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_MAINTENANCEORDER", "MaintenanceOrder"),
+            json={"d": {"results": page1}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_MAINTENANCEORDER", "MaintenanceOrder", **{"$skip": "100"}),
+            json={"d": {"results": [_order("4100002", "REL  PCNF PRC")]}},
+        )
+        wos = await connector.read_work_orders(status="REL")
+        assert [wo.id for wo in wos] == ["4100001", "4100002"]
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +440,7 @@ class TestCreateWorkOrder:
                     "MaintenanceOrderDesc": "Replace bearing",
                     "MaintenanceOrderType": "PM01",
                     "MaintPriority": "2",
-                    "MaintenanceOrderSystemStatus": "CRTD",
+                    "SystemStatusText": "CRTD MANC NMAT",
                     "Equipment": "10000001",
                     "CreationDate": "2025-07-01",
                     "LastChangeDateTime": "2025-07-01",
@@ -381,6 +460,7 @@ class TestCreateWorkOrder:
         )
         created = await connector.create_work_order(wo)
         assert created.id == "4000099"
+        assert created.status == WorkOrderStatus.CREATED
         post_req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         assert post_req.headers.get("X-CSRF-Token") == "csrf-abc123"
         assert post_req.headers.get("sap-client") == "100"
@@ -672,69 +752,42 @@ class TestReadMaintenancePlans:
 class TestReadMaintenanceHistory:
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, httpx_mock, connector: SapPmConnector) -> None:
-        """History query must filter by Equipment and a compound status clause."""
+        """History reads the equipment's orders and keeps the completed and closed ones.
+
+        SAP cannot filter on SystemStatusText, so the only server-side clause
+        is the Equipment one.
+        """
         await _connect(httpx_mock, connector)
-        expected_filter = (
-            "Equipment eq '10000001' and "
-            "(MaintenanceOrderSystemStatus eq 'CNF' or "
-            "MaintenanceOrderSystemStatus eq 'TECO' or "
-            "MaintenanceOrderSystemStatus eq 'CLSD')"
-        )
         httpx_mock.add_response(
             method="GET",
             url=_odata_url(
                 "API_MAINTENANCEORDER",
                 "MaintenanceOrder",
-                **{"$filter": expected_filter},
+                **{"$filter": "Equipment eq '10000001'"},
             ),
-            json={
-                "d": {
-                    "results": [
-                        {
-                            "MaintenanceOrder": "4000010",
-                            "MaintenanceOrderDesc": "Past repair",
-                            "MaintenanceOrderType": "PM01",
-                            "MaintPriority": "3",
-                            "MaintenanceOrderSystemStatus": "CNF",
-                            "Equipment": "10000001",
-                            "CreationDate": "2024-12-01",
-                            "LastChangeDateTime": "2024-12-05",
-                        },
-                        {
-                            "MaintenanceOrder": "4000011",
-                            "MaintenanceOrderDesc": "Closed job",
-                            "MaintenanceOrderType": "PM02",
-                            "MaintPriority": "3",
-                            "MaintenanceOrderSystemStatus": "TECO",
-                            "Equipment": "10000001",
-                            "CreationDate": "2025-01-10",
-                            "LastChangeDateTime": "2025-01-15",
-                        },
-                    ],
-                },
-            },
+            json={"d": {"results": _ORDERS}},
         )
         history = await connector.read_maintenance_history("10000001")
-        assert len(history) == 2
         assert all(isinstance(wo, WorkOrder) for wo in history)
-        assert history[0].id == "4000010"
+        assert [(wo.id, wo.status) for wo in history] == [
+            ("4000004", WorkOrderStatus.COMPLETED),
+            ("4000005", WorkOrderStatus.CLOSED),
+            ("4000006", WorkOrderStatus.CLOSED),
+        ]
 
     @pytest.mark.asyncio
     async def test_read_maintenance_history_pages_keep_the_filter(
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
-        """A full page triggers a ``$skip`` request that keeps the history filter."""
+        """A full page triggers a ``$skip`` request that keeps the Equipment filter."""
         await _connect(httpx_mock, connector)
-        page1 = [
-            {"MaintenanceOrder": f"40{i:05d}", "MaintenanceOrderSystemStatus": "CNF"}
-            for i in range(100)
-        ]
+        page1 = [_order(f"40{i:05d}", "REL  CNF  PRC  SETC") for i in range(100)]
         httpx_mock.add_response(
             method="GET",
             url=_odata_url(
                 "API_MAINTENANCEORDER",
                 "MaintenanceOrder",
-                **{"$filter": _history_filter("'10000001'")},
+                **{"$filter": "Equipment eq '10000001'"},
             ),
             json={"d": {"results": page1}},
         )
@@ -743,9 +796,9 @@ class TestReadMaintenanceHistory:
             url=_odata_url(
                 "API_MAINTENANCEORDER",
                 "MaintenanceOrder",
-                **{"$filter": _history_filter("'10000001'"), "$skip": "100"},
+                **{"$filter": "Equipment eq '10000001'", "$skip": "100"},
             ),
-            json={"d": {"results": [{"MaintenanceOrder": "4100000"}]}},
+            json={"d": {"results": [_order("4100000", "TECO CNF  PRC  SETC")]}},
         )
         history = await connector.read_maintenance_history("10000001")
         assert len(history) == 101
@@ -781,21 +834,11 @@ class TestReadMaintenanceHistory:
     async def test_read_maintenance_history_refuses_a_missing_asset_id(
         self, httpx_mock, connector: SapPmConnector, asset_id
     ) -> None:
-        """``Equipment eq ''`` would match every order without an equipment."""
+        """Without an Equipment filter the read would fetch every order."""
         await _connect(httpx_mock, connector)
         with pytest.raises(ConnectorError, match="requires an asset_id"):
             await connector.read_maintenance_history(asset_id)
         assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
-
-
-def _history_filter(equipment_literal: str) -> str:
-    """The history ``$filter`` for an already-quoted Equipment literal."""
-    return (
-        f"Equipment eq {equipment_literal} and "
-        "(MaintenanceOrderSystemStatus eq 'CNF' or "
-        "MaintenanceOrderSystemStatus eq 'TECO' or "
-        "MaintenanceOrderSystemStatus eq 'CLSD')"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -822,13 +865,14 @@ class TestODataLiteralEscaping:
                 id="get_work_order",
             ),
             pytest.param(
+                # The status is applied to the orders read; it never reaches SAP.
                 lambda c: c.read_work_orders(asset_id="P'1", status="TE'CO"),
-                "Equipment eq 'P''1' and MaintenanceOrderSystemStatus eq 'TE''CO'",
+                "Equipment eq 'P''1'",
                 id="read_work_orders",
             ),
             pytest.param(
                 lambda c: c.read_maintenance_history("x' or Equipment ne 'y"),
-                _history_filter("'x'' or Equipment ne ''y'"),
+                "Equipment eq 'x'' or Equipment ne ''y'",
                 id="read_maintenance_history",
             ),
         ],
@@ -899,6 +943,37 @@ class TestODataLiteralEscaping:
             b"/sap/opu/odata/sap/API_MAINTENANCEORDER/MaintenanceOrder("
             b"'1''%29%2F..%2F..%2FAPI_EQUIPMENT%2FEquipment%28''X')"
         )
+
+    @pytest.mark.asyncio
+    async def test_status_function_import_parameter_is_one_literal(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The order reaches the function import as one ``MaintenanceOrder``
+        literal: ``'`` is doubled and ``&`` cannot start another parameter."""
+        hostile = "4000'1&MaintenanceOrder='2"
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={"x-csrf-token": "csrf-tok"},
+            json={"d": {"results": []}},
+        )
+        httpx_mock.add_response(method="POST", json={"d": {"IsInvalid": False}})
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$top": "1", "$filter": "MaintenanceOrder eq '4000''1&MaintenanceOrder=''2'"},
+            ),
+            json={"d": {"results": [_order(hostile, "TECO CNF")]}},
+        )
+        await connector.update_work_order(hostile, status=WorkOrderStatus.CLOSED)
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        assert post.url.path.endswith("/API_MAINTENANCEORDER/SetMaintOrdToTechCompleted")
+        assert post.url.params.multi_items() == [
+            ("MaintenanceOrder", "'4000''1&MaintenanceOrder=''2'")
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -973,7 +1048,7 @@ class TestGetWorkOrder:
                             "MaintenanceOrderDesc": "Fix leak",
                             "MaintenanceOrderType": "PM01",
                             "MaintPriority": "2",
-                            "MaintenanceOrderSystemStatus": "REL",
+                            "SystemStatusText": "REL  PRC  SETC",
                             "Equipment": "10000001",
                             "CreationDate": "2025-06-01",
                             "LastChangeDateTime": "2025-06-02",
@@ -985,6 +1060,7 @@ class TestGetWorkOrder:
         wo = await connector.get_work_order("4000001")
         assert wo is not None
         assert wo.id == "4000001"
+        assert wo.status == WorkOrderStatus.ASSIGNED
 
     @pytest.mark.asyncio
     async def test_get_work_order_not_found(self, httpx_mock, connector: SapPmConnector) -> None:
@@ -1008,24 +1084,31 @@ class TestGetWorkOrder:
 
 
 class TestUpdateWorkOrder:
-    @pytest.mark.asyncio
-    async def test_update_work_order_status(self, httpx_mock, connector: SapPmConnector) -> None:
-        """PATCH must use CSRF token from the same HTTP session."""
-        await _connect(httpx_mock, connector)
-        # CSRF token fetch (same session as PATCH)
+    """The order has no writable status property: a status is set through the
+    API_MAINTENANCEORDER function import for it, never PATCHed."""
+
+    @staticmethod
+    def _mock_csrf(httpx_mock, token: str = "csrf-upd") -> None:
         httpx_mock.add_response(
             method="GET",
             url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
-            headers={"x-csrf-token": "csrf-upd"},
+            headers={"x-csrf-token": token},
             json={"d": {"results": []}},
         )
-        # PATCH response
+
+    @staticmethod
+    def _mock_action(httpx_mock, function_import: str, **kwargs) -> None:
         httpx_mock.add_response(
-            method="PATCH",
-            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
-            status_code=204,
+            method="POST",
+            url=httpx.URL(
+                f"{BASE}/API_MAINTENANCEORDER/{function_import}",
+                params={"MaintenanceOrder": "'4000001'"},
+            ),
+            **(kwargs or {"json": {"d": {"IsInvalid": False}}}),
         )
-        # Re-fetch after update
+
+    @staticmethod
+    def _mock_refetch(httpx_mock, system_status: str) -> None:
         httpx_mock.add_response(
             method="GET",
             url=_odata_url(
@@ -1033,27 +1116,89 @@ class TestUpdateWorkOrder:
                 "MaintenanceOrder",
                 **{"$top": "1", "$filter": "MaintenanceOrder eq '4000001'"},
             ),
-            json={
-                "d": {
-                    "results": [
-                        {
-                            "MaintenanceOrder": "4000001",
-                            "MaintenanceOrderDesc": "Fix leak",
-                            "MaintenanceOrderType": "PM01",
-                            "MaintPriority": "2",
-                            "MaintenanceOrderSystemStatus": "TECO",
-                            "Equipment": "10000001",
-                            "CreationDate": "2025-06-01",
-                            "LastChangeDateTime": "2025-07-01",
-                        },
-                    ],
-                },
-            },
+            json={"d": {"results": [_order("4000001", system_status)]}},
         )
-        from machina.domain.work_order import WorkOrderStatus
 
-        updated = await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
-        assert updated.id == "4000001"
-        # Verify the PATCH carried the CSRF token
-        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
-        assert patch_req.headers.get("X-CSRF-Token") == "csrf-upd"
+    @pytest.mark.parametrize(
+        ("status", "function_import", "system_status"),
+        [
+            (WorkOrderStatus.ASSIGNED, "ReleaseMaintenanceOrder", "REL  MANC PRC  SETC"),
+            (WorkOrderStatus.CLOSED, "SetMaintOrdToTechCompleted", "TECO CNF  PRC  SETC"),
+            (WorkOrderStatus.CANCELLED, "SetMaintOrdStsToMrkdForDeltn", "CRTD DLFL MANC"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_status_is_set_through_its_function_import(
+        self, httpx_mock, connector: SapPmConnector, status, function_import, system_status
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._mock_csrf(httpx_mock)
+        self._mock_action(httpx_mock, function_import)
+        self._mock_refetch(httpx_mock, system_status)
+        updated = await connector.update_work_order("4000001", status=status)
+        assert updated.status == status
+        requests = httpx_mock.get_requests()
+        assert not any(r.method == "PATCH" for r in requests)
+        post = next(r for r in requests if r.method == "POST")
+        assert post.headers["X-CSRF-Token"] == "csrf-upd"
+        assert post.content == b""  # the parameter travels in the query string
+        assert "Content-Type" not in post.headers
+
+    @pytest.mark.parametrize(
+        "status",
+        [WorkOrderStatus.CREATED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.COMPLETED],
+    )
+    @pytest.mark.asyncio
+    async def test_status_sap_sets_itself_is_refused_before_any_request(
+        self, httpx_mock, connector: SapPmConnector, status
+    ) -> None:
+        """CRTD, PCNF and CNF have no function import; the field update is not
+        sent either, so nothing is half-applied."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="SAP sets it itself"):
+            await connector.update_work_order("4000001", status=status, description="x")
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+    @pytest.mark.asyncio
+    async def test_fields_are_patched_before_the_status_is_set(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._mock_csrf(httpx_mock, "csrf-1")
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
+            status_code=204,
+        )
+        self._mock_csrf(httpx_mock, "csrf-2")
+        self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted")
+        self._mock_refetch(httpx_mock, "TECO CNF  PRC  SETC")
+        updated = await connector.update_work_order(
+            "4000001", status=WorkOrderStatus.CLOSED, description="Bearing replaced"
+        )
+        writes = [r for r in httpx_mock.get_requests() if r.method in ("PATCH", "POST")]
+        assert [r.method for r in writes] == ["PATCH", "POST"]
+        assert json.loads(writes[0].content) == {"MaintenanceOrderDesc": "Bearing replaced"}
+        assert writes[0].headers["X-CSRF-Token"] == "csrf-1"
+        assert writes[1].headers["X-CSRF-Token"] == "csrf-2"
+        assert updated.status == WorkOrderStatus.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_close_work_order_rejected_by_sap_raises(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._mock_csrf(httpx_mock)
+        self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted", status_code=400)
+        with pytest.raises(ConnectorError, match="SetMaintOrdToTechCompleted failed: HTTP 400"):
+            await connector.close_work_order("4000001")
+
+    @pytest.mark.asyncio
+    async def test_cancel_work_order_auth_failure(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._mock_csrf(httpx_mock)
+        self._mock_action(httpx_mock, "SetMaintOrdStsToMrkdForDeltn", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="authentication failed"):
+            await connector.cancel_work_order("4000001")

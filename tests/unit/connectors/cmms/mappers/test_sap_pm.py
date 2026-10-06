@@ -63,7 +63,7 @@ class TestParseWorkOrderPublicAPI:
         wo = parse_work_order(
             {
                 "MaintenanceOrder": "W-1",
-                "MaintenanceOrderSystemStatus": "CRTD REL MANC",
+                "SystemStatusText": "CRTD REL MANC",
             }
         )
         assert wo.status == WorkOrderStatus.ASSIGNED
@@ -73,7 +73,7 @@ class TestParseWorkOrderPublicAPI:
         wo = parse_work_order(
             {
                 "MaintenanceOrder": "W-2",
-                "MaintenanceOrderSystemStatus": "CRTD REL TECO",
+                "SystemStatusText": "CRTD REL TECO",
             }
         )
         assert wo.status == WorkOrderStatus.CLOSED
