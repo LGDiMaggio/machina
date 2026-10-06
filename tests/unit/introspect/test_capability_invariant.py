@@ -13,6 +13,10 @@ They pin:
   connectors) resolves through
   :data:`machina.introspect._methods.CAPABILITY_TO_METHOD` to a method that is
   present and not a :class:`NotImplementedError` stub;
+* **spare-part providers accept every filter** — every connector that can
+  declare ``READ_SPARE_PARTS`` accepts each ``asset_id`` / ``sku`` combination
+  its callers send, so a filter the backend cannot apply is refused at runtime
+  instead of failing the call with a ``TypeError``;
 * **vocabulary fully mapped** — every :class:`Capability` enum member appears in
   ``CAPABILITY_TO_METHOD`` (``describe().gaps.unmapped_capabilities`` is empty);
 * **no class/runtime base drift** — for the instance-computed connectors whose
@@ -25,6 +29,8 @@ They pin:
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from machina.connectors.capabilities import Capability
@@ -35,7 +41,11 @@ from machina.introspect._methods import (
     is_stub_method,
     method_name_for,
 )
-from machina.introspect.core import _class_base_capabilities, _import_class
+from machina.introspect.core import (
+    _class_base_capabilities,
+    _configurable_capabilities,
+    _import_class,
+)
 from machina.runtime import _CONNECTOR_FACTORIES
 
 
@@ -96,6 +106,55 @@ def test_declared_capabilities_resolve_to_live_methods(conn_type: str, cls: type
         assert has_live_method(cls, cap), (
             f"{cls.__name__} declares {cap.value!r} but has_live_method() is False"
         )
+
+
+# ---------------------------------------------------------------------------
+# READ_SPARE_PARTS providers accept every filter combination callers send
+# ---------------------------------------------------------------------------
+
+# The agent's ``check_spare_parts`` tool and the MCP ``machina_list_spare_parts``
+# tool send only the filters they were given; the context prefetch and the
+# ``alarm_to_workorder`` workflow step send ``asset_id``.
+_SPARE_PART_FILTER_CALLS: tuple[dict[str, str], ...] = (
+    {},
+    {"asset_id": "P-201"},
+    {"sku": "SKF-6310"},
+    {"asset_id": "P-201", "sku": "SKF-6310"},
+)
+
+
+def _declarable_capabilities(conn_type: str, cls: type) -> frozenset[Capability]:
+    """The class-readable base set plus whatever configuration can add to it."""
+    base = _class_base_capabilities(cls, conn_type)
+    return base | _configurable_capabilities(conn_type, base)
+
+
+_SPARE_PART_PROVIDERS = [
+    (conn_type, cls)
+    for conn_type, cls in _CONNECTOR_CASES
+    if Capability.READ_SPARE_PARTS in _declarable_capabilities(conn_type, cls)
+]
+
+
+@pytest.mark.parametrize(
+    ("conn_type", "cls"),
+    _SPARE_PART_PROVIDERS,
+    ids=[t for t, _ in _SPARE_PART_PROVIDERS],
+)
+def test_spare_part_providers_accept_every_filter_combination(conn_type: str, cls: type) -> None:
+    """``read_spare_parts`` binds each filter combination its callers send.
+
+    A backend that cannot apply a filter still accepts it and refuses it with a
+    ``ConnectorError`` the caller can report; rejecting the keyword instead
+    fails every call with a ``TypeError``, which the context prefetch and the
+    workflow step swallow.
+    """
+    signature = inspect.signature(cls.read_spare_parts)
+    for filters in _SPARE_PART_FILTER_CALLS:
+        try:
+            signature.bind(None, **filters)
+        except TypeError as exc:
+            pytest.fail(f"{cls.__name__}.read_spare_parts{signature} rejects {filters}: {exc}")
 
 
 # ---------------------------------------------------------------------------

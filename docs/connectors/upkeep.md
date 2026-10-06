@@ -45,7 +45,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
+| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — filter by `asset_id` (the parts assigned to the asset) and/or `sku`; prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
 
 ### Convenience methods
@@ -145,7 +145,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
-- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
+- **Spare part filtering by asset**: `/api/v2/parts` has no asset filter, so `read_spare_parts(asset_id=...)` reads the asset record (`GET /api/v2/assets/<ID>`) and keeps the parts on its `parts` list — the parts assigned to the asset in UpKeep — from a full read of `/api/v2/parts`. That costs one extra request, and the whole inventory is still paged. An asset with no parts assigned returns `[]` without reading the inventory; an asset UpKeep does not know raises `ConnectorError`. Filtering by `sku` runs in memory, after fetching all parts (and after the asset filter, when both are given).
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 
 ## API Reference
