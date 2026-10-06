@@ -25,6 +25,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
+from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import (
     WorkOrder,
@@ -82,6 +83,7 @@ class UpKeepConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -163,7 +165,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "GET",
-                f"{self.url}/api/v2/assets/{asset_id}",
+                f"{self.url}/api/v2/assets/{path_segment(asset_id)}",
                 headers=self._headers(),
             )
         if resp.status_code == 404:
@@ -210,7 +212,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "GET",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                f"{self.url}/api/v2/work-orders/{path_segment(work_order_id)}",
                 headers=self._headers(),
             )
         if resp.status_code == 404:
@@ -300,7 +302,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "PATCH",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                f"{self.url}/api/v2/work-orders/{path_segment(work_order_id)}",
                 headers=self._headers(),
                 json=payload,
             )
@@ -362,8 +364,12 @@ class UpKeepConnector:
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed work orders for an asset."""
-        wos = await self.read_work_orders(asset_id=asset_id, status="complete")
-        return wos
+        self._ensure_connected()
+        if not asset_id:
+            # Without an asset the read would drop the filter and return every
+            # completed work order in the account.
+            raise ConnectorError("read_maintenance_history requires an asset_id")
+        return await self.read_work_orders(asset_id=asset_id, status="complete")
 
     # ------------------------------------------------------------------
     # Internal helpers

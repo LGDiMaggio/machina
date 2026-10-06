@@ -457,9 +457,13 @@ class TestReadMaintenancePlans:
 class TestReadMaintenanceHistory:
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
-        """History query must combine assetnum with completed/closed status."""
+        """History query must combine assetnum with completed/closed status.
+
+        oslc.where has no ``or`` and no parentheses — ``and`` is its only
+        boolean operator — so the status alternatives go through ``in``.
+        """
         await _connect(httpx_mock, connector)
-        expected_where = 'assetnum="PUMP-201" and (status="COMP" or status="CLOSE")'
+        expected_where = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxwo", **{"oslc.where": expected_where}),
@@ -482,6 +486,214 @@ class TestReadMaintenanceHistory:
         history = await connector.read_maintenance_history("PUMP-201")
         assert len(history) == 1
         assert history[0].id == "WO-H1"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_follows_next_page(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        next_page = f"{OSLC}/os/mxwo?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(
+                "mxwo", **{"oslc.where": 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'}
+            ),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {"nextPage": next_page},
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_page,
+            json={"member": [{"wonum": "WO-H2", "status": "CLOSE"}], "responseInfo": {}},
+        )
+        history = await connector.read_maintenance_history("PUMP-201")
+        assert [wo.id for wo in history] == ["WO-H1", "WO-H2"]
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_follows_a_next_page_link_object(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Maximo's JSON API can give ``nextPage`` as ``{"href": ...}``."""
+        await _connect(httpx_mock, connector)
+        next_page = f"{OSLC}/os/mxwo?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(
+                "mxwo", **{"oslc.where": 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'}
+            ),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {"nextPage": {"href": next_page}},
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_page,
+            json={"member": [{"wonum": "WO-H2", "status": "CLOSE"}], "responseInfo": {}},
+        )
+        history = await connector.read_maintenance_history("PUMP-201")
+        assert [wo.id for wo in history] == ["WO-H1", "WO-H2"]
+
+    @pytest.mark.parametrize("asset_id", ["", None])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: MaximoConnector, asset_id
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="requires an asset_id"):
+            await connector.read_maintenance_history(asset_id)
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="authentication failed"):
+            await connector.read_maintenance_history("PUMP-201")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="HTTP 500"):
+            await connector.read_maintenance_history("PUMP-201")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: MaximoConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("PUMP-201")
+
+
+# ---------------------------------------------------------------------------
+# oslc.where values built from caller-supplied IDs
+# ---------------------------------------------------------------------------
+
+
+class TestOslcWhereValues:
+    """IDs and codes reach the connector from LLM / MCP-client input. Inside a
+    quoted oslc.where value, ``"`` and ``\\`` are string syntax, ``%`` makes the
+    match a LIKE, ``*`` means "any non-null value", and Maximo's QBE framework
+    reads ``,`` as OR and ``= ! < > ~`` as operators — so a value carrying one is
+    refused before any request."""
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
+            pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
+            pytest.param(lambda c, v: c.read_work_orders(asset_id=v), id="read_work_orders-asset"),
+            pytest.param(lambda c, v: c.read_work_orders(status=v), id="read_work_orders-status"),
+            pytest.param(lambda c, v: c.read_spare_parts(sku=v), id="read_spare_parts"),
+            pytest.param(
+                lambda c, v: c.read_maintenance_history(v), id="read_maintenance_history"
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_every_where_value_is_checked(
+        self, httpx_mock, connector: MaximoConnector, read
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match=r"oslc\.where"):
+            await read(connector, 'PUMP-201" and assetnum!="*')
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param('PUMP-201"', id="double-quote"),
+            pytest.param("PUMP-201\\", id="backslash"),
+            pytest.param("PUMP%", id="like-wildcard"),
+            pytest.param("*", id="not-null-star"),
+            pytest.param("PUMP-201,PUMP-202", id="qbe-comma"),
+            pytest.param("!=PUMP-201", id="qbe-not-equal"),
+            pytest.param("=PUMP-201", id="qbe-equal"),
+            pytest.param(">0", id="qbe-greater"),
+            pytest.param("<9", id="qbe-less"),
+            pytest.param("~NULL~", id="qbe-null-token"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_oslc_significant_character_is_refused(
+        self, httpx_mock, connector: MaximoConnector, value: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match=r"oslc\.where"):
+            await connector.read_maintenance_history(value)
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_ordinary_id_punctuation_passes_through(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", json={"member": [], "responseInfo": {}})
+        await connector.get_asset("O'NEIL-1/A.2_B #3")
+        sent = httpx_mock.get_requests()[-1].url.params["oslc.where"]
+        assert sent == 'assetnum="O\'NEIL-1/A.2_B #3"'
+
+    @pytest.mark.asyncio
+    async def test_empty_value_is_refused(self, httpx_mock, connector: MaximoConnector) -> None:
+        """An empty quoted value would put no restriction on the attribute."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="empty"):
+            await connector.get_asset("")
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_is_formatted_as_before(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A workflow event can carry an ID as a number; it is sent as its digits."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", json={"member": [], "responseInfo": {}})
+        await connector.get_asset(201)
+        assert httpx_mock.get_requests()[-1].url.params["oslc.where"] == 'assetnum="201"'
+
+
+class TestUpdatePathId:
+    """The work-order ID also goes into the PATCH URL path, where it must stay
+    one path segment, and is read back by ``wonum`` after the write."""
+
+    @pytest.mark.asyncio
+    async def test_update_id_stays_inside_its_path_segment(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        hostile = "WO-1/../../mxasset/X"
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="PATCH", status_code=204)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": f'wonum="{hostile}"'}),
+            json={"member": [{"wonum": hostile}], "responseInfo": {}},
+        )
+        await connector.update_work_order(hostile, description="x")
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        assert patch_req.url.raw_path == b"/maximo/oslc/os/mxwo/WO-1%2F..%2F..%2Fmxasset%2FX"
+
+    @pytest.mark.parametrize(
+        ("work_order_id", "reason"),
+        [
+            pytest.param("WO-1,WO-2", r"oslc\.where", id="unreadable-by-wonum"),
+            pytest.param("..", "Invalid record ID", id="dot-segment"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unsafe_id_is_refused_before_writing(
+        self, httpx_mock, connector: MaximoConnector, work_order_id: str, reason: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match=reason):
+            await connector.update_work_order(work_order_id, description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET"]  # connect only
 
 
 # ---------------------------------------------------------------------------

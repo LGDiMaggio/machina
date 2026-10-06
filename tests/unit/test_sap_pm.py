@@ -111,7 +111,7 @@ class TestParseWorkOrder:
             "MaintenanceOrderDesc": "Fix leaking pump",
             "MaintenanceOrderType": "PM01",
             "MaintPriority": "2",
-            "MaintenanceOrderSystemStatus": "REL",
+            "SystemStatusText": "REL  PRC  SETC",
             "Equipment": "10000001",
             "CreationDate": "2025-06-01T10:00:00Z",
             "LastChangeDateTime": "2025-06-02T08:00:00Z",
@@ -128,7 +128,7 @@ class TestParseWorkOrder:
             "MaintenanceOrder": "4000002",
             "MaintenanceOrderType": "PM02",
             "MaintPriority": "3",
-            "MaintenanceOrderSystemStatus": "CRTD",
+            "SystemStatusText": "CRTD MANC NMAT",
             "Equipment": "E1",
         }
         wo = _parse_work_order(raw)
@@ -141,7 +141,7 @@ class TestParseWorkOrder:
             "MaintenanceOrder": "4000003",
             "MaintenanceOrderType": "PM01",
             "MaintPriority": "2",
-            "MaintenanceOrderSystemStatus": "CNF",
+            "SystemStatusText": "REL  CNF  PRC  SETC",
             "Equipment": "E1",
             "MaintenanceActivityType": "BEARING_REPAIR",
             "MaintenanceCause": "WEAR",
@@ -335,6 +335,7 @@ class TestConnectorLifecycle:
         assert "read_assets" in conn.capabilities
         assert "create_work_order" in conn.capabilities
         assert "read_maintenance_plans" in conn.capabilities
+        assert "read_maintenance_history" in conn.capabilities
 
     def test_sap_client_stored(self) -> None:
         conn = self._make()
