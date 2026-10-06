@@ -45,7 +45,7 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorError, ConnectorUnsupportedFilterError
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -311,7 +311,9 @@ class TestReadSparePartsAssetFilter:
     @pytest.mark.asyncio
     async def test_asset_filter_raises_before_any_request(self) -> None:
         conn = self._connected()
-        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match="cannot filter spare parts by asset"
+        ):
             await conn.read_spare_parts(asset_id="PUMP-201")
         conn._oslc_get.assert_not_awaited()
 
@@ -319,7 +321,9 @@ class TestReadSparePartsAssetFilter:
     async def test_asset_filter_raises_even_with_a_sku(self) -> None:
         """A sku match says nothing about compatibility with the asset."""
         conn = self._connected()
-        with pytest.raises(ConnectorError, match="cannot filter spare parts by asset"):
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match="cannot filter spare parts by asset"
+        ):
             await conn.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
         conn._oslc_get.assert_not_awaited()
 

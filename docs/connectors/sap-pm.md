@@ -75,7 +75,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single maintenance order by number |
 | `create_work_order` | Create maintenance orders (CSRF token handled automatically) |
 | `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
-| `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) |
+| `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) — filter by `sku`, and by `asset_id` once `bom_equipment_field` is set |
 | `read_maintenance_plans` | Read preventive-maintenance plans (`API_MAINTENANCEPLAN/MaintenancePlan`) |
 
 ### Convenience methods
@@ -169,6 +169,11 @@ connector = SapPM(
 )
 ```
 
+`bom_equipment_field` is unset by default, because the default
+`BillOfMaterialItem` entity has no equipment field; until it is set,
+`read_spare_parts` refuses an `asset_id` filter (see
+[Known Limitations](#known-limitations)).
+
 ## Entity Mapping
 
 | SAP Field | Machina Field |
@@ -202,6 +207,7 @@ Default: 3 retries, 0.5 s → 8 s backoff cap.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.
+- **Spare parts by asset**: `read_spare_parts` filters by `asset_id` only through `bom_equipment_field` (see [Configurable BOM Endpoint](#configurable-bom-endpoint)). While it is unset, a non-empty `asset_id` raises `ConnectorUnsupportedFilterError` (a `ConnectorError`) before any request, with or without a `sku`, rather than returning `[]` (which would say the asset has no spare parts) or dropping the filter (which would return the entire BOM, or a bare `sku` match, as the asset's parts). `connect()` logs a `bom_equipment_field_unconfigured` warning once; look the part up by `sku` instead.
 
 ## API Reference
 

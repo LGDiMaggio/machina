@@ -14,7 +14,11 @@ from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorUnsupportedFilterError,
+)
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
 
@@ -110,6 +114,24 @@ class TestConnection:
         )
         with pytest.raises(ConnectorError, match="500"):
             await connector.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_warns_that_asset_filtered_spare_part_reads_are_refused(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Without bom_equipment_field, connect warns once that asset filters are refused.
+
+        Each refusal later is quiet (the agent's context prefetch logs it at
+        INFO), so this warning is where the configuration gap surfaces.
+        """
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            await _connect(httpx_mock, connector)
+        warnings = [e for e in logs if e["event"] == "bom_equipment_field_unconfigured"]
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert "refused" in warnings[0]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -581,20 +603,25 @@ class TestReadSpareParts:
         assert len(parts) == 1
         assert parts[0].sku == "MAT-001"
 
+    @pytest.mark.parametrize("sku", ["", "MAT-001"])
     @pytest.mark.asyncio
-    async def test_read_spare_parts_asset_filter_ignored_by_default(
-        self, httpx_mock, connector: SapPmConnector
+    async def test_read_spare_parts_asset_filter_refused_by_default(
+        self, httpx_mock, connector: SapPmConnector, sku: str
     ) -> None:
-        """Without bom_equipment_field and no sku, the unbounded BOM read is refused.
+        """Without bom_equipment_field an asset filter is refused, before any request.
 
-        asset_id cannot be filtered server-side and there is no sku to narrow
-        the query, so issuing the read would page the entire BOM into memory
-        (U9 OOM guard). The connector returns ``[]`` and issues NO request — the
-        only mocked response here is the connect handshake from ``_connect``.
+        asset_id cannot be filtered server-side. Reading without it would page
+        the entire BOM into memory (U9 OOM guard) or, with a sku, pass a bare sku
+        match off as compatible with the asset; answering ``[]`` would read as
+        "this asset has no spare parts". The only request is the connect
+        handshake from ``_connect``.
         """
         await _connect(httpx_mock, connector)
-        parts = await connector.read_spare_parts(asset_id="10000001")
-        assert parts == []
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match="cannot filter spare parts by asset"
+        ):
+            await connector.read_spare_parts(asset_id="10000001", sku=sku)
+        assert len(httpx_mock.get_requests()) == 1  # the $metadata handshake only
 
     @pytest.mark.asyncio
     async def test_read_spare_parts_custom_endpoint(self, httpx_mock) -> None:

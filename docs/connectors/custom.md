@@ -351,6 +351,17 @@ REST mocking or VCR for recorded responses.
   [capability matrix](../capabilities.md) (`machina describe`) is the
   authoritative record of which built-in connector declares which
   capability; consult it rather than any hand-maintained inline list.
+- **Refuse a filter you cannot apply.** Accept every filter your
+  capability method's callers send (the agent's context prefetch and the
+  `alarm_to_workorder` workflow call `read_spare_parts(asset_id=...)` for
+  the asset in play), and if your backend cannot apply one, raise
+  `ConnectorUnsupportedFilterError` (a `ConnectorError`) before any
+  request. Never drop the filter, which passes the unfiltered result off
+  as the filtered one (the whole inventory as one asset's parts), and
+  never answer `[]`, which says nothing matches ("this asset has no spare
+  parts"). The agent relays the refusal to the model, which can retry
+  with a filter you support, such as `sku`; its context prefetch leaves
+  the source out without logging a warning.
 
 ## API Reference
 

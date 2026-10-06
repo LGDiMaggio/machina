@@ -31,7 +31,11 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -339,7 +343,8 @@ class UpKeepConnector:
 
         Args:
             asset_id: Not supported (see Note): a non-empty value raises
-                :class:`ConnectorError` rather than being dropped.
+                :class:`ConnectorUnsupportedFilterError` rather than being
+                dropped.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
@@ -353,7 +358,7 @@ class UpKeepConnector:
         """
         self._ensure_connected()
         if asset_id:
-            raise ConnectorError(
+            raise ConnectorUnsupportedFilterError(
                 "The UpKeep connector cannot filter spare parts by asset: "
                 "/api/v2/parts has no asset filter, and the connector does not "
                 "read the asset's parts list. Look the part up by sku instead."

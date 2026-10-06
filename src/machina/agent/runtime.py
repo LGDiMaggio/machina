@@ -47,7 +47,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import ConnectorError, LLMError
+from machina.exceptions import ConnectorError, ConnectorUnsupportedFilterError, LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -1648,7 +1648,20 @@ class Agent:
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for name, result in zip(task_names, results, strict=False):
-                if isinstance(result, BaseException):
+                if isinstance(result, ConnectorUnsupportedFilterError):
+                    # A provider refusing a filter it cannot apply, e.g. an
+                    # inventory with no asset relation: expected, and recurring
+                    # on every turn that resolves an asset, so not a warning.
+                    # The source is left out rather than prefetched unfiltered.
+                    logger.info(
+                        "context_gather_skipped",
+                        agent=self.name,
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        reason=str(result),
+                    )
+                elif isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",
                         agent=self.name,

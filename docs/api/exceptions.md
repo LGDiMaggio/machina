@@ -50,6 +50,10 @@ All connector errors derive from `ConnectorError`. Catch the root if you don't c
 
 ::: machina.exceptions.ConnectorDependencyError
 
+### `ConnectorUnsupportedFilterError`
+
+::: machina.exceptions.ConnectorUnsupportedFilterError
+
 ## Domain errors
 
 ### `DomainValidationError`

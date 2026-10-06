@@ -6,6 +6,7 @@ from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
     ConnectorTimeoutError,
+    ConnectorUnsupportedFilterError,
     DomainValidationError,
     LLMError,
     MachinaError,
@@ -20,6 +21,9 @@ class TestExceptionHierarchy:
         assert issubclass(ConnectorError, MachinaError)
         assert issubclass(ConnectorAuthError, ConnectorError)
         assert issubclass(ConnectorTimeoutError, ConnectorError)
+        # A refused filter stays a ConnectorError, so a caller that relays any
+        # connector failure (the agent tool, the MCP tools) still catches it.
+        assert issubclass(ConnectorUnsupportedFilterError, ConnectorError)
 
     def test_domain_errors_inherit_from_machina(self) -> None:
         assert issubclass(DomainValidationError, MachinaError)
