@@ -77,6 +77,7 @@ pip install machina-ai[cmms-rest]
 | `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
 | `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) |
 | `read_maintenance_plans` | Read preventive-maintenance plans (`API_MAINTENANCEPLAN/MaintenancePlan`) |
+| `read_maintenance_history` | Read an asset's confirmed, technically completed or closed maintenance orders (`API_MAINTENANCEORDER/MaintenanceOrder` filtered by `Equipment`, status `CNF`, `TECO` or `CLSD`) |
 
 ### Convenience methods
 

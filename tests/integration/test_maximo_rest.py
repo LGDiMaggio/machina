@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
 from machina.domain.asset import Asset, AssetType
@@ -15,6 +16,9 @@ from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
+from machina.workflows.engine import WorkflowEngine
+from machina.workflows.models import Workflow
 
 BASE = "https://maximo.example.com"
 OSLC = f"{BASE}/maximo/oslc"
@@ -457,9 +461,13 @@ class TestReadMaintenancePlans:
 class TestReadMaintenanceHistory:
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
-        """History query must combine assetnum with completed/closed status."""
+        """History query must combine assetnum with completed/closed status.
+
+        Maximo's oslc.where has no ``or`` (it answers BMXAA8744E, query not
+        parsed), so the two statuses are matched with ``in``.
+        """
         await _connect(httpx_mock, connector)
-        expected_where = 'assetnum="PUMP-201" and (status="COMP" or status="CLOSE")'
+        expected_where = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxwo", **{"oslc.where": expected_where}),
@@ -482,6 +490,46 @@ class TestReadMaintenanceHistory:
         history = await connector.read_maintenance_history("PUMP-201")
         assert len(history) == 1
         assert history[0].id == "WO-H1"
+
+    @pytest.mark.asyncio
+    async def test_alarm_workflow_history_step_reaches_maximo(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """The built-in workflow's history step must run against Maximo.
+
+        The engine finds the step's connector by capability. With
+        ``read_maintenance_history`` undeclared it found none, and the step's
+        SKIP policy hid the miss.
+        """
+        await _connect(httpx_mock, connector)
+        expected_where = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": expected_where}),
+            json={
+                "member": [
+                    {
+                        "wonum": "WO-H1",
+                        "description": "Past repair",
+                        "status": "COMP",
+                        "assetnum": "PUMP-201",
+                    },
+                ],
+                "responseInfo": {},
+            },
+        )
+        registry = ConnectorRegistry()
+        registry.register("maximo", connector)
+        history_step = next(s for s in alarm_to_workorder.steps if s.name == "check_history")
+
+        result = await WorkflowEngine(registry=registry).execute(
+            Workflow(name="history only", steps=[history_step]),
+            {"asset_id": "PUMP-201"},
+        )
+
+        (step_result,) = result.step_results
+        assert not step_result.skipped
+        assert [wo.id for wo in step_result.output] == ["WO-H1"]
 
 
 # ---------------------------------------------------------------------------
