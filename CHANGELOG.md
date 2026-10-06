@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Generic CMMS connector runs local-mode work-order writes on a worker thread of its own, one at a time.** A `create_work_order` or `update_work_order` whose caller was cancelled (an MCP request cancellation, a workflow step timeout) used to release the write lock while its thread was still writing `work_orders.json`. The change stayed in memory without reaching the file: a retried `create_work_order` answered with the "existing" work order although it was never stored and was lost on restart, and a cancelled update stayed in memory even when its file write failed. The next write could also write the shared temporary file at the same time, which could corrupt `work_orders.json` or fail on Windows with `PermissionError`. A write's ID check, file write, in-memory update and log line now run as one step that cancelling the caller does not cut short, and the in-memory work orders change only once the file is written; a failed update no longer logs `work_order_updated`. `disconnect()` waits up to 5 seconds for a write still running, so the file is no longer being written once it returns.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

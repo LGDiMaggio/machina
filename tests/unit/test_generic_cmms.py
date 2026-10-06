@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import TYPE_CHECKING
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
+from machina.connectors.cmms import generic
 from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture
@@ -582,6 +587,292 @@ class TestGenericCmmsConnectorLocal:
         await conn.connect()
         plans = await conn.read_maintenance_plans()
         assert plans == []
+
+
+class _OverlapDetectingWorkOrderFile:
+    """Wraps the writes of ``work_orders.json`` and records two at once.
+
+    Local mode writes the file through a temp sibling: ``write_text`` on
+    ``work_orders.json.tmp``, then ``replace`` onto ``work_orders.json``. Each
+    call uses the temp file from start to end. The first call of the method
+    named by ``hold`` waits for ``release`` instead, with ``held`` set while it
+    waits, so a test can act while that write is mid-flight on its worker
+    thread; set ``fail`` before releasing it to make that call raise instead of
+    running. Calls on any other path run untouched.
+    """
+
+    _TEMP_FILE = "work_orders.json.tmp"
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.hold = ""
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.fail: Exception | None = None
+        self.max_users = 0
+        self._users = 0
+        self._state = threading.Condition()
+        for name in ("write_text", "replace"):
+            monkeypatch.setattr(Path, name, self._wrap(name, getattr(Path, name)))
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until no write of the file is running, on any thread."""
+        with self._state:
+            return self._state.wait_for(lambda: self._users == 0, timeout)
+
+    def _wrap(self, name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path.name != self._TEMP_FILE:
+                return func(path, *args, **kwargs)
+            with self._state:
+                self._users += 1
+                self.max_users = max(self.max_users, self._users)
+                hold = name == self.hold and not self.held.is_set()
+                if hold:
+                    self.held.set()
+            try:
+                if hold:
+                    self.release.wait(timeout=5)
+                    if self.fail is not None:
+                        raise self.fail
+                return func(path, *args, **kwargs)
+            finally:
+                with self._state:
+                    self._users -= 1
+                    self._state.notify_all()
+
+        return wrapper
+
+
+@pytest.fixture()
+def work_order_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[_OverlapDetectingWorkOrderFile]:
+    """The double, released at teardown: a call that a failing test left held
+    would otherwise resume later, inside the next test's wrappers."""
+    double = _OverlapDetectingWorkOrderFile(monkeypatch)
+    yield double
+    double.release.set()
+    assert double.wait_idle(5)
+
+
+def _on_disk(data_dir: Path) -> list[tuple[str, str]]:
+    """The ``(id, description)`` of each work order in ``work_orders.json``."""
+    stored = json.loads((data_dir / "work_orders.json").read_text(encoding="utf-8"))
+    return [(wo["id"], wo["description"]) for wo in stored]
+
+
+class TestLocalWritesTakeTurns:
+    """Local-mode writes use ``work_orders.json`` one at a time, whatever
+    happens to their callers: cancelling a caller cannot stop its write's
+    worker thread."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_create_holds_the_file_until_its_write_ends(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """The same-ID retry waits for the abandoned write, then finds the work
+        order stored, instead of answering from a record that never reached
+        the file."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        wo = WorkOrder(
+            id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+        )
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)  # the write is running
+        first.cancel()  # an MCP request cancellation, a workflow step timeout
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = asyncio.create_task(conn.create_work_order(wo))
+        await asyncio.sleep(0.05)
+        work_order_file.release.set()
+        assert (await retry).description == "new"
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert work_order_file.max_users == 1
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_holds_the_file_until_its_write_ends(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """The next write waits for the abandoned one instead of writing the
+        same temp file alongside it."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        new = WorkOrder(
+            id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+        )
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        create = asyncio.create_task(conn.create_work_order(new))
+        await asyncio.sleep(0.05)
+        work_order_file.release.set()
+        await create
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        expected = [("WO-001", "changed"), ("WO-002", "Filter replacement"), ("WO-003", "new")]
+        assert _on_disk(sample_data_dir) == expected
+        assert work_order_file.max_users == 1
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_whose_write_fails_leaves_the_store_as_it_was(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        work_order_file.fail = PermissionError("work_orders.json open in another program")
+        work_order_file.release.set()
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        expected = [("WO-001", "Bearing replacement"), ("WO-002", "Filter replacement")]
+        assert _on_disk(sample_data_dir) == expected
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_ends_after_its_caller_was_cancelled_is_read_back(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The in-memory work orders and the log are updated by the write
+        itself, not by its caller, so reads match the file without waiting for
+        another write, and the write is logged."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+        wo = WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        work_order_file.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the write has finished
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+        assert [c.args[0] for c in log.info.call_args_list] == ["work_order_created"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_take_turns(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+
+        await asyncio.gather(
+            *(
+                conn.create_work_order(
+                    WorkOrder(id=f"WO-00{n}", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+                )
+                for n in (3, 4, 5)
+            ),
+            conn.update_work_order("WO-001", description="changed"),
+        )
+
+        on_disk = _on_disk(sample_data_dir)
+        assert [wo_id for wo_id, _ in on_disk] == [
+            "WO-001",
+            "WO-002",
+            "WO-003",
+            "WO-004",
+            "WO-005",
+        ]
+        assert on_disk[0] == ("WO-001", "changed")
+        assert work_order_file.max_users == 1
+
+    @pytest.mark.asyncio
+    async def test_a_write_cancelled_before_its_turn_never_runs(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        wo_3, wo_4 = (
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            for wo_id in ("WO-003", "WO-004")
+        )
+
+        first = asyncio.create_task(conn.create_work_order(wo_3))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        waiting = asyncio.create_task(conn.create_work_order(wo_4))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        work_order_file.release.set()
+        await first
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_disconnect_waits_for_a_write_in_flight(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """Once disconnect() returns, the connector is not writing to the file,
+        and the write it waited for still returns its result."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        disconnecting = asyncio.create_task(conn.disconnect())
+        await asyncio.sleep(0.05)
+        assert not disconnecting.done()
+        work_order_file.release.set()
+        await disconnecting
+
+        assert work_order_file.wait_idle(0)
+        assert (await update).description == "changed"
+        assert _on_disk(sample_data_dir)[0] == ("WO-001", "changed")
+
+    @pytest.mark.asyncio
+    async def test_disconnect_stops_waiting_for_a_stuck_write(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        monkeypatch.setattr(generic, "_DISCONNECT_WAIT_SEC", 0.05)
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        await conn.disconnect()  # returns while the write is still held
+
+        assert [c.args[0] for c in log.warning.call_args_list] == ["write_still_running"]
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_work_orders()
+        work_order_file.release.set()
+        assert (await update).description == "changed"
 
 
 class TestDynamicCapabilities:
