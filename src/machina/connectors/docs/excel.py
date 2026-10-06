@@ -548,6 +548,27 @@ def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
     return ConnectorError(f"Could not write {path.name}: {exc.strerror or exc}")
 
 
+def _log_failure_after_cancel(log_fields: dict[str, str], future: Future[Any]) -> None:
+    """Log the failure of a file-thread call whose caller was cancelled.
+
+    Attached as a done-callback only once the caller is gone, so it runs on
+    the file thread as the call ends (or at once, if it has already ended)
+    and never repeats a failure that a caller received. A call dropped
+    before it ran did nothing, and is not logged.
+    """
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc is not None:
+        logger.error(
+            "failed_after_cancel",
+            connector="ExcelCsvConnector",
+            **log_fields,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
 # ------------------------------------------------------------------
 # Connector
 # ------------------------------------------------------------------
@@ -659,7 +680,7 @@ class ExcelCsvConnector:
         The files are read on the connector's file thread, in turn with
         writes and refreshes, so the event loop runs on meanwhile.
         """
-        await self._run_on_file_thread(self._load_sheets)
+        await self._run_on_file_thread(self._load_sheets, operation="connect")
         self._connected = True
         logger.info(
             "connected",
@@ -825,7 +846,13 @@ class ExcelCsvConnector:
 
         row_data = self._work_order_to_row(work_order, schema)
         return await self._run_on_file_thread(
-            self._append_unless_present, schema, work_order, row_data
+            self._append_unless_present,
+            schema,
+            work_order,
+            row_data,
+            operation="create_work_order",
+            work_order_id=work_order.id,
+            asset_id=work_order.asset_id,
         )
 
     @sandbox_aware
@@ -888,7 +915,13 @@ class ExcelCsvConnector:
         schema = self._config.work_orders
         persist = schema is not None and schema.write_mode is not None
         return await self._run_on_file_thread(
-            self._apply_update, work_order_id, new_status, changes, schema if persist else None
+            self._apply_update,
+            work_order_id,
+            new_status,
+            changes,
+            schema if persist else None,
+            operation="update_work_order",
+            work_order_id=work_order_id,
         )
 
     def _append_unless_present(
@@ -1118,7 +1151,9 @@ class ExcelCsvConnector:
                 )
         self._wo_cache = work_orders
 
-    async def _run_on_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
+    async def _run_on_file_thread(
+        self, func: Callable[[*_Ts], _T], /, *args: *_Ts, **log_fields: str
+    ) -> _T:
         """Run ``func(*args)`` on the connector's file thread, after earlier calls.
 
         One thread runs every call, so no two calls overlap, whatever happens
@@ -1126,9 +1161,16 @@ class ExcelCsvConnector:
         workflow step timeout) cannot stop a call that is already running, and
         the calls behind it wait for it; a call still queued when the
         cancellation reaches the thread pool, on the event loop's next
-        iteration, is dropped.
+        iteration, is dropped. Nobody reads the outcome of a call that
+        outlives its caller, so if that call fails, the failure is logged as
+        ``failed_after_cancel``, with ``log_fields``.
         """
-        return await asyncio.wrap_future(self._submit_to_file_thread(func, *args))
+        future = self._submit_to_file_thread(func, *args)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.add_done_callback(lambda done: _log_failure_after_cancel(log_fields, done))
+            raise
 
     def _submit_to_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> Future[_T]:
         """Queue ``func(*args)`` on the file thread, in a copy of the caller's context."""

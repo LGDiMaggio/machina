@@ -150,7 +150,9 @@ since then count. A work-order row whose values do not make a valid work order
   cancellation, a workflow step timeout) does not stop it once it has
   started: it still finishes, the cached records follow its outcome, and the
   next write waits for it, so a retried create finds the row instead of
-  adding it again. `disconnect()` waits for it too, for up to 5 seconds.
+  adding it again. If it fails, no caller is left to receive the error, so it
+  is logged as `failed_after_cancel`. `disconnect()` waits for it too, for up
+  to 5 seconds.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.
 - `write_mode` accepts `append` or `overwrite`; either one makes the sheet

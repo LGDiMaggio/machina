@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import logging
 import shutil
 import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -1404,10 +1405,17 @@ class TestWritesTakeTurns:
 
     @pytest.mark.asyncio
     async def test_a_write_cancelled_before_its_turn_never_runs(
-        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Nor is it reported as failed, by the connector or by the thread pool."""
         path, conn = await _odl_connector(tmp_path)
         workbook.hold = "_append_xlsx_row"
+        log = MagicMock()
+        monkeypatch.setattr(excel, "logger", log)
         wo_3, wo_4 = (
             WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="C-3")
             for wo_id in ("WO-3", "WO-4")
@@ -1426,6 +1434,8 @@ class TestWritesTakeTurns:
 
         assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
         assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+        log.error.assert_not_called()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
     @pytest.mark.asyncio
     async def test_a_write_that_ends_after_its_caller_was_cancelled_is_read_back(
@@ -1454,6 +1464,7 @@ class TestWritesTakeTurns:
         assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
         assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
         assert [c.args[0] for c in log.info.call_args_list] == ["work_order_created"]
+        log.error.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_cancelled_update_whose_save_fails_leaves_the_cache_as_it_was(
@@ -1474,6 +1485,89 @@ class TestWritesTakeTurns:
         expected = [("WO-1", "first"), ("WO-2", "second")]
         assert [(row[0], row[4]) for row in _sheet_rows(path)] == expected
         assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("call", "hold", "logged"),
+        [
+            pytest.param(
+                lambda conn: conn.update_work_order("WO-1", description="changed"),
+                "_save_xlsx_atomically",
+                {
+                    "operation": "update_work_order",
+                    "work_order_id": "WO-1",
+                    "error_type": "ConnectorLockedError",
+                },
+                id="update",
+            ),
+            pytest.param(
+                lambda conn: conn.create_work_order(
+                    WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+                ),
+                "_save_xlsx_atomically",
+                {
+                    "operation": "create_work_order",
+                    "work_order_id": "WO-3",
+                    "asset_id": "C-3",
+                    "error_type": "ConnectorLockedError",
+                },
+                id="create",
+            ),
+            pytest.param(
+                lambda conn: conn.connect(),
+                "_read_xlsx_rows",
+                {"operation": "connect", "error_type": "PermissionError"},
+                id="connect",
+            ),
+        ],
+    )
+    async def test_a_call_that_fails_after_its_caller_was_cancelled_is_logged(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+        call: Callable[[ExcelCsvConnector], Any],
+        hold: str,
+        logged: dict[str, str],
+    ) -> None:
+        """Nobody reads that call's outcome any more, so its failure is logged
+        where it happens, with what identifies the call."""
+        _path, conn = await _odl_connector(tmp_path)
+        workbook.hold = hold
+        log = MagicMock()
+        monkeypatch.setattr(excel, "logger", log)
+
+        task = asyncio.create_task(call(conn))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        workbook.fail = PermissionError("workbook open in another program")
+        workbook.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the call has failed
+
+        log.error.assert_called_once_with(
+            "failed_after_cancel", connector="ExcelCsvConnector", **logged, error=ANY
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failure_its_caller_receives_is_not_logged_again(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+        workbook.fail = PermissionError("workbook open in another program")
+        workbook.release.set()
+        log = MagicMock()
+        monkeypatch.setattr(excel, "logger", log)
+
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-1", description="changed")
+
+        log.error.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_disconnect_waits_for_a_write_in_flight(
