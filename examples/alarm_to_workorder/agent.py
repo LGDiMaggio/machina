@@ -114,8 +114,9 @@ async def run_alarm_demo(sandbox: bool) -> None:
     status = "SUCCESS" if result.success else "FAILED"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
     for sr in result.steps:
-        icon = "+" if sr.success else "~" if sr.skipped else "x"
-        print(f"    [{icon}] {sr.name:<20} {_summary(sr.output)}")
+        # Check skipped first: a skipped step also reports success.
+        icon = "~" if sr.skipped else "+" if sr.success else "x"
+        print(f"    [{icon}] {sr.name:<20} {sr.error or _summary(sr.output)}")
 
     await agent.stop()
     print()

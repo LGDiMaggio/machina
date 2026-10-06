@@ -165,7 +165,11 @@ class WorkflowEngine:
 
             if result.success and not result.skipped:
                 context.set_step_output(step.name, result.output)
-            elif not result.success:
+            elif result.error is not None:
+                # Failed, or skipped after an error: later templates say so.
+                context.mark_step_failed(step.name)
+
+            if not result.success:
                 overall_success = False
                 if step.on_error == ErrorPolicy.STOP:
                     logger.error(
@@ -206,9 +210,10 @@ class WorkflowEngine:
         """Execute a single step with guard check, error handling, and tracing."""
         # Guard condition check
         if step.guard is not None:
+            guard_error: str | None = None
             try:
                 should_run = step.guard.check(context.as_dict())
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "guard_exception",
                     step=step.name,
@@ -216,13 +221,16 @@ class WorkflowEngine:
                     exc_info=True,
                 )
                 should_run = False
+                guard_error = f"Guard raised {type(exc).__name__}: {exc}"
             if not should_run:
                 logger.info(
                     "step_skipped_guard",
                     step=step.name,
                     guard=step.guard.description,
                 )
-                return StepResult(step_name=step.name, skipped=True)
+                # guard_error stays None when the guard returned False: that
+                # skip is deliberate, unlike one caused by a crashing guard.
+                return StepResult(step_name=step.name, skipped=True, error=guard_error)
 
         attempts = 1 + (step.retries if step.on_error == ErrorPolicy.RETRY else 0)
 
@@ -308,10 +316,12 @@ class WorkflowEngine:
         """Apply the step's error policy after all retries are exhausted."""
         if step.on_error == ErrorPolicy.SKIP:
             logger.info("step_skipped_error", step=step.name, error=error_msg)
+            # Keep the error: it is what tells this skip apart from a guard skip.
             return StepResult(
                 step_name=step.name,
                 success=True,
                 skipped=True,
+                error=error_msg,
                 duration_ms=round(elapsed_ms, 2),
             )
 

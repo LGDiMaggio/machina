@@ -455,6 +455,26 @@ class TestWorkflowContext:
         assert ctx.resolve_input_value(42) == 42
         assert ctx.resolve_input_value(None) is None
 
+    # -- a failed step renders as a marker, not as its placeholder -------
+
+    def test_resolve_failed_step_renders_failure_marker(self) -> None:
+        """A failed step's placeholders say it failed instead of staying verbatim.
+
+        A literal ``{check_spare_parts}`` reads as a template typo, and
+        "unavailable" would read as "out of stock" in a technician's message.
+        """
+        ctx = WorkflowContext()
+        ctx.mark_step_failed("check_spare_parts")
+        rendered = ctx.resolve("Spare Parts: {check_spare_parts}")
+        assert rendered == "Spare Parts: [check_spare_parts failed]"
+        assert ctx.resolve("{check_spare_parts.stock}") == "[check_spare_parts failed]"
+
+    def test_resolve_input_value_failed_step_returns_none(self) -> None:
+        """A step input never receives the display marker."""
+        ctx = WorkflowContext()
+        ctx.mark_step_failed("check_spare_parts")
+        assert ctx.resolve_input_value("{check_spare_parts}") is None
+
 
 class TestBuiltinAlarmToWorkorder:
     """Test the built-in alarm_to_workorder template loads correctly."""

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A workflow step skipped after an error keeps the error.** Under `ErrorPolicy.SKIP` a failed step returned `success=True, skipped=True` with no `error`, so a run looked clean and the failure was only in the logs. `StepResult.error` now holds it, and also holds the error when a step is skipped because its guard raised. A guard that returned `False` still leaves `error` as `None`, which is how the two skips are told apart: code that reads a non-`None` `error` as a failure should check `skipped` first. The agent's `execute_workflow` tool reports `skipped` for each step, and the examples print `[~]` for a skipped step instead of `[+]`.
+- **A template that references a failed step renders `[step_name failed]` instead of the raw placeholder.** The built-in alarm workflow's technician notification read `Spare Parts: {check_spare_parts}` whenever the spare-parts read failed. `WorkflowContext.resolve` now renders `[check_spare_parts failed]` for a step that failed under `SKIP` or `NOTIFY`; the error text stays on the `StepResult`. A bare `{step_name}` step input still resolves to `None`, and a step skipped by its guard keeps its placeholder.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
