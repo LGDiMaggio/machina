@@ -10,10 +10,14 @@ Requires: pytest-httpx (dev dep), httpx (cmms-rest extra).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import httpx
 import pytest
 
+from machina.connectors.base import set_sandbox_mode
 from machina.connectors.cmms.generic import GenericCmmsConnector
+from machina.connectors.cmms.pagination import OffsetLimitPagination
 from machina.domain.work_order import (
     FailureImpact,
     Priority,
@@ -21,7 +25,16 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorConfigError,
+    ConnectorError,
+    ConnectorTimeoutError,
+    SandboxViolationError,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 BASE_URL = "https://cmms.example.com/api"
 
@@ -41,6 +54,20 @@ async def _connect_with_health(httpx_mock, conn: GenericCmmsConnector) -> None:
         json={"status": "ok"},
     )
     await conn.connect()
+
+
+# The failures every REST call maps onto the connector-error hierarchy: an
+# error status (status, expected exception type) or a transport failure
+# (httpx exception type, expected exception type, what the message says).
+_STATUS_FAILURES = [
+    pytest.param(401, ConnectorAuthError, id="401"),
+    pytest.param(403, ConnectorAuthError, id="403"),
+    pytest.param(500, ConnectorError, id="500"),
+]
+_TRANSPORT_FAILURES = [
+    pytest.param(httpx.ReadTimeout, ConnectorTimeoutError, "timed out", id="timeout"),
+    pytest.param(httpx.ConnectError, ConnectorError, "failed: ConnectError", id="connect-error"),
+]
 
 
 class TestRestConnection:
@@ -73,6 +100,59 @@ class TestRestConnection:
         )
         with pytest.raises(ConnectorError, match="health check failed"):
             await rest_connector.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_requires_200_from_health(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        """The health check must answer 200; another 2xx is not enough."""
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/health", status_code=204)
+        with pytest.raises(ConnectorError, match=r"^CMMS health check failed: HTTP 204$"):
+            await rest_connector.connect()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status", "expected"), _STATUS_FAILURES)
+    async def test_connect_maps_error_status(
+        self,
+        httpx_mock,
+        rest_connector: GenericCmmsConnector,
+        status: int,
+        expected: type[ConnectorError],
+    ) -> None:
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/health", status_code=status)
+        with pytest.raises(ConnectorError) as exc_info:
+            await rest_connector.connect()
+        assert type(exc_info.value) is expected
+        assert str(exc_info.value) == f"CMMS health check failed: HTTP {status}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("exc_type", "expected", "outcome"), _TRANSPORT_FAILURES)
+    async def test_connect_maps_transport_failure(
+        self,
+        httpx_mock,
+        rest_connector: GenericCmmsConnector,
+        exc_type: type[httpx.TransportError],
+        expected: type[ConnectorError],
+        outcome: str,
+    ) -> None:
+        url = f"{BASE_URL}/health"
+        httpx_mock.add_exception(exc_type(f"simulated failure for {url}"), method="GET", url=url)
+        with pytest.raises(ConnectorError) as exc_info:
+            await rest_connector.connect()
+        assert type(exc_info.value) is expected
+        assert str(exc_info.value) == f"CMMS health check {outcome}"
+        assert isinstance(exc_info.value.__cause__, exc_type)
+
+    @pytest.mark.asyncio
+    async def test_connect_with_a_malformed_url_raises_config_error(self, httpx_mock) -> None:
+        """httpx.InvalidURL is not an httpx.HTTPError; it is mapped all the same."""
+        conn = GenericCmmsConnector(url="https://cmms.example.com:abc/api", api_key="test-key")
+        with pytest.raises(ConnectorConfigError) as exc_info:
+            await conn.connect()
+        assert str(exc_info.value) == (
+            "CMMS health check failed: invalid URL (check 'url' and the endpoint paths)"
+        )
+        assert isinstance(exc_info.value.__cause__, httpx.InvalidURL)
 
 
 class TestRestReadAssets:
@@ -261,8 +341,11 @@ class TestRestCreateWorkOrder:
             status_code=422,
             json={"error": "unknown asset_id"},
         )
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(ConnectorError) as exc_info:
             await rest_connector.create_work_order(wo_in)
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value) == "CMMS create work order failed: HTTP 422"
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
 
 
 class TestRequireHttpx:
@@ -702,3 +785,180 @@ class TestRestGracefulDegradation:
         await _connect_with_health(httpx_mock, rest_connector)
         with pytest.raises(ConnectorError, match="not configured"):
             await rest_connector.read_maintenance_plans()
+
+
+_WORK_ORDER = WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+# Every REST operation of rest_connector_with_endpoints: HTTP method, path
+# under BASE_URL, the connector call, and the operation its errors name.
+_OPERATIONS = [
+    pytest.param("GET", "assets", lambda c: c.read_assets(), "read assets", id="read_assets"),
+    pytest.param(
+        "GET", "assets/P-201", lambda c: c.get_asset("P-201"), "get asset", id="get_asset"
+    ),
+    pytest.param(
+        "GET",
+        "work_orders",
+        lambda c: c.read_work_orders(),
+        "read work orders",
+        id="read_work_orders",
+    ),
+    pytest.param(
+        "POST",
+        "work_orders",
+        lambda c: c.create_work_order(_WORK_ORDER),
+        "create work order",
+        id="create_work_order",
+    ),
+    pytest.param(
+        "GET",
+        "work_orders/WO-1",
+        lambda c: c.get_work_order("WO-1"),
+        "get work order",
+        id="get_work_order",
+    ),
+    pytest.param(
+        "PATCH",
+        "work_orders/WO-1",
+        lambda c: c.update_work_order("WO-1", description="Re-checked"),
+        "update work order",
+        id="update_work_order",
+    ),
+    pytest.param(
+        "GET",
+        "maintenance_plans",
+        lambda c: c.read_maintenance_plans(),
+        "read maintenance plans",
+        id="read_maintenance_plans",
+    ),
+]
+
+
+class TestRestErrorMapping:
+    """A failed REST call raises a ConnectorError subclass, never an httpx error.
+
+    The message names the operation and the status or failure type, never the
+    URL, and the httpx exception stays chained as ``__cause__``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status", "expected"), _STATUS_FAILURES)
+    @pytest.mark.parametrize(("method", "path", "call", "operation"), _OPERATIONS)
+    async def test_error_status_is_mapped(
+        self,
+        httpx_mock,
+        rest_connector_with_endpoints: GenericCmmsConnector,
+        method: str,
+        path: str,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+        operation: str,
+        status: int,
+        expected: type[ConnectorError],
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(method=method, url=f"{BASE_URL}/{path}", status_code=status)
+
+        with pytest.raises(ConnectorError) as exc_info:
+            await call(conn)
+
+        assert type(exc_info.value) is expected
+        assert str(exc_info.value) == f"CMMS {operation} failed: HTTP {status}"
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("exc_type", "expected", "outcome"), _TRANSPORT_FAILURES)
+    @pytest.mark.parametrize(("method", "path", "call", "operation"), _OPERATIONS)
+    async def test_transport_failure_is_mapped(
+        self,
+        httpx_mock,
+        rest_connector_with_endpoints: GenericCmmsConnector,
+        method: str,
+        path: str,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+        operation: str,
+        exc_type: type[httpx.TransportError],
+        expected: type[ConnectorError],
+        outcome: str,
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        url = f"{BASE_URL}/{path}"
+        httpx_mock.add_exception(exc_type(f"simulated failure for {url}"), method=method, url=url)
+
+        with pytest.raises(ConnectorError) as exc_info:
+            await call(conn)
+
+        assert type(exc_info.value) is expected
+        assert str(exc_info.value) == f"CMMS {operation} {outcome}"
+        assert isinstance(exc_info.value.__cause__, exc_type)
+
+    @pytest.mark.asyncio
+    async def test_failure_on_a_later_page_is_mapped(self, httpx_mock) -> None:
+        conn = GenericCmmsConnector(
+            url=BASE_URL, api_key="test-key", pagination=OffsetLimitPagination(page_size=1)
+        )
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE_URL}/assets?limit=1&offset=0", json=[{"id": "P-201"}]
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE_URL}/assets?limit=1&offset=1", status_code=503
+        )
+
+        with pytest.raises(ConnectorError, match=r"^CMMS read assets failed: HTTP 503$"):
+            await conn.read_assets()
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_reports_the_failure_as_an_error_entry(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        """MCP tools that handle ConnectorError now catch REST failures too."""
+        from unittest.mock import MagicMock
+
+        from machina.mcp.tools import machina_list_assets
+        from machina.runtime import MachinaRuntime
+
+        await _connect_with_health(httpx_mock, rest_connector)
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets", status_code=500)
+        runtime = MachinaRuntime(connectors={"cmms": rest_connector}, primary_cmms_name="cmms")
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {"runtime": runtime}
+
+        assert await machina_list_assets(ctx) == [{"error": "CMMS read assets failed: HTTP 500"}]
+
+
+# The REST writes; close and cancel go through update_work_order.
+_WRITES = [
+    pytest.param(lambda c: c.create_work_order(_WORK_ORDER), id="create_work_order"),
+    pytest.param(
+        lambda c: c.update_work_order("WO-1", description="Re-checked"), id="update_work_order"
+    ),
+    pytest.param(lambda c: c.close_work_order("WO-1"), id="close_work_order"),
+    pytest.param(lambda c: c.cancel_work_order("WO-1"), id="cancel_work_order"),
+]
+
+
+class TestRestSandbox:
+    """In sandbox mode a REST write is refused before any request is sent."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call", _WRITES)
+    async def test_write_sends_no_request(
+        self,
+        httpx_mock,
+        rest_connector_with_endpoints: GenericCmmsConnector,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+
+        set_sandbox_mode(True)
+        try:
+            with pytest.raises(SandboxViolationError):
+                await call(conn)
+        finally:
+            set_sandbox_mode(False)
+
+        # Only the health check went out.
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET"]

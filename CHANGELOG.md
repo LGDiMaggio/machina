@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`GenericCmmsConnector` REST mode raises `ConnectorError` subclasses instead of httpx exceptions.** Every REST call (reads under any pagination strategy, creates, updates and the health check in `connect()`) maps HTTP 401/403 to `ConnectorAuthError`, any other error status to `ConnectorError`, a timeout to `ConnectorTimeoutError`, any other transport failure to `ConnectorError` and a malformed URL to `ConnectorConfigError`, with the httpx exception chained as `__cause__`. Code that caught `httpx.HTTPStatusError` or other httpx exceptions from the connector must catch `ConnectorError` instead. Messages name the operation and the status or failure type (`CMMS create work order failed: HTTP 422`), so error text that reaches the agent or an MCP client no longer carries the CMMS URL. A 404 on a single-record read still returns `None`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
