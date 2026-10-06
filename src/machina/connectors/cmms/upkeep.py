@@ -326,7 +326,7 @@ class UpKeepConnector:
 
     @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
-        """Transition a work order to CANCELLED (maps to 'on hold' in UpKeep)."""
+        """Transition a work order to CANCELLED (maps to 'onHold' in UpKeep)."""
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_spare_parts(
