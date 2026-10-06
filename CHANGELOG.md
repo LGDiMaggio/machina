@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Workflow connector steps name a `Capability`.** In a `<category>.<capability>` action, the part after the dot must be a `Capability` value. Any other name fails the step with a `WorkflowError` naming the step and the unknown capability, under the step's error policy; a connector that declares such a name in the deprecated `list[str]` format is no longer reached. In sandbox mode a write step still returns its placeholder before the name is checked.
+- **Workflow steps call the method that backs their capability**, as listed in `CAPABILITY_TO_METHOD`: `iot.publish_message` calls `publish` and `calendar.read_calendar_events` calls `read_events`, where they used to fail with "connector has no method". The CMMS capabilities are served by methods of the same name, so their steps are unchanged.
+
+### Fixed
+
+- **Workflow runs no longer emit `DeprecationWarning`.** Connector and `channels.send_message` steps looked connectors up with raw strings, the form whose removal is scheduled for v0.5; they now pass `Capability` members.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

@@ -110,7 +110,9 @@ The engine routes each step's `action`:
 - `failure_analyzer.*`, `work_order_factory.*`, `maintenance_scheduler.*`,
   `domain.*` — a domain-service method;
 - `<category>.<capability>` (for example `cmms.read_spare_parts`) — the method
-  of the first connector that declares that capability.
+  that backs that capability (`iot.publish_message` calls `publish`) on the
+  first connector that declares it. A name that is not a `Capability` value
+  fails the step.
 
 In sandbox mode write steps return a placeholder instead of executing, LLM
 steps are not called, and messages are not sent. A step is a write when it

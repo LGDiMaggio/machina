@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from typing import Any, ClassVar
 
 import pytest
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.capabilities import Capability
 from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import (
@@ -104,7 +106,7 @@ class _FakeReadConnector:
 class _FakeErrorConnector:
     """Connector that always raises."""
 
-    capabilities: ClassVar[list[str]] = ["flaky_operation"]
+    capabilities: ClassVar[list[str]] = ["read_maintenance_history"]
 
     async def connect(self) -> None:
         pass
@@ -115,7 +117,7 @@ class _FakeErrorConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def flaky_operation(self, **kwargs: Any) -> None:
+    async def read_maintenance_history(self, **kwargs: Any) -> None:
         raise RuntimeError("Connection reset")
 
 
@@ -335,6 +337,113 @@ class TestNotificationDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Tests — capability coercion
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityCoercion:
+    """Action suffixes become ``Capability`` members before the registry lookup."""
+
+    @pytest.mark.asyncio
+    async def test_connector_step_emits_no_deprecation_warning(self, tracer: ActionTracer) -> None:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _FakeReadConnector())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="NoWarn", steps=[Step("read_wos", action="cmms.read_work_orders")])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = await engine.execute(wf)
+        assert result.step_results[0].error is None
+        assert result.step_results[0].output[0]["id"] == "WO-001"
+
+    @pytest.mark.asyncio
+    async def test_notification_step_emits_no_deprecation_warning(
+        self, tracer: ActionTracer
+    ) -> None:
+        comms = _FakeCommsConnector()
+        registry = ConnectorRegistry()
+        registry.register("comms", comms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="NoWarnNotify",
+            steps=[Step("notify", action="channels.send_message", template="Alert")],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = await engine.execute(wf)
+        assert result.step_results[0].error is None
+        assert result.step_results[0].output["sent"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_capability_fails_the_step_with_a_clear_error(
+        self, tracer: ActionTracer
+    ) -> None:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _FakeReadConnector())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="Unknown",
+            steps=[
+                Step("lookup", action="cmms.read_work_order_typo", on_error=ErrorPolicy.STOP),
+                Step("after", action=""),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.success is False
+        assert len(result.step_results) == 1  # STOP policy still applies
+        error = result.step_results[0].error or ""
+        assert error.startswith("WorkflowError: Step 'lookup'")
+        assert "unknown capability 'read_work_order_typo'" in error
+
+    @pytest.mark.asyncio
+    async def test_action_calls_the_method_backing_the_capability(
+        self, tracer: ActionTracer
+    ) -> None:
+        # Actions name capabilities; OPC-UA serves READ_NODE_VALUE with read_value.
+        class _FakeOpcUaConnector:
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_NODE_VALUE})
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def health_check(self) -> bool:
+                return True
+
+            async def read_value(self, node_id: str) -> float:
+                return 71.5 if node_id == "ns=2;s=Temp" else 0.0
+
+        registry = ConnectorRegistry()
+        registry.register("opcua", _FakeOpcUaConnector())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="ReadNode",
+            steps=[
+                Step("temp", action="iot.read_node_value", inputs={"node_id": "ns=2;s=Temp"}),
+            ],
+        )
+        result = await engine.execute(wf)
+        assert result.step_results[0].error is None
+        assert result.step_results[0].output == 71.5
+
+    @pytest.mark.asyncio
+    async def test_sandbox_write_is_intercepted_before_the_capability_check(
+        self, tracer: ActionTracer
+    ) -> None:
+        # No connector capability exists for purchase orders, yet a sandbox run
+        # still returns the write's placeholder (examples/reference/custom_workflows).
+        engine = WorkflowEngine(tracer=tracer, sandbox=True)
+        wf = Workflow(
+            name="SandboxPO",
+            steps=[Step("place_order", action="erp.create_purchase_order", is_write=True)],
+        )
+        result = await engine.execute(wf)
+        assert result.step_results[0].output["__sandbox__"] is True
+
+
+# ---------------------------------------------------------------------------
 # Tests — template variable resolution
 # ---------------------------------------------------------------------------
 
@@ -389,7 +498,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="StopTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.STOP),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.STOP),
                 Step("after", action=""),  # should NOT execute
             ],
         )
@@ -407,7 +516,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="SkipTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.SKIP),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.SKIP),
                 Step("after", action=""),
             ],
         )
@@ -425,7 +534,7 @@ class TestErrorPolicies:
         wf = Workflow(
             name="NotifyTest",
             steps=[
-                Step("fail", action="flaky.flaky_operation", on_error=ErrorPolicy.NOTIFY),
+                Step("fail", action="flaky.read_maintenance_history", on_error=ErrorPolicy.NOTIFY),
                 Step("after", action=""),
             ],
         )
@@ -441,7 +550,7 @@ class TestErrorPolicies:
         call_count = 0
 
         class _FlakeThenOk:
-            capabilities: ClassVar[list[str]] = ["flaky_then_ok"]
+            capabilities: ClassVar[list[str]] = ["read_spare_parts"]
 
             async def connect(self) -> None:
                 pass
@@ -452,7 +561,7 @@ class TestErrorPolicies:
             async def health_check(self) -> bool:
                 return True
 
-            async def flaky_then_ok(self, **kwargs: Any) -> str:
+            async def read_spare_parts(self, **kwargs: Any) -> str:
                 nonlocal call_count
                 call_count += 1
                 if call_count < 3:
@@ -467,7 +576,7 @@ class TestErrorPolicies:
             steps=[
                 Step(
                     "flaky",
-                    action="svc.flaky_then_ok",
+                    action="svc.read_spare_parts",
                     on_error=ErrorPolicy.RETRY,
                     retries=3,
                 ),
@@ -488,7 +597,7 @@ class TestErrorPolicies:
             steps=[
                 Step(
                     "fail",
-                    action="flaky.flaky_operation",
+                    action="flaky.read_maintenance_history",
                     on_error=ErrorPolicy.RETRY,
                     retries=2,
                 ),
@@ -905,7 +1014,8 @@ class TestSandboxMode:
             async def health_check(self) -> bool:
                 return True
 
-            async def publish_message(self, **kwargs: Any) -> None:
+            # The method that backs PUBLISH_MESSAGE, as on MqttConnector.
+            async def publish(self, **kwargs: Any) -> None:
                 self.publish_count += 1
 
         mqtt = _FakeMqttConnector()
