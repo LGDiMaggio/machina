@@ -528,6 +528,143 @@ class TestReadMaintenanceHistory:
         assert len(history) == 1
         assert history[0].id == "wo-h1"
 
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_pages_keep_the_filter(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A full page triggers the next offset with asset + status kept."""
+        await _connect(httpx_mock, connector)
+        page1 = [{"id": f"wo{i}", "status": "complete", "assetId": "a1"} for i in range(100)]
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=a1&status=complete",
+            json={"results": page1},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=100&asset=a1&status=complete",
+            json={"results": [{"id": "wo100", "status": "complete", "assetId": "a1"}]},
+        )
+        history = await connector.read_maintenance_history("a1")
+        assert len(history) == 101
+        assert history[-1].id == "wo100"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="invalid"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="GET /api/v2/work-orders failed"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: UpKeepConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.parametrize("asset_id", ["", None])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: UpKeepConnector, asset_id
+    ) -> None:
+        """Without an asset the query would drop the filter and return every
+        completed work order in the account."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="requires an asset_id"):
+            await connector.read_maintenance_history(asset_id)
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+
+# ---------------------------------------------------------------------------
+# IDs placed in the URL path
+# ---------------------------------------------------------------------------
+
+
+class TestIdPathSegments:
+    """IDs reach the connector from LLM / MCP-client input and go into the URL
+    path. Each must stay one path segment: ``/``, ``?`` and ``#`` are
+    percent-encoded, and the dot segments HTTP clients normalize away are
+    refused, so an ID cannot reach another endpoint or append a query."""
+
+    @pytest.mark.asyncio
+    async def test_get_asset_id_cannot_climb_to_another_endpoint(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=404)
+        assert await connector.get_asset("../users") is None
+        assert httpx_mock.get_requests()[-1].url.raw_path == b"/api/v2/assets/..%2Fusers"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_id_cannot_append_a_query(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=404)
+        assert await connector.get_work_order("wo1?limit=1#x") is None
+        assert (
+            httpx_mock.get_requests()[-1].url.raw_path
+            == b"/api/v2/work-orders/wo1%3Flimit%3D1%23x"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_id_stays_inside_its_path_segment(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        hostile = "../assets/a1"
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="PATCH", json={"result": {"id": hostile}})
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/..%2Fassets%2Fa1",
+            json={"result": {"id": hostile, "status": "open"}},
+        )
+        await connector.update_work_order(hostile, description="x")
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        assert patch_req.url.raw_path == b"/api/v2/work-orders/..%2Fassets%2Fa1"
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_is_formatted_as_before(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A workflow event can carry an ID as a number; it is sent as its digits."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=404)
+        assert await connector.get_asset(123) is None
+        assert httpx_mock.get_requests()[-1].url.raw_path == b"/api/v2/assets/123"
+
+    @pytest.mark.parametrize("record_id", ["", ".", ".."])
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda c, i: c.get_asset(i), id="get_asset"),
+            pytest.param(lambda c, i: c.get_work_order(i), id="get_work_order"),
+            pytest.param(
+                lambda c, i: c.update_work_order(i, description="x"), id="update_work_order"
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_dot_segment_or_empty_id_is_refused(
+        self, httpx_mock, connector: UpKeepConnector, call, record_id: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await call(connector, record_id)
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle state transitions
