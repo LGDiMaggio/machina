@@ -498,6 +498,53 @@ class TestGetAsset:
 
 
 # ---------------------------------------------------------------------------
+# Caller-supplied IDs stay one URL path segment
+# ---------------------------------------------------------------------------
+
+
+class TestIdsStayOnePathSegment:
+    """IDs reach these paths from LLM and MCP tool input.
+
+    Each response is mocked only at the encoded URL, so an ID that leaves its
+    segment (the HTTP client normalizes ``..`` away) finds no match.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/assets/..%2Fwork-orders%2Fwo1", status_code=404
+        )
+        assert await connector.get_asset("../work-orders/wo1") is None
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1%3Fstatus%3Dopen%23x", status_code=404
+        )
+        assert await connector.get_work_order("wo1?status=open#x") is None
+
+    @pytest.mark.asyncio
+    async def test_update_work_order(self, httpx_mock, connector: UpKeepConnector) -> None:
+        """Interpolated as-is, this ID would PATCH ``/api/v2/assets/a1``."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/..%2Fassets%2Fa1", status_code=404
+        )
+        with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order("../assets/a1", description="x")
+
+    @pytest.mark.asyncio
+    async def test_dot_segment_id_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await connector.update_work_order("..", description="x")
+
+
+# ---------------------------------------------------------------------------
 # Read maintenance history
 # ---------------------------------------------------------------------------
 

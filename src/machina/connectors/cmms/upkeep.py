@@ -23,6 +23,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._url import path_segment
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.retry import request_with_retry
@@ -163,7 +164,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "GET",
-                f"{self.url}/api/v2/assets/{asset_id}",
+                f"{self.url}/api/v2/assets/{path_segment(asset_id)}",
                 headers=self._headers(),
             )
         if resp.status_code == 404:
@@ -210,7 +211,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "GET",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                f"{self.url}/api/v2/work-orders/{path_segment(work_order_id)}",
                 headers=self._headers(),
             )
         if resp.status_code == 404:
@@ -300,7 +301,7 @@ class UpKeepConnector:
             resp = await request_with_retry(
                 client,
                 "PATCH",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
+                f"{self.url}/api/v2/work-orders/{path_segment(work_order_id)}",
                 headers=self._headers(),
                 json=payload,
             )
