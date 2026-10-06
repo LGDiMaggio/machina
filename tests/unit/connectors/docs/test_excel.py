@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import csv
 import shutil
 import threading
 from datetime import date, datetime
@@ -1516,6 +1517,112 @@ class TestWritesTakeTurns:
             await conn.read_work_orders()
         workbook.release.set()
         assert (await update).description == "changed"
+
+
+_ODL_HEADER = ("ID", "Codice Asset", "Stato", "Data creazione")
+_ODL_WO_1 = ("WO-1", "P-201", "created", "2026-10-01T08:00:00")
+
+
+async def _connector_over(path: Path, *rows: tuple[Any, ...]) -> ExcelCsvConnector:
+    """A connector connected to a ``.csv`` or ``.xlsx`` work-order file of ``rows``."""
+    if path.suffix == ".csv":
+        with path.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([_ODL_HEADER, *rows])
+    else:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.active.title = "OdL"
+        for row in (_ODL_HEADER, *rows):
+            wb.active.append(row)
+        wb.save(str(path))
+        wb.close()
+    conn = ExcelCsvConnector(
+        work_orders={
+            "path": str(path),
+            "sheet": "OdL",
+            "write_mode": "append",
+            "columns": [
+                {"column": "ID", "field": "id", "required": True},
+                {"column": "Codice Asset", "field": "asset_id", "required": True},
+                {"column": "Stato", "field": "status"},
+                {
+                    "column": "Data creazione",
+                    "field": "created_at",
+                    "required": True,
+                    "coerce": "datetime_parse",
+                },
+            ],
+        }
+    )
+    await conn.connect()
+    return conn
+
+
+def _ids_in_file(path: Path) -> list[Any]:
+    """The ID cells of a work-order file's rows, read without the connector."""
+    if path.suffix == ".csv":
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            return [row[0] for row in csv.reader(f)][1:]
+    return [row[0] for row in _sheet_rows(path)]
+
+
+class TestCreateSeesUnreadableRows:
+    """Reads skip a row that holds a work-order ID but is not a valid work order,
+    so the cached work orders miss that ID. Create also checks the ID cell of
+    every row, and refuses rather than add a second row with the ID."""
+
+    @pytest.mark.parametrize("suffix", [".csv", ".xlsx"])
+    @pytest.mark.parametrize(
+        ("row_7", "why"),
+        [
+            (
+                ("WO-7", "P-201", "aperto", "2026-10-01T08:00:00"),
+                "column 'Stato': Input should be 'created'",
+            ),
+            (
+                ("WO-7", None, "created", "2026-10-01T08:00:00"),
+                "required column 'Codice Asset' is empty",
+            ),
+            (
+                ("WO-7", "P-201", "created", "ieri"),
+                "column 'Data creazione': Invalid isoformat string: 'ieri'",
+            ),
+        ],
+        ids=["unknown-status", "empty-required-cell", "unreadable-required-cell"],
+    )
+    @pytest.mark.asyncio
+    async def test_create_refuses_an_id_on_a_row_typed_by_hand_that_is_not_valid(
+        self, tmp_path: Path, suffix: str, row_7: tuple[Any, ...], why: str
+    ) -> None:
+        path = tmp_path / f"odl{suffix}"
+        conn = await _connector_over(path, _ODL_WO_1, row_7)
+
+        with pytest.raises(ConnectorError) as refused:
+            await conn.create_work_order(
+                WorkOrder(id="WO-7", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            )
+
+        assert f"row 3 of {path.name}" in str(refused.value)
+        assert why in str(refused.value)
+        assert _ids_in_file(path) == ["WO-1", "WO-7"]  # no second WO-7 row
+        assert [wo.id for wo in await conn.read_work_orders()] == ["WO-1"]
+
+    @pytest.mark.asyncio
+    async def test_an_id_on_a_valid_row_is_found_even_if_an_invalid_row_repeats_it(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "odl.csv"
+        conn = await _connector_over(
+            path, _ODL_WO_1, ("WO-1", "P-201", "aperto", "2026-10-01T08:00:00")
+        )
+
+        again = await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+        )
+
+        assert again.asset_id == "P-201"  # the stored record, not the retry
+        assert _ids_in_file(path) == ["WO-1", "WO-1"]  # the two rows typed by hand
 
 
 class TestRefresh:

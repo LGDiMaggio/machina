@@ -129,6 +129,9 @@ since then count. A work-order row whose values do not make a valid work order
   the file's own column order; columns the schema does not map stay empty. It
   is idempotent on the work-order ID: creating a work order whose ID is already
   in the sheet returns the existing record instead of adding a duplicate row.
+  If that ID is only on a row skipped on read (an empty or unreadable required
+  cell, an invalid value), create raises `ConnectorError` naming the row and
+  the problem, and writes nothing: fix or remove that row first.
   A missing work-order file or sheet is created on the first write, with the
   schema's header row.
 - **Update** applies only legal status transitions (an illegal one, or an

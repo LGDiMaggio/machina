@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import contextvars
 import csv
 import re
@@ -285,6 +286,59 @@ def _validate_headers(headers: list[str], schema: SheetSchema, source: str) -> N
         )
 
 
+class _UnreadableRowError(Exception):
+    """A row that is skipped on read; the message says why."""
+
+
+def _row_to_dict(
+    raw: dict[str, Any], schema: SheetSchema, source: str, row_num: int
+) -> dict[str, Any]:
+    """Coerce one raw spreadsheet row to a field dict.
+
+    Raises:
+        _UnreadableRowError: If a required cell is empty or cannot be coerced
+            (logged as ``missing_required_field`` or ``broken_cell``).
+    """
+    record: dict[str, Any] = {}
+    for mapping in schema.columns:
+        cell_value = raw.get(mapping.column)
+        try:
+            coerced = _coerce_cell(cell_value, mapping)
+        except (ValueError, TypeError) as exc:
+            if mapping.required:
+                logger.warning(
+                    "broken_cell",
+                    connector="ExcelCsvConnector",
+                    source=source,
+                    row_num=row_num,
+                    column=mapping.column,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise _UnreadableRowError(f"column '{mapping.column}': {exc}") from exc
+            logger.debug(
+                "optional_cell_coercion_failed",
+                connector="ExcelCsvConnector",
+                source=source,
+                row_num=row_num,
+                column=mapping.column,
+                error=str(exc),
+            )
+            coerced = mapping.default
+        if coerced is None and mapping.required:
+            logger.warning(
+                "missing_required_field",
+                connector="ExcelCsvConnector",
+                source=source,
+                row_num=row_num,
+                column=mapping.column,
+                field=mapping.field,
+            )
+            raise _UnreadableRowError(f"required column '{mapping.column}' is empty")
+        record[mapping.field] = coerced
+    return record
+
+
 def _rows_to_dicts(
     raw_rows: list[dict[str, Any]],
     schema: SheetSchema,
@@ -293,48 +347,8 @@ def _rows_to_dicts(
     """Convert raw spreadsheet rows to coerced field dicts, skipping broken rows."""
     results: list[dict[str, Any]] = []
     for row_num, raw in enumerate(raw_rows, start=2):  # row 1 is header
-        record: dict[str, Any] = {}
-        broken = False
-        for mapping in schema.columns:
-            cell_value = raw.get(mapping.column)
-            try:
-                coerced = _coerce_cell(cell_value, mapping)
-            except (ValueError, TypeError) as exc:
-                if mapping.required:
-                    logger.warning(
-                        "broken_cell",
-                        connector="ExcelCsvConnector",
-                        source=source,
-                        row_num=row_num,
-                        column=mapping.column,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                    )
-                    broken = True
-                    break
-                logger.debug(
-                    "optional_cell_coercion_failed",
-                    connector="ExcelCsvConnector",
-                    source=source,
-                    row_num=row_num,
-                    column=mapping.column,
-                    error=str(exc),
-                )
-                coerced = mapping.default
-            if coerced is None and mapping.required:
-                logger.warning(
-                    "missing_required_field",
-                    connector="ExcelCsvConnector",
-                    source=source,
-                    row_num=row_num,
-                    column=mapping.column,
-                    field=mapping.field,
-                )
-                broken = True
-                break
-            record[mapping.field] = coerced
-        if not broken:
-            results.append(record)
+        with contextlib.suppress(_UnreadableRowError):
+            results.append(_row_to_dict(raw, schema, source, row_num))
     return results
 
 
@@ -899,10 +913,14 @@ class ExcelCsvConnector:
         the file thread: the re-read, the ID check, the append, the cache
         update and the log line are one step that no other write can split
         and that cancelling the caller does not cut short.
+
+        Raises:
+            ConnectorError: If the ID is only on rows that are skipped on read
+                because they are not valid work orders.
         """
         path = Path(schema.path)
         # The file, not the connect-time cache, is the source of truth.
-        self._reload_work_orders_for_write(path)
+        unreadable = self._reload_work_orders_for_write(path)
         cache = self._wo_cache  # the list just loaded, even if refresh() swaps it
         existing = next((wo for wo in cache if wo.id == work_order.id), None)
         if existing is not None:
@@ -914,6 +932,13 @@ class ExcelCsvConnector:
                 asset_id=work_order.asset_id,
             )
             return existing
+        if work_order.id in unreadable:
+            row_num, reason = unreadable[work_order.id]
+            raise ConnectorError(
+                f"Cannot create work order '{work_order.id}': row {row_num} of {path.name} "
+                f"already holds that ID but cannot be read as a work order ({reason}). "
+                "Fix or remove that row first."
+            )
         try:
             self._write_row(path, schema, row_data)
         except OSError as exc:
@@ -1052,6 +1077,10 @@ class ExcelCsvConnector:
 
     def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
         """Shared exists-check → read → validate → parse pipeline for one sheet."""
+        return _rows_to_dicts(self._read_sheet(schema, label), schema, str(Path(schema.path)))
+
+    def _read_sheet(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
+        """Check one sheet's schema and file, read it, and return its raw data rows."""
         for col in schema.columns:
             if col.coerce and col.coerce not in COERCER_REGISTRY:
                 raise ConnectorConfigError(
@@ -1064,7 +1093,7 @@ class ExcelCsvConnector:
             raise ConnectorConfigError(f"{label} file not found: {path}")
         headers, raw_rows = self._read_file(path, schema)
         _validate_headers(headers, schema, str(path))
-        return _rows_to_dicts(raw_rows, schema, str(path))
+        return raw_rows
 
     def _validate_and_load_assets(self) -> None:
         schema = self._config.asset_registry
@@ -1078,28 +1107,53 @@ class ExcelCsvConnector:
         dicts = self._load_sheet_dicts(schema, "Failure modes")
         self._fm_cache = [_dict_to_failure_mode(d) for d in dicts]
 
-    def _validate_and_load_work_orders(self) -> None:
+    def _validate_and_load_work_orders(self) -> dict[str, tuple[int, str]]:
+        """Load the work-order sheet into the cache, skipping rows that are not work orders.
+
+        Returns the ID on each skipped row, with the row number and why it was
+        skipped, read from the ID cell as :func:`_update_xlsx_row` matches it:
+        a create must not append a second row for an ID the cache cannot show.
+        """
         schema = self._config.work_orders
         assert schema is not None
-        if not Path(schema.path).exists() and schema.write_mode is not None:
+        path = Path(schema.path)
+        if not path.exists() and schema.write_mode is not None:
             self._wo_cache = []
-            return
-        dicts = self._load_sheet_dicts(schema, "Work order")
+            return {}
+        raw_rows = self._read_sheet(schema, "Work order")
+        columns = {m.field: m.column for m in schema.columns}
         work_orders: list[WorkOrder] = []
-        for d in dicts:
+        unreadable: dict[str, tuple[int, str]] = {}
+        for row_num, raw in enumerate(raw_rows, start=2):  # row 1 is header
             try:
-                work_orders.append(_dict_to_work_order(d))
-            except ValidationError as exc:
-                # A row typed by hand with, e.g., an unknown status must not make
-                # the whole sheet unreadable — nor block every later write.
-                logger.warning(
-                    "invalid_work_order_row_skipped",
-                    connector="ExcelCsvConnector",
-                    source=Path(schema.path).name,
-                    work_order_id=str(d.get("id", "")),
-                    fields=sorted({str(err["loc"][0]) for err in exc.errors() if err["loc"]}),
-                )
+                d = _row_to_dict(raw, schema, str(path), row_num)
+            except _UnreadableRowError as exc:
+                reason = str(exc)
+            else:
+                try:
+                    work_orders.append(_dict_to_work_order(d))
+                    continue
+                except ValidationError as exc:
+                    # A row typed by hand with, e.g., an unknown status must not make
+                    # the whole sheet unreadable — nor block every later write.
+                    logger.warning(
+                        "invalid_work_order_row_skipped",
+                        connector="ExcelCsvConnector",
+                        source=path.name,
+                        work_order_id=str(d.get("id", "")),
+                        fields=sorted({str(err["loc"][0]) for err in exc.errors() if err["loc"]}),
+                    )
+                    reason = "; ".join(
+                        f"column '{columns.get(str(err['loc'][0]), err['loc'][0])}': {err['msg']}"
+                        for err in exc.errors()
+                        if err["loc"]
+                    )
+            cell = raw.get(columns["id"]) if "id" in columns else None
+            row_id = "" if cell is None else _strip_formula_guard(str(cell).strip())
+            if row_id:
+                unreadable.setdefault(row_id, (row_num, reason))
         self._wo_cache = work_orders
+        return unreadable
 
     async def _run_on_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
         """Run ``func(*args)`` on the connector's file thread, after earlier calls.
@@ -1115,15 +1169,17 @@ class ExcelCsvConnector:
         context = contextvars.copy_context()  # as asyncio.to_thread does
         return await loop.run_in_executor(self._file_thread, context.run, func, *args)
 
-    def _reload_work_orders_for_write(self, path: Path) -> None:
+    def _reload_work_orders_for_write(self, path: Path) -> dict[str, tuple[int, str]]:
         """Re-read the work-order sheet at the start of a write, on the file thread.
+
+        Returns the IDs on skipped rows (see :meth:`_validate_and_load_work_orders`).
 
         Raises:
             ConnectorLockedError: If the file is open in another program.
             ConnectorError: If the file cannot be read (unreadable, corrupt).
         """
         try:
-            self._validate_and_load_work_orders()
+            return self._validate_and_load_work_orders()
         except ConnectorError:
             raise
         except OSError as exc:
