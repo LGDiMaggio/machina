@@ -6,6 +6,8 @@ and basic lifecycle without network calls.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from machina.connectors.cmms.auth import BasicAuth
@@ -48,7 +50,7 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorError, ConnectorUnsupportedFilterError
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -363,7 +365,13 @@ class TestRequireHttpx:
 
 
 class TestSparePartsBomGuard:
-    """U8 — asset-scoped spare-part reads never trigger an unbounded BOM fetch."""
+    """U8 — asset-scoped spare-part reads never trigger an unbounded BOM fetch.
+
+    Without ``bom_equipment_field`` (the default) an asset filter cannot be
+    applied, so it is refused before any request: answering ``[]`` would read
+    as "this asset has no spare parts", and dropping the filter would pass a
+    bare sku match off as compatible with the asset.
+    """
 
     def _conn(self, *, bom_equipment_field: str = "") -> SapPmConnector:
         conn = SapPmConnector(
@@ -372,42 +380,52 @@ class TestSparePartsBomGuard:
             bom_equipment_field=bom_equipment_field,
         )
         conn._connected = True
+        conn._odata_get = AsyncMock(return_value=[])
         return conn
 
-    @pytest.mark.asyncio
-    async def test_unfilterable_asset_read_returns_empty_without_fetching(self) -> None:
-        from unittest.mock import AsyncMock
+    _REFUSAL = "cannot filter spare parts by asset: bom_equipment_field is not set"
 
+    @pytest.mark.asyncio
+    async def test_unfilterable_asset_filter_raises_before_any_request(self) -> None:
         conn = self._conn(bom_equipment_field="")  # default config
-        conn._odata_get = AsyncMock(return_value=[])
-        parts = await conn.read_spare_parts(asset_id="P-201")
-        assert parts == []
+        with pytest.raises(ConnectorUnsupportedFilterError, match=self._REFUSAL):
+            await conn.read_spare_parts(asset_id="P-201")
         conn._odata_get.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_configured_equipment_field_filters_server_side(self) -> None:
-        from unittest.mock import AsyncMock
+    async def test_unfilterable_asset_filter_raises_even_with_a_sku(self) -> None:
+        """A sku match says nothing about compatibility with the asset."""
+        conn = self._conn(bom_equipment_field="")
+        with pytest.raises(ConnectorUnsupportedFilterError, match=self._REFUSAL):
+            await conn.read_spare_parts(asset_id="P-201", sku="SKF-6310")
+        conn._odata_get.assert_not_awaited()
 
-        conn = self._conn(bom_equipment_field="BillOfMaterialEquipment")
-        conn._odata_get = AsyncMock(return_value=[])
-        await conn.read_spare_parts(asset_id="P-201")
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_no_filter(self) -> None:
+        conn = self._conn(bom_equipment_field="")
+        await conn.read_spare_parts(asset_id="", sku="SKF-6310")
         conn._odata_get.assert_awaited_once()
-        assert (
-            "BillOfMaterialEquipment eq 'P-201'"
-            in conn._odata_get.await_args.kwargs["odata_filter"]
+        assert conn._odata_get.await_args.kwargs["odata_filter"] == (
+            "BillOfMaterialComponent eq 'SKF-6310'"
         )
 
     @pytest.mark.asyncio
-    async def test_sku_narrows_even_without_equipment_field(self) -> None:
-        from unittest.mock import AsyncMock
+    async def test_configured_equipment_field_filters_server_side(self) -> None:
+        conn = self._conn(bom_equipment_field="BillOfMaterialEquipment")
+        await conn.read_spare_parts(asset_id="P-201")
+        conn._odata_get.assert_awaited_once()
+        assert conn._odata_get.await_args.kwargs["odata_filter"] == (
+            "BillOfMaterialEquipment eq 'P-201'"
+        )
 
-        conn = self._conn(bom_equipment_field="")
-        conn._odata_get = AsyncMock(return_value=[])
+    @pytest.mark.asyncio
+    async def test_configured_equipment_field_combines_with_sku(self) -> None:
+        conn = self._conn(bom_equipment_field="BillOfMaterialEquipment")
         await conn.read_spare_parts(asset_id="P-201", sku="SKF-6310")
         conn._odata_get.assert_awaited_once()
-        odata_filter = conn._odata_get.await_args.kwargs["odata_filter"]
-        assert "SKF-6310" in odata_filter
-        assert "P-201" not in odata_filter  # the unfilterable asset clause is dropped
+        assert conn._odata_get.await_args.kwargs["odata_filter"] == (
+            "BillOfMaterialEquipment eq 'P-201' and BillOfMaterialComponent eq 'SKF-6310'"
+        )
 
 
 class TestOdataRowCap:

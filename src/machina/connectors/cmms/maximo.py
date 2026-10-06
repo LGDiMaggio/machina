@@ -35,7 +35,11 @@ from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset, AssetType
@@ -360,7 +364,8 @@ class MaximoConnector:
 
         Args:
             asset_id: Not supported (see Note): a non-empty value raises
-                :class:`ConnectorError` rather than being dropped.
+                :class:`ConnectorUnsupportedFilterError` rather than being
+                dropped.
             sku: Optional Maximo ``itemnum`` to narrow the lookup via an
                 OSLC ``where`` clause.
 
@@ -374,7 +379,7 @@ class MaximoConnector:
         """
         self._ensure_connected()
         if asset_id:
-            raise ConnectorError(
+            raise ConnectorUnsupportedFilterError(
                 "The Maximo connector cannot filter spare parts by asset: "
                 "mxinventory does not link items to assets, and the connector "
                 "does not read the asset's spare-parts list. Look the part up "

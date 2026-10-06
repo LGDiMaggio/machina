@@ -48,6 +48,17 @@ class ConnectorDependencyError(ConnectorError):
     """A required Python package (extra) is not installed."""
 
 
+class ConnectorUnsupportedFilterError(ConnectorError):
+    """The connector cannot apply a filter it was given, so it refuses the read.
+
+    Raised before any request, in place of dropping the filter (which would
+    pass the unfiltered result off as the filtered one) or answering ``[]``
+    (which would read as "nothing matches"). Catch it apart from other
+    connector errors when the refusal is an expected outcome rather than a
+    failure, e.g. to retry by a filter the backend does support.
+    """
+
+
 class SandboxViolationError(ConnectorError):
     """A write operation was blocked because sandbox mode is active."""
 
