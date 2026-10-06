@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
+import contextvars
 import csv
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, TypeVarTuple
 
 import structlog
 from pydantic import ValidationError
@@ -28,6 +31,8 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.connectors.docs.excel_schema import (
         ColumnMapping,
         ExcelConnectorConfig,
@@ -44,6 +49,12 @@ from machina.exceptions import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
+_Ts = TypeVarTuple("_Ts")
+
+# How long disconnect() waits for a write still running on the file thread.
+_DISCONNECT_WAIT_SEC = 5.0
 
 
 # ------------------------------------------------------------------
@@ -275,6 +286,59 @@ def _validate_headers(headers: list[str], schema: SheetSchema, source: str) -> N
         )
 
 
+class _UnreadableRowError(Exception):
+    """A row that is skipped on read; the message says why."""
+
+
+def _row_to_dict(
+    raw: dict[str, Any], schema: SheetSchema, source: str, row_num: int
+) -> dict[str, Any]:
+    """Coerce one raw spreadsheet row to a field dict.
+
+    Raises:
+        _UnreadableRowError: If a required cell is empty or cannot be coerced
+            (logged as ``missing_required_field`` or ``broken_cell``).
+    """
+    record: dict[str, Any] = {}
+    for mapping in schema.columns:
+        cell_value = raw.get(mapping.column)
+        try:
+            coerced = _coerce_cell(cell_value, mapping)
+        except (ValueError, TypeError) as exc:
+            if mapping.required:
+                logger.warning(
+                    "broken_cell",
+                    connector="ExcelCsvConnector",
+                    source=source,
+                    row_num=row_num,
+                    column=mapping.column,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise _UnreadableRowError(f"column '{mapping.column}': {exc}") from exc
+            logger.debug(
+                "optional_cell_coercion_failed",
+                connector="ExcelCsvConnector",
+                source=source,
+                row_num=row_num,
+                column=mapping.column,
+                error=str(exc),
+            )
+            coerced = mapping.default
+        if coerced is None and mapping.required:
+            logger.warning(
+                "missing_required_field",
+                connector="ExcelCsvConnector",
+                source=source,
+                row_num=row_num,
+                column=mapping.column,
+                field=mapping.field,
+            )
+            raise _UnreadableRowError(f"required column '{mapping.column}' is empty")
+        record[mapping.field] = coerced
+    return record
+
+
 def _rows_to_dicts(
     raw_rows: list[dict[str, Any]],
     schema: SheetSchema,
@@ -283,48 +347,8 @@ def _rows_to_dicts(
     """Convert raw spreadsheet rows to coerced field dicts, skipping broken rows."""
     results: list[dict[str, Any]] = []
     for row_num, raw in enumerate(raw_rows, start=2):  # row 1 is header
-        record: dict[str, Any] = {}
-        broken = False
-        for mapping in schema.columns:
-            cell_value = raw.get(mapping.column)
-            try:
-                coerced = _coerce_cell(cell_value, mapping)
-            except (ValueError, TypeError) as exc:
-                if mapping.required:
-                    logger.warning(
-                        "broken_cell",
-                        connector="ExcelCsvConnector",
-                        source=source,
-                        row_num=row_num,
-                        column=mapping.column,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                    )
-                    broken = True
-                    break
-                logger.debug(
-                    "optional_cell_coercion_failed",
-                    connector="ExcelCsvConnector",
-                    source=source,
-                    row_num=row_num,
-                    column=mapping.column,
-                    error=str(exc),
-                )
-                coerced = mapping.default
-            if coerced is None and mapping.required:
-                logger.warning(
-                    "missing_required_field",
-                    connector="ExcelCsvConnector",
-                    source=source,
-                    row_num=row_num,
-                    column=mapping.column,
-                    field=mapping.field,
-                )
-                broken = True
-                break
-            record[mapping.field] = coerced
-        if not broken:
-            results.append(record)
+        with contextlib.suppress(_UnreadableRowError):
+            results.append(_row_to_dict(raw, schema, source, row_num))
     return results
 
 
@@ -632,7 +656,10 @@ class ExcelCsvConnector:
         self._asset_cache: list[Asset] = []
         self._wo_cache: list[WorkOrder] = []
         self._fm_cache: list[FailureMode] = []
-        self._write_lock = asyncio.Lock()
+        # Every work-order write runs on this one thread, one at a time (see
+        # _run_on_file_thread): a write whose caller was cancelled still holds
+        # the file until it is done, and the next write waits for it.
+        self._file_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="machina-excel")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -656,11 +683,28 @@ class ExcelCsvConnector:
         )
 
     async def disconnect(self) -> None:
-        """Release caches."""
-        self._asset_cache.clear()
-        self._wo_cache.clear()
-        self._fm_cache.clear()
-        self._connected = False
+        """Wait for a write still running, then release caches.
+
+        A write keeps running when its caller is cancelled. ``disconnect()``
+        waits up to 5 seconds for it, so that once it returns the connector
+        is not writing to its files; past that, it logs
+        ``write_still_running`` and goes on.
+        """
+        try:
+            await asyncio.wait_for(
+                self._run_on_file_thread(lambda: None), timeout=_DISCONNECT_WAIT_SEC
+            )
+        except TimeoutError:
+            logger.warning(
+                "write_still_running",
+                connector="ExcelCsvConnector",
+                operation="disconnect",
+                timeout_sec=_DISCONNECT_WAIT_SEC,
+            )
+        finally:
+            # New lists, not clear(): a write still running holds the old ones.
+            self._asset_cache, self._wo_cache, self._fm_cache = [], [], []
+            self._connected = False
 
     async def health_check(self) -> ConnectorHealth:
         """Check that configured files are accessible."""
@@ -776,6 +820,11 @@ class ExcelCsvConnector:
         to collapse retries. The new row's values go under the matching
         column headers, whatever the column order in the file.
 
+        Writes run one at a time. Cancelling the caller does not stop a write
+        that has started: it still finishes, and the next write waits for it,
+        so a retry after a cancellation finds the row instead of adding it
+        twice.
+
         Raises:
             ConnectorConfigError: If no writable work-orders sheet is configured.
             ConnectorLockedError: If the file is open in another program.
@@ -788,34 +837,9 @@ class ExcelCsvConnector:
             raise ConnectorConfigError("work_orders schema has no write_mode configured")
 
         row_data = self._work_order_to_row(work_order, schema)
-        path = Path(schema.path)
-
-        async with self._write_lock:
-            # The file, not the connect-time cache, is the source of truth.
-            await asyncio.to_thread(self._reload_work_orders_for_write, path)
-            existing = next((wo for wo in self._wo_cache if wo.id == work_order.id), None)
-            if existing is not None:
-                logger.info(
-                    "work_order_create_idempotent_hit",
-                    connector="ExcelCsvConnector",
-                    operation="create_work_order",
-                    work_order_id=work_order.id,
-                    asset_id=work_order.asset_id,
-                )
-                return existing
-            try:
-                await asyncio.to_thread(self._write_row, path, schema, row_data)
-            except OSError as exc:
-                raise _file_write_error(exc, path) from exc
-            self._wo_cache.append(work_order)
-        logger.info(
-            "work_order_created",
-            connector="ExcelCsvConnector",
-            operation="create_work_order",
-            work_order_id=work_order.id,
-            asset_id=work_order.asset_id,
+        return await self._run_on_file_thread(
+            self._append_unless_present, schema, work_order, row_data
         )
-        return work_order
 
     @sandbox_aware
     async def update_work_order(
@@ -842,8 +866,10 @@ class ExcelCsvConnector:
         through a temp file and an atomic replace. A field that is not a
         ``WorkOrder`` field, a change of ``id``, and a change to a field that
         no column is mapped to are refused rather than silently dropped. If
-        the write fails, the cached work order is restored. When no
-        ``write_mode`` is set, the update is kept in cache only.
+        the write fails, the cached work order is left as it was. When no
+        ``write_mode`` is set, the update is kept in cache only. As with
+        :meth:`create_work_order`, a write that has started finishes even if
+        the caller is cancelled, and the next write waits for it.
 
         Raises:
             ConnectorError: If the work order is unknown, the status is not a
@@ -874,39 +900,99 @@ class ExcelCsvConnector:
 
         schema = self._config.work_orders
         persist = schema is not None and schema.write_mode is not None
-        # Serialise the reload, the cache mutation and the file write under
-        # the write lock so concurrent writes cannot interleave.
-        async with self._write_lock:
-            if persist:
-                assert schema is not None
-                await asyncio.to_thread(self._reload_work_orders_for_write, Path(schema.path))
-            idx = next((i for i, wo in enumerate(self._wo_cache) if wo.id == work_order_id), None)
-            if idx is None:
-                raise ConnectorError(f"Work order '{work_order_id}' not found")
-            wo = self._wo_cache[idx]
-            before = wo.model_copy(deep=True)
-            changed: set[str] = set()
+        return await self._run_on_file_thread(
+            self._apply_update, work_order_id, new_status, changes, schema if persist else None
+        )
+
+    def _append_unless_present(
+        self, schema: SheetSchema, work_order: WorkOrder, row_data: dict[str, Any]
+    ) -> WorkOrder:
+        """Append a work order's row unless the sheet already holds its ID.
+
+        Returns the stored record when it does, else ``work_order``. Runs on
+        the file thread: the re-read, the ID check, the append, the cache
+        update and the log line are one step that no other write can split
+        and that cancelling the caller does not cut short.
+
+        Raises:
+            ConnectorError: If the ID is only on rows that are skipped on read
+                because they are not valid work orders.
+        """
+        path = Path(schema.path)
+        # The file, not the connect-time cache, is the source of truth.
+        unreadable = self._reload_work_orders_for_write(path)
+        cache = self._wo_cache  # the list just loaded, even if refresh() swaps it
+        existing = next((wo for wo in cache if wo.id == work_order.id), None)
+        if existing is not None:
+            logger.info(
+                "work_order_create_idempotent_hit",
+                connector="ExcelCsvConnector",
+                operation="create_work_order",
+                work_order_id=work_order.id,
+                asset_id=work_order.asset_id,
+            )
+            return existing
+        if work_order.id in unreadable:
+            row_num, reason = unreadable[work_order.id]
+            raise ConnectorError(
+                f"Cannot create work order '{work_order.id}': row {row_num} of {path.name} "
+                f"already holds that ID but cannot be read as a work order ({reason}). "
+                "Fix or remove that row first."
+            )
+        try:
+            self._write_row(path, schema, row_data)
+        except OSError as exc:
+            raise _file_write_error(exc, path) from exc
+        cache.append(work_order)
+        logger.info(
+            "work_order_created",
+            connector="ExcelCsvConnector",
+            operation="create_work_order",
+            work_order_id=work_order.id,
+            asset_id=work_order.asset_id,
+        )
+        return work_order
+
+    def _apply_update(
+        self,
+        work_order_id: str,
+        new_status: WorkOrderStatus | None,
+        changes: dict[str, Any],
+        schema: SheetSchema | None,
+    ) -> WorkOrder:
+        """Update a copy of the cached work order, write it, then cache it.
+
+        ``schema`` is the sheet whose row receives the changed cells, or
+        ``None`` to keep the update in cache only. Runs on the file thread:
+        the re-read, the change, the row rewrite, the cache update and the
+        log lines are one step that no other write can split and that
+        cancelling the caller does not cut short. If any part fails, the
+        cached work order is left as it was.
+        """
+        if schema is not None:
+            self._reload_work_orders_for_write(Path(schema.path))
+        cache = self._wo_cache  # the list just loaded, even if refresh() swaps it
+        idx = next((i for i, wo in enumerate(cache) if wo.id == work_order_id), None)
+        if idx is None:
+            raise ConnectorError(f"Work order '{work_order_id}' not found")
+        wo = cache[idx].model_copy(deep=True)
+        changed: set[str] = set()
+        if new_status is not None and new_status != wo.status:
             try:
-                if new_status is not None and new_status != wo.status:
-                    try:
-                        wo.transition_to(new_status)
-                    except ValueError as exc:
-                        raise ConnectorError(str(exc)) from exc
-                    changed |= {"status", "updated_at"}
-                for key, value in changes.items():
-                    setattr(wo, key, value)
-                    changed.add(key)
-                if persist and changed:
-                    assert schema is not None
-                    path = Path(schema.path)
-                    try:
-                        await asyncio.to_thread(self._update_row_in_file, schema, wo, changed)
-                    except OSError as exc:
-                        raise _file_write_error(exc, path) from exc
-            except Exception:
-                self._wo_cache[idx] = before
-                raise
-        if not persist:
+                wo.transition_to(new_status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from exc
+            changed |= {"status", "updated_at"}
+        for key, value in changes.items():
+            setattr(wo, key, value)
+            changed.add(key)
+        if schema is not None and changed:
+            try:
+                self._update_row_in_file(schema, wo, changed)
+            except OSError as exc:
+                raise _file_write_error(exc, Path(schema.path)) from exc
+        cache[idx] = wo
+        if schema is None:
             logger.warning(
                 "update_not_persisted",
                 connector="ExcelCsvConnector",
@@ -991,6 +1077,10 @@ class ExcelCsvConnector:
 
     def _load_sheet_dicts(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
         """Shared exists-check → read → validate → parse pipeline for one sheet."""
+        return _rows_to_dicts(self._read_sheet(schema, label), schema, str(Path(schema.path)))
+
+    def _read_sheet(self, schema: SheetSchema, label: str) -> list[dict[str, Any]]:
+        """Check one sheet's schema and file, read it, and return its raw data rows."""
         for col in schema.columns:
             if col.coerce and col.coerce not in COERCER_REGISTRY:
                 raise ConnectorConfigError(
@@ -1003,7 +1093,7 @@ class ExcelCsvConnector:
             raise ConnectorConfigError(f"{label} file not found: {path}")
         headers, raw_rows = self._read_file(path, schema)
         _validate_headers(headers, schema, str(path))
-        return _rows_to_dicts(raw_rows, schema, str(path))
+        return raw_rows
 
     def _validate_and_load_assets(self) -> None:
         schema = self._config.asset_registry
@@ -1017,38 +1107,79 @@ class ExcelCsvConnector:
         dicts = self._load_sheet_dicts(schema, "Failure modes")
         self._fm_cache = [_dict_to_failure_mode(d) for d in dicts]
 
-    def _validate_and_load_work_orders(self) -> None:
+    def _validate_and_load_work_orders(self) -> dict[str, tuple[int, str]]:
+        """Load the work-order sheet into the cache, skipping rows that are not work orders.
+
+        Returns the ID on each skipped row, with the row number and why it was
+        skipped, read from the ID cell as :func:`_update_xlsx_row` matches it:
+        a create must not append a second row for an ID the cache cannot show.
+        """
         schema = self._config.work_orders
         assert schema is not None
-        if not Path(schema.path).exists() and schema.write_mode is not None:
+        path = Path(schema.path)
+        if not path.exists() and schema.write_mode is not None:
             self._wo_cache = []
-            return
-        dicts = self._load_sheet_dicts(schema, "Work order")
+            return {}
+        raw_rows = self._read_sheet(schema, "Work order")
+        columns = {m.field: m.column for m in schema.columns}
         work_orders: list[WorkOrder] = []
-        for d in dicts:
+        unreadable: dict[str, tuple[int, str]] = {}
+        for row_num, raw in enumerate(raw_rows, start=2):  # row 1 is header
             try:
-                work_orders.append(_dict_to_work_order(d))
-            except ValidationError as exc:
-                # A row typed by hand with, e.g., an unknown status must not make
-                # the whole sheet unreadable — nor block every later write.
-                logger.warning(
-                    "invalid_work_order_row_skipped",
-                    connector="ExcelCsvConnector",
-                    source=Path(schema.path).name,
-                    work_order_id=str(d.get("id", "")),
-                    fields=sorted({str(err["loc"][0]) for err in exc.errors() if err["loc"]}),
-                )
+                d = _row_to_dict(raw, schema, str(path), row_num)
+            except _UnreadableRowError as exc:
+                reason = str(exc)
+            else:
+                try:
+                    work_orders.append(_dict_to_work_order(d))
+                    continue
+                except ValidationError as exc:
+                    # A row typed by hand with, e.g., an unknown status must not make
+                    # the whole sheet unreadable — nor block every later write.
+                    logger.warning(
+                        "invalid_work_order_row_skipped",
+                        connector="ExcelCsvConnector",
+                        source=path.name,
+                        work_order_id=str(d.get("id", "")),
+                        fields=sorted({str(err["loc"][0]) for err in exc.errors() if err["loc"]}),
+                    )
+                    reason = "; ".join(
+                        f"column '{columns.get(str(err['loc'][0]), err['loc'][0])}': {err['msg']}"
+                        for err in exc.errors()
+                        if err["loc"]
+                    )
+            cell = raw.get(columns["id"]) if "id" in columns else None
+            row_id = "" if cell is None else _strip_formula_guard(str(cell).strip())
+            if row_id:
+                unreadable.setdefault(row_id, (row_num, reason))
         self._wo_cache = work_orders
+        return unreadable
 
-    def _reload_work_orders_for_write(self, path: Path) -> None:
-        """Re-read the work-order sheet before a write, inside the write lock.
+    async def _run_on_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
+        """Run ``func(*args)`` on the connector's file thread, after earlier calls.
+
+        One thread runs every call, so no two calls overlap, whatever happens
+        to their callers. A cancelled caller (an MCP request cancellation, a
+        workflow step timeout) cannot stop a call that is already running, and
+        the calls behind it wait for it; a call still queued when the
+        cancellation reaches the thread pool, on the event loop's next
+        iteration, is dropped.
+        """
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()  # as asyncio.to_thread does
+        return await loop.run_in_executor(self._file_thread, context.run, func, *args)
+
+    def _reload_work_orders_for_write(self, path: Path) -> dict[str, tuple[int, str]]:
+        """Re-read the work-order sheet at the start of a write, on the file thread.
+
+        Returns the IDs on skipped rows (see :meth:`_validate_and_load_work_orders`).
 
         Raises:
             ConnectorLockedError: If the file is open in another program.
             ConnectorError: If the file cannot be read (unreadable, corrupt).
         """
         try:
-            self._validate_and_load_work_orders()
+            return self._validate_and_load_work_orders()
         except ConnectorError:
             raise
         except OSError as exc:
