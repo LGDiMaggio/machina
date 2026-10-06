@@ -73,7 +73,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
+| `read_spare_parts` | Read inventory items (`mxinventory` object structure) — filter by `sku`; `asset_id` cannot be filtered (see [Known Limitations](#known-limitations)) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
 
 ### Convenience methods
@@ -198,7 +198,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 ## Known Limitations
 
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
-- **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
+- **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets, so `read_spare_parts` cannot filter by `asset_id`. An `asset_id` passed to it (as the agent and the MCP `machina_list_spare_parts` tool do) is dropped with a WARNING log: on its own it returns no parts rather than the whole inventory; with a `sku`, the read narrows by `sku` alone. For parts by asset, use work-order job plans instead.
 - **Pagination**: Uses Maximo's OSLC `responseInfo.nextPage` link-following. Very large result sets may benefit from server-side `oslc.where` filtering.
 
 ## API Reference

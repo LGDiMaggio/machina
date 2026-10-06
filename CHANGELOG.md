@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Maximo and UpKeep spare-part reads accept `asset_id` again.** `MaximoConnector.read_spare_parts` and `UpKeepConnector.read_spare_parts` lost the parameter in 0.2.0, but the agent's `check_spare_parts` tool and context prefetch, the MCP `machina_list_spare_parts` tool and the built-in `alarm_to_workorder` workflow all still pass it. Every such call raised `TypeError`, and the prefetch and the workflow step swallowed it, so spare parts silently went missing. Neither API relates parts to assets, so `asset_id` is dropped with a WARNING (`spare_parts_asset_filter_unsupported`): on its own the read returns no parts instead of passing the whole inventory off as the asset's; with a `sku` it narrows by `sku` alone — what `SapPmConnector` does when no `bom_equipment_field` is configured.
+- **The custom-workflows reference example's reorder workflow runs every step.** `lookup_part` passed `part_id` to `cmms.read_spare_parts`, which no connector accepts, so the workflow stopped at its first step; it now looks the part up by `sku`. `check_dependencies` passed `part_id` to `cmms.read_assets`, which takes no arguments, so it was always skipped, and `verify_criticality`, guarded on its output, with it. Both steps are gone: the part record already lists the assets that use the part (`compatible_assets`), and the urgency prompt now points the LLM at it. A step cannot reference one item of a list output, so nothing could hand those assets to `domain.check_asset_criticality`, which takes a single `asset_id`. The warehouse notification printed `{lookup_part.name}` verbatim, because `lookup_part` returns a list; it now names the part by its `sku`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
