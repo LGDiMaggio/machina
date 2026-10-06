@@ -10,13 +10,16 @@ Requires: pytest-httpx (dev dep), httpx (cmms-rest extra).
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from machina.connectors.base import set_sandbox_mode
 from machina.connectors.cmms.generic import GenericCmmsConnector
+from machina.connectors.cmms.generic_coercers import COERCER_REGISTRY
 from machina.connectors.cmms.pagination import OffsetLimitPagination
 from machina.domain.work_order import (
     FailureImpact,
@@ -510,6 +513,16 @@ def rest_connector_with_endpoints() -> GenericCmmsConnector:
     )
 
 
+@pytest.fixture
+def rest_connector_without_get() -> GenericCmmsConnector:
+    """REST-mode connector whose update returns the PATCH response (no re-read)."""
+    return GenericCmmsConnector(
+        url=BASE_URL,
+        api_key="test-key",
+        endpoints={"update_work_order": {"path": "work_orders/{id}"}},
+    )
+
+
 class TestRestGetWorkOrder:
     """REST get_work_order exercises GET /work_orders/{id}."""
 
@@ -670,6 +683,39 @@ class TestRestUpdateWorkOrder:
         assert "wo_status" in body
         assert "wo_desc" in body
         assert "status" not in body
+
+    @pytest.mark.asyncio
+    async def test_update_without_get_endpoint_returns_the_patch_response(
+        self, httpx_mock, rest_connector_without_get: GenericCmmsConnector
+    ) -> None:
+        conn = rest_connector_without_get
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE_URL}/work_orders/WO-001",
+            json={"id": "WO-001", "type": "corrective", "asset_id": "P-201", "status": "assigned"},
+        )
+
+        updated = await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        assert updated.status == WorkOrderStatus.ASSIGNED
+        assert updated.asset_id == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_update_without_get_endpoint_or_response_body(
+        self, httpx_mock, rest_connector_without_get: GenericCmmsConnector
+    ) -> None:
+        """An empty PATCH response yields a minimal work order with the new status."""
+        conn = rest_connector_without_get
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE_URL}/work_orders/WO-001", status_code=204
+        )
+
+        updated = await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        assert updated.id == "WO-001"
+        assert updated.status == WorkOrderStatus.ASSIGNED
 
 
 class TestRestCloseAndCancelWorkOrder:
@@ -926,6 +972,238 @@ class TestRestErrorMapping:
         ctx.request_context.lifespan_context = {"runtime": runtime}
 
         assert await machina_list_assets(ctx) == [{"error": "CMMS read assets failed: HTTP 500"}]
+
+
+# 2xx bodies resp.json() cannot decode, the error each one raises, and how the
+# message describes it: an HTML page, as a proxy in front of the CMMS (an SSO
+# login page, say) may answer, and JSON encoded in Latin-1 rather than UTF-8.
+_NON_JSON_BODIES = [
+    pytest.param(b"<html>login</html>", json.JSONDecodeError, "not JSON", id="html"),
+    pytest.param(
+        '{"name": "Pompa unità 2"}'.encode("latin-1"),
+        UnicodeDecodeError,
+        "not UTF-8",
+        id="latin-1",
+    ),
+]
+
+# The reads of _OPERATIONS. The CMMS may already have applied a write it
+# answered with a 2xx, so a write's non-JSON response is reported differently.
+_READ_OPERATIONS = [
+    p for p in _OPERATIONS if p.id not in ("create_work_order", "update_work_order")
+]
+
+# The writes that decode their response, on rest_connector_without_get: create,
+# and update, which returns the PATCH response when it does not re-read.
+_DECODING_WRITES = [
+    pytest.param(
+        "POST",
+        "work_orders",
+        lambda c: c.create_work_order(_WORK_ORDER),
+        "create work order",
+        id="create_work_order",
+    ),
+    pytest.param(
+        "PATCH",
+        "work_orders/WO-1",
+        lambda c: c.update_work_order("WO-1", description="Re-checked"),
+        "update work order",
+        id="update_work_order",
+    ),
+]
+
+# An asset whose ``specs`` field holds JSON-encoded text that is not valid JSON.
+_ASSET_WITH_BAD_SPECS = {"id": "P-201", "specs": "{not json"}
+
+
+class TestRestNonJsonBody:
+    """A 2xx response whose body cannot be decoded as JSON raises ConnectorError.
+
+    The message names the operation and says the body is not JSON or not
+    UTF-8, never the body or the URL; the decoding error stays chained as
+    ``__cause__``.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("body", "decode_error", "problem"), _NON_JSON_BODIES)
+    @pytest.mark.parametrize(("method", "path", "call", "operation"), _READ_OPERATIONS)
+    async def test_non_json_body_is_mapped(
+        self,
+        httpx_mock,
+        rest_connector_with_endpoints: GenericCmmsConnector,
+        method: str,
+        path: str,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+        operation: str,
+        body: bytes,
+        decode_error: type[ValueError],
+        problem: str,
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(method=method, url=f"{BASE_URL}/{path}", content=body)
+
+        with pytest.raises(ConnectorError) as exc_info:
+            await call(conn)
+
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value) == f"CMMS {operation} failed: response is {problem}"
+        assert isinstance(exc_info.value.__cause__, decode_error)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("body", "decode_error", "problem"), _NON_JSON_BODIES)
+    @pytest.mark.parametrize(("method", "path", "call", "operation"), _DECODING_WRITES)
+    async def test_non_json_write_response_says_the_change_may_have_been_applied(
+        self,
+        httpx_mock,
+        rest_connector_without_get: GenericCmmsConnector,
+        method: str,
+        path: str,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+        operation: str,
+        body: bytes,
+        decode_error: type[ValueError],
+        problem: str,
+    ) -> None:
+        """The 2xx means the CMMS may have applied the write, so the error must
+        not read as a failure that invites a retry, which could duplicate it."""
+        conn = rest_connector_without_get
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(method=method, url=f"{BASE_URL}/{path}", content=body)
+
+        with pytest.raises(ConnectorError) as exc_info:
+            await call(conn)
+
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value) == (
+            f"CMMS {operation}: response is {problem}; the change may have been applied, "
+            "so check the CMMS before retrying"
+        )
+        assert isinstance(exc_info.value.__cause__, decode_error)
+
+    @pytest.mark.asyncio
+    async def test_update_answered_with_2xx_is_logged_although_its_response_is_not_json(
+        self, httpx_mock, rest_connector_without_get: GenericCmmsConnector
+    ) -> None:
+        """work_order_updated records a PATCH the CMMS answered with 2xx, as on
+        the path that re-reads the work order."""
+        conn = rest_connector_without_get
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE_URL}/work_orders/WO-1", text="<html>login</html>"
+        )
+
+        with capture_logs() as logs, pytest.raises(ConnectorError):
+            await conn.update_work_order("WO-1", description="Re-checked")
+
+        assert any(
+            e["event"] == "work_order_updated" and e["work_order_id"] == "WO-1" for e in logs
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_that_re_reads_does_not_decode_the_patch_response(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        """With get_work_order the update returns the re-read work order, so a
+        PATCH response that is not JSON (a plain "OK", say) is not an error."""
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(method="PATCH", url=f"{BASE_URL}/work_orders/WO-1", text="OK")
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/WO-1",
+            json={"id": "WO-1", "type": "corrective", "asset_id": "P-201"},
+        )
+
+        updated = await conn.update_work_order("WO-1", description="Re-checked")
+
+        assert updated.id == "WO-1"
+        assert updated.asset_id == "P-201"
+
+    @pytest.mark.asyncio
+    async def test_non_json_later_page_is_mapped(self, httpx_mock) -> None:
+        conn = GenericCmmsConnector(
+            url=BASE_URL, api_key="test-key", pagination=OffsetLimitPagination(page_size=1)
+        )
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE_URL}/assets?limit=1&offset=0", json=[{"id": "P-201"}]
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE_URL}/assets?limit=1&offset=1", text="<html>login</html>"
+        )
+
+        with pytest.raises(
+            ConnectorError, match=r"^CMMS read assets failed: response is not JSON$"
+        ):
+            await conn.read_assets()
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_reports_a_non_json_body_as_an_error_entry(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from machina.mcp.tools import machina_list_assets
+        from machina.runtime import MachinaRuntime
+
+        await _connect_with_health(httpx_mock, rest_connector)
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets", text="<html>login</html>")
+        runtime = MachinaRuntime(connectors={"cmms": rest_connector}, primary_cmms_name="cmms")
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {"runtime": runtime}
+
+        assert await machina_list_assets(ctx) == [
+            {"error": "CMMS read assets failed: response is not JSON"}
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path", "body", "call"),
+        [
+            pytest.param(
+                "assets", [_ASSET_WITH_BAD_SPECS], lambda c: c.read_assets(), id="read_assets"
+            ),
+            pytest.param(
+                "assets/P-201",
+                _ASSET_WITH_BAD_SPECS,
+                lambda c: c.get_asset("P-201"),
+                id="get_asset",
+            ),
+        ],
+    )
+    async def test_mapping_error_is_not_reported_as_a_non_json_body(
+        self,
+        httpx_mock,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: object,
+        call: Callable[[GenericCmmsConnector], Awaitable[object]],
+    ) -> None:
+        """Records are mapped after the REST call, so a coercer's own decoding
+        error (here a plugin coercer for a JSON-encoded field) is not reported
+        as a non-JSON response: like any mapping error, it propagates as is."""
+        monkeypatch.setitem(COERCER_REGISTRY, "json_text", lambda value, **_: json.loads(value))
+        conn = GenericCmmsConnector(
+            url=BASE_URL,
+            api_key="test-key",
+            yaml_mapping={
+                "mapping": {
+                    "asset": {
+                        "endpoint": {"path": "assets"},
+                        "fields": {
+                            "id": {"source": "id"},
+                            "metadata": {"specs": {"source": "specs", "coerce": "json_text"}},
+                        },
+                    }
+                }
+            },
+        )
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(method="GET", url=f"{BASE_URL}/{path}", json=body)
+
+        with pytest.raises(json.JSONDecodeError):
+            await call(conn)
 
 
 # The REST writes; close and cancel go through update_work_order.

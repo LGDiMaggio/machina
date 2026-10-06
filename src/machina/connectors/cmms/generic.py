@@ -89,17 +89,26 @@ def _require_httpx() -> Any:
 
 
 @contextmanager
-def _rest_errors(operation: str) -> Iterator[None]:
-    """Re-raise an httpx failure inside a REST operation as a connector error.
+def _rest_errors(operation: str, *, write: bool = False) -> Iterator[None]:
+    """Re-raise a REST operation's httpx failure or undecodable body as a connector error.
 
     An error status becomes :class:`ConnectorAuthError` for 401/403 and
     :class:`ConnectorError` otherwise; a timeout becomes
     :class:`ConnectorTimeoutError`, and any other transport failure a
     :class:`ConnectorError`. A malformed URL raises ``httpx.InvalidURL``,
     which is not an ``httpx.HTTPError``, and becomes
-    :class:`ConnectorConfigError`. The message names the operation and the
-    status or failure type but never the URL, which httpx puts in its own
-    messages; the httpx exception stays chained as ``__cause__``.
+    :class:`ConnectorConfigError`. A 2xx body that ``resp.json()`` cannot
+    decode (an HTML login page from a proxy, say) becomes a
+    :class:`ConnectorError` too. For a ``write`` the CMMS may already have
+    applied the change, so that message says so rather than report a failure
+    that invites a duplicating retry. The message names the operation and
+    the status or failure type but never the URL, which httpx puts in its
+    own messages, nor the body; the original exception stays chained as
+    ``__cause__``.
+
+    Wrap only the request, the status check and the decoding: map and parse
+    records after the block, so that an error there (a plugin coercer's
+    included) is not reported as a failed call.
     """
     httpx = _require_httpx()
     try:
@@ -118,6 +127,16 @@ def _rest_errors(operation: str) -> Iterator[None]:
         raise ConnectorConfigError(
             f"CMMS {operation} failed: invalid URL (check 'url' and the endpoint paths)"
         ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # resp.json() decodes the raw bytes and ignores the declared charset,
+        # so a body that is not UTF-8 fails before it can fail as JSON.
+        problem = "not UTF-8" if isinstance(exc, UnicodeDecodeError) else "not JSON"
+        if write:
+            raise ConnectorError(
+                f"CMMS {operation}: response is {problem}; the change may have been "
+                "applied, so check the CMMS before retrying"
+            ) from exc
+        raise ConnectorError(f"CMMS {operation} failed: response is {problem}") from exc
 
 
 class GenericCmmsConnector:
@@ -876,15 +895,16 @@ class GenericCmmsConnector:
                     if resp.status_code == 404:
                         return []
                     resp.raise_for_status()
-            return [_parse_asset(self._apply_mapping("assets", resp.json()))]
+                    body = resp.json()
+            return [_parse_asset(self._apply_mapping("assets", body))]
 
         url = self._rest_url("assets")
-        results: list[Asset] = []
+        raw_items: list[dict[str, Any]] = []
         with _rest_errors("read assets"):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 async for raw in self._pagination.iterate(client, url, headers):
-                    results.append(_parse_asset(self._apply_mapping("assets", raw)))
-        return results
+                    raw_items.append(raw)
+        return [_parse_asset(self._apply_mapping("assets", raw)) for raw in raw_items]
 
     async def _rest_read_work_orders(
         self,
@@ -906,12 +926,12 @@ class GenericCmmsConnector:
             params["status"] = status
 
         url = self._rest_url("work_orders")
-        results: list[WorkOrder] = []
+        raw_items: list[dict[str, Any]] = []
         with _rest_errors("read work orders"):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 async for raw in self._pagination.iterate(client, url, headers, params=params):
-                    results.append(_parse_work_order(self._apply_mapping("work_orders", raw)))
-        return results
+                    raw_items.append(raw)
+        return [_parse_work_order(self._apply_mapping("work_orders", raw)) for raw in raw_items]
 
     async def _rest_create_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Submit a new work order to the REST API."""
@@ -920,7 +940,7 @@ class GenericCmmsConnector:
         payload = work_order.model_dump(mode="json")
         if self._yaml_mapping is not None:
             payload = self._yaml_reverse_map("work_order", payload)
-        with _rest_errors("create work order"):
+        with _rest_errors("create work order", write=True):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     self._rest_url("work_orders"),
@@ -928,7 +948,8 @@ class GenericCmmsConnector:
                     json=payload,
                 )
                 resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+                body = resp.json()
+        return _parse_work_order(self._apply_mapping("work_orders", body))
 
     async def _rest_get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Fetch a single work order from the REST API."""
@@ -942,7 +963,8 @@ class GenericCmmsConnector:
                 if resp.status_code == 404:
                     return None
                 resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+                body = resp.json()
+        return _parse_work_order(self._apply_mapping("work_orders", body))
 
     async def _rest_update_work_order(
         self,
@@ -994,7 +1016,9 @@ class GenericCmmsConnector:
                 raise ConnectorError(f"Work order {work_order_id} not found after update")
             return updated
         if resp.content:
-            return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+            with _rest_errors("update work order", write=True):
+                body = resp.json()
+            return _parse_work_order(self._apply_mapping("work_orders", body))
         # No response body and no get endpoint — return a minimal WO
         return WorkOrder(
             id=work_order_id,
@@ -1009,14 +1033,15 @@ class GenericCmmsConnector:
         httpx = _require_httpx()
         path = config["path"]
         headers = self._rest_headers()
-        results: list[MaintenancePlan] = []
+        raw_items: list[dict[str, Any]] = []
         with _rest_errors("read maintenance plans"):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
-                    results.append(
-                        _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
-                    )
-        return results
+                    raw_items.append(raw)
+        return [
+            _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
+            for raw in raw_items
+        ]
 
     # ------------------------------------------------------------------
     # Endpoint configuration helpers
