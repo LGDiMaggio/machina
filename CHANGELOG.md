@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Maximo `read_maintenance_history` sends an `oslc.where` clause the OSLC query grammar accepts.** It filtered on `assetnum="<id>" and (status="COMP" or status="CLOSE")`, but `and` is the only boolean operator `oslc.where` accepts and grouping parentheses are not part of its grammar, so Maximo's parser rejects the clause (`BMXAA8744E`). The two statuses are now listed through `in`: `assetnum="<id>" and status in ["COMP","CLOSE"]`. The asset term is still built by the same exact-match check as the other Maximo filters.
+
+### Security
+
+- **SAP PM and Maximo filters keep caller-supplied values inside their string literals.** Asset, work-order and material IDs and raw status strings reach these read methods from LLM and MCP tool arguments and were interpolated into server-side filters as-is, so a value such as `X' or Equipment ne '` turned an exact lookup into an unbounded read paged entirely into memory. SAP PM now doubles single quotes in every OData `$filter` string literal and in the `MaintenanceOrder('…')` key of `update_work_order`; the key is also percent-encoded so an ID cannot leave its path segment (unencoded, `1')/../../API_EQUIPMENT/Equipment('10000001` was normalized by the HTTP client into a PATCH on an equipment record). Maximo documents no escape inside an `oslc.where` string literal, and `oslc.where` maps onto its QBE framework, where `%` is a LIKE wildcard, `"*"` means "not null" and `~null~` matches empty fields; a value that contains `"`, `\`, `%`, `,`, `~` or a non-printable character, starts with `=`, `!`, `<` or `>`, or is blank or `*` is therefore refused with `ConnectorError` before any request — including the PATCH of `update_work_order`, whose read-back looks the order up by `wonum`. Ordinary values produce the same requests as before.
+- **UpKeep and Maximo send IDs in URL paths as one percent-encoded path segment and refuse `.` and `..`**, as Generic CMMS REST already did: on UpKeep, `update_work_order("../assets/a1")` sent its PATCH to `/api/v2/assets/a1`. The three connectors share one helper for the rule, and Generic CMMS REST now also refuses an empty ID in `get_asset`, which read the whole `/assets` collection and returned its first record.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

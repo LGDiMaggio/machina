@@ -457,9 +457,13 @@ class TestReadMaintenancePlans:
 class TestReadMaintenanceHistory:
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
-        """History query must combine assetnum with completed/closed status."""
+        """History query must combine assetnum with completed/closed status.
+
+        oslc.where has no ``or`` and no grouping parentheses, so the two
+        statuses are listed through ``in``.
+        """
         await _connect(httpx_mock, connector)
-        expected_where = 'assetnum="PUMP-201" and (status="COMP" or status="CLOSE")'
+        expected_where = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxwo", **{"oslc.where": expected_where}),
@@ -582,6 +586,108 @@ class TestUpdateWorkOrder:
 
         payload = json.loads(patch_req.content)
         assert payload["status"] == "CLOSE"
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_id_stays_one_path_segment(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Interpolated as-is, this ID would PATCH ``/os/mxasset/PUMP-201``."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{OSLC}/os/mxwo/..%2Fmxasset%2FPUMP-201", status_code=404
+        )
+        with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order("../mxasset/PUMP-201", description="x")
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied values stay inside their oslc.where literal
+# ---------------------------------------------------------------------------
+
+# Closes the string literal and appends a term every row satisfies:
+# interpolated as-is, ``itemnum="<value>"`` becomes an unbounded read.
+_BREAKOUT = 'X" or itemnum!="'
+
+
+class TestWhereValuesStayLiteral:
+    """IDs, SKUs and raw statuses reach oslc.where from LLM and MCP tool input.
+
+    Maximo documents no escape inside a where literal, so a value that could
+    leave it or widen the match is refused before any request: nothing is
+    mocked here, and a request would fail the test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid assetnum"):
+            await connector.get_asset(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("argument", "attribute"), [("asset_id", "assetnum"), ("status", "status")]
+    )
+    async def test_read_work_orders(
+        self, httpx_mock, connector: MaximoConnector, argument: str, attribute: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match=f"Invalid {attribute}"):
+            await connector.read_work_orders(**{argument: _BREAKOUT})
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid wonum"):
+            await connector.get_work_order(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_refuses_before_patching(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """An ID the read-back after the PATCH could not express is refused up front."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid wonum"):
+            await connector.update_work_order("A,B", description="x")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid assetnum"):
+            await connector.read_maintenance_history(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sku",
+        [
+            pytest.param(_BREAKOUT, id="quote"),
+            pytest.param("X\\", id="backslash-escaping-the-closing-quote"),
+            pytest.param("%", id="like-wildcard"),
+            pytest.param("*", id="not-null"),
+            pytest.param("BRG-6205,BRG-6206", id="qbe-alternatives"),
+            pytest.param("!=BRG-6205", id="qbe-operator"),
+            pytest.param("~null~", id="qbe-null"),
+            pytest.param("\x01!=BRG-6205", id="control-character-before-operator"),
+            pytest.param("  ", id="blank"),
+        ],
+    )
+    async def test_read_spare_parts_refuses(
+        self, httpx_mock, connector: MaximoConnector, sku: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid itemnum"):
+            await connector.read_spare_parts(sku=sku)
+
+    @pytest.mark.asyncio
+    async def test_ordinary_punctuation_is_sent_unchanged(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'itemnum="6205-2RS/C3_A.1"'}),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.read_spare_parts(sku="6205-2RS/C3_A.1") == []
 
 
 class TestAssetTypeMap:

@@ -35,6 +35,7 @@ See also:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import quote
 
 import structlog
 from pydantic import Field
@@ -69,6 +70,16 @@ def _require_httpx() -> Any:
             "httpx is required for SapPmConnector. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+def _odata_string(value: object) -> str:
+    """Quote ``value`` as an OData string literal, doubling embedded single quotes.
+
+    Filter values and entity keys reach OData from LLM and MCP-client input.
+    With its quotes doubled a value cannot close the literal and append a
+    clause — ``X' or Equipment ne '`` would otherwise read every row.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _is_csrf_challenge(resp: Any) -> bool:
@@ -255,7 +266,7 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_EQUIPMENT",
             "Equipment",
-            odata_filter=f"Equipment eq '{asset_id}'",
+            odata_filter=f"Equipment eq {_odata_string(asset_id)}",
             top=1,
         )
         return sap_mapper.parse_asset(raw[0]) if raw else None
@@ -278,14 +289,14 @@ class SapPmConnector:
         self._ensure_connected()
         filters: list[str] = []
         if asset_id:
-            filters.append(f"Equipment eq '{asset_id}'")
+            filters.append(f"Equipment eq {_odata_string(asset_id)}")
         if status:
             sap_status = (
                 sap_mapper.REVERSE_SAP_STATUS.get(status, status.value)
                 if isinstance(status, WorkOrderStatus)
                 else status
             )
-            filters.append(f"MaintenanceOrderSystemStatus eq '{sap_status}'")
+            filters.append(f"MaintenanceOrderSystemStatus eq {_odata_string(sap_status)}")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
@@ -300,7 +311,7 @@ class SapPmConnector:
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
-            odata_filter=f"MaintenanceOrder eq '{work_order_id}'",
+            odata_filter=f"MaintenanceOrder eq {_odata_string(work_order_id)}",
             top=1,
         )
         return sap_mapper.parse_work_order(raw[0]) if raw else None
@@ -378,9 +389,12 @@ class SapPmConnector:
             payload["MaintenanceOrderDesc"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
+        # The key literal is percent-encoded as well, so ``/``, ``?`` and ``#``
+        # in an ID stay inside this one path segment.
+        key = quote(_odata_string(work_order_id), safe="'")
         resp = await self._write_with_csrf(
             "PATCH",
-            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder('{work_order_id}')",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({key})",
             payload,
         )
         if resp.status_code == 401:
@@ -437,7 +451,7 @@ class SapPmConnector:
         filters: list[str] = []
         if asset_id:
             if self._bom_equipment_field:
-                filters.append(f"{self._bom_equipment_field} eq '{asset_id}'")
+                filters.append(f"{self._bom_equipment_field} eq {_odata_string(asset_id)}")
             elif not sku:
                 # asset_id requested, but it cannot be filtered server-side
                 # (bom_equipment_field unset — the default) and there is no sku to
@@ -469,7 +483,7 @@ class SapPmConnector:
                     ),
                 )
         if sku:
-            filters.append(f"{self._bom_material_field} eq '{sku}'")
+            filters.append(f"{self._bom_material_field} eq {_odata_string(sku)}")
         odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             self._bom_service,
@@ -488,7 +502,7 @@ class SapPmConnector:
         """Return completed/closed maintenance orders for an asset."""
         self._ensure_connected()
         odata_filter = (
-            f"Equipment eq '{asset_id}' and "
+            f"Equipment eq {_odata_string(asset_id)} and "
             "(MaintenanceOrderSystemStatus eq 'CNF' or "
             "MaintenanceOrderSystemStatus eq 'TECO' or "
             "MaintenanceOrderSystemStatus eq 'CLSD')"
