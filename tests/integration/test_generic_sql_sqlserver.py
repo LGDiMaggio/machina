@@ -153,3 +153,54 @@ class TestSqlServerRoundTrip:
             assert wos[0].description == "Integration test work order"
         finally:
             await connector.disconnect()
+
+
+class TestSqlServerStatementTimeout:
+    @pytest.mark.asyncio
+    async def test_read_waiting_on_a_row_lock_times_out(self, mssql_dsn: str) -> None:
+        """SQL Server waits for locks indefinitely by default; query_timeout bounds it."""
+        import asyncio
+
+        import pyodbc  # type: ignore[import-untyped]
+
+        from machina.connectors.sql.generic import GenericSqlConnector
+        from machina.connectors.sql.schema import (
+            FieldMapping,
+            SqlConnectorConfig,
+            TableMapping,
+        )
+        from machina.exceptions import ConnectorTimeoutError
+
+        config = SqlConnectorConfig(
+            dsn=mssql_dsn,
+            query_timeout=1,
+            tables={
+                "assets": TableMapping(
+                    query="SELECT asset_id, asset_name FROM test_assets",
+                    entity="Asset",
+                    fields={
+                        "id": FieldMapping(column="asset_id"),
+                        "name": FieldMapping(column="asset_name"),
+                    },
+                ),
+            },
+        )
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+        blocker = None
+        try:
+            # Another application holds a row lock: an UPDATE it has not committed.
+            blocker = pyodbc.connect(mssql_dsn, autocommit=False)
+            blocker.cursor().execute(
+                "UPDATE test_assets SET asset_name = 'locked' WHERE asset_id = 'P-001'"
+            )
+            with pytest.raises(ConnectorTimeoutError, match="HYT00"):
+                # wait_for: without the timeout the read would wait forever.
+                await asyncio.wait_for(connector.read_assets(), timeout=30)
+            # The timed-out read no longer holds the connection.
+            assert (await connector.health_check()).status.value == "healthy"
+        finally:
+            if blocker is not None:
+                blocker.rollback()
+                blocker.close()
+            await connector.disconnect()

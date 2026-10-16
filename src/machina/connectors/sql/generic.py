@@ -27,6 +27,7 @@ from machina.exceptions import (
     ConnectorConfigError,
     ConnectorError,
     ConnectorSchemaError,
+    ConnectorTimeoutError,
     ConnectorTransientError,
 )
 
@@ -54,6 +55,48 @@ def _is_transient(exc: Exception) -> bool:
     """Check if a database exception is transient and retryable."""
     msg = str(exc)
     return any(code in msg for code in _TRANSIENT_ERRORS)
+
+
+# A statement stopped by a timeout (query_timeout, or one the driver or the
+# database sets). Not retried — see _execute_read and _execute_write.
+_TIMEOUT_SQLSTATES: frozenset[str] = frozenset(
+    {
+        "HYT00",  # ODBC query timeout expired
+        "HYT01",  # ODBC connection timeout expired
+        "HY008",  # operation cancelled (Db2 CLI on its query timeout; mssql-jdbc)
+        "57014",  # processing cancelled (Db2 SQL0952, PostgreSQL)
+    }
+)
+_TIMEOUT_MARKERS: tuple[str, ...] = (
+    "TimeoutException",  # JDBC: java.sql.SQLTimeoutException and its subclasses
+    "SQL0666",  # IBM i: refused on the optimizer's estimate of its run time
+)
+
+
+def _sqlstate(exc: Exception) -> str:
+    """Return the SQLSTATE a driver gives for ``exc``, or ``""``.
+
+    pyodbc passes it as the exception's first argument; jaydebeapi passes the
+    Java ``SQLException``, which has ``getSQLState()``.
+    """
+    first = exc.args[0] if exc.args else None
+    if isinstance(first, str):
+        return first
+    get_sqlstate = getattr(first, "getSQLState", None)
+    return str(get_sqlstate() or "") if callable(get_sqlstate) else ""
+
+
+def _is_timeout(exc: Exception) -> bool:
+    """Check if a database exception reports a statement stopped by a timeout."""
+    if _sqlstate(exc) in _TIMEOUT_SQLSTATES:
+        return True
+    msg = str(exc)
+    return any(marker in msg for marker in _TIMEOUT_MARKERS)
+
+
+# How long health_check() and disconnect() wait for a call already using the
+# connection when no query_timeout bounds that call.
+_FALLBACK_CONNECTION_WAIT = 30.0
 
 
 def _jitter() -> float:
@@ -204,24 +247,50 @@ class GenericSqlConnector:
         )
 
     async def disconnect(self) -> None:
-        """Close the database connection."""
+        """Close the database connection.
+
+        Waits at most ``query_timeout`` seconds (30 when unset) for a call
+        still using the connection. Past that, it logs ``sql_disconnect_busy``
+        and drops the connection without closing it, since closing it under a
+        running statement is not safe; the call closes it when it ends.
+        """
         if self._conn is not None:
-            async with self._db_lock:
-                with contextlib.suppress(Exception):
-                    await asyncio.to_thread(self._conn.close)
+            if await self._acquire_connection():
+                try:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(self._conn.close)
+                finally:
+                    self._db_lock.release()
+            else:
+                logger.warning(
+                    "sql_disconnect_busy",
+                    connector="GenericSqlConnector",
+                    operation="disconnect",
+                    waited=self._connection_wait,
+                    hint="A statement is still running; it closes the connection when it ends",
+                )
             self._conn = None
         self._connected = False
 
     async def health_check(self) -> ConnectorHealth:
-        """Test the database connection with a simple query."""
+        """Test the database connection with a simple query.
+
+        Reports the connection busy, instead of queueing behind it, when
+        another call still uses it after ``query_timeout`` seconds (30 when
+        unset).
+        """
         if self._conn is None:
             return ConnectorHealth(
                 status=ConnectorStatus.UNHEALTHY,
                 message="Not connected",
             )
+        if not await self._acquire_connection():
+            return ConnectorHealth(
+                status=ConnectorStatus.UNHEALTHY,
+                message=f"Connection busy: still in use after waiting {self._connection_wait:g}s",
+            )
         try:
-            async with self._db_lock:
-                await asyncio.to_thread(self._execute_scalar, "SELECT 1")
+            await asyncio.to_thread(self._execute_scalar, "SELECT 1")
             return ConnectorHealth(
                 status=ConnectorStatus.HEALTHY,
                 message="Database reachable",
@@ -231,6 +300,8 @@ class GenericSqlConnector:
                 status=ConnectorStatus.UNHEALTHY,
                 message=f"Health check failed: {exc}",
             )
+        finally:
+            self._db_lock.release()
 
     # ------------------------------------------------------------------
     # Read operations
@@ -395,8 +466,37 @@ class GenericSqlConnector:
                 self._config.dsn,
                 self._config.jdbc_driver_class or "",
                 self._config.jdbc_driver_path,
+                query_timeout=self._config.query_timeout,
             )
-        return connect_odbc(self._config.dsn)
+        return connect_odbc(self._config.dsn, query_timeout=self._config.query_timeout)
+
+    @property
+    def _connection_wait(self) -> float:
+        """Seconds health_check() and disconnect() wait for a busy connection."""
+        return self._config.query_timeout or _FALLBACK_CONNECTION_WAIT
+
+    async def _acquire_connection(self) -> bool:
+        """Acquire ``_db_lock``, waiting at most ``_connection_wait`` seconds.
+
+        Returns False if another call still holds the connection by then.
+        """
+        # wait_for rather than asyncio.timeout: before Python 3.11.3, the
+        # latter raises CancelledError instead of TimeoutError in a task that
+        # was cancelled before (as a shutdown path that catches it may be).
+        try:
+            await asyncio.wait_for(self._db_lock.acquire(), timeout=self._connection_wait)
+        except TimeoutError:
+            return False
+        return True
+
+    def _close_if_dropped(self, conn: Any) -> None:
+        """Close ``conn`` if disconnect() dropped it while a call was using it.
+
+        Runs on the thread that used it, once that call is done with it.
+        """
+        if conn is not self._conn:
+            with contextlib.suppress(Exception):
+                conn.close()
 
     def _validate_schemas(self) -> None:
         """Check that mapped columns exist in query results."""
@@ -441,6 +541,12 @@ class GenericSqlConnector:
                 async with self._db_lock:
                     return await asyncio.to_thread(self._read_sync, mapping)
             except Exception as exc:
+                if _is_timeout(exc):
+                    # Not retried: the read already held the shared connection
+                    # for query_timeout seconds, and a retry would likely wait
+                    # on the same lock as long again, with every call queued.
+                    self._log_timeout("read", exc)
+                    raise ConnectorTimeoutError(f"SQL read timed out: {exc}") from exc
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
                         min(
@@ -480,6 +586,12 @@ class GenericSqlConnector:
                 async with self._db_lock:
                     return await asyncio.to_thread(self._execute_insert, mapping, data)
             except Exception as exc:
+                if _is_timeout(exc):
+                    # Never re-sent from this loop: it skips create_work_order's
+                    # ID check, and a timeout can come after the row was written
+                    # (in commit). A caller's retry goes through that check.
+                    self._log_timeout("insert", exc)
+                    raise ConnectorTimeoutError(f"SQL write timed out: {exc}") from exc
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
                         min(
@@ -509,10 +621,25 @@ class GenericSqlConnector:
                 # so a raw driver exception must not escape a write either.
                 raise ConnectorError(f"SQL write failed: {exc}") from exc
 
+    def _log_timeout(self, operation: str, exc: Exception) -> None:
+        # Logged here because callers such as the MCP tools return the error
+        # without logging it, and a timeout is how lock contention shows.
+        logger.warning(
+            "sql_statement_timeout",
+            connector="GenericSqlConnector",
+            operation=operation,
+            query_timeout=self._config.query_timeout,
+            error=str(exc),
+        )
+
+    # The worker-thread functions below read self._conn once: disconnect()
+    # may drop it while they run (see _close_if_dropped).
+
     def _read_sync(self, mapping: TableMapping) -> list[dict[str, Any]]:
-        if self._conn is None:
+        conn = self._conn
+        if conn is None:
             raise ConnectorError("Not connected — call connect() before reading")
-        cursor = self._conn.cursor()
+        cursor = conn.cursor()
         try:
             cursor.execute(mapping.query)
             columns = [desc[0] for desc in (cursor.description or [])]
@@ -536,6 +663,7 @@ class GenericSqlConnector:
             return results
         finally:
             cursor.close()
+            self._close_if_dropped(conn)
 
     def _execute_insert(self, mapping: TableMapping, data: dict[str, Any]) -> None:
         assert mapping.insert_table is not None
@@ -556,22 +684,31 @@ class GenericSqlConnector:
             f"INSERT INTO {mapping.insert_table} "
             f"({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
         )
-        cursor = self._conn.cursor()
+        # Commit or roll back on the connection that ran the INSERT.
+        conn = self._conn
+        if conn is None:
+            raise ConnectorError("Not connected — call connect() before writing")
+        cursor = conn.cursor()
         try:
             cursor.execute(sql, values)
-            self._conn.commit()
+            conn.commit()
         except Exception:
             with contextlib.suppress(Exception):
-                self._conn.rollback()
+                conn.rollback()
             raise
         finally:
             cursor.close()
+            self._close_if_dropped(conn)
 
     def _execute_scalar(self, sql: str) -> Any:
-        cursor = self._conn.cursor()
+        conn = self._conn
+        if conn is None:
+            raise ConnectorError("Not connected")
+        cursor = conn.cursor()
         try:
             cursor.execute(sql)
             row = cursor.fetchone()
             return row[0] if row else None
         finally:
             cursor.close()
+            self._close_if_dropped(conn)

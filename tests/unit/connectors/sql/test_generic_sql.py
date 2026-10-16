@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import date
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
+from machina.connectors.base import ConnectorStatus
 from machina.connectors.sql.generic import (
     GenericSqlConnector,
     _coerce_value,
@@ -27,6 +30,7 @@ from machina.domain.work_order import WorkOrder, WorkOrderType
 from machina.exceptions import (
     ConnectorConfigError,
     ConnectorSchemaError,
+    ConnectorTimeoutError,
     ConnectorTransientError,
 )
 
@@ -39,6 +43,7 @@ def _basic_config(
     *,
     capabilities: str = "read_only",
     with_insert: bool = False,
+    **settings: Any,
 ) -> SqlConnectorConfig:
     fields = {
         "id": FieldMapping(column="ASSET_ID"),
@@ -77,6 +82,7 @@ def _basic_config(
         dsn="Driver={ODBC Driver 18};Server=localhost;",
         capabilities=capabilities,
         tables=tables,
+        **settings,
     )
 
 
@@ -117,6 +123,59 @@ def _make_conn(cursor: MagicMock) -> MagicMock:
     conn = MagicMock()
     conn.cursor.return_value = cursor
     return conn
+
+
+class _FakeOdbcError(Exception):
+    """Stand-in for a pyodbc error: the SQLSTATE comes first, then the message."""
+
+
+class _FakeJavaSqlError(Exception):
+    """Stand-in for a java.sql.SQLException reached through JPype.
+
+    ``str()`` gives its ``toString()``: the class name, then the message.
+    """
+
+    def __init__(self, text: str, sqlstate: str | None) -> None:
+        super().__init__(text)
+        self._sqlstate = sqlstate
+
+    def getSQLState(self) -> str | None:  # noqa: N802 - the Java method
+        return self._sqlstate
+
+
+class _FakeJdbcError(Exception):
+    """Stand-in for jaydebeapi.DatabaseError, which wraps the Java exception."""
+
+    def __init__(self, text: str, sqlstate: str | None) -> None:
+        super().__init__(_FakeJavaSqlError(text, sqlstate))
+
+
+# What pyodbc raises when the driver stops a statement at its query timeout.
+_SQLSERVER_TIMEOUT = (
+    "HYT00",
+    "[HYT00] [Microsoft][ODBC Driver 18 for SQL Server]Query timeout expired (0) (SQLExecDirectW)",
+)
+
+
+def _make_stuck_conn(
+    started: threading.Event, release: threading.Event, *, stuck_on: str
+) -> MagicMock:
+    """A connection whose ``stuck_on`` statement blocks until ``release`` is set.
+
+    It stands for a statement waiting on a lock in a driver that does not stop
+    it at the query timeout.
+    """
+    cursor = _make_smart_cursor(read_rows=[("WO-1", "P-001", "Seal")])
+    answer = cursor.execute.side_effect
+
+    def _execute(query: str, params: Any = None) -> None:
+        if query.upper().startswith(stuck_on) and "WHERE 1=0" not in query.upper():
+            started.set()
+            release.wait(timeout=10)
+        answer(query, params)
+
+    cursor.execute = MagicMock(side_effect=_execute)
+    return _make_conn(cursor)
 
 
 # ------------------------------------------------------------------
@@ -196,6 +255,100 @@ class TestIsTransient:
 
     def test_non_transient(self) -> None:
         assert not _is_transient(Exception("Syntax error in SQL"))
+
+
+class TestIsTimeout:
+    """A statement stopped by its timeout, in the forms the drivers report it."""
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            # pyodbc: (SQLSTATE, message)
+            _FakeOdbcError(*_SQLSERVER_TIMEOUT),
+            _FakeOdbcError(
+                "HYT01",
+                "[HYT01] [Microsoft][ODBC Driver 18 for SQL Server]Connection timeout expired "
+                "(0) (SQLEndTran)",
+            ),
+            _FakeOdbcError(  # Db2 LUW CLI
+                "HY008",
+                "[HY008] [IBM][CLI Driver][DB2/NT64] SQL0952N  Processing was cancelled due to "
+                "an interrupt.  SQLSTATE=57014\r\n (-952) (SQLExecDirectW)",
+            ),
+            _FakeOdbcError(  # IBM i Access: refused on the optimizer's estimate
+                "HY000",
+                "[HY000] [IBM][System i Access ODBC Driver][DB2 for i5/OS]SQL0666 - SQL query "
+                "exceeds specified time limit or storage limit. (-666) (SQLExecDirectW)",
+            ),
+            _FakeOdbcError(  # PostgreSQL statement_timeout
+                "57014",
+                "[57014] ERROR: canceling statement due to statement timeout;\n"
+                "Error while executing the query (1) (SQLExecDirectW)",
+            ),
+            # jaydebeapi: the Java exception, with its SQLSTATE
+            _FakeJdbcError(  # mssql-jdbc 7.0+
+                "java.sql.SQLTimeoutException: The query has timed out.", "HY008"
+            ),
+            _FakeJdbcError(  # pgjdbc: no timeout in the text, only the SQLSTATE
+                "org.postgresql.util.PSQLException: ERROR: canceling statement due to user "
+                "request",
+                "57014",
+            ),
+            _FakeJdbcError(  # Db2 JCC
+                "com.ibm.db2.jcc.am.SqlTimeoutException: DB2 SQL Error: SQLCODE=-952, "
+                "SQLSTATE=57014, SQLERRMC=null, DRIVER=4.33.31",
+                "57014",
+            ),
+            _FakeJdbcError(  # jt400, query timeout mechanism=cancel
+                "java.sql.SQLTimeoutException: [SQL0952] Processing of the SQL statement ended.",
+                "57014",
+            ),
+            _FakeJdbcError(  # jt400, default mechanism: refused on the estimate
+                "java.sql.SQLException: [SQL0666] SQL query exceeds specified time limit or "
+                "storage limit.",
+                "57005",
+            ),
+            _FakeJdbcError(  # MySQL Connector/J 8+: no SQLSTATE
+                "com.mysql.cj.jdbc.exceptions.MySQLTimeoutException: Statement cancelled due "
+                "to timeout or client request",
+                None,
+            ),
+        ],
+    )
+    def test_timeouts(self, exc: Exception) -> None:
+        from machina.connectors.sql.generic import _is_timeout
+
+        assert _is_timeout(exc)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            Exception("Error 1205: deadlock victim"),
+            _FakeOdbcError(
+                "40001",
+                "[40001] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]Transaction "
+                "(Process ID 52) was deadlocked on lock resources with another process and has "
+                "been chosen as the deadlock victim. Rerun the transaction. (1205) "
+                "(SQLExecDirectW)",
+            ),
+            _FakeOdbcError("42S02", "[42S02] Invalid object name 'WO'. (208) (SQLExecDirectW)"),
+            _FakeOdbcError(  # a timeout SQLSTATE quoted in the data is not one
+                "22001",
+                "[22001] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]String or binary "
+                "data would be truncated in table 'MAINT.dbo.WORK_ORDERS', column 'WO_DESC'. "
+                "Truncated value: 'Pump 57014 seal'. (2628) (SQLExecDirectW)",
+            ),
+            _FakeJdbcError(
+                "org.postgresql.util.PSQLException: ERROR: duplicate key value violates unique "
+                'constraint "work_orders_pkey"',
+                "23505",
+            ),
+        ],
+    )
+    def test_other_errors(self, exc: Exception) -> None:
+        from machina.connectors.sql.generic import _is_timeout
+
+        assert not _is_timeout(exc)
 
 
 # ------------------------------------------------------------------
@@ -618,3 +771,257 @@ class TestDisconnect:
         await connector.connect()
         await connector.disconnect()
         conn_mock.close.assert_called_once()
+
+
+class TestQueryTimeout:
+    """connect() hands query_timeout to the driver, which applies it per statement."""
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_odbc_connection_gets_it(self, mock_connect: MagicMock) -> None:
+        mock_connect.return_value = _make_conn(_make_smart_cursor())
+        await GenericSqlConnector(config=_basic_config(query_timeout=30)).connect()
+        assert mock_connect.call_args.kwargs["query_timeout"] == 30
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_unset_leaves_the_driver_setting(self, mock_connect: MagicMock) -> None:
+        mock_connect.return_value = _make_conn(_make_smart_cursor())
+        await GenericSqlConnector(config=_basic_config()).connect()
+        assert mock_connect.call_args.kwargs["query_timeout"] is None
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_jdbc")
+    async def test_jdbc_connection_gets_it(self, mock_connect: MagicMock) -> None:
+        mock_connect.return_value = _make_conn(_make_smart_cursor())
+        config = _basic_config(
+            driver_type="jdbc",
+            jdbc_driver_class="com.ibm.as400.access.AS400JDBCDriver",
+            query_timeout=45,
+        )
+        await GenericSqlConnector(config=config).connect()
+        assert mock_connect.call_args.kwargs["query_timeout"] == 45
+
+
+class TestStatementTimeout:
+    """A statement stopped by its timeout raises ConnectorTimeoutError, unretried."""
+
+    @staticmethod
+    async def _timing_out_reader(mock_connect: MagicMock) -> tuple[GenericSqlConnector, MagicMock]:
+        cursor = _make_smart_cursor()
+        answer = cursor.execute.side_effect
+
+        def _execute(query: str, params: Any = None) -> None:
+            if "WHERE 1=0" not in query.upper():
+                raise _FakeOdbcError(*_SQLSERVER_TIMEOUT)
+            answer(query, params)
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        mock_connect.return_value = _make_conn(cursor)
+        config = _basic_config(query_timeout=5)
+        config.retry.base_backoff = 0.01
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+        cursor.execute.reset_mock()
+        return connector, cursor
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic._is_transient", return_value=True)
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_timed_out_read_is_not_retried(
+        self, mock_connect: MagicMock, _transient: MagicMock
+    ) -> None:
+        """Not even when the error also reads as transient."""
+        connector, cursor = await self._timing_out_reader(mock_connect)
+
+        with pytest.raises(ConnectorTimeoutError, match="Query timeout expired"):
+            await connector.read_assets()
+
+        # A retry would likely wait on the same lock, holding the connection again.
+        assert cursor.execute.call_count == 1
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_timeout_is_logged(self, mock_connect: MagicMock) -> None:
+        """Callers such as the MCP tools return the error without logging it."""
+        connector, _cursor = await self._timing_out_reader(mock_connect)
+
+        with capture_logs() as logs, pytest.raises(ConnectorTimeoutError):
+            await connector.read_assets()
+
+        [event] = [e for e in logs if e["event"] == "sql_statement_timeout"]
+        assert event["log_level"] == "warning"
+        assert event["operation"] == "read"
+        assert event["query_timeout"] == 5
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic._is_transient", return_value=True)
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_timed_out_insert_is_rolled_back_and_not_retried(
+        self, mock_connect: MagicMock, _transient: MagicMock
+    ) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+
+        def _execute(query: str, params: Any = None) -> None:
+            if query.upper().startswith("INSERT"):
+                raise _FakeOdbcError(*_SQLSERVER_TIMEOUT)
+            cursor.description = _WO_COLS if "WORK_ORDERS" in query.upper() else _ALL_COLS
+            cursor.fetchall.return_value = []
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        config = _basic_config(capabilities="read_write", with_insert=True)
+        config.retry.base_backoff = 0.01
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+
+        with pytest.raises(ConnectorTimeoutError, match="SQL write timed out"):
+            await connector.create_work_order(
+                WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+            )
+
+        executed = [str(call.args[0]).upper() for call in cursor.execute.call_args_list]
+        assert len([q for q in executed if q.startswith("INSERT")]) == 1
+        conn_obj.rollback.assert_called_once()
+        conn_obj.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_create_retried_after_a_commit_timeout_inserts_once(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """The timeout can come after the row reached the database (here, in commit).
+
+        The connector does not re-send the INSERT itself; the caller's retry goes
+        through create_work_order's ID check and finds the row.
+        """
+        stored: list[tuple[Any, ...]] = []
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+
+        def _execute(query: str, params: Any = None) -> None:
+            if query.upper().startswith("INSERT"):
+                stored.append(tuple(params))
+                return
+            cursor.description = _WO_COLS if "WORK_ORDERS" in query.upper() else _ALL_COLS
+            cursor.fetchall.return_value = [] if "WHERE 1=0" in query.upper() else list(stored)
+
+        cursor.execute = MagicMock(side_effect=_execute)
+        conn_obj = _make_conn(cursor)
+        conn_obj.commit.side_effect = _FakeOdbcError(
+            "HYT01",
+            "[HYT01] [Microsoft][ODBC Driver 18 for SQL Server]Connection timeout expired "
+            "(0) (SQLEndTran)",
+        )
+        mock_connect.return_value = conn_obj
+        config = _basic_config(capabilities="read_write", with_insert=True)
+        config.retry.base_backoff = 0.01
+        connector = GenericSqlConnector(config=config)
+        await connector.connect()
+        wo = WorkOrder(id="WO-7", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+
+        with pytest.raises(ConnectorTimeoutError):
+            await connector.create_work_order(wo)
+        result = await connector.create_work_order(wo)
+
+        assert result.id == "WO-7"
+        assert len(stored) == 1
+
+
+class TestBusyConnection:
+    """health_check and disconnect wait only so long for a call using the connection."""
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_health_check_reports_a_busy_connection(self, mock_connect: MagicMock) -> None:
+        started, release = threading.Event(), threading.Event()
+        mock_connect.return_value = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=1))
+        await connector.connect()
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            health = await asyncio.wait_for(connector.health_check(), timeout=5)
+        finally:
+            release.set()
+            await stuck
+
+        assert health.status == ConnectorStatus.UNHEALTHY
+        assert "busy" in health.message
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_without_query_timeout_the_wait_is_still_bounded(
+        self, mock_connect: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("machina.connectors.sql.generic._FALLBACK_CONNECTION_WAIT", 0.5)
+        started, release = threading.Event(), threading.Event()
+        mock_connect.return_value = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            health = await asyncio.wait_for(connector.health_check(), timeout=5)
+        finally:
+            release.set()
+            await stuck
+
+        assert "busy" in health.message
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_disconnect_leaves_a_busy_connection_to_the_call_using_it(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Closing it under the running statement is unsafe; the call closes it."""
+        started, release = threading.Event(), threading.Event()
+        conn_obj = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=1))
+        await connector.connect()
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            with capture_logs() as logs:
+                await asyncio.wait_for(connector.disconnect(), timeout=5)
+            conn_obj.close.assert_not_called()
+            assert (await connector.health_check()).message == "Not connected"
+        finally:
+            release.set()
+            await stuck
+
+        conn_obj.close.assert_called_once()
+        [event] = [e for e in logs if e["event"] == "sql_disconnect_busy"]
+        assert event["log_level"] == "warning"
+        assert event["operation"] == "disconnect"
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_insert_running_at_disconnect_still_commits(
+        self, mock_connect: MagicMock
+    ) -> None:
+        started, release = threading.Event(), threading.Event()
+        conn_obj = _make_stuck_conn(started, release, stuck_on="INSERT")
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True, query_timeout=1)
+        )
+        await connector.connect()
+        create = asyncio.create_task(
+            connector.create_work_order(
+                WorkOrder(id="WO-5", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            await asyncio.wait_for(connector.disconnect(), timeout=5)
+        finally:
+            release.set()
+            created = await create
+
+        assert created.id == "WO-5"
+        conn_obj.commit.assert_called_once()
+        conn_obj.close.assert_called_once()

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`query_timeout` for the SQL connector:** the seconds one statement may run before the driver stops it, set as pyodbc's `Connection.timeout` on ODBC and with `Statement.setQueryTimeout` on every JDBC statement. It is unset by default because drivers apply it differently: SQL Server, pgjdbc, Db2's JCC driver and MySQL Connector/J cancel the statement; IBM i's ODBC driver checks it against the optimizer's estimate before the query starts (SQL0666) and never stops a running statement; the Db2 CLI and psqlODBC drivers refuse the connection timeout pyodbc sets with it. A driver that refuses it fails `connect()` with `ConnectorConfigError` instead of running without the limit. The SQL connector page says what each driver does.
+
+### Fixed
+
+- **A stuck SQL statement no longer blocks the SQL connector's `health_check()` and `disconnect()` indefinitely.** The connector runs every call on one shared connection, one at a time, so a statement waiting on a lock held by another application (SQL Server waits for locks indefinitely by default) held up every later read, `create_work_order`, `health_check()` and `disconnect()`. `health_check()` now waits at most `query_timeout` seconds (30 when unset) for the connection, then reports it busy. `disconnect()` waits as long, then logs `sql_disconnect_busy` and drops the connection; the call still running on it closes it when it ends. If the driver never stops that statement, the process still waits for its thread on exit. A statement stopped by a query timeout (`query_timeout`, or one set in the DSN, JDBC URL or PostgreSQL's `statement_timeout`) now raises `ConnectorTimeoutError`, is logged as `sql_statement_timeout`, and is not retried by the connector for reads or writes: a retry would likely wait on the same lock as long again, and the connector's retry loop would re-send an INSERT without `create_work_order`'s ID check (a caller's retry still goes through it).
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
