@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A malformed `Retry-After` no longer crashes `request_with_retry`.** `str.isdigit()` also accepts characters such as a superscript two that `float()` rejects, so such a header raised a bare `ValueError` out of the connector call. Only ASCII digits (RFC 9110 `delay-seconds`) are now read as a delay; anything else falls back to the exponential backoff, as an HTTP-date already did.
 - **Tool-call arguments that parse as JSON but not as an object** (`[]`, `"P-201"`, `7`, `null`) are fed back to the model for correction like unparseable arguments, under the same retry budget, with a message that asks for a JSON object. They used to reach the write gates and tool handlers, raise `AttributeError` and end the turn with `LLMError`. A `null` on a tool that declares no parameters (`list_assets`) still counts as a call without arguments.
 - **MCP asset lookups work on a primary CMMS without `get_asset()`.** `machina_get_asset`, the asset check in `machina_create_work_order` and the `machina://v1/assets/{asset_id}` resource called `get_asset()` unconditionally, so a connector implementing only `read_assets()` — all that `READ_ASSETS` requires — failed with `AttributeError`. They now scan `read_assets()` when `get_asset()` is absent.
+### Changed
+
+- **Workflow connector steps name a `Capability`.** In a `<category>.<capability>` action, the part after the dot must be a `Capability` value. Any other name fails the step with a `WorkflowError` naming the step and the unknown capability, under the step's error policy; a connector that declares such a name in the deprecated `list[str]` format is no longer reached. In sandbox mode a write step still returns its placeholder before the name is checked.
+- **Workflow steps call the method that backs their capability**, as listed in `CAPABILITY_TO_METHOD`: `iot.publish_message` calls `publish` and `calendar.read_calendar_events` calls `read_events`, where they used to fail with "connector has no method". The CMMS capabilities are served by methods of the same name, so their steps are unchanged.
+
+### Fixed
+
+- **Workflow runs no longer emit `DeprecationWarning`.** Connector and `channels.send_message` steps looked connectors up with raw strings, the form whose removal is scheduled for v0.5; they now pass `Capability` members.
 
 ## [0.4.0] - 2026-10-04
 

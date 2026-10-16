@@ -15,7 +15,7 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, it needs a connector that declares `create_purchase_order`, or the workflow stops there.
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
 
 ```python
 from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy, GuardCondition
