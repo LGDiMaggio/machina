@@ -1,0 +1,11 @@
+# Each commit gets two coverage uploads from .github/workflows/ci.yml:
+# `core` (ci, Python 3.12, no optional extras) and `extras` (ci-extras,
+# Python 3.12, with the mcp/excel/calendar/litellm extras). Wait for both
+# before posting statuses or the PR comment, so neither is computed from the
+# core report alone, which shows the extras-only modules at 0%.
+codecov:
+  notify:
+    after_n_builds: 2
+
+comment:
+  after_n_builds: 2
