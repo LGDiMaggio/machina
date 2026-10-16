@@ -357,13 +357,15 @@ _TOOL_CALL_LEAK_FALLBACK = (
     "capable model."
 )
 
-# Fed back to the model (as the tool result) when it supplies a non-empty but
-# unparseable arguments blob, so it can retry with valid JSON instead of the
-# error being silently swallowed as ``{}`` and crashing a downstream tool that
-# needs required keys. FIXED text — never the raw exception, which echoes the
+# Fed back to the model (as the tool result) when its arguments are not a JSON
+# object (an unparseable blob, or valid JSON of another type such as [],
+# "P-201", 7 or null), so it can retry with an object instead of the error
+# being silently swallowed as ``{}`` and crashing a downstream tool that needs
+# required keys. FIXED text — never the raw exception, which echoes the
 # offending (possibly injected) argument bytes back into the prompt (H1).
 _INVALID_ARGS_MESSAGE = (
-    "Arguments could not be parsed as valid JSON. Retry this call with valid JSON arguments."
+    "Arguments must be a JSON object of this tool's parameters; these were not valid "
+    "JSON or not an object. Retry this call with a JSON object of arguments."
 )
 
 # Hard cap on how many unparseable-argument retries one turn may feed back
@@ -2150,6 +2152,12 @@ class Agent:
         ``role:tool`` message and no risk of a second write here.
         """
         tools = self._get_available_tools()
+        # Offered tools whose schema declares no parameters (list_assets).
+        no_arg_tools: set[str] = {
+            tool["function"]["name"]
+            for tool in tools
+            if not tool.get("function", {}).get("parameters", {}).get("properties")
+        }
 
         # Per-turn memo of side-effecting tool calls (keyed by name + args).
         # If the model re-requests the same write across loop iterations — the
@@ -2239,6 +2247,12 @@ class Agent:
                         args = json.loads(raw_arguments)
                     except (json.JSONDecodeError, TypeError, ValueError):
                         args = None  # unparseable — rejected with non-objects below
+                    else:
+                        if args is None and func_name in no_arg_tools:
+                            # JSON null on a tool that declares no parameters
+                            # names no arguments, like absent ones: a valid
+                            # no-arg call, not a malformed one.
+                            args = {}
                 if not isinstance(args, dict):
                     # Genuinely malformed args: unparseable, or valid JSON that is
                     # not an object ([], "P-201", 7, null). Every tool schema is an
