@@ -53,7 +53,21 @@ fields given, renamed through `field_map`) and re-reads the work order when
 of either a number of days or `{days, weeks, months, hours}`.
 
 REST mode reads no spare parts and no maintenance history: those methods
-return empty lists. Calls are single attempts, without retries.
+return empty lists. Calls are single attempts, without retries. A failed call
+raises `ConnectorError`: `ConnectorAuthError` for HTTP 401/403,
+`ConnectorTimeoutError` for a timeout, `ConnectorConfigError` for a malformed
+`url`. The message names the operation and the HTTP status or the kind of
+failure (e.g. `CMMS read assets failed: HTTP 500`), never the URL; the
+original httpx exception is chained as `__cause__`. A 2xx response whose body
+is not JSON (an HTML login page from a proxy in front of the CMMS, say) raises
+`ConnectorError` too (`CMMS get asset failed: response is not JSON`), without
+the body in the message. The body is read as UTF-8 whatever charset the
+response declares, so JSON in another encoding fails with `response is not
+UTF-8`. A create, and an update without `get_work_order`, return the CMMS's
+response, so it must be JSON (an update's may also be empty). When it is not,
+the CMMS may already have applied the change, and the message says so instead
+of reporting a failure: `CMMS create work order: response is not JSON; the
+change may have been applied, so check the CMMS before retrying`.
 
 ### YAML Configuration
 
