@@ -335,6 +335,67 @@ class TestReadSpareParts:
         assert len(parts) == 1
         assert parts[0].sku == "SKF-6205"
 
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_filter(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """asset_id must keep only the parts listed on the asset record."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/assets/a1",
+            json={"success": True, "result": {"id": "a1", "name": "Pump A", "parts": ["p2"]}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "p1", "partNumber": "SKF-6205", "name": "Bearing"},
+                    {"id": "p2", "partNumber": "SKF-7309", "name": "Angular bearing"},
+                ],
+            },
+        )
+        parts = await connector.read_spare_parts(asset_id="a1")
+        assert [p.sku for p in parts] == ["SKF-7309"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_unknown_asset(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A 404 on the asset must raise, not read as an asset without parts."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", url=f"{BASE}/api/v2/assets/missing", status_code=404)
+        with pytest.raises(ConnectorError, match="missing"):
+            await connector.read_spare_parts(asset_id="missing")
+        # Exactly 2 requests: the connect health check + the asset lookup.
+        assert len(httpx_mock.get_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_without_parts(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """An asset with no parts must return [] without paging the inventory."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/assets/a1",
+            json={"success": True, "result": {"id": "a1", "parts": []}},
+        )
+        assert await connector.read_spare_parts(asset_id="a1") == []
+        assert len(httpx_mock.get_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_lookup_auth_failure(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A 401 on the asset lookup must raise ConnectorAuthError, as the parts read does."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", url=f"{BASE}/api/v2/assets/a1", status_code=401)
+        with pytest.raises(ConnectorAuthError):
+            await connector.read_spare_parts(asset_id="a1")
+        assert len(httpx_mock.get_requests()) == 2
+
 
 # ---------------------------------------------------------------------------
 # Read maintenance plans

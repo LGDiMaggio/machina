@@ -198,7 +198,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 ## Known Limitations
 
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
-- **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
+- **Spare parts by asset**: Maximo's `mxinventory` does not link items to assets, and the connector does not read an asset's spare-parts list (the `SPAREPART` object behind the Assets application's Spare Parts tab), so `read_spare_parts` cannot filter by `asset_id`. A non-empty `asset_id` raises `ConnectorError` rather than returning the whole inventory as the asset's parts; look the part up by `sku` instead.
 - **Pagination**: Uses Maximo's OSLC `responseInfo.nextPage` link-following. Very large result sets may benefit from server-side `oslc.where` filtering.
 
 ## API Reference
