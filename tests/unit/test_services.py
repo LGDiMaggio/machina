@@ -1,7 +1,10 @@
 """Tests for domain services."""
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
+from machina.connectors.cmms.mappers.upkeep import parse_maintenance_plans
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -9,6 +12,7 @@ from machina.domain.services.failure_analyzer import FailureAnalyzer
 from machina.domain.services.maintenance_scheduler import MaintenanceScheduler
 from machina.domain.services.work_order_factory import WorkOrderFactory
 from machina.domain.work_order import Priority, WorkOrderStatus, WorkOrderType
+from machina.exceptions import DomainValidationError
 
 
 class TestFailureAnalyzer:
@@ -192,3 +196,92 @@ class TestMaintenanceScheduler:
             interval=Interval(months=1),
         )
         assert not scheduler.is_overdue(plan, date(2026, 1, 1), today=date(2026, 1, 15))
+
+
+def _plan(plan_id: str, interval: Interval, *, active: bool = True) -> MaintenancePlan:
+    return MaintenancePlan(
+        id=plan_id, asset_id="P-1", name=f"Plan {plan_id}", interval=interval, active=active
+    )
+
+
+class TestSchedulerWithoutCalendarInterval:
+    """Plans that recur on a meter or on operating hours get no invented due date.
+
+    ``Interval.total_days`` is 0 for them, so a calendar projection would
+    report them as due on the day of the scan, every time it runs.
+    """
+
+    @pytest.mark.parametrize(
+        "interval", [Interval(), Interval(hours=500)], ids=["meter", "operating-hours"]
+    )
+    def test_next_due_date_refuses_a_plan_without_calendar_interval(
+        self, interval: Interval
+    ) -> None:
+        scheduler = MaintenanceScheduler()
+        with pytest.raises(DomainValidationError, match=r"'MP-M'.*calendar due date"):
+            scheduler.next_due_date(_plan("MP-M", interval), last_executed=date(2026, 1, 1))
+        with pytest.raises(DomainValidationError):
+            scheduler.is_overdue(_plan("MP-M", interval), date(2026, 1, 1))
+
+    def test_scan_reports_only_calendar_plans_as_due(self) -> None:
+        scheduler = MaintenanceScheduler(
+            plans=[
+                _plan("MP-METER", Interval()),
+                _plan("MP-HOURS", Interval(hours=500)),
+                _plan("MP-WEEKLY", Interval(weeks=1)),
+            ]
+        )
+        due = scheduler.scan_due_plans(horizon_days=14)
+        assert [r["plan_id"] for r in due] == ["MP-WEEKLY"]
+
+    def test_find_window_skips_inactive_and_non_calendar_plans(self) -> None:
+        scheduler = MaintenanceScheduler(
+            plans=[
+                _plan("MP-METER", Interval()),
+                _plan("MP-ENDED", Interval(days=1), active=False),
+            ]
+        )
+        window = scheduler.find_window(asset_id="P-1")
+        assert window["plan_id"] == ""  # ad-hoc fallback, not a plan due today
+        assert window["start"] == date.today() + timedelta(days=1)
+
+        scheduler = MaintenanceScheduler(
+            plans=[_plan("MP-METER", Interval()), _plan("MP-MONTHLY", Interval(months=1))]
+        )
+        assert scheduler.find_window(asset_id="P-1")["plan_id"] == "MP-MONTHLY"
+
+    def test_plans_without_calendar_due_date_lists_them_with_their_active_flag(self) -> None:
+        scheduler = MaintenanceScheduler(
+            plans=[
+                _plan("MP-METER", Interval()),
+                _plan("MP-HOURS", Interval(hours=500), active=False),
+                _plan("MP-WEEKLY", Interval(weeks=1)),
+            ]
+        )
+        listed = scheduler.plans_without_calendar_due_date()
+        assert [(p["plan_id"], p["active"]) for p in listed] == [
+            ("MP-METER", True),
+            ("MP-HOURS", False),
+        ]
+        assert [p["interval_operating_hours"] for p in listed] == [None, 500]
+        assert all("calendar due date cannot be computed" in p["reason"] for p in listed)
+        assert scheduler.plans_without_calendar_due_date(asset_id="P-2") == []
+
+    def test_upkeep_meter_schedule_is_listed_but_never_due(self) -> None:
+        # A PM template with one meter-triggered schedule (no repeatFrequency)
+        # and one weekly schedule, as GET /api/v2/pm?includes=schedules returns.
+        template = {
+            "_id": "pm-1",
+            "name": "Pump service",
+            "tasks": [],
+            "schedules": [
+                {"id": "sch-meter", "asset": "P-1", "meter": "m-1", "meterDueValue": 500},
+                {"id": "sch-weekly", "asset": "P-1", "repeatFrequency": "WEEKLY"},
+            ],
+        }
+        plans = parse_maintenance_plans(template, now=datetime(2026, 10, 16, tzinfo=UTC))
+        assert [(p.id, p.active) for p in plans] == [("sch-meter", True), ("sch-weekly", True)]
+
+        scheduler = MaintenanceScheduler(plans=plans)
+        assert [r["plan_id"] for r in scheduler.scan_due_plans(horizon_days=14)] == ["sch-weekly"]
+        assert [p["plan_id"] for p in scheduler.plans_without_calendar_due_date()] == ["sch-meter"]
