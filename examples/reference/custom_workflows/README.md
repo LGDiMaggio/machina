@@ -15,10 +15,10 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, it needs a connector that declares `create_purchase_order`, or the workflow stops there.
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). A deterministic CMMS lookup feeds an LLM urgency assessment: the part record lists the assets that use the part (`compatible_assets`). Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, it needs a connector that declares `create_purchase_order`, or the workflow stops there.
 
 ```python
-from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy, GuardCondition
+from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy
 
 spare_part_reorder = Workflow(
     name="Spare Part Reorder",
@@ -26,20 +26,11 @@ spare_part_reorder = Workflow(
                     filter={"condition": "stock_below_reorder_point"}),
     steps=[
         Step("lookup_part",        action="cmms.read_spare_parts",
-             inputs={"part_id": "{trigger.part_id}"},
+             inputs={"sku": "{trigger.part_id}"},
              on_error=ErrorPolicy.STOP),
 
-        Step("check_dependencies", action="cmms.read_assets",
-             on_error=ErrorPolicy.SKIP),
-
-        Step("verify_criticality", action="domain.check_asset_criticality",
-             guard=GuardCondition(                          # skip if no deps
-                 check=lambda ctx: bool(ctx.get("check_dependencies")),
-             ),
-             on_error=ErrorPolicy.SKIP),
-
         Step("assess_urgency",     action="agent.reason",   # <-- LLM step
-             prompt="...standard or expedited procurement?...",
+             prompt="...Part: {lookup_part}... standard or expedited?...",
              on_error=ErrorPolicy.SKIP),
 
         Step("place_order",        action="erp.create_purchase_order",
@@ -101,7 +92,7 @@ A trigger describes the event a workflow handles; it does not start the workflow
 
 ### Template Variables
 
-Reference trigger data with `{trigger.field}` and prior step outputs with `{step_name}` or `{step_name.field}`.
+Reference trigger data with `{trigger.field}` and prior step outputs with `{step_name}` or `{step_name.field}`. The `.field` form reads a key of a dict output or an attribute of an object output. A list output (most `read_*` capabilities return one) has no fields to read: reference it whole, as `{step_name}`. A placeholder that does not resolve is left in the text as written.
 
 ### Guard Conditions
 

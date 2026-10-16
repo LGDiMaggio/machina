@@ -34,7 +34,6 @@ from machina.connectors.comms.cli import CliChannel
 from machina.connectors.docs import DocumentStoreConnector
 from machina.workflows import (
     ErrorPolicy,
-    GuardCondition,
     Step,
     Trigger,
     TriggerType,
@@ -46,7 +45,7 @@ SAMPLE_DIR = _examples_dir / "sample_data"
 
 # ── Workflow 1: Spare Part Reorder ──────────────────────────────
 #
-# Stock drops below reorder point? The agent checks dependencies,
+# Stock drops below reorder point? The agent looks the part up,
 # assesses urgency with LLM reasoning, and places the order.
 
 spare_part_reorder = Workflow(
@@ -57,26 +56,13 @@ spare_part_reorder = Workflow(
         filter={"condition": "stock_below_reorder_point"},
     ),
     steps=[
+        # Returns a list, which later steps can reference only whole, as
+        # {lookup_part}. Each part lists the assets that use it (compatible_assets).
         Step(
             "lookup_part",
             action="cmms.read_spare_parts",
-            inputs={"part_id": "{trigger.part_id}"},
+            inputs={"sku": "{trigger.part_id}"},
             on_error=ErrorPolicy.STOP,
-        ),
-        Step(
-            "check_dependencies",
-            action="cmms.read_assets",
-            inputs={"part_id": "{trigger.part_id}"},
-            on_error=ErrorPolicy.SKIP,
-        ),
-        Step(
-            "verify_criticality",
-            action="domain.check_asset_criticality",
-            guard=GuardCondition(
-                check=lambda ctx: bool(ctx.get("check_dependencies")),
-                description="Skip if no dependent assets found",
-            ),
-            on_error=ErrorPolicy.SKIP,
         ),
         # LLM decides: standard or expedited procurement?
         Step(
@@ -85,9 +71,7 @@ spare_part_reorder = Workflow(
             prompt=(
                 "Spare part {trigger.part_id} is below reorder point.\n"
                 "Stock: {trigger.current_stock}, reorder: {trigger.reorder_point}\n"
-                "Part: {lookup_part}\n"
-                "Dependent assets: {check_dependencies}\n"
-                "Criticality: {verify_criticality}\n\n"
+                "Part (compatible_assets lists the assets that use it): {lookup_part}\n\n"
                 "Assess urgency. Standard or expedited? Recommend quantity."
             ),
             on_error=ErrorPolicy.SKIP,
@@ -105,7 +89,7 @@ spare_part_reorder = Workflow(
             action="channels.send_message",
             template=(
                 "Spare Part Reorder\n"
-                "Part: {trigger.part_id} -- {lookup_part.name}\n"
+                "Part: {trigger.part_id}\n"
                 "Stock: {trigger.current_stock}\n"
                 "Assessment: {assess_urgency}"
             ),
