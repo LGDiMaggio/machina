@@ -47,6 +47,7 @@ pip install machina-ai[cmms-rest]
 | `update_work_order` | Update status, assignee, or description via PATCH |
 | `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
+| `read_maintenance_history` | Read the completed work orders of one asset (`status=complete`) |
 
 ### Convenience methods
 

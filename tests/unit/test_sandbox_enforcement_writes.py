@@ -119,6 +119,56 @@ class TestIdempotentWritesTouchNothingInSandbox:
         conn._execute_write.assert_not_called()
 
 
+def _vendor_cmms(kind: str) -> object:
+    """A connected vendor REST CMMS connector; no request is made to build it."""
+    from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
+    from machina.connectors.cmms.maximo import MaximoConnector
+    from machina.connectors.cmms.sap_pm import SapPmConnector
+    from machina.connectors.cmms.upkeep import UpKeepConnector
+
+    conn: SapPmConnector | MaximoConnector | UpKeepConnector
+    if kind == "sap_pm":
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+    elif kind == "maximo":
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+    else:
+        conn = UpKeepConnector(api_key="k")
+    conn._connected = True
+    return conn
+
+
+@pytest.mark.usefixtures("_sandbox_on")
+class TestVendorCmmsUpdatesBlockedInSandbox:
+    """The real decorated update/close/cancel of the REST CMMS connectors (not a
+    ``MagicMock`` self). The ID checks inside ``update_work_order`` run behind the
+    guard: in sandbox even an ID live mode refuses raises SandboxViolationError,
+    and no request — SAP's CSRF fetch included — is sent."""
+
+    @pytest.mark.parametrize("kind", ["sap_pm", "maximo", "upkeep"])
+    @pytest.mark.parametrize(
+        "write",
+        [
+            pytest.param(lambda c, i: c.update_work_order(i, description="x"), id="update"),
+            pytest.param(lambda c, i: c.close_work_order(i), id="close"),
+            pytest.param(lambda c, i: c.cancel_work_order(i), id="cancel"),
+        ],
+    )
+    @pytest.mark.parametrize("work_order_id", ["..", "WO-1,WO-2"])
+    @pytest.mark.asyncio
+    async def test_blocked_before_any_request(
+        self, httpx_mock, kind: str, write, work_order_id: str
+    ) -> None:
+        with pytest.raises(SandboxViolationError):
+            await write(_vendor_cmms(kind), work_order_id)
+        assert httpx_mock.get_requests() == []
+
+
 class TestCliChannelStillWorksInSandbox:
     """The CLI channel only prints to stdout — it must NOT be sandbox-gated,
     otherwise the agent could not reply to the user in sandbox mode."""
