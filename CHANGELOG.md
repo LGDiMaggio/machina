@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`MaintenanceScheduler.next_due_date()` and `is_overdue()` raise `DomainValidationError` for a plan without a calendar interval** instead of returning a date. A caller that loops over plans of mixed recurrence, such as SAP PM plans with operating-hours cycles, must skip or catch these. The new `MaintenanceScheduler.plans_without_calendar_due_date()` (also callable as the workflow action `maintenance_scheduler.plans_without_calendar_due_date`) lists them with their own `active` flag, their operating-hours interval and the reason.
+- **Workflow connector steps name a `Capability`.** In a `<category>.<capability>` action, the part after the dot must be a `Capability` value. Any other name fails the step with a `WorkflowError` naming the step and the unknown capability, under the step's error policy; a connector that declares such a name in the deprecated `list[str]` format is no longer reached. In sandbox mode a write step still returns its placeholder before the name is checked.
+- **Workflow steps call the method that backs their capability**, as listed in `CAPABILITY_TO_METHOD`: `iot.publish_message` calls `publish` and `calendar.read_calendar_events` calls `read_events`, where they used to fail with "connector has no method". The CMMS capabilities are served by methods of the same name, so their steps are unchanged.
 
 ### Fixed
 
@@ -24,20 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A malformed `Retry-After` no longer crashes `request_with_retry`.** `str.isdigit()` also accepts characters such as a superscript two that `float()` rejects, so such a header raised a bare `ValueError` out of the connector call. Only ASCII digits (RFC 9110 `delay-seconds`) are now read as a delay; anything else falls back to the exponential backoff, as an HTTP-date already did.
 - **Tool-call arguments that parse as JSON but not as an object** (`[]`, `"P-201"`, `7`, `null`) are fed back to the model for correction like unparseable arguments, under the same retry budget, with a message that asks for a JSON object. They used to reach the write gates and tool handlers, raise `AttributeError` and end the turn with `LLMError`. A `null` on a tool that declares no parameters (`list_assets`) still counts as a call without arguments.
 - **MCP asset lookups work on a primary CMMS without `get_asset()`.** `machina_get_asset`, the asset check in `machina_create_work_order` and the `machina://v1/assets/{asset_id}` resource called `get_asset()` unconditionally, so a connector implementing only `read_assets()` — all that `READ_ASSETS` requires — failed with `AttributeError`. They now scan `read_assets()` when `get_asset()` is absent.
-### Changed
-
-- **Workflow connector steps name a `Capability`.** In a `<category>.<capability>` action, the part after the dot must be a `Capability` value. Any other name fails the step with a `WorkflowError` naming the step and the unknown capability, under the step's error policy; a connector that declares such a name in the deprecated `list[str]` format is no longer reached. In sandbox mode a write step still returns its placeholder before the name is checked.
-- **Workflow steps call the method that backs their capability**, as listed in `CAPABILITY_TO_METHOD`: `iot.publish_message` calls `publish` and `calendar.read_calendar_events` calls `read_events`, where they used to fail with "connector has no method". The CMMS capabilities are served by methods of the same name, so their steps are unchanged.
-
-### Fixed
-
 - **Workflow runs no longer emit `DeprecationWarning`.** Connector and `channels.send_message` steps looked connectors up with raw strings, the form whose removal is scheduled for v0.5; they now pass `Capability` members.
-### Fixed
-
 - **A workflow step skipped after an error keeps the error.** Under `ErrorPolicy.SKIP` a failed step returned `success=True, skipped=True` with no `error`, so a run looked clean and the failure was only in the logs. `StepResult.error` now holds it, and also holds the error when a step is skipped because its guard raised. A guard that returned `False` still leaves `error` as `None`, which is how the two skips are told apart: code that reads a non-`None` `error` as a failure should check `skipped` first. The agent's `execute_workflow` tool reports `skipped` for each step, and the examples print `[~]` for a skipped step instead of `[+]`.
 - **A template that references a failed step renders `[step_name failed]` instead of the raw placeholder.** The built-in alarm workflow's technician notification read `Spare Parts: {check_spare_parts}` whenever the spare-parts read failed. `WorkflowContext.resolve` now renders `[check_spare_parts failed]` for a step that failed under `SKIP` or `NOTIFY`; the error text stays on the `StepResult`. A bare `{step_name}` step input still resolves to `None`, and a step skipped by its guard keeps its placeholder.
-### Fixed
-
 - **Every placeholder in the custom-workflows reference example's planner notification resolves.** Its `notify_planners` template read `{scan_plans.count}` and `{create_work_orders.count}`, but a list output has no fields: `.count` reached the list's `count` method, so the message showed `<built-in method count of list object at 0x…>` and no `template_unresolved` warning was logged. That was `scan_plans` on every run and `create_work_orders` run live; in sandbox mode `create_work_orders` returns a placeholder with no `count` key, so `{create_work_orders.count}` stayed in the message as written. The template now references both outputs whole, as `{scan_plans}` and `{create_work_orders}`.
 
 ## [0.4.0] - 2026-10-04
