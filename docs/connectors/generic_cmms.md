@@ -53,7 +53,12 @@ fields given, renamed through `field_map`) and re-reads the work order when
 of either a number of days or `{days, weeks, months, hours}`.
 
 REST mode reads no spare parts and no maintenance history: those methods
-return empty lists. Calls are single attempts, without retries.
+return empty lists. Calls are single attempts, without retries. A failed call
+raises `ConnectorError`: `ConnectorAuthError` for HTTP 401/403,
+`ConnectorTimeoutError` for a timeout, `ConnectorConfigError` for a malformed
+`url`. The message names the operation and the HTTP status or the kind of
+failure (e.g. `CMMS read assets failed: HTTP 500`), never the URL; the
+original httpx exception is chained as `__cause__`.
 
 ### YAML Configuration
 
