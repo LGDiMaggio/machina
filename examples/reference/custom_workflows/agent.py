@@ -225,7 +225,7 @@ async def run_demo(llm: str, sandbox: bool) -> None:
     status = "SUCCESS" if result.success else "PARTIAL"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
     for sr in result.steps:
-        icon = "+" if sr.success else "~" if sr.skipped else "x"
+        icon = "~" if sr.skipped else "+" if sr.success else "x"
         print(f"    [{icon}] {sr.name}")
 
     await agent.stop()
