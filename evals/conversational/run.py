@@ -161,8 +161,15 @@ class TurnSignals:
 # result is a dict containing EXACTLY ONE of these keys with a list value,
 # that list decides emptiness (e.g. diagnose_failure always returns
 # ``{"asset_id": ..., "symptoms": [...], "probable_failures": []}`` — truthy
-# as a dict even when the diagnosis found nothing).
-_LIST_PAYLOAD_KEYS: tuple[str, ...] = ("probable_failures", "results", "items", "matches")
+# as a dict even when the diagnosis found nothing; likewise check_spare_parts'
+# ``{"parts": [], "total": 0, "truncated": false}``).
+_LIST_PAYLOAD_KEYS: tuple[str, ...] = (
+    "probable_failures",
+    "results",
+    "items",
+    "matches",
+    "parts",
+)
 
 
 def tool_result_emptiness(raw: str) -> str | None:

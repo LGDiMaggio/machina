@@ -37,6 +37,7 @@ from machina.agent.entity_resolver import (
 from machina.agent.maintenance_schedule import get_maintenance_schedule
 from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
+    bounded_spare_parts,
     build_context_message,
     build_system_prompt,
     safe_source,
@@ -47,7 +48,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorError, LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -3017,12 +3018,30 @@ class Agent:
         if name == "check_spare_parts":
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
-                _, conn = connectors[0]
-                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    sku=args.get("sku", ""),
-                )
-                return [p.model_dump(mode="json") for p in parts]
+                cname, conn = connectors[0]
+                # Send only the filters the model gave, as the MCP tool does: an
+                # empty value is no filter, so a provider is never handed one it
+                # may not support.
+                filters = {key: args[key] for key in ("asset_id", "sku") if args.get(key)}
+                try:
+                    parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
+                except ConnectorError as exc:
+                    # E.g. Maximo or UpKeep refusing an asset filter they cannot
+                    # apply. Relay it so the model can say so and look the part
+                    # up by sku, instead of the error ending the turn.
+                    logger.warning(
+                        "spare_parts_lookup_failed",
+                        agent=self.name,
+                        tool=name,
+                        connector=cname,
+                        asset_id=filters.get("asset_id", ""),
+                        sku=filters.get("sku", ""),
+                        operation="execute_tool",
+                        error=str(exc),
+                    )
+                    return {"error": safe_text(str(exc))}
+                # Capped: an unfiltered lookup returns the whole inventory.
+                return bounded_spare_parts(parts, lambda part: part.model_dump(mode="json"))
             return {"error": "No spare parts connector available"}
 
         if name == "diagnose_failure":
