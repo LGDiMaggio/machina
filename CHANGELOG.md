@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SAP PM, Maximo and UpKeep declare `READ_MAINTENANCE_HISTORY`.** Their `read_maintenance_history()` was implemented but undeclared, so an MCP server whose only CMMS is one of them never registered `machina_get_maintenance_history`, the `alarm_to_workorder` history step was skipped, and the capability spine listed none of them as a provider. Each now refuses a missing `asset_id` instead of reading history without an asset filter.
+
+### Fixed
+
+- **SAP PM work-order status uses what `API_MAINTENANCEORDER` exposes.** The connector filtered, read and PATCHed `MaintenanceOrderSystemStatus`, a property the MaintenanceOrder entity does not have: on a real system every status filter and every maintenance-history query was rejected, every order read as `created`, and a status update sent a property the order lacks. Reads now map `SystemStatusText`, the order's active system statuses as one line (`REL  CNF  PRC  SETC`). SAP cannot filter on that field (KBA 3614100), and the process phase it suggests filtering on instead is set only on orders of phase-enabled order types, so `read_work_orders` filters by `Equipment` and applies `status` to the orders read — a `WorkOrderStatus`, its value (`"closed"`, as the LLM and MCP tools send it) or a raw SAP code (`REL`) — and `read_maintenance_history` keeps the equipment's completed and closed orders. `update_work_order` sets `assigned`, `closed` and `cancelled` through the `ReleaseMaintenanceOrder`, `SetMaintOrdToTechCompleted` and `SetMaintOrdStsToMrkdForDeltn` function imports, and refuses `created`, `in_progress` and `completed` — statuses SAP sets itself — before any request.
+- **Maximo maintenance-history queries parse.** The history `oslc.where` grouped the statuses as `(status="COMP" or status="CLOSE")`; oslc.where has no `or` and no grouping (`and` is its only boolean operator), so it now uses `status in ["COMP","CLOSE"]`.
+- **Maximo reads follow a `nextPage` link given as `{"href": ...}`** as well as a bare URL. Only the bare form was followed, so a multi-page read answered with the object form failed on its second request.
+- **IDs from LLM or MCP-client input can no longer rewrite SAP PM, Maximo or UpKeep requests.** SAP PM writes IDs and codes as OData string literals (an embedded `'` is doubled) in every `$filter`, in the update key and in the status function import's parameter. Maximo refuses, with `ConnectorError` and before any request, an empty value or one containing `"`, `\`, `%`, `*`, `,`, `=`, `!`, `<`, `>` or `~` — characters oslc.where and Maximo's QBE read as query syntax; an update checks its ID before the PATCH. IDs in URL paths (UpKeep reads and updates, the Maximo update, the SAP update key) are percent-encoded, so `/`, `?` and `#` cannot change the target; UpKeep and Maximo also refuse an empty, `.` or `..` ID there. Numeric IDs are still formatted as their digits.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
