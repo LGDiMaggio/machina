@@ -129,6 +129,9 @@ since then count. A work-order row whose values do not make a valid work order
   the file's own column order; columns the schema does not map stay empty. It
   is idempotent on the work-order ID: creating a work order whose ID is already
   in the sheet returns the existing record instead of adding a duplicate row.
+  If that ID is only on a row skipped on read (an empty or unreadable required
+  cell, an invalid value), create raises `ConnectorError` naming the row and
+  the problem, and writes nothing: fix or remove that row first.
   A missing work-order file or sheet is created on the first write, with the
   schema's header row.
 - **Update** applies only legal status transitions (an illegal one, or an
@@ -142,6 +145,11 @@ since then count. A work-order row whose values do not make a valid work order
   work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8
   BOM, which Excel on Windows needs to read accented text. Without a
   `write_mode`, `update_work_order()` changes the in-memory copy only.
+- Writes run one at a time. Cancelling a write (an MCP request cancellation,
+  a workflow step timeout) does not stop it once it has started: it still
+  finishes, the cached records follow its outcome, and the next write waits
+  for it, so a retried create finds the row instead of adding it again.
+  `disconnect()` waits for it too, for up to 5 seconds.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.
 - `write_mode` accepts `append` or `overwrite`; either one makes the sheet
