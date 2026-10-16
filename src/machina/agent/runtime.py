@@ -2229,6 +2229,7 @@ class Agent:
             for tc in tool_calls:
                 func_name = tc.function.name
                 raw_arguments = getattr(tc.function, "arguments", None)
+                args: Any
                 if raw_arguments is None or not str(raw_arguments).strip():
                     # No arguments supplied — a valid no-arg call (e.g.
                     # list_assets), not a parse failure.
@@ -2237,34 +2238,39 @@ class Agent:
                     try:
                         args = json.loads(raw_arguments)
                     except (json.JSONDecodeError, TypeError, ValueError):
-                        # Genuinely malformed args. Instead of silently coercing to
-                        # {} (which masks the error and crashes a tool that needs
-                        # required keys like asset_id), feed a FIXED error back so
-                        # the model self-corrects. Bounded by
-                        # _MAX_ARG_CORRECTION_ATTEMPTS so persistent junk still
-                        # terminates (H1). The counter advances once per
-                        # ITERATION (below), not once per bad call, so a single
-                        # iteration emitting several malformed calls still leaves
-                        # the model its full quota of correction rounds.
-                        iteration_had_arg_error = True
-                        logger.warning(
-                            "invalid_tool_arguments",
-                            agent=self.name,
-                            tool=func_name,
-                            operation="llm_loop",
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
-                                "tool_call_id": tc.id,
-                            }
-                        )
-                        # The fed-back error is new information; mark progress so a
-                        # single bad call doesn't trip the no-progress guard — the
-                        # dedicated counter is the real bound.
-                        iteration_made_progress = True
-                        continue
+                        args = None  # unparseable — rejected with non-objects below
+                if not isinstance(args, dict):
+                    # Genuinely malformed args: unparseable, or valid JSON that is
+                    # not an object ([], "P-201", 7, null). Every tool schema is an
+                    # object and the write gates and tool handlers read
+                    # args.get(...), so a non-object would raise AttributeError
+                    # and end the turn. Instead of silently coercing to {} (which
+                    # masks the error and crashes a tool that needs required keys
+                    # like asset_id), feed a FIXED error back so the model
+                    # self-corrects. Bounded by _MAX_ARG_CORRECTION_ATTEMPTS so
+                    # persistent junk still terminates (H1). The counter advances
+                    # once per ITERATION (below), not once per bad call, so a
+                    # single iteration emitting several malformed calls still
+                    # leaves the model its full quota of correction rounds.
+                    iteration_had_arg_error = True
+                    logger.warning(
+                        "invalid_tool_arguments",
+                        agent=self.name,
+                        tool=func_name,
+                        operation="llm_loop",
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
+                            "tool_call_id": tc.id,
+                        }
+                    )
+                    # The fed-back error is new information; mark progress so a
+                    # single bad call doesn't trip the no-progress guard — the
+                    # dedicated counter is the real bound.
+                    iteration_made_progress = True
+                    continue
 
                 # Canonical key for EVERY call (read or write), used for both the
                 # read-replay cache and the no-progress detector.
