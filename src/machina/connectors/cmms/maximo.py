@@ -113,6 +113,7 @@ class MaximoConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -381,7 +382,8 @@ class MaximoConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset."""
         self._ensure_connected()
-        where = f'assetnum="{asset_id}" and (status="COMP" or status="CLOSE")'
+        # oslc.where has no "or" (Maximo answers BMXAA8744E); "in" matches a list.
+        where = f'assetnum="{asset_id}" and status in ["COMP","CLOSE"]'
         raw = await self._oslc_get("mxwo", oslc_where=where)
         return [maximo_mapper.parse_work_order(item) for item in raw]
 

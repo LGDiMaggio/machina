@@ -4,7 +4,8 @@ The self-description spine promises a hard contract: a capability is surfaced
 only when a connector both **declares** it and exposes a **live** (present,
 non-stub) backing method. These tests enforce that contract directly against
 the real classes in :data:`machina.runtime._CONNECTOR_FACTORIES`, so a
-connector cannot declare a capability it cannot serve and quietly pass review.
+connector cannot declare a capability it cannot serve, or serve one it never
+declares, and quietly pass review.
 
 They pin:
 
@@ -13,6 +14,11 @@ They pin:
   connectors) resolves through
   :data:`machina.introspect._methods.CAPABILITY_TO_METHOD` to a method that is
   present and not a :class:`NotImplementedError` stub;
+* **live-backed ⇒ declared** — the converse: a connector with a live method for
+  a capability declares it (in its base set, or as config-gated for the
+  instance-computed connectors), unless :data:`_UNDECLARED_BY_DESIGN` records
+  why not. An undeclared method is invisible to every capability lookup — the
+  workflow engine, MCP tool registration, the agent's tools and the spine;
 * **vocabulary fully mapped** — every :class:`Capability` enum member appears in
   ``CAPABILITY_TO_METHOD`` (``describe().gaps.unmapped_capabilities`` is empty);
 * **no class/runtime base drift** — for the instance-computed connectors whose
@@ -35,8 +41,25 @@ from machina.introspect._methods import (
     is_stub_method,
     method_name_for,
 )
-from machina.introspect.core import _class_base_capabilities, _import_class
+from machina.introspect.core import (
+    _INSTANCE_COMPUTED_TYPES,
+    _class_base_capabilities,
+    _configurable_capabilities,
+    _import_class,
+)
 from machina.runtime import _CONNECTOR_FACTORIES
+
+# Live capability methods a connector deliberately leaves undeclared, with the
+# reason. Each one is also listed under "Convenience methods" in the
+# connector's docs page. A live method missing from both its connector's
+# declarations and this map fails test_live_capability_methods_are_declared.
+_UNDECLARED_BY_DESIGN: dict[str, dict[Capability, str]] = {
+    conn_type: {
+        Capability.CLOSE_WORK_ORDER: "convenience wrapper over update_work_order",
+        Capability.CANCEL_WORK_ORDER: "convenience wrapper over update_work_order",
+    }
+    for conn_type in ("maximo", "sap_pm", "upkeep")
+}
 
 
 def _declared_connectors() -> list[tuple[str, type]]:
@@ -95,6 +118,74 @@ def test_declared_capabilities_resolve_to_live_methods(conn_type: str, cls: type
         # The combined helper the core uses must agree with the granular checks.
         assert has_live_method(cls, cap), (
             f"{cls.__name__} declares {cap.value!r} but has_live_method() is False"
+        )
+
+
+# ---------------------------------------------------------------------------
+# live backing method ⇒ declared (or undeclared by design)
+# ---------------------------------------------------------------------------
+
+
+def _undeclared_live_capabilities(cls: type, conn_type: str) -> set[Capability]:
+    """Capabilities ``cls`` has a live method for but never declares.
+
+    "Declared" covers the class-readable base set plus, for the
+    instance-computed connectors, the capabilities their configuration can
+    enable (what the spine reports as ``cfg``).
+    """
+    declared = _class_base_capabilities(cls, conn_type)
+    if conn_type in _INSTANCE_COMPUTED_TYPES:
+        declared |= _configurable_capabilities(conn_type, declared)
+    # Two capabilities can share a method name: subscribe_to_nodes (OPC-UA)
+    # and subscribe_to_topics (MQTT) both map to ``subscribe``. A method that
+    # backs a declared capability is no evidence for the other one.
+    declared_methods = {method_name_for(cap) for cap in declared}
+    return {
+        cap
+        for cap in Capability
+        if cap not in declared
+        and method_name_for(cap) not in declared_methods
+        and has_live_method(cls, cap)
+    }
+
+
+@pytest.mark.parametrize(
+    ("conn_type", "cls"),
+    _CONNECTOR_CASES,
+    ids=[t for t, _ in _CONNECTOR_CASES],
+)
+def test_live_capability_methods_are_declared(conn_type: str, cls: type) -> None:
+    """A live method backing a capability is declared, unless undeclared by design.
+
+    Regression: Maximo, SAP PM and UpKeep served ``read_maintenance_history``
+    without declaring it, so the alarm workflow's history step found no
+    connector (its SKIP policy hid the miss) and MCP never offered the tool.
+    """
+    allowed = set(_UNDECLARED_BY_DESIGN.get(conn_type, {}))
+    missing = _undeclared_live_capabilities(cls, conn_type) - allowed
+    assert not missing, (
+        f"{cls.__name__} ({conn_type}) has live methods for "
+        f"{sorted(cap.value for cap in missing)} but does not declare them, so no "
+        "capability lookup can reach them. Declare them, or record why not in "
+        "_UNDECLARED_BY_DESIGN and the connector's 'Convenience methods' docs."
+    )
+
+
+def test_undeclared_by_design_entries_are_current() -> None:
+    """Every ``_UNDECLARED_BY_DESIGN`` entry is still live and still undeclared.
+
+    A stale entry (method removed, or the capability declared since) would
+    silently excuse a future omission of that capability, so it must go.
+    """
+    classes = dict(_CONNECTOR_CASES)
+    for conn_type, allowed in _UNDECLARED_BY_DESIGN.items():
+        assert conn_type in classes, f"{conn_type!r} is not a registered connector type"
+        cls = classes[conn_type]
+        stale = set(allowed) - _undeclared_live_capabilities(cls, conn_type)
+        assert not stale, (
+            f"_UNDECLARED_BY_DESIGN[{conn_type!r}] lists "
+            f"{sorted(cap.value for cap in stale)}, which {cls.__name__} now "
+            "declares or no longer backs with a live method — remove the entry."
         )
 
 

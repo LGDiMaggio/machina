@@ -82,6 +82,7 @@ class UpKeepConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -362,6 +363,12 @@ class UpKeepConnector:
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed work orders for an asset."""
+        self._ensure_connected()
+        if not asset_id:
+            # read_work_orders reads an empty asset_id as "no filter", which
+            # would return every completed order in the account as this
+            # asset's history.
+            return []
         wos = await self.read_work_orders(asset_id=asset_id, status="complete")
         return wos
 

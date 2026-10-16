@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SAP PM, Maximo and UpKeep declare `read_maintenance_history`.** The three connectors implemented `read_maintenance_history()` without declaring `Capability.READ_MAINTENANCE_HISTORY`, so no capability lookup could reach it: the `check_history` step of the built-in `alarm_to_workorder` workflow found no connector and was silently skipped (its error policy is `SKIP`), the MCP server did not register `machina_get_maintenance_history`, and `machina describe` listed Generic CMMS as the only provider.
+- **Maintenance-history reads on Maximo and UpKeep.** Maximo's query joined the two statuses with `or`, which `oslc.where` does not accept (Maximo answers `BMXAA8744E`, query not parsed); it now uses `status in ["COMP","CLOSE"]`. UpKeep, given no asset ID, read every completed work order in the account as that asset's history; it now returns none.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
