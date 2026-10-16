@@ -45,7 +45,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
+| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU; filter by `sku`; `asset_id` is accepted but cannot be applied (see [Known Limitations](#known-limitations)) |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
 
 ### Convenience methods
@@ -145,7 +145,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
-- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
+- **Spare parts by asset**: UpKeep's `/api/v2/parts` neither filters by asset nor reports which assets a part belongs to, so `read_spare_parts` cannot filter by `asset_id`. Rather than return the whole inventory as the asset's parts, a call with only `asset_id` (as the `alarm_to_workorder` workflow, the agent's context prefetch and the MCP `machina_list_spare_parts` tool make) returns `[]` without querying UpKeep; with `sku` as well, the parts are fetched and narrowed by `sku` only (in memory, as for any `sku` filter). Both cases log a `spare_parts_asset_filter_unsupported` warning. Use work-order line items to find the parts used on an asset.
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 
 ## API Reference

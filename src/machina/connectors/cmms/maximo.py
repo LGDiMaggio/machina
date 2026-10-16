@@ -353,21 +353,40 @@ class MaximoConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read inventory items (spare parts) from Maximo.
 
         Args:
+            asset_id: Accepted for the shared ``read_spare_parts`` contract
+                but never applied — ``mxinventory`` has no asset relation.
+                Given alone, the read is refused (``[]``, no request): the
+                whole inventory is not the asset's parts. Given with
+                ``sku``, the read is narrowed by ``sku`` only. Both cases
+                log a ``spare_parts_asset_filter_unsupported`` warning.
             sku: Optional Maximo ``itemnum`` to narrow the lookup via an
                 OSLC ``where`` clause.
 
         Note:
-            Maximo's ``mxinventory`` object structure does not expose a
-            direct asset-compatibility relation, so filtering by asset is
-            not supported here. For asset-specific spare parts, consult
-            the corresponding work-order job plan or ``mxpmpart``.
+            For asset-specific spare parts, consult the corresponding
+            work-order job plan or ``mxpmpart``.
         """
         self._ensure_connected()
+        if asset_id:
+            logger.warning(
+                "spare_parts_asset_filter_unsupported",
+                connector="MaximoConnector",
+                asset_id=asset_id,
+                message=(
+                    "asset_id ignored (mxinventory has no asset relation); narrowing by sku"
+                    if sku
+                    else "asset_id ignored and no sku to narrow the read: returning no "
+                    "parts rather than the whole inventory"
+                ),
+            )
+            if not sku:
+                return []
         where = f'itemnum="{sku}"' if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]
