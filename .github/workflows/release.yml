@@ -11,10 +11,13 @@ permissions:
 # Three jobs, so a failed step can be retried with "Re-run failed jobs".
 # PyPI refuses a second upload of the same version: with the upload and the
 # GitHub Release in one job, a failed Release step could never be re-run.
+#
+# Runners are pinned to ubuntu-24.04, like ci.yml, so a release is built on
+# the image its commit was tested on.
 jobs:
   build:
     name: Check and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -89,7 +92,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/download-artifact@v8
@@ -113,7 +116,7 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [build, publish-pypi]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write  # needed to create GitHub Releases
 

@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Runners are pinned to ubuntu-24.04, the image ubuntu-latest resolved to
+# until GitHub began moving it to Ubuntu 26.04 (rollout 2026-10-19 to
+# 2026-11-19). Move the label on purpose, after the jobs pass on
+# ubuntu-26.04, so an image change never lands mid-review.
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -60,7 +64,7 @@ jobs:
 
   ci-extras:
     name: Tests with optional extras (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -82,7 +86,7 @@ jobs:
 
   validate-examples:
     name: Validate examples & doc snippets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -110,7 +114,7 @@ jobs:
 
   docs:
     name: Docs build (strict)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
