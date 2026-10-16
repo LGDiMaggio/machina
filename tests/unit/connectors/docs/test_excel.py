@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import shutil
+import threading
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("openpyxl")
 
 from machina.connectors.capabilities import Capability
+from machina.connectors.docs import excel
 from machina.connectors.docs.excel import (
     COERCER_REGISTRY,
     ExcelCsvConnector,
@@ -38,6 +43,9 @@ from machina.exceptions import (
     ConnectorLockedError,
     ConnectorSchemaError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "excel"
 
@@ -1001,6 +1009,31 @@ class TestYamlSettingsAndCallContract:
         assert wo.description == "x"
 
     @pytest.mark.asyncio
+    async def test_update_of_an_unknown_work_order_is_refused(self, tmp_path: Path) -> None:
+        conn = await _connected_with_work_orders(tmp_path)
+        with pytest.raises(ConnectorError, match="'WO-404' not found"):
+            await conn.update_work_order("WO-404", description="x")
+
+    @pytest.mark.asyncio
+    async def test_update_without_write_mode_changes_the_cache_only(self, tmp_path: Path) -> None:
+        orders = tmp_path / "odl.csv"
+        orders.write_text(
+            "ID,Codice Asset,Descrizione,Stato,Assegnato a\r\nWO-1,P-201,x,created,\r\n",
+            encoding="utf-8",
+        )
+        settings = _flat_settings(tmp_path)
+        settings["work_orders"]["write_mode"] = None  # type: ignore[index]
+        conn = ExcelCsvConnector(**settings)
+        await conn.connect()
+        before = orders.read_bytes()
+
+        updated = await conn.update_work_order("WO-1", assigned_to="Rossi")
+
+        assert updated.assigned_to == "Rossi"
+        assert [w.assigned_to for w in await conn.read_work_orders()] == ["Rossi"]
+        assert orders.read_bytes() == before
+
+    @pytest.mark.asyncio
     async def test_a_row_typed_with_an_invalid_status_is_skipped(self, tmp_path: Path) -> None:
         """One bad hand-typed row neither breaks reads nor blocks later writes."""
         conn = await _connected_with_work_orders(tmp_path)
@@ -1201,6 +1234,288 @@ class TestWritesPreserveTheFile:
 
         row = path.read_text(encoding="utf-8").splitlines()[1]
         assert row == "WO-1,P-201,assigned,BEAR-WEAR-01,2026-01-15T10:00:00"
+
+
+class _OverlapDetectingWorkbook:
+    """Wraps the connector's ``.xlsx`` file operations and records two at once.
+
+    A sheet read, a row append and a row rewrite each use the file from start
+    to end. The first call of the function named by ``hold`` waits for
+    ``release`` instead, with ``held`` set while it waits, so a test can act
+    while that write is mid-flight on its worker thread; set ``fail`` before
+    releasing it to make that call raise instead of running. Holding
+    ``_save_xlsx_atomically`` stops an append or a rewrite after it has loaded
+    and changed the workbook, just before the save.
+    """
+
+    _USES_THE_FILE = ("_read_xlsx_rows", "_append_xlsx_row", "_update_xlsx_row")
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.hold = ""
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.fail: Exception | None = None
+        self.max_users = 0
+        self._users = 0
+        self._state = threading.Condition()
+        for name in (*self._USES_THE_FILE, "_save_xlsx_atomically"):
+            monkeypatch.setattr(excel, name, self._wrap(name, getattr(excel, name)))
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until no file operation is running, on any thread."""
+        with self._state:
+            return self._state.wait_for(lambda: self._users == 0, timeout)
+
+    def _wrap(self, name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+        uses_the_file = name in self._USES_THE_FILE
+
+        def wrapper(*args: Any) -> Any:
+            with self._state:
+                if uses_the_file:
+                    self._users += 1
+                    self.max_users = max(self.max_users, self._users)
+                hold = name == self.hold and not self.held.is_set()
+                if hold:
+                    self.held.set()
+            try:
+                if hold:
+                    self.release.wait(timeout=5)
+                    if self.fail is not None:
+                        raise self.fail
+                return func(*args)
+            finally:
+                if uses_the_file:
+                    with self._state:
+                        self._users -= 1
+                        self._state.notify_all()
+
+        return wrapper
+
+
+@pytest.fixture()
+def workbook(monkeypatch: pytest.MonkeyPatch) -> Iterator[_OverlapDetectingWorkbook]:
+    """The double, released at teardown: a call that a failing test left held
+    would otherwise resume later, inside the next test's wrappers."""
+    double = _OverlapDetectingWorkbook(monkeypatch)
+    yield double
+    double.release.set()
+    assert double.wait_idle(5)
+
+
+async def _odl_connector(tmp_path: Path) -> tuple[Path, ExcelCsvConnector]:
+    """A workbook holding WO-1 and WO-2, and a connector connected to it."""
+    path = tmp_path / "odl.xlsx"
+    TestWritesPreserveTheFile._workbook(path)
+    conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+    await conn.connect()
+    return path, conn
+
+
+def _sheet_rows(path: Path) -> list[tuple[Any, ...]]:
+    """The work-order rows of the ``OdL`` sheet, header excluded."""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(str(path), read_only=True)
+    try:
+        return list(wb["OdL"].iter_rows(min_row=2, values_only=True))
+    finally:
+        wb.close()
+
+
+class TestWritesTakeTurns:
+    """Work-order writes use the file one at a time, whatever happens to their
+    callers: cancelling a caller cannot stop its write's worker thread."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_create_holds_the_file_until_its_append_ends(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        """The same-ID retry waits for the abandoned append, then finds the row
+        instead of appending it a second time."""
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_append_xlsx_row"
+        wo = WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="new")
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(workbook.held.wait, 5)  # the append is running
+        first.cancel()  # an MCP request cancellation, a workflow step timeout
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = asyncio.create_task(conn.create_work_order(wo))
+        await asyncio.sleep(0.05)
+        workbook.release.set()
+        assert (await retry).description == "new"
+        assert await asyncio.to_thread(workbook.wait_idle, 5)
+
+        assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
+        assert workbook.max_users == 1
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_holds_the_file_until_its_save_ends(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        """The abandoned rewrite has already loaded the workbook, so a row
+        appended before it saves would be lost in that save."""
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+        new = WorkOrder(
+            id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3", description="new"
+        )
+
+        update = asyncio.create_task(conn.update_work_order("WO-1", description="changed"))
+        assert await asyncio.to_thread(workbook.held.wait, 5)  # changed, not yet saved
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        create = asyncio.create_task(conn.create_work_order(new))
+        await asyncio.sleep(0.05)
+        workbook.release.set()
+        await create
+        assert await asyncio.to_thread(workbook.wait_idle, 5)
+
+        expected = [("WO-1", "changed"), ("WO-2", "second"), ("WO-3", "new")]
+        assert [(row[0], row[4]) for row in _sheet_rows(path)] == expected
+        assert workbook.max_users == 1
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_take_turns(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        path, conn = await _odl_connector(tmp_path)
+
+        await asyncio.gather(
+            *(
+                conn.create_work_order(
+                    WorkOrder(id=f"WO-{n}", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+                )
+                for n in (3, 4, 5)
+            ),
+            conn.update_work_order("WO-1", description="changed"),
+        )
+
+        rows = _sheet_rows(path)
+        assert [row[0] for row in rows] == ["WO-1", "WO-2", "WO-3", "WO-4", "WO-5"]
+        assert rows[0][4] == "changed"
+        assert workbook.max_users == 1
+
+    @pytest.mark.asyncio
+    async def test_a_write_cancelled_before_its_turn_never_runs(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_append_xlsx_row"
+        wo_3, wo_4 = (
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+            for wo_id in ("WO-3", "WO-4")
+        )
+
+        first = asyncio.create_task(conn.create_work_order(wo_3))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        waiting = asyncio.create_task(conn.create_work_order(wo_4))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        workbook.release.set()
+        await first
+        assert await asyncio.to_thread(workbook.wait_idle, 5)
+
+        assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_ends_after_its_caller_was_cancelled_is_read_back(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The cached work orders and the log are updated by the write itself,
+        not by its caller, so reads match the file without waiting for another
+        write, and the write is logged."""
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_append_xlsx_row"
+        log = MagicMock()
+        monkeypatch.setattr(excel, "logger", log)
+        wo = WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="C-3")
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        workbook.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the append has finished
+
+        assert [row[0] for row in _sheet_rows(path)] == ["WO-1", "WO-2", "WO-3"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+        assert [c.args[0] for c in log.info.call_args_list] == ["work_order_created"]
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_whose_save_fails_leaves_the_cache_as_it_was(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+
+        update = asyncio.create_task(conn.update_work_order("WO-1", description="changed"))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        workbook.fail = PermissionError("workbook open in another program")
+        workbook.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the rewrite has failed
+
+        expected = [("WO-1", "first"), ("WO-2", "second")]
+        assert [(row[0], row[4]) for row in _sheet_rows(path)] == expected
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_disconnect_waits_for_a_write_in_flight(
+        self, tmp_path: Path, workbook: _OverlapDetectingWorkbook
+    ) -> None:
+        """Once disconnect() returns, the connector is not writing to the file,
+        and the write it waited for still returns its result."""
+        path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+
+        update = asyncio.create_task(conn.update_work_order("WO-1", description="changed"))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        disconnecting = asyncio.create_task(conn.disconnect())
+        await asyncio.sleep(0.05)
+        assert not disconnecting.done()
+        workbook.release.set()
+        await disconnecting
+
+        assert workbook.wait_idle(0)
+        assert (await update).description == "changed"
+        assert _sheet_rows(path)[0][4] == "changed"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_stops_waiting_for_a_stuck_write(
+        self,
+        tmp_path: Path,
+        workbook: _OverlapDetectingWorkbook,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _path, conn = await _odl_connector(tmp_path)
+        workbook.hold = "_save_xlsx_atomically"
+        monkeypatch.setattr(excel, "_DISCONNECT_WAIT_SEC", 0.05)
+        log = MagicMock()
+        monkeypatch.setattr(excel, "logger", log)
+
+        update = asyncio.create_task(conn.update_work_order("WO-1", description="changed"))
+        assert await asyncio.to_thread(workbook.held.wait, 5)
+        await conn.disconnect()  # returns while the write is still held
+
+        assert [c.args[0] for c in log.warning.call_args_list] == ["write_still_running"]
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_work_orders()
+        workbook.release.set()
+        assert (await update).description == "changed"
 
 
 class TestRefresh:

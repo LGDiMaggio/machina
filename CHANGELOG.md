@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Excel/CSV connector runs work-order writes on a worker thread of its own, one at a time.** A `create_work_order` or `update_work_order` whose caller was cancelled (an MCP request cancellation, a workflow step timeout) used to release the write lock while its thread was still using the file, so the next write could run alongside it: a retried `create_work_order` could re-read the sheet before the abandoned append landed and add the row twice, two `.xlsx` writes could each load and save the workbook so that one change was lost, and two saves could collide on the shared temporary file and fail with a spurious `ConnectorLockedError`. A write's re-read, ID check, file write, cache update and log line now run as one step that cancelling the caller does not cut short: the cached work orders follow the write's outcome (a cancelled update whose file write then failed no longer stays in the cache), and a write that lands after its caller was cancelled is still logged. `disconnect()` waits up to 5 seconds for a write still running, so the file is no longer being written once it returns.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
