@@ -10,6 +10,7 @@ registered conditionally in ``build_server``.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,7 +19,8 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.connectors.base import set_sandbox_mode
-from machina.exceptions import SandboxViolationError
+from machina.connectors.cmms._url import path_segment
+from machina.exceptions import ConnectorError, SandboxViolationError
 
 # See machina.mcp.tools: FastMCP injects the request context only into a
 # parameter annotated with its bare ``Context`` class (opaque to mypy).
@@ -31,6 +33,9 @@ else:
         Context = Any
 
 logger = structlog.get_logger(__name__)
+
+# An OSLC object structure name, e.g. ``mxwo`` or ``mxapiasset``.
+_OBJECT_STRUCTURE = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _runtime(ctx: Any) -> Any:
@@ -121,11 +126,27 @@ async def maximo_raw_attribute_update(
     attributes.  Use only when the domain-level tools are insufficient.
 
     Args:
-        resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset').
-        resource_id: Resource identifier.
+        resource_type: OSLC object structure name (e.g. 'mxwo', 'mxasset'):
+            letters, digits and underscores only.
+        resource_id: Rest ID of the resource, the last segment of its OSLC
+            href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
     """
     from machina.connectors.base import get_sandbox_mode
+
+    # Both values come from the MCP client and go into the PATCH URL: the
+    # request may reach one resource of one object structure under
+    # /maximo/oslc/os/ and nothing else. Refused in sandbox mode too, so a
+    # sandbox run answers as a live run would.
+    if not _OBJECT_STRUCTURE.fullmatch(resource_type):
+        return {
+            "error": f"Invalid resource_type {resource_type!r}: expected an object "
+            "structure name such as 'mxwo' (letters, digits and underscores)"
+        }
+    try:
+        resource_segment = path_segment(resource_id)
+    except ConnectorError:
+        return {"error": f"Invalid resource_id {resource_id!r}"}
 
     # _runtime re-establishes the sandbox contextvar for this request task;
     # it must run before get_sandbox_mode() is read. The raw httpx PATCH below
@@ -149,7 +170,7 @@ async def maximo_raw_attribute_update(
         headers = {**conn._headers(), "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.patch(
-                f"{conn.url}/maximo/oslc/os/{resource_type}/{resource_id}",
+                f"{conn.url}/maximo/oslc/os/{resource_type}/{resource_segment}",
                 headers=headers,
                 json=attributes,
             )

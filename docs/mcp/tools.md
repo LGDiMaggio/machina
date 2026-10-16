@@ -95,6 +95,12 @@ connector is not configured.
 | `sap_pm_raw_iw38_notification` | SAP PM | `equipment_id`, `notification_type="M2"`, `description=""` |
 | `maximo_raw_attribute_update` | Maximo | `resource_type`, `resource_id`, `attributes=None` |
 
+`maximo_raw_attribute_update` patches one resource,
+`/maximo/oslc/os/{resource_type}/{resource_id}`: `resource_type` must be an
+object structure name (letters, digits and underscores), and `resource_id` —
+the rest ID that ends the resource's `href` — is sent as one percent-encoded
+path segment, with empty, `.` and `..` refused.
+
 ## Sandbox Behavior
 
 With `sandbox: true` in the config, write tools do not reach the CMMS or the
@@ -124,6 +130,7 @@ sandbox mode themselves before calling the vendor API.
 Missing records and missing connectors come back as an `error` entry in the
 result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
 model can read them; so do an invalid `status` in `machina_update_work_order`,
+an invalid `resource_type` or `resource_id` in `maximo_raw_attribute_update`,
 an alarm source without `get_alarms()`, and connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
 `machina_send_message`. Any other connector failure — and

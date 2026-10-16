@@ -502,6 +502,16 @@ class TestRestGetWorkOrder:
         with pytest.raises(ConnectorError, match="Invalid record ID"):
             await conn.get_work_order("..")
 
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_refused_not_listed(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        """An empty ID must not fall through to ``GET /assets`` and return its first row."""
+        await _connect_with_health(httpx_mock, rest_connector)
+
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await rest_connector.get_asset("")
+
 
 class TestRestUpdateWorkOrder:
     """REST update_work_order exercises PATCH /work_orders/{id}."""
