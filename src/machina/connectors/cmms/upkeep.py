@@ -332,22 +332,32 @@ class UpKeepConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read spare parts (UpKeep calls them *parts*).
 
         Args:
+            asset_id: Not supported (see Note): a non-empty value raises
+                :class:`ConnectorError` rather than being dropped.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
 
         Note:
-            UpKeep's ``/api/v2/parts`` endpoint does not expose an
-            asset-compatibility relation, so filtering by asset is not
-            supported here. Use work-order line items to discover parts
-            associated with a specific asset.
+            UpKeep's ``/api/v2/parts`` endpoint has no asset field or asset
+            filter; UpKeep lists an asset's parts on the asset record (its
+            ``parts`` IDs), which this connector does not read. Dropping the
+            filter would pass every part (or a bare ``sku`` match) off as the
+            asset's compatible parts, so the read refuses it instead.
         """
         self._ensure_connected()
+        if asset_id:
+            raise ConnectorError(
+                "The UpKeep connector cannot filter spare parts by asset: "
+                "/api/v2/parts has no asset filter, and the connector does not "
+                "read the asset's parts list. Look the part up by sku instead."
+            )
         raw = await self._paginated_get("/api/v2/parts")
         parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:

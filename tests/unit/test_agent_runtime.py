@@ -30,7 +30,7 @@ from machina.domain.failure_mode import FailureMode
 from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorError, LLMError
 from machina.llm.provider import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -326,6 +326,40 @@ class _FakeSparePartsConnector:
                 warehouse_location="W1",
             )
         ]
+
+
+class _FakeNoAssetRelationConnector:
+    """Spare-parts provider whose inventory has no asset relation.
+
+    Shaped like the Maximo and UpKeep connectors: an ``asset_id`` filter is
+    refused with a ConnectorError instead of being answered with the whole
+    inventory. Records the keyword arguments of every call.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, **filters: Any) -> list[SparePart]:
+        self.calls.append(filters)
+        if filters.get("asset_id"):
+            raise ConnectorError("Inventory cannot be filtered by asset; filter by sku instead")
+        inventory = [
+            SparePart(sku="SKF-6310", name="Deep Groove Ball Bearing", stock_quantity=4),
+            SparePart(sku="FLT-GA55", name="Oil Filter", stock_quantity=2),
+        ]
+        sku = filters.get("sku")
+        return [p for p in inventory if not sku or p.sku == sku]
 
 
 class _FakeErrorConnector:
@@ -887,6 +921,33 @@ class TestExecuteTool:
         agent = Agent()
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_sends_only_the_given_filters(self) -> None:
+        """An empty ``asset_id`` / ``sku`` is no filter, so it is not sent.
+
+        Mirrors the MCP tool: unfiltered and sku lookups reach the connector
+        without an asset filter nobody asked for.
+        """
+        conn = _FakeNoAssetRelationConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        unfiltered = await agent._execute_tool("check_spare_parts", {})
+        by_sku = await agent._execute_tool(
+            "check_spare_parts", {"asset_id": "", "sku": "SKF-6310"}
+        )
+        assert [p["sku"] for p in unfiltered] == ["SKF-6310", "FLT-GA55"]
+        assert [p["sku"] for p in by_sku] == ["SKF-6310"]
+        assert conn.calls == [{}, {"sku": "SKF-6310"}]
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_refused_asset_filter_is_a_tool_error(self) -> None:
+        """The connector's refusal reaches the model instead of ending the turn."""
+        conn = _FakeNoAssetRelationConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
+        assert result == {"error": "Inventory cannot be filtered by asset; filter by sku instead"}
 
     @pytest.mark.asyncio
     async def test_diagnose_failure_tool(self) -> None:
@@ -2663,6 +2724,19 @@ class TestGatherContext:
         context = await agent._gather_context("spare parts for P-201", resolved)
         assert "spare_parts" in context
         assert len(context["spare_parts"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_refused_asset_filter_prefetches_no_spare_parts(self) -> None:
+        """No unfiltered fallback: the inventory is never passed off as the asset's."""
+        plant = _make_plant()
+        parts_conn = _FakeNoAssetRelationConnector()
+        agent = Agent(plant=plant, connectors=[_FakeConnector(), parts_conn])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        context = await agent._gather_context("spare parts for P-201", resolved)
+        assert "spare_parts" not in context
+        assert parts_conn.calls == [{"asset_id": "P-201"}]
+        assert "work_orders" in context  # the other sources are still gathered
 
     @pytest.mark.asyncio
     async def test_with_documents(self) -> None:
