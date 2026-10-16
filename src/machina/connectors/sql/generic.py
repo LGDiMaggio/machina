@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, TypeVarTuple
 
 import structlog
 from pydantic import ValidationError
@@ -31,12 +33,17 @@ from machina.exceptions import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.connectors.sql.schema import FieldMapping, SqlConnectorConfig, TableMapping
     from machina.domain.asset import Asset
     from machina.domain.failure_mode import FailureMode
     from machina.domain.work_order import WorkOrder, WorkOrderStatus
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
+_Ts = TypeVarTuple("_Ts")
 
 # Transient SQL error codes that warrant retry
 _TRANSIENT_ERRORS: frozenset[str] = frozenset(
@@ -164,9 +171,10 @@ class GenericSqlConnector:
         # One DB-API connection is shared by every caller (the MCP HTTP server
         # serves concurrent requests from one connector), and DB-API
         # connections are not safe to use from several threads at once:
-        # every database call goes through _db_lock. _write_lock additionally
+        # every use of the connection runs on this one worker thread, one
+        # call at a time (see _run_on_connection). _write_lock additionally
         # holds the idempotency probe and the INSERT together.
-        self._db_lock = asyncio.Lock()
+        self._db_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="machina-sql")
         self._write_lock = asyncio.Lock()
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
@@ -194,7 +202,7 @@ class GenericSqlConnector:
     async def connect(self) -> None:
         """Open the database connection and validate schema mappings."""
         self._conn = await asyncio.to_thread(self._open_connection)
-        await asyncio.to_thread(self._validate_schemas)
+        await self._run_on_connection(self._validate_schemas)
         self._connected = True
         logger.info(
             "connected",
@@ -206,9 +214,8 @@ class GenericSqlConnector:
     async def disconnect(self) -> None:
         """Close the database connection."""
         if self._conn is not None:
-            async with self._db_lock:
-                with contextlib.suppress(Exception):
-                    await asyncio.to_thread(self._conn.close)
+            with contextlib.suppress(Exception):
+                await self._run_on_connection(self._close_sync)
             self._conn = None
         self._connected = False
 
@@ -220,8 +227,7 @@ class GenericSqlConnector:
                 message="Not connected",
             )
         try:
-            async with self._db_lock:
-                await asyncio.to_thread(self._execute_scalar, "SELECT 1")
+            await self._run_on_connection(self._execute_scalar, "SELECT 1")
             return ConnectorHealth(
                 status=ConnectorStatus.HEALTHY,
                 message="Database reachable",
@@ -398,6 +404,13 @@ class GenericSqlConnector:
             )
         return connect_odbc(self._config.dsn)
 
+    def _close_sync(self) -> None:
+        # Drop the reference before closing, on the connection's own thread,
+        # so a call queued behind this one finds no connection, not a closed one.
+        conn, self._conn = self._conn, None
+        if conn is not None:  # a concurrent disconnect() closed it first
+            conn.close()
+
     def _validate_schemas(self) -> None:
         """Check that mapped columns exist in query results."""
         cursor = self._conn.cursor()
@@ -432,14 +445,25 @@ class GenericSqlConnector:
                 return mapping
         return None
 
+    async def _run_on_connection(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
+        """Run ``func(*args)`` on the connection's worker thread, after earlier calls.
+
+        One thread runs every call, so no two calls overlap, whatever happens
+        to their callers. A cancelled caller (an MCP request cancellation, a
+        workflow step timeout) cannot stop a call that is already running, and
+        the calls behind it wait for it; a call that has not started is dropped.
+        """
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()  # as asyncio.to_thread does
+        return await loop.run_in_executor(self._db_thread, context.run, func, *args)
+
     async def _execute_read(self, mapping: TableMapping) -> list[dict[str, Any]]:
         """Execute a read query with retry on transient errors."""
         retry_cfg = self._config.retry
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                async with self._db_lock:
-                    return await asyncio.to_thread(self._read_sync, mapping)
+                return await self._run_on_connection(self._read_sync, mapping)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
@@ -477,8 +501,7 @@ class GenericSqlConnector:
 
         for attempt in range(retry_cfg.max_retries + 1):
             try:
-                async with self._db_lock:
-                    return await asyncio.to_thread(self._execute_insert, mapping, data)
+                return await self._run_on_connection(self._execute_insert, mapping, data)
             except Exception as exc:
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (

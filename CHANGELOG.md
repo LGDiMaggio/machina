@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The SQL connector runs every database call on its own worker thread, one call at a time.** A cancelled read or insert (an MCP request cancellation, a workflow step timeout) used to release the connection lock while its thread was still using the connection, so the next call could use the same connection from a second thread — which pyodbc and jaydebeapi do not support — and a retried `create_work_order` could check for its ID before the abandoned INSERT reached the database and insert the row twice. Schema validation in `connect()` now waits its turn too.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
