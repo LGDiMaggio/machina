@@ -92,8 +92,8 @@ spare_part_reorder = Workflow(
             ),
             on_error=ErrorPolicy.SKIP,
         ),
-        # NOTE: Machina ships no ERP connector. Run live, this step needs one
-        # that declares create_purchase_order, or the workflow stops here.
+        # NOTE: Machina ships no ERP connector, and create_purchase_order is
+        # not a connector Capability, so run live the workflow stops here.
         # In sandbox mode this step is blocked automatically (is_write=True).
         Step(
             "place_order",

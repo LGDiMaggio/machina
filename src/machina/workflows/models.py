@@ -423,7 +423,8 @@ class WorkflowContext:
         ``{check_spare_parts}`` reads as a template typo, and a bare
         "unavailable" after "Spare Parts:" reads as out of stock. The
         error text itself stays on the step's ``StepResult.error``.
-        Steps skipped by their guard keep the verbatim placeholder.
+        Steps whose guard returned ``False`` keep the verbatim placeholder;
+        a guard that raised marks its step failed.
         """
 
         def _replacer(match: re.Match[str]) -> str:
