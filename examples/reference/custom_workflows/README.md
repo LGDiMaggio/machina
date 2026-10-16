@@ -57,7 +57,7 @@ spare_part_reorder = Workflow(
 
 Meant for a weekly run -- its trigger records the schedule (Mondays at 6 AM), but Machina does not schedule anything: start it from cron, Task Scheduler or your own service with `agent.trigger_workflow("Preventive Maintenance Scheduler")`. Scans for due plans, LLM prioritizes, batch-creates work orders.
 
-Caveat: no connector reports when a plan last ran, so unless your code records each plan's last execution on the scheduler, `scan_due_plans` assumes every plan ran exactly one interval ago and reports every active plan as due today. Feed it real execution dates before acting on the list:
+Caveat: no connector reports when a plan last ran, so unless your code records each plan's last execution on the scheduler, `scan_due_plans` assumes every plan ran exactly one interval ago and reports every active calendar plan as due today. Plans that recur only on operating hours or a meter reading are never reported as due; `maintenance_scheduler.plans_without_calendar_due_date` lists them. Feed it real execution dates before acting on the list:
 
 ```python
 preventive_scheduling = Workflow(

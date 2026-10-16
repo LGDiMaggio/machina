@@ -267,21 +267,45 @@ class TestSchedulerWithoutCalendarInterval:
         assert all("calendar due date cannot be computed" in p["reason"] for p in listed)
         assert scheduler.plans_without_calendar_due_date(asset_id="P-2") == []
 
-    def test_upkeep_meter_schedule_is_listed_but_never_due(self) -> None:
-        # A PM template with one meter-triggered schedule (no repeatFrequency)
-        # and one weekly schedule, as GET /api/v2/pm?includes=schedules returns.
+    def test_upkeep_meter_schedules_are_listed_but_never_due(self) -> None:
+        # The meter schedule from UpKeep's documented "Get all PMs" response
+        # (developers.onupkeep.com/#get-all-pms): its meterDueFrequency /
+        # meterDueInterval describe the meter, not a calendar recurrence, and
+        # its endDate has passed. A running copy of it and a weekly calendar
+        # schedule sit next to it in the same template.
+        meter_schedule = {
+            "asset": "P-1",
+            "endDate": "2024-10-09T16:23:35.000Z",
+            "id": "65672e0c90176209662a4fc4",
+            "meter": "vXMGBoLMJv",
+            "meterConditionValue": 1000,
+            "meterDueFrequency": "weeks",
+            "meterDueInterval": 1,
+            "nextMeterReading": 1075,
+            "startDate": "2023-12-10T16:23:35.000Z",
+        }
+        running_meter = {k: v for k, v in meter_schedule.items() if k != "endDate"}
+        running_meter["id"] = "sch-meter-running"
+        weekly = {"id": "sch-weekly", "asset": "P-1", "repeatFrequency": "WEEKLY"}
         template = {
             "_id": "pm-1",
             "name": "Pump service",
             "tasks": [],
-            "schedules": [
-                {"id": "sch-meter", "asset": "P-1", "meter": "m-1", "meterDueValue": 500},
-                {"id": "sch-weekly", "asset": "P-1", "repeatFrequency": "WEEKLY"},
-            ],
+            "schedules": [meter_schedule, running_meter, weekly],
         }
         plans = parse_maintenance_plans(template, now=datetime(2026, 10, 16, tzinfo=UTC))
-        assert [(p.id, p.active) for p in plans] == [("sch-meter", True), ("sch-weekly", True)]
+        assert [(p.id, p.active) for p in plans] == [
+            ("65672e0c90176209662a4fc4", False),
+            ("sch-meter-running", True),
+            ("sch-weekly", True),
+        ]
 
         scheduler = MaintenanceScheduler(plans=plans)
         assert [r["plan_id"] for r in scheduler.scan_due_plans(horizon_days=14)] == ["sch-weekly"]
-        assert [p["plan_id"] for p in scheduler.plans_without_calendar_due_date()] == ["sch-meter"]
+        assert scheduler.find_window(asset_id="P-1")["plan_id"] == "sch-weekly"
+        assert [
+            (p["plan_id"], p["active"]) for p in scheduler.plans_without_calendar_due_date()
+        ] == [
+            ("65672e0c90176209662a4fc4", False),
+            ("sch-meter-running", True),
+        ]
