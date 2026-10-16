@@ -6,6 +6,7 @@ All HTTP traffic is intercepted by pytest-httpx — no real UpKeep API calls.
 from __future__ import annotations
 
 import pytest
+from structlog.testing import capture_logs
 
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
@@ -334,6 +335,55 @@ class TestReadSpareParts:
         parts = await connector.read_spare_parts(sku="SKF-6205")
         assert len(parts) == 1
         assert parts[0].sku == "SKF-6205"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_by_asset_refuses_the_unfiltered_read(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """/api/v2/parts cannot be filtered by asset: no parts and a WARNING.
+
+        Read unfiltered, every part would pass for the asset's parts. No
+        request is made — the only mocked response is the auth check from
+        ``_connect``.
+        """
+        await _connect(httpx_mock, connector)
+        with capture_logs() as logs:
+            parts = await connector.read_spare_parts(asset_id="a1")
+        assert parts == []
+        assert len(httpx_mock.get_requests()) == 1
+        [warning] = [e for e in logs if e["log_level"] == "warning"]
+        assert (
+            warning.items()
+            >= {
+                "event": "spare_parts_asset_filter_unsupported",
+                "connector": "UpKeepConnector",
+                "operation": "read_spare_parts",
+                "asset_id": "a1",
+            }.items()
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_by_asset_and_sku_filters_by_sku_alone(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """The sku filter applies alone; no asset parameter reaches UpKeep."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "p1", "partNumber": "SKF-6205", "name": "Bearing"},
+                    {"id": "p2", "partNumber": "SKF-7309", "name": "Angular bearing"},
+                ],
+            },
+        )
+        with capture_logs() as logs:
+            parts = await connector.read_spare_parts(asset_id="a1", sku="SKF-6205")
+        assert [p.sku for p in parts] == ["SKF-6205"]
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+            "spare_parts_asset_filter_unsupported"
+        ]
 
 
 # ---------------------------------------------------------------------------

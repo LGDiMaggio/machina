@@ -353,11 +353,16 @@ class MaximoConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read inventory items (spare parts) from Maximo.
 
         Args:
+            asset_id: Not filterable (see Note), so it is dropped with a
+                WARNING. Without a ``sku`` the read then returns ``[]``
+                rather than the whole inventory; with one it is narrowed by
+                ``sku`` alone.
             sku: Optional Maximo ``itemnum`` to narrow the lookup via an
                 OSLC ``where`` clause.
 
@@ -368,6 +373,23 @@ class MaximoConnector:
             the corresponding work-order job plan or ``mxpmpart``.
         """
         self._ensure_connected()
+        if asset_id:
+            # Unfiltered, the read would pass the whole inventory off as this
+            # asset's spare parts — refuse it unless a sku narrows the query.
+            logger.warning(
+                "spare_parts_asset_filter_unsupported",
+                connector="MaximoConnector",
+                operation="read_spare_parts",
+                asset_id=asset_id,
+                hint=(
+                    "mxinventory has no asset relation; narrowing by sku alone"
+                    if sku
+                    else "mxinventory has no asset relation; returning no parts "
+                    "rather than the whole inventory"
+                ),
+            )
+            if not sku:
+                return []
         where = f'itemnum="{sku}"' if sku else ""
         raw = await self._oslc_get("mxinventory", oslc_where=where)
         return [maximo_mapper.parse_spare_part(item) for item in raw]
