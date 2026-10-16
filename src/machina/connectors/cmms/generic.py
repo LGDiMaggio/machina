@@ -12,7 +12,6 @@ import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
-from urllib.parse import quote
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
@@ -24,6 +23,7 @@ from pydantic import Field, ValidationError
 from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._url import path_segment
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,
@@ -777,22 +777,6 @@ class GenericCmmsConnector:
         """Join the base URL and path parts, stripping trailing slashes."""
         return "/".join([self.url.rstrip("/"), *parts])
 
-    @staticmethod
-    def _path_segment(record_id: str) -> str:
-        """Encode a caller-supplied ID as exactly one URL path segment.
-
-        IDs reach REST paths from LLM and MCP-client input, so ``/``, ``?``,
-        ``#`` and ``%`` are percent-encoded and the dot segments that HTTP
-        clients normalize away are refused — an ID can never address a
-        different endpoint than the one configured.
-
-        Raises:
-            ConnectorError: If the ID is empty, ``.`` or ``..``.
-        """
-        if record_id in ("", ".", ".."):
-            raise ConnectorError(f"Invalid record ID {record_id!r}")
-        return quote(record_id, safe="")
-
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
         if self._auth is None:
@@ -811,19 +795,20 @@ class GenericCmmsConnector:
             url=self.url,
         )
 
-    async def _rest_read_assets(self, *, asset_id: str = "") -> list[Asset]:
+    async def _rest_read_assets(self, *, asset_id: str | None = None) -> list[Asset]:
         """Fetch assets from the REST API.
 
         When ``asset_id`` is provided, GETs ``/assets/{id}`` and expects a
         single-object response (pagination bypassed); a 404 means no such
         asset and yields ``[]``, as ``_rest_get_work_order`` maps 404 to
-        ``None``. Otherwise GETs ``/assets`` and iterates via the configured
+        ``None``. An empty ``asset_id`` is refused there, not read as "all
+        assets". Otherwise GETs ``/assets`` and iterates via the configured
         pagination strategy.
         """
         httpx = _require_httpx()
         headers = self._rest_headers()
-        if asset_id:
-            url = self._rest_url("assets", self._path_segment(asset_id))
+        if asset_id is not None:
+            url = self._rest_url("assets", path_segment(asset_id))
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 404:
@@ -884,7 +869,7 @@ class GenericCmmsConnector:
         """Fetch a single work order from the REST API."""
         config = self._require_endpoint("get_work_order")
         httpx = _require_httpx()
-        path = config["path"].replace("{id}", self._path_segment(work_order_id))
+        path = config["path"].replace("{id}", path_segment(work_order_id))
         headers = self._rest_headers()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(self._rest_url(path), headers=headers)
@@ -904,7 +889,7 @@ class GenericCmmsConnector:
         """Update a work order via the REST API and re-fetch."""
         config = self._require_endpoint("update_work_order")
         httpx = _require_httpx()
-        path = config["path"].replace("{id}", self._path_segment(work_order_id))
+        path = config["path"].replace("{id}", path_segment(work_order_id))
         method = config.get("method", "PATCH")
         field_map: dict[str, str] = config.get("field_map", {})
 
