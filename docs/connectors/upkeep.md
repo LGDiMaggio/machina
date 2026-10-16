@@ -45,7 +45,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
+| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU; filter by `asset_id` (the parts assigned to the asset) and/or `sku` |
 | `read_maintenance_plans` | Read preventive-maintenance schedules (`/api/v2/preventive-maintenance`) |
 
 ### Convenience methods
@@ -145,7 +145,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
-- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
+- **Spare part filtering**: UpKeep's parts API has no server-side filter, so the connector fetches all parts and filters in memory. `asset_id` keeps the parts in the asset record's `parts` list (the parts assigned to the asset); an asset with no assigned parts, or one UpKeep does not know, returns an empty list without fetching the parts list. `sku` matches the parsed SKU.
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 
 ## API Reference

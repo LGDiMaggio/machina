@@ -444,10 +444,7 @@ async def machina_list_spare_parts(
     """
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
-    kwargs: dict[str, Any] = {}
-    if asset_id:
-        kwargs["asset_id"] = asset_id
-    parts = await cmms.read_spare_parts(**kwargs)
+    parts = await cmms.read_spare_parts(asset_id=asset_id)
     return [
         {
             "sku": p.sku,

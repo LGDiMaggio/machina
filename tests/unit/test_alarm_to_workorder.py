@@ -71,11 +71,17 @@ class _FakeWoFactory:
 
 
 class _FakeCmmsConnector:
-    """CMMS connector providing history, spare parts, and work order creation."""
+    """CMMS connector providing history, spare parts, and work order creation.
+
+    Declares the capabilities the built-in workflow dispatches, and the read
+    methods carry the connector contract's exact signatures (no ``**kwargs``):
+    a step passing an input the contract does not define fails here as it
+    would against a real connector, instead of being swallowed by a fake.
+    """
 
     capabilities: ClassVar[list[str]] = [
-        "get_asset_history",
-        "check_spare_parts",
+        "read_maintenance_history",
+        "read_spare_parts",
         "create_work_order",
     ]
 
@@ -92,10 +98,10 @@ class _FakeCmmsConnector:
     async def health_check(self) -> bool:
         return True
 
-    async def get_asset_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+    async def read_maintenance_history(self, asset_id: str) -> list[dict[str, Any]]:
         return [{"id": "WO-PREV-001", "status": "closed", "type": "corrective"}]
 
-    async def check_spare_parts(self, **kwargs: Any) -> list[dict[str, Any]]:
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[dict[str, Any]]:
         return [{"sku": "SKF-6310", "available": True, "stock": 3}]
 
     async def create_work_order(self, **kwargs: Any) -> dict[str, Any]:
@@ -188,9 +194,12 @@ class TestAlarmToWorkorderWorkflow:
             "submit_work_order",
         ]
 
-        # All steps succeeded
+        # All steps succeeded — and ran: a SKIP-policy step that errors also
+        # reports success, so success alone cannot tell a lookup that ran from
+        # one that failed (e.g. on a TypeError) and was skipped.
         for sr in result.step_results:
             assert sr.success is True, f"Step {sr.step_name} failed: {sr.error}"
+            assert sr.skipped is False, f"Step {sr.step_name} was skipped"
 
     @pytest.mark.asyncio
     async def test_generate_work_order_receives_upstream_inputs(self) -> None:
@@ -280,6 +289,9 @@ class TestAlarmToWorkorderWorkflow:
         assert "P-201" in msg
         # Template should have resolved {analyze_alarm} (DiagnosisResult str())
         assert "BEAR-WEAR-01" in msg
+        # ...and {check_spare_parts}, rather than leaving the placeholder
+        assert "SKF-6310" in msg
+        assert "{check_spare_parts}" not in msg
 
     @pytest.mark.asyncio
     async def test_diagnosis_failure_stops_workflow(self) -> None:
@@ -309,7 +321,7 @@ class TestAlarmToWorkorderWorkflow:
         """If check_spare_parts fails (ErrorPolicy.SKIP), workflow continues."""
 
         class _FailingCmms(_FakeCmmsConnector):
-            async def check_spare_parts(self, **kwargs: Any) -> None:
+            async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> None:
                 raise RuntimeError("CMMS timeout")
 
         engine, _cmms, _comms = self._build_engine(cmms=_FailingCmms())
@@ -427,8 +439,8 @@ class TestAlarmToWorkorderLiveIntegration:
 
         class _CmmsLike:
             capabilities: ClassVar[list[str]] = [
-                "get_asset_history",
-                "check_spare_parts",
+                "read_maintenance_history",
+                "read_spare_parts",
                 "create_work_order",
             ]
 
@@ -441,10 +453,12 @@ class TestAlarmToWorkorderLiveIntegration:
             async def health_check(self) -> bool:
                 return True
 
-            async def get_asset_history(self, **kwargs: Any) -> list[dict[str, Any]]:
+            async def read_maintenance_history(self, asset_id: str) -> list[dict[str, Any]]:
                 return []
 
-            async def check_spare_parts(self, **kwargs: Any) -> list[dict[str, Any]]:
+            async def read_spare_parts(
+                self, *, asset_id: str = "", sku: str = ""
+            ) -> list[dict[str, Any]]:
                 return []
 
             async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:

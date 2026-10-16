@@ -417,6 +417,45 @@ class TestReadSpareParts:
         assert len(parts) == 1
         assert parts[0].sku == "BRG-6205"
 
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_filtered_by_asset(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """asset_id must narrow inventory to the asset's spare-parts list.
+
+        INVENTORY reaches the asset's Spare Parts list (SPAREPART) through its
+        ``sparepart`` relationship; the where clause filters on it server-side,
+        so an asset-scoped read never returns the whole inventory.
+        """
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'sparepart.assetnum="PUMP-201"'}),
+            json={
+                "member": [{"itemnum": "BRG-6205", "description": "Bearing", "curbal": 5}],
+                "responseInfo": {},
+            },
+        )
+        parts = await connector.read_spare_parts(asset_id="PUMP-201")
+        assert [p.sku for p in parts] == ["BRG-6205"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_filtered_by_asset_and_sku(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Both filters apply together in one where clause."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(
+                "mxinventory",
+                **{"oslc.where": 'sparepart.assetnum="PUMP-201" and itemnum="BRG-6205"'},
+            ),
+            json={"member": [], "responseInfo": {}},
+        )
+        parts = await connector.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        assert parts == []
+
 
 # ---------------------------------------------------------------------------
 # Read maintenance plans

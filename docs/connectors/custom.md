@@ -344,6 +344,13 @@ REST mocking or VCR for recorded responses.
 - **Structured logging.** Use `structlog` and include `connector=`,
   `asset_id=`, and `operation=` in every log line so operators can trace
   issues.
+- **Accept the filters callers pass.** The agent runtime, the workflow
+  engine and the MCP tools call capability methods with keyword arguments
+  — e.g. `read_spare_parts(asset_id=..., sku=...)` — so give your methods
+  the keyword parameters listed in the Path A table above; a missing one
+  fails every such call with `TypeError`. Never ignore a filter your
+  backend cannot apply: an asset-scoped spare-parts read that returned the
+  whole inventory would present every part as that asset's.
 - **Graceful degradation.** Declare only the capabilities you actually
   support. If your CMMS doesn't expose spare parts, omit
   `Capability.READ_SPARE_PARTS` from the frozenset — the agent will simply

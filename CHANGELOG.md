@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`read_spare_parts` has one call contract across the CMMS connectors: keyword-only `asset_id` and `sku`, the arguments every caller passes.** `MaximoConnector` and `UpKeepConnector` rejected `asset_id` (removed in 0.2.0, when it filtered on a field neither parser populated), so on those CMMSs the built-in `alarm_to_workorder` workflow silently skipped its spare-parts step (the notification showed a literal `{check_spare_parts}`), the agent's `check_spare_parts` tool failed the whole turn, and the per-turn context prefetch and the MCP `machina_list_spare_parts` tool returned no parts. Both connectors accept `asset_id` again, now filtered through the backend's own asset↔part relation — Maximo the asset's Spare Parts list (`sparepart.assetnum` on `mxinventory`), UpKeep the parts assigned to the asset (the asset record's `parts` list) — so an asset-scoped read returns that asset's parts, not the whole inventory. `UpKeepConnector.get_asset` now raises `ConnectorAuthError` (a `ConnectorError`) on HTTP 401. A conformance test binds every caller's arguments against every registered connector that declares `READ_SPARE_PARTS`.
+- **A failing spare-parts lookup no longer ends the agent turn.** The `check_spare_parts` tool hands the connector error to the model as a tool-level error, as `get_work_order` already did.
+- The `custom_workflows` reference example passed `part_id` to `read_spare_parts`, which no connector accepts, so its reorder workflow stopped at the first step; it now passes `sku`.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.
