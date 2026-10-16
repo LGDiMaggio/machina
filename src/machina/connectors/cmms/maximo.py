@@ -23,6 +23,7 @@ See also:
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import structlog
@@ -33,6 +34,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
+from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import ConnectorAuthError, ConnectorError
@@ -47,6 +49,11 @@ logger = structlog.get_logger(__name__)
 _AuthUnion = ApiKeyHeaderAuth | BasicAuth | BearerAuth
 # The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
 _AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
+
+# Object-structure names (``mxwo``, ``MXASSET``, a site's own ``ZZ_WO``) are
+# letters, digits and ``_``; a name that matches cannot add path segments, dot
+# segments or a query to the URL it is placed in.
+_OBJECT_STRUCTURE_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _require_httpx() -> Any:
@@ -463,3 +470,28 @@ class MaximoConnector:
             total=len(all_items),
         )
         return all_items
+
+    @sandbox_aware
+    async def _patch_resource(
+        self, object_structure: str, resource_id: str, attributes: dict[str, Any]
+    ) -> Any:
+        """PATCH raw attributes onto one resource of an OSLC object structure.
+
+        The write path of the ``maximo_raw_attribute_update`` MCP vendor tool.
+        Both values come from MCP-client input and httpx removes dot segments,
+        so ``object_structure`` must be an object-structure name and
+        ``resource_id`` is sent as one percent-encoded path segment: neither
+        can address another Maximo endpoint. The response is returned
+        unchecked, for the caller to report.
+
+        Raises:
+            ConnectorError: If ``object_structure`` is not letters, digits and
+                ``_``, or ``resource_id`` is empty, ``.`` or ``..``.
+        """
+        if not _OBJECT_STRUCTURE_RE.fullmatch(object_structure):
+            raise ConnectorError(f"Invalid Maximo object structure {object_structure!r}")
+        url = f"{self.url}/maximo/oslc/os/{object_structure}/{path_segment(resource_id)}"
+        httpx = _require_httpx()
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await request_with_retry(client, "PATCH", url, headers=headers, json=attributes)

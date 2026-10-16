@@ -39,10 +39,10 @@ def _runtime(ctx: Any) -> Any:
     Identical to ``mcp.tools._runtime``: each MCP tool call runs in its own
     request task that does not inherit the ``_sandbox_mode`` contextvar set
     once at lifespan startup. The sandbox short-circuit in every vendor tool
-    reads ``get_sandbox_mode()``, so it MUST be funnelled through here first —
-    otherwise a server started in sandbox mode reports sandbox as off and the
-    raw vendor write (e.g. the Maximo httpx PATCH, which has no
-    ``@sandbox_aware`` backstop) executes live.
+    reads ``get_sandbox_mode()``, and the ``@sandbox_aware`` connector helper
+    each tool writes through reads the same contextvar, so it MUST be
+    funnelled through here first — otherwise a server started in sandbox mode
+    reports sandbox as off and the raw vendor write executes live.
     """
     runtime = ctx.request_context.lifespan_context["runtime"]
     set_sandbox_mode(runtime.sandbox_mode)
@@ -121,15 +121,15 @@ async def maximo_raw_attribute_update(
     attributes.  Use only when the domain-level tools are insufficient.
 
     Args:
-        resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset').
-        resource_id: Resource identifier.
+        resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
+            letters, digits and underscores only.
+        resource_id: Resource identifier, sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
     """
     from machina.connectors.base import get_sandbox_mode
 
     # _runtime re-establishes the sandbox contextvar for this request task;
-    # it must run before get_sandbox_mode() is read. The raw httpx PATCH below
-    # has no @sandbox_aware backstop, so this check is the only sandbox gate.
+    # it must run before get_sandbox_mode() is read.
     runtime = _runtime(ctx)
     if get_sandbox_mode():
         logger.info("sandbox_write_blocked", operation="maximo_raw_attribute_update")
@@ -141,18 +141,8 @@ async def maximo_raw_attribute_update(
     conn = _find_connector_by_type(runtime, "maximo")
     if conn is None:
         return {"error": "No Maximo connector configured"}
-    attributes = attributes or {}
     try:
-        import importlib
-
-        httpx = importlib.import_module("httpx")
-        headers = {**conn._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.patch(
-                f"{conn.url}/maximo/oslc/os/{resource_type}/{resource_id}",
-                headers=headers,
-                json=attributes,
-            )
+        resp = await conn._patch_resource(resource_type, resource_id, attributes or {})
         return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
     except SandboxViolationError:
         return {
