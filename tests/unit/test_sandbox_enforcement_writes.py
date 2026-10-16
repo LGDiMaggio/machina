@@ -95,8 +95,7 @@ class TestIdempotentWritesTouchNothingInSandbox:
         conn = MagicMock()
         with pytest.raises(SandboxViolationError):
             await ExcelCsvConnector.create_work_order(conn, MagicMock())
-        conn._validate_and_load_work_orders.assert_not_called()
-        conn._write_row.assert_not_called()
+        conn._run_on_file_thread.assert_not_called()  # the re-read and the write run there
 
     @pytest.mark.asyncio
     async def test_excel_update_reads_and_writes_no_file(self) -> None:
@@ -105,8 +104,7 @@ class TestIdempotentWritesTouchNothingInSandbox:
         conn = MagicMock()
         with pytest.raises(SandboxViolationError):
             await ExcelCsvConnector.update_work_order(conn, "WO-1", status="assigned")
-        conn._validate_and_load_work_orders.assert_not_called()
-        conn._update_row_in_file.assert_not_called()
+        conn._run_on_file_thread.assert_not_called()  # the re-read and the write run there
 
     @pytest.mark.asyncio
     async def test_sql_create_runs_no_query(self) -> None:
