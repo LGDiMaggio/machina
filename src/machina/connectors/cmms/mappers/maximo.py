@@ -33,6 +33,7 @@ __all__ = [
     "resolve_asset_type",
     "reverse_priority",
     "reverse_status",
+    "reverse_status_filter",
     "reverse_worktype",
 ]
 
@@ -268,6 +269,20 @@ def reverse_worktype(wo_type: WorkOrderType) -> str:
 def reverse_status(status: WorkOrderStatus) -> str:
     """Map Machina work-order status to Maximo status code."""
     return REVERSE_MAXIMO_STATUS.get(status, "WAPPR")
+
+
+def reverse_status_filter(status: WorkOrderStatus | str) -> str:
+    """Map a ``read_work_orders`` status filter to the Maximo status code to send.
+
+    A :class:`WorkOrderStatus`, or a string equal to one of its values such as
+    ``"in_progress"``, is reverse-mapped. Any other string is taken as a
+    Maximo status code and only upper-cased.
+    """
+    try:
+        machina_status = WorkOrderStatus(status)
+    except ValueError:
+        return status.upper()
+    return REVERSE_MAXIMO_STATUS.get(machina_status, machina_status.value.upper())
 
 
 # ---------------------------------------------------------------------------

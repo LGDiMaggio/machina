@@ -211,6 +211,28 @@ class TestReadWorkOrdersErrors:
             await connector.read_work_orders()
 
 
+class TestReadWorkOrdersStatusFilter:
+    """A WorkOrderStatus value is sent as UpKeep's status; any other string is UpKeep's."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status"),
+        # The filter takes open, onHold, inProgress or complete:
+        # https://developers.onupkeep.com/#get-all-work-orders
+        [("created", "open"), ("completed", "complete"), ("onHold", "onHold")],
+    )
+    async def test_status_filter_sends_upkeep_value(
+        self, httpx_mock, connector: UpKeepConnector, status: str, upkeep_status: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status={upkeep_status}",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status=status) == []
+
+
 class TestCreateWorkOrder:
     @pytest.mark.asyncio
     async def test_create_work_order(self, httpx_mock, connector: UpKeepConnector) -> None:

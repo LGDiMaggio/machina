@@ -32,6 +32,7 @@ __all__ = [
     "parse_work_order",
     "reverse_priority",
     "reverse_status",
+    "reverse_status_filter",
 ]
 
 
@@ -231,3 +232,17 @@ def reverse_priority(priority: Priority) -> int:
 def reverse_status(status: WorkOrderStatus) -> str:
     """Map Machina work-order status to UpKeep status string."""
     return REVERSE_UPKEEP_STATUS.get(status, "open")
+
+
+def reverse_status_filter(status: WorkOrderStatus | str) -> str:
+    """Map a ``read_work_orders`` status filter to the UpKeep status to send.
+
+    A :class:`WorkOrderStatus`, or a string equal to one of its values such as
+    ``"in_progress"``, is reverse-mapped. Any other string is taken as an
+    UpKeep status and sent unchanged.
+    """
+    try:
+        machina_status = WorkOrderStatus(status)
+    except ValueError:
+        return status
+    return REVERSE_UPKEEP_STATUS.get(machina_status, machina_status.value)

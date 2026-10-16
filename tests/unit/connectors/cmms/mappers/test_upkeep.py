@@ -11,6 +11,7 @@ from machina.connectors.cmms.mappers.upkeep import (
     parse_work_order,
     reverse_priority,
     reverse_status,
+    reverse_status_filter,
 )
 from machina.domain.asset import AssetType, Criticality
 from machina.domain.work_order import (
@@ -87,6 +88,17 @@ class TestParseDatetime:
     def test_iso_with_z(self) -> None:
         dt = parse_datetime("2024-06-01T09:30:00Z")
         assert dt == datetime(2024, 6, 1, 9, 30, 0, tzinfo=UTC)
+
+
+class TestReverseStatusFilter:
+    def test_status_value_is_sent_like_the_enum(self) -> None:
+        """``"in_progress"`` filters on the UpKeep value of ``IN_PROGRESS``."""
+        for status in WorkOrderStatus:
+            assert reverse_status_filter(status.value) == reverse_status(status)
+            assert reverse_status_filter(status) == reverse_status(status)
+
+    def test_upkeep_status_is_sent_unchanged(self) -> None:
+        assert reverse_status_filter("onHold") == "onHold"
 
 
 class TestReverseMaps:

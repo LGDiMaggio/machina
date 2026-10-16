@@ -93,7 +93,7 @@ GET_ASSET_DETAILS_TOOL = make_tool(
 
 READ_WORK_ORDERS_TOOL = make_tool(
     name="read_work_orders",
-    description=("Read work orders from the CMMS. Can filter by asset ID, status, or type."),
+    description=("Read work orders from the CMMS. Can filter by asset ID or status."),
     parameters={
         "type": "object",
         "properties": {
@@ -103,7 +103,7 @@ READ_WORK_ORDERS_TOOL = make_tool(
             },
             "status": {
                 "type": "string",
-                "description": "Filter by status: created, assigned, in_progress, completed, closed.",
+                "description": "Filter by status: created, assigned, in_progress, completed, closed, cancelled.",
             },
         },
     },

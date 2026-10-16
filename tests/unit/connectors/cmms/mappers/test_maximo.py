@@ -11,6 +11,7 @@ from machina.connectors.cmms.mappers.maximo import (
     resolve_asset_type,
     reverse_priority,
     reverse_status,
+    reverse_status_filter,
     reverse_worktype,
 )
 from machina.domain.asset import AssetType, Criticality
@@ -110,3 +111,15 @@ class TestReverseMaps:
 
     def test_reverse_status_cancelled_is_can(self) -> None:
         assert reverse_status(WorkOrderStatus.CANCELLED) == "CAN"
+
+
+class TestReverseStatusFilter:
+    def test_status_value_is_sent_like_the_enum(self) -> None:
+        """``"in_progress"`` filters on the Maximo code of ``IN_PROGRESS``."""
+        for status in WorkOrderStatus:
+            assert reverse_status_filter(status.value) == reverse_status(status)
+            assert reverse_status_filter(status) == reverse_status(status)
+
+    def test_maximo_code_is_sent_upper_cased(self) -> None:
+        assert reverse_status_filter("WMATL") == "WMATL"
+        assert reverse_status_filter("wmatl") == "WMATL"
