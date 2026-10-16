@@ -74,8 +74,9 @@ wire more.
 ### Config File
 
 `config.yaml` is mounted read-only into the container. It configures a
-`generic_cmms` connector in REST mode with the optional work-order and
-maintenance-plan endpoints, so the server offers 11 tools. Edit it to add
+`generic_cmms` connector in REST mode with the optional work-order,
+maintenance-plan, spare-part and maintenance-history endpoints, so the server
+offers 11 tools. Edit it to add
 connectors (Excel, SQL, a document store, a vendor CMMS); see
 [YAML Configuration](../yaml-config.md) and the [MCP setup](../mcp/setup.md).
 
@@ -114,8 +115,9 @@ FROM python:3.11-slim-bookworm@sha256:<digest> AS build
 ## Mock CMMS
 
 The mock CMMS (`deploy/docker/mock-cmms/`) is a FastAPI app with in-memory
-data — 3 assets, 2 work orders and a maintenance plan — that resets on
-restart. It requires a bearer token and accepts any non-empty one.
+data — 3 assets, 4 work orders (2 of them completed history), 3 spare parts
+and a maintenance plan — that resets on restart. It requires a bearer token
+and accepts any non-empty one.
 
 | Method | Path | Used by |
 |--------|------|---------|
@@ -126,10 +128,11 @@ restart. It requires a bearer token and accepts any non-empty one.
 | `GET` | `/work_orders/{id}` | `get_work_order` endpoint |
 | `PATCH` | `/work_orders/{id}` | `update_work_order` endpoint (also close and cancel) |
 | `GET` | `/maintenance_plans` | `read_maintenance_plans` endpoint |
+| `GET` | `/spare_parts?asset_id=&sku=` | `read_spare_parts` endpoint |
+| `GET` | `/assets/{id}/history` | `read_maintenance_history` endpoint (the asset's completed and closed work orders) |
 
-In REST mode the Generic CMMS connector does not fetch spare parts or
-maintenance history: those two tools return empty lists. See
-[Generic CMMS](../connectors/generic_cmms.md).
+Without its endpoint, the Generic CMMS connector in REST mode does not offer
+the matching tool — see [Generic CMMS](../connectors/generic_cmms.md).
 
 ## Logs
 

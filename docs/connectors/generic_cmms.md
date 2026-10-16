@@ -37,23 +37,35 @@ percent-encoded path segment (a `/` in it becomes `%2F`); an empty ID, `.` or
 exist: `get_asset()` and `get_work_order()` return `None`. A create sends the
 work order with Machina's work-order ID; with a `yaml_mapping` that has
 `reverse_fields`, only the mapped fields are sent, so map `id` there to keep
-it. Three more
-operations are available when you configure their `endpoints` (paths relative
-to `url`, `{id}` replaced by the work-order ID):
+it. Five more operations are available when you configure their `endpoints`
+(paths relative to `url`; a query string in the path is kept):
 
 | `endpoints` key | Enables | Example |
 |-----------------|---------|---------|
 | `get_work_order` | `get_work_order` | `{path: "work_orders/{id}"}` |
 | `update_work_order` | `update_work_order`, `close_work_order`, `cancel_work_order` | `{path: "work_orders/{id}", method: PATCH, field_map: {status: state}}` |
 | `read_maintenance_plans` | `read_maintenance_plans` | `{path: "maintenance_plans"}` |
+| `read_spare_parts` | `read_spare_parts` | `{path: "spare_parts"}` |
+| `read_maintenance_history` | `read_maintenance_history` | `{path: "assets/{asset_id}/history"}` |
 
-An update sends `{"status": …, "assigned_to": …, "description": …}` (only the
+`{id}` is replaced by the work-order ID and `{asset_id}` by the asset ID. An
+update sends `{"status": …, "assigned_to": …, "description": …}` (only the
 fields given, renamed through `field_map`) and re-reads the work order when
 `get_work_order` is configured. Maintenance plans are read with an `interval`
 of either a number of days or `{days, weeks, months, hours}`.
 
-REST mode reads no spare parts and no maintenance history: those methods
-return empty lists. Calls are single attempts, without retries.
+Spare parts are read with the `asset_id` and `sku` filters sent as query
+parameters for the CMMS to apply, and checked again on the records it returns:
+a part whose `compatible_assets` list excludes the asset, or with a different
+SKU, is dropped, so a CMMS that ignores the parameters cannot pass its whole
+catalog off as one asset's parts. Maintenance history is read per asset:
+`{asset_id}` can sit in the path or the query string (`history?equipment={asset_id}`),
+and without it the ID is sent as `?asset_id=`. Point this endpoint at the
+CMMS's history view (the asset's completed work orders) — the records are read
+as work orders and returned as served, without status filtering. Without their
+endpoints REST mode declares neither capability, and calling either method
+raises `ConnectorError` instead of returning an empty list. Calls are single
+attempts, without retries.
 
 ### YAML Configuration
 
@@ -69,6 +81,8 @@ connectors:
         get_work_order: {path: "work_orders/{id}"}
         update_work_order: {path: "work_orders/{id}", method: PATCH}
         read_maintenance_plans: {path: "maintenance_plans"}
+        read_spare_parts: {path: "spare_parts"}
+        read_maintenance_history: {path: "assets/{asset_id}/history"}
 ```
 
 [`deploy/docker/`](../deployment/docker.md) runs this configuration against a
@@ -156,7 +170,11 @@ The request paths always come from the REST contract above: the mapping's
 `endpoint`, `create_endpoint` and `root` entries are validated but not used to
 build requests. For simple renames, the Python-only `schema_mapping` parameter
 also accepts `{"assets": {"asset_id": "id"}}` or JMESPath extraction
-(`{"assets": {"_fields": {"id": "equipment.id"}}}`).
+(`{"assets": {"_fields": {"id": "equipment.id"}}}`). Maintenance-history
+records go through the `work_order` mapping. Spare parts have no
+`yaml_mapping` entry: their records need Machina's field names (`sku`, `name`,
+`stock_quantity`, `compatible_assets`, …) or a `schema_mapping` under
+`spare_parts`.
 
 ### Python
 
@@ -196,11 +214,11 @@ exists returns the existing record.
 | `read_assets` | Yes | Yes |
 | `read_work_orders` | Yes | Yes |
 | `create_work_order` | Yes | Yes |
-| `read_spare_parts` | Declared, but returns `[]` | Yes |
-| `read_maintenance_history` | Declared, but returns `[]` | Yes (completed and closed work orders) |
 | `get_work_order` | With the `get_work_order` endpoint | Yes |
 | `update_work_order`, `close_work_order`, `cancel_work_order` | With the `update_work_order` endpoint | Yes |
 | `read_maintenance_plans` | With the `read_maintenance_plans` endpoint | Yes |
+| `read_spare_parts` | With the `read_spare_parts` endpoint | Yes |
+| `read_maintenance_history` | With the `read_maintenance_history` endpoint | Yes (completed and closed work orders) |
 | `read_failure_modes` | No | When `failure_modes.json` exists |
 
 Capabilities are computed per instance, from the mode and the configured

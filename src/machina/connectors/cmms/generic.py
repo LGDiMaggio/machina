@@ -12,7 +12,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
@@ -110,9 +110,15 @@ class GenericCmmsConnector:
             (``none``, ``offset_limit``, ``page_number``, ``cursor``).
             Defaults to :class:`NoPagination` (single-shot GET) which
             preserves the behaviour of earlier versions.
-        endpoints: Optional REST endpoints that enable optional
-            capabilities (e.g. ``get_work_order``, ``update_work_order``,
-            ``read_maintenance_plans``).
+        endpoints: Optional REST endpoints, keyed by operation, each a dict
+            with a ``path`` relative to ``url`` (a query string in it is
+            kept). A configured key declares the matching capability in REST
+            mode: ``get_work_order`` and ``update_work_order`` (``{id}`` in
+            the path; update also takes ``method`` and ``field_map``),
+            ``read_maintenance_plans``, ``read_spare_parts``, and
+            ``read_maintenance_history`` (``{asset_id}`` in the path or its
+            query string, else an ``asset_id`` query param). Unused in local
+            mode, which serves every capability from the JSON files.
         yaml_mapping: Declarative field mapping between the CMMS REST
             payloads and Machina entities — a
             :class:`~machina.connectors.cmms.generic_schema.GenericCmmsYamlConfig`
@@ -167,8 +173,6 @@ class GenericCmmsConnector:
             Capability.READ_ASSETS,
             Capability.READ_WORK_ORDERS,
             Capability.CREATE_WORK_ORDER,
-            Capability.READ_SPARE_PARTS,
-            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -179,6 +183,8 @@ class GenericCmmsConnector:
         Capability.CLOSE_WORK_ORDER: "update_work_order",
         Capability.CANCEL_WORK_ORDER: "update_work_order",
         Capability.READ_MAINTENANCE_PLANS: "read_maintenance_plans",
+        Capability.READ_SPARE_PARTS: "read_spare_parts",
+        Capability.READ_MAINTENANCE_HISTORY: "read_maintenance_history",
     }
 
     @property
@@ -423,26 +429,53 @@ class GenericCmmsConnector:
         asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read spare parts, optionally filtered."""
+        """Read spare parts, optionally filtered by compatible asset or SKU.
+
+        In local mode filters the parts loaded from ``spare_parts.json``.
+        In REST mode fetches from the configured ``read_spare_parts``
+        endpoint with pagination; ``asset_id`` and ``sku`` are forwarded as
+        query params for the server to filter on, and re-checked against
+        the records it returns.
+
+        Raises:
+            ConnectorError: In REST mode, if the ``read_spare_parts``
+                endpoint is not configured.
+        """
         self._ensure_connected()
-        results = self._spare_parts
-        if asset_id:
-            results = [sp for sp in results if asset_id in sp.compatible_assets]
-        if sku:
-            results = [sp for sp in results if sp.sku == sku]
-        return results
+        if self._data_dir:
+            results = self._spare_parts
+            if asset_id:
+                results = [sp for sp in results if asset_id in sp.compatible_assets]
+            if sku:
+                results = [sp for sp in results if sp.sku == sku]
+            return results
+        return await self._rest_read_spare_parts(asset_id=asset_id, sku=sku)
 
     async def read_maintenance_history(
         self,
         asset_id: str,
     ) -> list[WorkOrder]:
-        """Return completed work orders for an asset (maintenance history)."""
+        """Return an asset's maintenance history (its completed work orders).
+
+        In local mode returns the asset's completed/closed work orders.
+        In REST mode returns the records the configured
+        ``read_maintenance_history`` endpoint serves, with pagination:
+        ``{asset_id}`` in its path or query string is replaced by the asset
+        ID, otherwise the ID is sent as an ``asset_id`` query param.
+
+        Raises:
+            ConnectorError: In REST mode, if the ``read_maintenance_history``
+                endpoint is not configured, or the asset ID is empty, ``.``
+                or ``..``.
+        """
         self._ensure_connected()
-        return [
-            wo
-            for wo in self._work_orders
-            if wo.asset_id == asset_id and wo.status.value in ("completed", "closed")
-        ]
+        if self._data_dir:
+            return [
+                wo
+                for wo in self._work_orders
+                if wo.asset_id == asset_id and wo.status.value in ("completed", "closed")
+            ]
+        return await self._rest_read_maintenance_history(asset_id)
 
     # ------------------------------------------------------------------
     # Work-order lifecycle & maintenance plans
@@ -793,6 +826,18 @@ class GenericCmmsConnector:
             raise ConnectorError(f"Invalid record ID {record_id!r}")
         return quote(record_id, safe="")
 
+    @staticmethod
+    def _split_endpoint_path(path: str) -> tuple[str, dict[str, str]]:
+        """Split a configured endpoint path into its path and query params.
+
+        httpx replaces a URL's query string whenever ``params`` are passed,
+        and every pagination strategy passes them, so a query configured on
+        the path (``work_orders?status=closed``) is lifted into params that
+        the call's own filters then extend.
+        """
+        base, _, query = path.partition("?")
+        return base, dict(parse_qsl(query, keep_blank_values=True))
+
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
         if self._auth is None:
@@ -955,14 +1000,86 @@ class GenericCmmsConnector:
         """Fetch maintenance plans from the REST API."""
         config = self._require_endpoint("read_maintenance_plans")
         httpx = _require_httpx()
-        path = config["path"]
+        path, params = self._split_endpoint_path(config["path"])
         headers = self._rest_headers()
         results: list[MaintenancePlan] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
+            async for raw in self._pagination.iterate(
+                client, self._rest_url(path), headers, params=params
+            ):
                 results.append(
                     _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
                 )
+        return results
+
+    async def _rest_read_spare_parts(
+        self,
+        *,
+        asset_id: str = "",
+        sku: str = "",
+    ) -> list[SparePart]:
+        """Fetch spare parts from the REST API.
+
+        ``asset_id`` and ``sku`` are forwarded as query params for the server
+        to filter on, then re-checked here: a CMMS that ignores unknown params
+        returns its whole catalog, which must not reach the caller as the
+        asset's parts. A part whose listed ``compatible_assets`` exclude the
+        asset, or whose SKU differs, is dropped; a part listing no compatible
+        assets is kept, since the server may filter on a relation it does not
+        return. Iteration uses the configured pagination strategy.
+        """
+        config = self._require_endpoint("read_spare_parts")
+        httpx = _require_httpx()
+        path, params = self._split_endpoint_path(config["path"])
+        if asset_id:
+            params["asset_id"] = asset_id
+        if sku:
+            params["sku"] = sku
+        headers = self._rest_headers()
+        results: list[SparePart] = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async for raw in self._pagination.iterate(
+                client, self._rest_url(path), headers, params=params
+            ):
+                results.append(_parse_spare_part(self._apply_mapping("spare_parts", raw)))
+        if asset_id:
+            results = [
+                sp
+                for sp in results
+                if not sp.compatible_assets or asset_id in sp.compatible_assets
+            ]
+        if sku:
+            results = [sp for sp in results if sp.sku == sku]
+        return results
+
+    async def _rest_read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
+        """Fetch an asset's maintenance history from the REST API.
+
+        The asset ID goes through :meth:`_path_segment`, so it can neither
+        redirect the request to another resource nor — empty — read as "no
+        filter" and return every asset's history. ``{asset_id}`` may sit in
+        the path or its query string; without it the ID is sent as the
+        ``asset_id`` query param. Records are parsed as work orders;
+        iteration uses the configured pagination strategy.
+        """
+        config = self._require_endpoint("read_maintenance_history")
+        httpx = _require_httpx()
+        segment = self._path_segment(asset_id)
+        template: str = config["path"]
+        if "{asset_id}" in template:
+            # Splitting after the substitution decodes the ID again inside the
+            # query string, where httpx re-encodes it as a param value.
+            path, params = self._split_endpoint_path(template.replace("{asset_id}", segment))
+        else:
+            path, params = self._split_endpoint_path(template)
+            params["asset_id"] = asset_id
+        headers = self._rest_headers()
+        results: list[WorkOrder] = []
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async for raw in self._pagination.iterate(
+                client, self._rest_url(path), headers, params=params
+            ):
+                results.append(_parse_work_order(self._apply_mapping("work_orders", raw)))
         return results
 
     # ------------------------------------------------------------------
@@ -1069,17 +1186,21 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
 
 
 def _parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Parse a dict into a SparePart."""
+    """Parse a dict into a SparePart, tolerating missing and null fields."""
+    # ``or`` defaults so an explicit ``null`` — common in REST payloads — is
+    # treated like a missing field: ``int(None)`` would raise, and ``str(None)``
+    # would mint the literal 'None' where a null sku must instead fail
+    # SparePart's empty-sku validation.
     return SparePart(
-        sku=str(data.get("sku", "")),
-        name=str(data.get("name", "")),
-        manufacturer=str(data.get("manufacturer", "")),
-        compatible_assets=data.get("compatible_assets", []),
-        stock_quantity=int(data.get("stock_quantity", 0)),
-        reorder_point=int(data.get("reorder_point", 0)),
-        lead_time_days=int(data.get("lead_time_days", 0)),
-        unit_cost=float(data.get("unit_cost", 0.0)),
-        warehouse_location=str(data.get("warehouse_location", "")),
+        sku=str(data.get("sku") or ""),
+        name=str(data.get("name") or ""),
+        manufacturer=str(data.get("manufacturer") or ""),
+        compatible_assets=data.get("compatible_assets") or [],
+        stock_quantity=int(data.get("stock_quantity") or 0),
+        reorder_point=int(data.get("reorder_point") or 0),
+        lead_time_days=int(data.get("lead_time_days") or 0),
+        unit_cost=float(data.get("unit_cost") or 0.0),
+        warehouse_location=str(data.get("warehouse_location") or ""),
     )
 
 

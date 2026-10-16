@@ -30,6 +30,39 @@ class TestAutoRegistration:
         # No IoT connector → no sensor tools
         assert "machina_get_sensor_reading" not in tool_names
 
+    def test_rest_generic_cmms_gates_spare_parts_and_history_tools_on_endpoints(self) -> None:
+        """REST generic_cmms registers these tools only when it can back them.
+
+        Without the optional endpoints the connector has no data source for
+        the reads, so the tools must not be registered (they would answer
+        every call with an empty list).
+        """
+        from machina.mcp.server import build_server
+
+        rest = {"url": "https://cmms.example.com/api", "api_key": "k"}
+
+        def tool_names(settings: dict[str, object]) -> set[str]:
+            config = MachinaConfig(
+                connectors={"cmms": ConnectorConfig(type="generic_cmms", settings=settings)}
+            )
+            return {t.name for t in build_server(config)._tool_manager.list_tools()}
+
+        bare = tool_names(rest)
+        assert "machina_list_spare_parts" not in bare
+        assert "machina_get_maintenance_history" not in bare
+
+        configured = tool_names(
+            {
+                **rest,
+                "endpoints": {
+                    "read_spare_parts": {"path": "spare-parts"},
+                    "read_maintenance_history": {"path": "assets/{asset_id}/history"},
+                },
+            }
+        )
+        assert "machina_list_spare_parts" in configured
+        assert "machina_get_maintenance_history" in configured
+
     def test_no_connectors_registers_no_tools(self) -> None:
         from machina.mcp.server import build_server
 

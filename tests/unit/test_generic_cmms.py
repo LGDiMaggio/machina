@@ -10,9 +10,13 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_httpx import HTTPXMock
+
 from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+REST_URL = "https://cmms.example.com/api"
 
 
 @pytest.fixture
@@ -596,6 +600,8 @@ class TestDynamicCapabilities:
         assert "cancel_work_order" in caps
         assert "get_work_order" in caps
         assert "read_maintenance_plans" in caps
+        assert "read_spare_parts" in caps
+        assert "read_maintenance_history" in caps
 
     def test_rest_mode_base_only(self) -> None:
         conn = GenericCmmsConnector(url="http://example.com/api", api_key="k")
@@ -634,6 +640,38 @@ class TestDynamicCapabilities:
         assert "get_work_order" in caps
         assert "update_work_order" not in caps
         assert "read_maintenance_plans" not in caps
+
+    def test_rest_mode_omits_spare_parts_and_history_without_endpoints(self) -> None:
+        """A bare REST config cannot serve either read, so it declares neither.
+
+        Without their endpoints the reads have no data source in REST mode;
+        declaring them would register MCP tools / agent tools that answer
+        with a silent empty list.
+        """
+        conn = GenericCmmsConnector(url="http://example.com/api", api_key="k")
+        caps = conn.capabilities
+        assert "read_spare_parts" not in caps
+        assert "read_maintenance_history" not in caps
+
+    def test_rest_mode_spare_parts_endpoint_declares_only_spare_parts(self) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        caps = conn.capabilities
+        assert "read_spare_parts" in caps
+        assert "read_maintenance_history" not in caps
+
+    def test_rest_mode_history_endpoint_declares_only_history(self) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "assets/{asset_id}/history"}},
+        )
+        caps = conn.capabilities
+        assert "read_maintenance_history" in caps
+        assert "read_spare_parts" not in caps
 
     def test_capabilities_still_accessible_on_instance(self) -> None:
         """Backward compat: capabilities is accessible as a property."""
@@ -708,9 +746,10 @@ class TestDynamicCapabilities:
 class TestGenericCmmsConnectorRest:
     """Pre-connect validation for REST mode.
 
-    The full REST path (real HTTP via httpx) is covered in
-    ``tests/integration/test_generic_cmms_rest.py`` using ``pytest-httpx``.
-    This class keeps only the tests that don't need a mock server.
+    The full REST path (HTTP via httpx) is covered in
+    ``tests/integration/test_generic_cmms_rest.py`` using ``pytest-httpx``;
+    the optional endpoint reads are in :class:`TestRestEndpointReads`. This
+    class keeps only the tests that don't need a mock server.
     """
 
     @pytest.mark.asyncio
@@ -726,6 +765,337 @@ class TestGenericCmmsConnectorRest:
         conn = GenericCmmsConnector(url="http://example.com/api", api_key="key")
         health = await conn.health_check()
         assert health.status.value == "unhealthy"
+
+
+async def _connect_rest(httpx_mock: HTTPXMock, conn: GenericCmmsConnector) -> None:
+    """Register the health-check response and connect a REST-mode connector."""
+    httpx_mock.add_response(method="GET", url=f"{REST_URL}/health", json={"status": "ok"})
+    await conn.connect()
+
+
+class TestRestEndpointReads:
+    """REST reads behind the optional endpoints (spare parts, history, plans).
+
+    HTTP goes through ``pytest-httpx``'s mocked transport — no network. An
+    unexpected request fails the test, and so does a mocked response the
+    connector never requested.
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_fetches_configured_endpoint(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts",
+            json=[
+                {
+                    "sku": "SKF-6310",
+                    "name": "Bearing 6310",
+                    "compatible_assets": ["P-201"],
+                    "stock_quantity": 4,
+                    "reorder_point": 2,
+                },
+            ],
+        )
+        parts = await conn.read_spare_parts()
+        assert [p.sku for p in parts] == ["SKF-6310"]
+        assert parts[0].stock_quantity == 4
+        assert parts[0].compatible_assets == ["P-201"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_forwards_filters_as_query_params(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts?asset_id=P-201&sku=SKF-6310",
+            json=[{"sku": "SKF-6310", "name": "Bearing 6310"}],
+        )
+        parts = await conn.read_spare_parts(asset_id="P-201", sku="SKF-6310")
+        assert [p.sku for p in parts] == ["SKF-6310"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_applies_schema_mapping(self, httpx_mock: HTTPXMock) -> None:
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "inventory"}},
+            schema_mapping={"spare_parts": {"part_no": "sku", "label": "name"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/inventory",
+            json=[{"part_no": "SEAL-CR32-KIT", "label": "Mechanical Seal Kit"}],
+        )
+        parts = await conn.read_spare_parts()
+        assert parts[0].sku == "SEAL-CR32-KIT"
+        assert parts[0].name == "Mechanical Seal Kit"
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_walks_pagination(self, httpx_mock: HTTPXMock) -> None:
+        from machina.connectors.cmms import OffsetLimitPagination
+
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            pagination=OffsetLimitPagination(page_size=1),
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts?limit=1&offset=0",
+            json=[{"sku": "SKF-6310"}],
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts?limit=1&offset=1",
+            json=[{"sku": "SEAL-CR32-KIT"}],
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts?limit=1&offset=2",
+            json=[],
+        )
+        parts = await conn.read_spare_parts()
+        assert [p.sku for p in parts] == ["SKF-6310", "SEAL-CR32-KIT"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_drops_records_contradicting_the_filters(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """A CMMS that ignores the filter params cannot mislabel parts.
+
+        Parts listed as compatible only with other assets, or carrying another
+        SKU, are dropped; a part without a compatibility list is kept — the
+        server may filter on a relation it does not return.
+        """
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        catalog = [
+            {"sku": "SKF-6310", "name": "Bearing 6310", "compatible_assets": ["P-201"]},
+            {"sku": "ABB-FAN-160", "name": "Motor cooling fan", "compatible_assets": ["M-301"]},
+            {"sku": "GREASE-EP2", "name": "Bearing grease EP2"},
+        ]
+        httpx_mock.add_response(
+            method="GET", url=f"{REST_URL}/spare-parts?asset_id=P-201", json=catalog
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{REST_URL}/spare-parts?sku=SKF-6310", json=catalog
+        )
+        by_asset = await conn.read_spare_parts(asset_id="P-201")
+        assert [p.sku for p in by_asset] == ["SKF-6310", "GREASE-EP2"]
+        by_sku = await conn.read_spare_parts(sku="SKF-6310")
+        assert [p.sku for p in by_sku] == ["SKF-6310"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_tolerates_null_fields(self, httpx_mock: HTTPXMock) -> None:
+        """REST payloads send ``null`` for unknown values; they read as defaults."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_spare_parts": {"path": "spare-parts"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/spare-parts",
+            json=[
+                {
+                    "sku": "SKF-6310",
+                    "name": None,
+                    "manufacturer": None,
+                    "compatible_assets": None,
+                    "stock_quantity": None,
+                    "reorder_point": None,
+                    "lead_time_days": None,
+                    "unit_cost": None,
+                    "warehouse_location": None,
+                },
+            ],
+        )
+        [part] = await conn.read_spare_parts()
+        assert part.sku == "SKF-6310"
+        assert part.name == ""
+        assert part.compatible_assets == []
+        assert part.stock_quantity == 0
+        assert part.unit_cost == 0.0
+        assert part.warehouse_location == ""
+
+    @pytest.mark.asyncio
+    async def test_query_string_in_endpoint_path_is_kept(self, httpx_mock: HTTPXMock) -> None:
+        """A configured ``?query`` survives the paginated GET.
+
+        httpx replaces a URL's query string whenever ``params`` are passed,
+        and every pagination strategy passes them — so the query must travel
+        as params rather than stay on the path.
+        """
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={
+                "read_spare_parts": {"path": "spare-parts?warehouse=W1"},
+                "read_maintenance_history": {"path": "work_orders?status=closed"},
+                "read_maintenance_plans": {"path": "maintenance_plans?active=true"},
+            },
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET", url=f"{REST_URL}/spare-parts?warehouse=W1&asset_id=P-201", json=[]
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{REST_URL}/work_orders?status=closed&asset_id=P-201", json=[]
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{REST_URL}/maintenance_plans?active=true", json=[]
+        )
+        assert await conn.read_spare_parts(asset_id="P-201") == []
+        assert await conn.read_maintenance_history("P-201") == []
+        assert await conn.read_maintenance_plans() == []
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_substitutes_asset_id_in_path(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "assets/{asset_id}/history"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/assets/P-201/history",
+            json=[
+                {
+                    "id": "WO-2025-117",
+                    "type": "corrective",
+                    "status": "closed",
+                    "asset_id": "P-201",
+                    "description": "Replaced drive-end bearing",
+                    "failure_mode": "BEAR-WEAR-01",
+                },
+            ],
+        )
+        history = await conn.read_maintenance_history("P-201")
+        assert [wo.id for wo in history] == ["WO-2025-117"]
+        assert history[0].status == WorkOrderStatus.CLOSED
+        assert history[0].failure_mode == "BEAR-WEAR-01"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_encodes_asset_id_path_segment(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """An asset ID is one path segment — '/' or '?' cannot reshape the URL."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "assets/{asset_id}/history"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/assets/LINE3%2FM-301%3Fx%3D1/history",
+            json=[],
+        )
+        assert await conn.read_maintenance_history("LINE3/M-301?x=1") == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asset_id", ["", ".", ".."])
+    async def test_read_maintenance_history_refuses_empty_and_dot_asset_ids(
+        self, httpx_mock: HTTPXMock, asset_id: str
+    ) -> None:
+        """HTTP clients normalize '.'/'..' away ('..' would GET {url}/history)."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "assets/{asset_id}/history"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn.read_maintenance_history(asset_id)
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_empty_asset_id_query_param(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """``?asset_id=`` reads as "no filter" on many APIs: every asset's history."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "maintenance-history"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn.read_maintenance_history("")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_substitutes_asset_id_in_query_string(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """``{asset_id}`` in the query lets the endpoint name its own filter param."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "history?equipment={asset_id}"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(method="GET", url=f"{REST_URL}/history?equipment=P-201", json=[])
+        assert await conn.read_maintenance_history("P-201") == []
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_sends_asset_id_query_param(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Without an ``{asset_id}`` placeholder the ID travels as a query param."""
+        conn = GenericCmmsConnector(
+            url=REST_URL,
+            api_key="k",
+            endpoints={"read_maintenance_history": {"path": "maintenance-history"}},
+        )
+        await _connect_rest(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{REST_URL}/maintenance-history?asset_id=P-201",
+            json=[{"id": "WO-2025-117", "status": "completed", "asset_id": "P-201"}],
+        )
+        history = await conn.read_maintenance_history("P-201")
+        assert [wo.id for wo in history] == ["WO-2025-117"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_without_endpoint_raises(self, httpx_mock: HTTPXMock) -> None:
+        """No silent empty list: the unconfigured read fails loudly, with no HTTP call."""
+        conn = GenericCmmsConnector(url=REST_URL, api_key="k")
+        await _connect_rest(httpx_mock, conn)
+        with pytest.raises(ConnectorError, match="read_spare_parts is not configured"):
+            await conn.read_spare_parts(asset_id="P-201")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_without_endpoint_raises(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        conn = GenericCmmsConnector(url=REST_URL, api_key="k")
+        await _connect_rest(httpx_mock, conn)
+        with pytest.raises(ConnectorError, match="read_maintenance_history is not configured"):
+            await conn.read_maintenance_history("P-201")
 
 
 class TestAuthStrategies:
