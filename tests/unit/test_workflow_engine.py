@@ -396,6 +396,38 @@ class TestCapabilityCoercion:
         assert "unknown capability 'read_work_order_typo'" in error
 
     @pytest.mark.asyncio
+    async def test_declared_capability_without_its_method_fails_the_step(
+        self, tracer: ActionTracer
+    ) -> None:
+        # A connector can declare a capability it does not implement (a
+        # misconfigured or partial third-party connector). The step fails
+        # with an error naming the connector and the missing method; under
+        # SKIP it keeps that error and later templates say the step failed.
+        class _DeclaresOnly:
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_ASSETS})
+
+        comms = _FakeCommsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", _DeclaresOnly())
+        registry.register("comms", comms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="DeclaredOnly",
+            steps=[
+                Step("assets", action="cmms.read_assets", on_error=ErrorPolicy.SKIP),
+                Step("notify", action="channels.send_message", template="Assets: {assets}"),
+            ],
+        )
+        result = await engine.execute(wf)
+        lookup = result.step_results[0]
+        assert lookup.skipped is True
+        assert lookup.error == (
+            "WorkflowError: Step 'assets': connector 'cmms' has no method "
+            "'read_assets' for capability 'read_assets'"
+        )
+        assert comms.last_message == "Assets: [assets failed]"
+
+    @pytest.mark.asyncio
     async def test_action_calls_the_method_backing_the_capability(
         self, tracer: ActionTracer
     ) -> None:
