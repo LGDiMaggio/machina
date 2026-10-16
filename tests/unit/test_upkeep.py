@@ -136,15 +136,28 @@ class TestParseWorkOrder:
         assert wo.priority == Priority.EMERGENCY
 
     def test_in_progress_status_mapping(self) -> None:
+        """UpKeep reports the status as ``inProgress``."""
         raw = {
             "id": "wo-3",
             "title": "Repair",
             "priority": 1,
-            "status": "in progress",
+            "status": "inProgress",
             "assetId": "a",
         }
         wo = _parse_work_order(raw)
         assert wo.status == WorkOrderStatus.IN_PROGRESS
+
+    def test_on_hold_status_mapping(self) -> None:
+        """UpKeep reports the status as ``onHold``."""
+        raw = {
+            "id": "wo-4",
+            "title": "Awaiting parts",
+            "priority": 1,
+            "status": "onHold",
+            "assetId": "a",
+        }
+        wo = _parse_work_order(raw)
+        assert wo.status == WorkOrderStatus.ASSIGNED
 
 
 class TestParseSparePart:

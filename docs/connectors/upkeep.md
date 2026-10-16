@@ -55,7 +55,7 @@ These methods are available but are **not** declared as agent-discoverable capab
 | Method | Description |
 |---|---|
 | `close_work_order(id)` | Transition to CLOSED (maps to UpKeep `complete`) via `update_work_order` |
-| `cancel_work_order(id)` | Transition to CANCELLED (maps to UpKeep `on hold`) via `update_work_order` |
+| `cancel_work_order(id)` | Transition to CANCELLED (maps to UpKeep `onHold`) via `update_work_order` |
 
 ## Usage Examples
 
@@ -74,7 +74,7 @@ from machina.domain.work_order import WorkOrderStatus
 
 wos = await connector.read_work_orders(
     asset_id="asset-123",
-    status=WorkOrderStatus.IN_PROGRESS,  # auto-mapped to "in progress"
+    status=WorkOrderStatus.IN_PROGRESS,  # auto-mapped to "inProgress"
 )
 ```
 
@@ -130,7 +130,7 @@ await connector.close_work_order("wo-123")
 | `id` (work order) | `WorkOrder.id` |
 | `title` | `WorkOrder.description` |
 | `priority` (0-3) | `WorkOrder.priority` (0→Low, 1→Medium, 2→High, 3→Emergency) |
-| `status` | `WorkOrder.status` (open→Created, in progress→InProgress, on hold→Assigned, complete→Completed) |
+| `status` | `WorkOrder.status` (open→Created, inProgress→InProgress, onHold→Assigned, complete→Completed; filters and updates send the same values, with Closed as complete and Cancelled as onHold) |
 | `partNumber` / `barcode` / `id` | `SparePart.sku` (prefers physical identifier, falls back to record ID) |
 | `name` (part) | `SparePart.name` |
 | `quantity` | `SparePart.stock_quantity` |

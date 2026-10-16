@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **UpKeep work-order statuses use the values UpKeep documents: `open`, `onHold`, `inProgress` and `complete`.** The connector expected `in progress` and `on hold`, so an on-hold or in-progress work order read as `CREATED`, and a `read_work_orders` status filter or an update to `ASSIGNED`, `IN_PROGRESS` or `CANCELLED` (including `cancel_work_order`) sent a value UpKeep's API does not list. Payloads with the spaced forms still read as before; history reads, which filter on `complete`, were unaffected.
+
 ## [0.4.0] - 2026-10-04
 
 Upgrading from 0.3.x? The [migration guide](https://github.com/LGDiMaggio/machina/blob/main/docs/migration/v0.3-to-v0.4.md) covers the breaking changes below in a few steps.

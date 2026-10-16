@@ -11,7 +11,7 @@ from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 BASE = "https://api.onupkeep.com"
@@ -178,6 +178,60 @@ class TestReadWorkOrders:
         )
         wos = await connector.read_work_orders(asset_id="a1", status="complete")
         assert wos == []
+
+    @pytest.mark.asyncio
+    async def test_read_work_orders_maps_documented_statuses(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """UpKeep reports ``onHold`` and ``inProgress``; neither may read as CREATED."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"},
+                    {"id": "wo2", "title": "Fix pump", "status": "onHold", "assetId": "a1"},
+                    {"id": "wo3", "title": "Fix pump", "status": "inProgress", "assetId": "a1"},
+                    {"id": "wo4", "title": "Fix pump", "status": "complete", "assetId": "a1"},
+                ],
+            },
+        )
+        wos = await connector.read_work_orders()
+        assert [wo.status for wo in wos] == [
+            WorkOrderStatus.CREATED,
+            WorkOrderStatus.ASSIGNED,
+            WorkOrderStatus.IN_PROGRESS,
+            WorkOrderStatus.COMPLETED,
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status"),
+        [
+            (WorkOrderStatus.CREATED, "open"),
+            (WorkOrderStatus.ASSIGNED, "onHold"),
+            (WorkOrderStatus.IN_PROGRESS, "inProgress"),
+            (WorkOrderStatus.COMPLETED, "complete"),
+            (WorkOrderStatus.CLOSED, "complete"),
+            (WorkOrderStatus.CANCELLED, "onHold"),
+        ],
+    )
+    async def test_status_filter_sends_documented_value(
+        self,
+        httpx_mock,
+        connector: UpKeepConnector,
+        status: WorkOrderStatus,
+        upkeep_status: str,
+    ) -> None:
+        """The ``status`` filter accepts only open, onHold, inProgress and complete."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status={upkeep_status}",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status=status) == []
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +499,6 @@ class TestUpdateWorkOrder:
                 },
             },
         )
-        from machina.domain.work_order import WorkOrderStatus
-
         updated = await connector.update_work_order("wo1", status=WorkOrderStatus.CLOSED)
         assert updated.id == "wo1"
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
@@ -454,6 +506,40 @@ class TestUpdateWorkOrder:
 
         payload = json.loads(patch_req.content)
         assert payload["status"] == "complete"  # CLOSED → UpKeep "complete"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status", "read_back"),
+        [
+            (WorkOrderStatus.ASSIGNED, "onHold", WorkOrderStatus.ASSIGNED),
+            (WorkOrderStatus.IN_PROGRESS, "inProgress", WorkOrderStatus.IN_PROGRESS),
+            # UpKeep has no cancelled state: the order is put on hold and reads back so.
+            (WorkOrderStatus.CANCELLED, "onHold", WorkOrderStatus.ASSIGNED),
+        ],
+    )
+    async def test_update_work_order_sends_documented_status(
+        self,
+        httpx_mock,
+        connector: UpKeepConnector,
+        status: WorkOrderStatus,
+        upkeep_status: str,
+        read_back: WorkOrderStatus,
+    ) -> None:
+        """The PATCH body's ``status`` accepts only open, onHold, inProgress and complete."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": upkeep_status, "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        updated = await connector.update_work_order("wo1", status=status)
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        assert json.loads(patch_req.content) == {"status": upkeep_status}
+        assert updated.status == read_back
 
 
 # ---------------------------------------------------------------------------

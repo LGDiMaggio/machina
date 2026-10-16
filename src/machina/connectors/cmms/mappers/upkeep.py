@@ -50,19 +50,29 @@ UPKEEP_PRIORITY_MAP: dict[int, Priority] = {
 }
 
 UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
+    # Per the UpKeep REST API v2, a work-order status is one of open, onHold,
+    # inProgress or complete. Keys are lowercase because parse_work_order
+    # lowercases the payload value; the spaced forms are not API values and
+    # stay only so that such payloads still map. See:
+    # https://developers.onupkeep.com/#get-all-work-orders
     "open": WorkOrderStatus.CREATED,
+    "inprogress": WorkOrderStatus.IN_PROGRESS,
     "in progress": WorkOrderStatus.IN_PROGRESS,
+    "onhold": WorkOrderStatus.ASSIGNED,
     "on hold": WorkOrderStatus.ASSIGNED,
     "complete": WorkOrderStatus.COMPLETED,
 }
 
 REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
+    # Sent as the ``status`` filter and in PATCH bodies, which accept only the
+    # documented values, spelled exactly as UpKeep does. See:
+    # https://developers.onupkeep.com/#update-a-specific-work-order
     WorkOrderStatus.CREATED: "open",
-    WorkOrderStatus.ASSIGNED: "on hold",
-    WorkOrderStatus.IN_PROGRESS: "in progress",
+    WorkOrderStatus.ASSIGNED: "onHold",
+    WorkOrderStatus.IN_PROGRESS: "inProgress",
     WorkOrderStatus.COMPLETED: "complete",
     WorkOrderStatus.CLOSED: "complete",  # UpKeep has no distinct closed state
-    WorkOrderStatus.CANCELLED: "on hold",  # UpKeep has no distinct cancelled state
+    WorkOrderStatus.CANCELLED: "onHold",  # UpKeep has no distinct cancelled state
 }
 
 UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {

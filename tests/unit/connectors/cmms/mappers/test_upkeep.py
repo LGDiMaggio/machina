@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from machina.connectors.cmms.mappers.upkeep import (
+    REVERSE_UPKEEP_STATUS,
     parse_asset,
     parse_datetime,
     parse_spare_part,
@@ -18,6 +21,11 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
+
+# The work-order status values UpKeep documents for the ``status`` filter of
+# GET /api/v2/work-orders and the PATCH /api/v2/work-orders/<ID> body:
+# https://developers.onupkeep.com/#get-all-work-orders
+UPKEEP_STATUSES = {"open", "onHold", "inProgress", "complete"}
 
 
 class TestParseAssetPublicAPI:
@@ -62,9 +70,30 @@ class TestParseWorkOrderPublicAPI:
         wo = parse_work_order({"id": "4"})
         assert wo.type == WorkOrderType.CORRECTIVE
 
-    def test_status_on_hold_maps_to_assigned(self) -> None:
-        wo = parse_work_order({"id": "5", "status": "on hold"})
-        assert wo.status == WorkOrderStatus.ASSIGNED
+    @pytest.mark.parametrize(
+        ("upkeep_status", "expected"),
+        [
+            ("open", WorkOrderStatus.CREATED),
+            ("onHold", WorkOrderStatus.ASSIGNED),
+            ("inProgress", WorkOrderStatus.IN_PROGRESS),
+            ("complete", WorkOrderStatus.COMPLETED),
+        ],
+    )
+    def test_documented_status_values(self, upkeep_status: str, expected: WorkOrderStatus) -> None:
+        wo = parse_work_order({"id": "5", "status": upkeep_status})
+        assert wo.status == expected
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [
+            ("in progress", WorkOrderStatus.IN_PROGRESS),
+            ("On Hold", WorkOrderStatus.ASSIGNED),
+        ],
+    )
+    def test_spaced_status_labels_still_map(self, label: str, expected: WorkOrderStatus) -> None:
+        """Not API values, but the spaced forms this mapper once expected still map."""
+        wo = parse_work_order({"id": "6", "status": label})
+        assert wo.status == expected
 
 
 class TestParseSparePartSku:
@@ -103,5 +132,14 @@ class TestReverseMaps:
         assert reverse_status(WorkOrderStatus.CLOSED) == "complete"
 
     def test_reverse_status_cancelled_maps_to_on_hold(self) -> None:
-        """UpKeep has no distinct CANCELLED state — maps to 'on hold'."""
-        assert reverse_status(WorkOrderStatus.CANCELLED) == "on hold"
+        """UpKeep has no distinct CANCELLED state — maps to 'onHold'."""
+        assert reverse_status(WorkOrderStatus.CANCELLED) == "onHold"
+
+    def test_reverse_status_uses_camel_case_values(self) -> None:
+        assert reverse_status(WorkOrderStatus.IN_PROGRESS) == "inProgress"
+        assert reverse_status(WorkOrderStatus.ASSIGNED) == "onHold"
+
+    def test_every_status_has_a_documented_upkeep_value(self) -> None:
+        """The status filter and the PATCH body only ever send values UpKeep accepts."""
+        assert set(REVERSE_UPKEEP_STATUS) == set(WorkOrderStatus)
+        assert set(REVERSE_UPKEEP_STATUS.values()) <= UPKEEP_STATUSES
