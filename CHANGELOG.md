@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Tool-call arguments that parse as JSON but not as an object** (`[]`, `"P-201"`, `7`, `null`) are fed back to the model for correction like unparseable arguments, under the same retry budget. They used to reach the write gates and tool handlers, raise `AttributeError` and end the turn with `LLMError`.
+### Fixed
+
+- **MCP asset lookups work on a primary CMMS without `get_asset()`.** `machina_get_asset`, the asset check in `machina_create_work_order` and the `machina://v1/assets/{asset_id}` resource called `get_asset()` unconditionally, so a connector implementing only `read_assets()` — all that `READ_ASSETS` requires — failed with `AttributeError`. They now scan `read_assets()` when `get_asset()` is absent.
 
 ## [0.4.0] - 2026-10-04
 
