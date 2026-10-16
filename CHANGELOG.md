@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A workflow step skipped after an error keeps the error.** Under `ErrorPolicy.SKIP` a failed step returned `success=True, skipped=True` with no `error`, so a run looked clean and the failure was only in the logs. `StepResult.error` now holds it, and also holds the error when a step is skipped because its guard raised. A guard that returned `False` still leaves `error` as `None`, which is how the two skips are told apart: code that reads a non-`None` `error` as a failure should check `skipped` first. The agent's `execute_workflow` tool reports `skipped` for each step, and the examples print `[~]` for a skipped step instead of `[+]`.
 - **A template that references a failed step renders `[step_name failed]` instead of the raw placeholder.** The built-in alarm workflow's technician notification read `Spare Parts: {check_spare_parts}` whenever the spare-parts read failed. `WorkflowContext.resolve` now renders `[check_spare_parts failed]` for a step that failed under `SKIP` or `NOTIFY`; the error text stays on the `StepResult`. A bare `{step_name}` step input still resolves to `None`, and a step skipped by its guard keeps its placeholder.
+### Fixed
+
+- **Every placeholder in the custom-workflows reference example's planner notification resolves.** Its `notify_planners` template read `{scan_plans.count}` and `{create_work_orders.count}`, but a list output has no fields: `.count` reached the list's `count` method, so the message showed `<built-in method count of list object at 0x…>` and no `template_unresolved` warning was logged. That was `scan_plans` on every run and `create_work_orders` run live; in sandbox mode `create_work_orders` returns a placeholder with no `count` key, so `{create_work_orders.count}` stayed in the message as written. The template now references both outputs whole, as `{scan_plans}` and `{create_work_orders}`.
 
 ## [0.4.0] - 2026-10-04
 
