@@ -7,8 +7,6 @@ from typing import Any
 
 import pytest
 
-import pytest
-
 from machina.connectors.cmms.mappers.upkeep import (
     REVERSE_UPKEEP_STATUS,
     parse_asset,
