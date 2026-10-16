@@ -189,6 +189,12 @@ a `yaml_mapping` is set, in which case the external file format is left
 untouched and changes stay in memory). Creating a work order whose ID already
 exists returns the existing record.
 
+Writes run one at a time. Cancelling a create or update (an MCP request
+cancellation, a workflow step timeout) does not stop it once it has started: it
+still finishes, the in-memory work orders follow its outcome, and the next
+write waits for it, so a retried create finds the stored work order.
+`disconnect()` waits for it too, for up to 5 seconds.
+
 ## Capabilities
 
 | Capability | REST | Local |
