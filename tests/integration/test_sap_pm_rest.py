@@ -9,12 +9,13 @@ import httpx
 import pytest
 
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.retry import DEFAULT_MAX_RETRIES
 from machina.connectors.cmms.sap_pm import SapPmConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
+from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorTimeoutError
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
 
@@ -876,3 +877,173 @@ class TestUpdateWorkOrder:
         # Verify the PATCH carried the CSRF token
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
         assert patch_req.headers.get("X-CSRF-Token") == "csrf-upd"
+
+
+# ---------------------------------------------------------------------------
+# Transport errors (httpx raises instead of returning a response)
+# ---------------------------------------------------------------------------
+
+
+class TestTransportErrors:
+    """A timeout raises ConnectorTimeoutError, any other httpx failure ConnectorError."""
+
+    _CSRF_URL = f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1"
+    _ORDERS_URL = f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder"
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+
+    @staticmethod
+    def _work_order() -> WorkOrder:
+        from datetime import UTC, datetime
+
+        return WorkOrder(
+            id="TEMP",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="10000001",
+            description="Replace bearing",
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+
+    def _csrf_token(self, httpx_mock, token: str = "csrf-ok") -> None:
+        httpx_mock.add_response(
+            method="GET",
+            url=self._CSRF_URL,
+            headers={"x-csrf-token": token},
+            json={"d": {"results": []}},
+        )
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_after_retries(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        url = f"{BASE}/API_EQUIPMENT/$metadata"
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=url, is_reusable=True)
+        with pytest.raises(
+            ConnectorTimeoutError, match=r"^SAP PM health check timed out$"
+        ) as info:
+            await connector.connect()
+        assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+        assert not connector._connected
+
+    @pytest.mark.asyncio
+    async def test_connect_oauth2_token_request_connect_error(self, httpx_mock) -> None:
+        """The token endpoint is often another host, so its failure is named apart."""
+        token_url = "https://sap.example.com/oauth/token"
+        conn = SapPmConnector(
+            url=BASE,
+            auth=OAuth2ClientCredentials(
+                token_url=token_url, client_id="cid", client_secret="csecret"
+            ),
+        )
+        httpx_mock.add_exception(httpx.ConnectError(""), method="POST", url=token_url)
+        with pytest.raises(ConnectorError) as info:
+            await conn.connect()
+        assert info.type is ConnectorError
+        assert str(info.value) == "SAP PM OAuth2 token request failed: ConnectError"
+        assert len(httpx_mock.get_requests()) == 1  # no $metadata request follows
+
+    @pytest.mark.asyncio
+    async def test_read_assets_connect_error_after_retries(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        url = _odata_url("API_EQUIPMENT", "Equipment")
+        httpx_mock.add_exception(
+            httpx.ConnectError(f"no route to {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert info.type is ConnectorError
+        assert str(info.value) == "SAP PM GET API_EQUIPMENT/Equipment failed: ConnectError"
+        assert isinstance(info.value.__cause__, httpx.ConnectError)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_protocol_error_fails_at_once(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A transport error the retry helper does not retry surfaces on the first attempt."""
+        await _connect(httpx_mock, connector)
+        url = _odata_url(
+            "API_MAINTENANCEORDER",
+            "MaintenanceOrder",
+            **{"$top": "1", "$filter": "MaintenanceOrder eq '4000001'"},
+        )
+        httpx_mock.add_exception(httpx.RemoteProtocolError(""), url=url)
+        with pytest.raises(
+            ConnectorError,
+            match=r"^SAP PM GET API_MAINTENANCEORDER/MaintenanceOrder failed: RemoteProtocolError$",
+        ):
+            await connector.get_work_order("4000001")
+        assert len(httpx_mock.get_requests(url=url)) == 1
+
+    @pytest.mark.asyncio
+    async def test_csrf_token_fetch_timeout_sends_no_order(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The token fetch is a retried GET; when it gives up, the order was never sent."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=self._CSRF_URL, is_reusable=True)
+        with pytest.raises(ConnectorTimeoutError, match=r"^SAP PM CSRF token fetch timed out$"):
+            await connector.create_work_order(self._work_order())
+        assert len(httpx_mock.get_requests(url=self._CSRF_URL)) == 1 + DEFAULT_MAX_RETRIES
+        assert not httpx_mock.get_requests(method="POST")
+
+    @pytest.mark.asyncio
+    async def test_create_work_order_timeout_is_not_retried(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A POST that timed out may have been applied, so it is sent once."""
+        await _connect(httpx_mock, connector)
+        self._csrf_token(httpx_mock)
+        httpx_mock.add_exception(httpx.ReadTimeout(""), method="POST", url=self._ORDERS_URL)
+        with pytest.raises(
+            ConnectorTimeoutError, match=r"^SAP PM create maintenance order timed out$"
+        ):
+            await connector.create_work_order(self._work_order())
+        assert len(httpx_mock.get_requests(method="POST")) == 1
+
+    @pytest.mark.asyncio
+    async def test_csrf_challenge_still_refreshes_before_a_failed_resend(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A 403 CSRF challenge re-sends once with a fresh token; that re-send is not retried."""
+        await _connect(httpx_mock, connector)
+        self._csrf_token(httpx_mock, "csrf-stale")
+        httpx_mock.add_response(
+            method="POST",
+            url=self._ORDERS_URL,
+            status_code=403,
+            headers={"x-csrf-token": "Required"},
+        )
+        self._csrf_token(httpx_mock, "csrf-fresh")
+        httpx_mock.add_exception(httpx.ConnectError(""), method="POST", url=self._ORDERS_URL)
+        with pytest.raises(
+            ConnectorError, match=r"^SAP PM create maintenance order failed: ConnectError$"
+        ):
+            await connector.create_work_order(self._work_order())
+        posts = httpx_mock.get_requests(method="POST")
+        assert [p.headers["X-CSRF-Token"] for p in posts] == ["csrf-stale", "csrf-fresh"]
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_connect_error_is_not_retried(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._csrf_token(httpx_mock)
+        httpx_mock.add_exception(
+            httpx.ConnectError(""), method="PATCH", url=f"{self._ORDERS_URL}('4000001')"
+        )
+        with pytest.raises(
+            ConnectorError, match=r"^SAP PM update maintenance order failed: ConnectError$"
+        ):
+            await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
+        assert len(httpx_mock.get_requests(method="PATCH")) == 1

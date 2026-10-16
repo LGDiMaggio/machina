@@ -23,6 +23,7 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._http_errors import rest_errors
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.retry import request_with_retry
@@ -107,19 +108,22 @@ class UpKeepConnector:
 
         Raises:
             ConnectorAuthError: If the API key is missing or invalid.
+            ConnectorTimeoutError: If the API does not answer in time.
+            ConnectorConfigError: If ``url`` is malformed.
             ConnectorError: If the API is unreachable.
         """
         if not self._auth.value:
             raise ConnectorAuthError("UpKeep API key is required")
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/api/v2/users",
-                headers=self._headers(),
-                params={"limit": "1"},
-            )
+        with rest_errors("UpKeep", "health check"):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/api/v2/users",
+                    headers=self._headers(),
+                    params={"limit": "1"},
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("UpKeep API key is invalid")
         if resp.status_code != 200:
@@ -159,13 +163,14 @@ class UpKeepConnector:
         """Look up a single asset by ID."""
         self._ensure_connected()
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/api/v2/assets/{asset_id}",
-                headers=self._headers(),
-            )
+        with rest_errors("UpKeep", "GET asset"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/api/v2/assets/{asset_id}",
+                    headers=self._headers(),
+                )
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
@@ -206,13 +211,14 @@ class UpKeepConnector:
         """Look up a single work order by ID."""
         self._ensure_connected()
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
-                headers=self._headers(),
-            )
+        with rest_errors("UpKeep", "GET work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/api/v2/work-orders/{work_order_id}",
+                    headers=self._headers(),
+                )
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
@@ -241,14 +247,15 @@ class UpKeepConnector:
                 "preventive" if work_order.type == WorkOrderType.PREVENTIVE else "reactive"
             ),
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "POST",
-                f"{self.url}/api/v2/work-orders",
-                headers=self._headers(),
-                json=payload,
-            )
+        with rest_errors("UpKeep", "create work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "POST",
+                    f"{self.url}/api/v2/work-orders",
+                    headers=self._headers(),
+                    json=payload,
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("UpKeep API key is invalid")
         if resp.status_code not in (200, 201):
@@ -296,14 +303,15 @@ class UpKeepConnector:
             payload["title"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "PATCH",
-                f"{self.url}/api/v2/work-orders/{work_order_id}",
-                headers=self._headers(),
-                json=payload,
-            )
+        with rest_errors("UpKeep", "update work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "PATCH",
+                    f"{self.url}/api/v2/work-orders/{work_order_id}",
+                    headers=self._headers(),
+                    json=payload,
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("UpKeep API key is invalid")
         if resp.status_code not in (200, 204):
@@ -391,30 +399,31 @@ class UpKeepConnector:
         httpx = _require_httpx()
         all_items: list[dict[str, Any]] = []
         offset = 0
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while True:
-                query: dict[str, str] = {
-                    "limit": str(self._PAGE_SIZE),
-                    "offset": str(offset),
-                    **(params or {}),
-                }
-                resp = await request_with_retry(
-                    client,
-                    "GET",
-                    f"{self.url}{path}",
-                    headers=self._headers(),
-                    params=query,
-                )
-                if resp.status_code == 401:
-                    raise ConnectorAuthError("UpKeep API key is invalid")
-                if resp.status_code != 200:
-                    raise ConnectorError(f"UpKeep GET {path} failed: HTTP {resp.status_code}")
-                body = resp.json()
-                results = body.get("results", [])
-                all_items.extend(results)
-                if len(results) < self._PAGE_SIZE:
-                    break
-                offset += self._PAGE_SIZE
+        with rest_errors("UpKeep", f"GET {path}"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                while True:
+                    query: dict[str, str] = {
+                        "limit": str(self._PAGE_SIZE),
+                        "offset": str(offset),
+                        **(params or {}),
+                    }
+                    resp = await request_with_retry(
+                        client,
+                        "GET",
+                        f"{self.url}{path}",
+                        headers=self._headers(),
+                        params=query,
+                    )
+                    if resp.status_code == 401:
+                        raise ConnectorAuthError("UpKeep API key is invalid")
+                    if resp.status_code != 200:
+                        raise ConnectorError(f"UpKeep GET {path} failed: HTTP {resp.status_code}")
+                    body = resp.json()
+                    results = body.get("results", [])
+                    all_items.extend(results)
+                    if len(results) < self._PAGE_SIZE:
+                        break
+                    offset += self._PAGE_SIZE
         logger.debug(
             "paginated_get",
             connector="UpKeepConnector",

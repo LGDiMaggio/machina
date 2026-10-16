@@ -503,7 +503,9 @@ class TestCsrfWriteRecovery:
                 self._resp(201, {}),  # write succeeds
             ],
         )
-        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        resp = await self._conn()._write_with_csrf(
+            "POST", "https://sap/x", {"a": 1}, operation="create maintenance order"
+        )
         assert resp.status_code == 201
         assert rwr.await_count == 4
 
@@ -513,7 +515,9 @@ class TestCsrfWriteRecovery:
             monkeypatch,
             [self._resp(200, {"x-csrf-token": "TOK1"}), self._resp(401, {})],
         )
-        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        resp = await self._conn()._write_with_csrf(
+            "POST", "https://sap/x", {"a": 1}, operation="create maintenance order"
+        )
         assert resp.status_code == 401
         assert rwr.await_count == 2  # non-idempotent POST is not retried
 
@@ -523,7 +527,9 @@ class TestCsrfWriteRecovery:
             monkeypatch,
             [self._resp(200, {"x-csrf-token": "TOK1"}), self._resp(403, {})],
         )
-        resp = await self._conn()._write_with_csrf("POST", "https://sap/x", {"a": 1})
+        resp = await self._conn()._write_with_csrf(
+            "POST", "https://sap/x", {"a": 1}, operation="create maintenance order"
+        )
         assert resp.status_code == 403
         assert rwr.await_count == 2
 

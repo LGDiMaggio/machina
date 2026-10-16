@@ -31,6 +31,7 @@ from pydantic import Field
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._http_errors import rest_errors
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.retry import request_with_retry
@@ -147,16 +148,19 @@ class MaximoConnector:
 
         Raises:
             ConnectorAuthError: If credentials are invalid.
+            ConnectorTimeoutError: If the server does not answer in time.
+            ConnectorConfigError: If ``url`` is malformed.
             ConnectorError: If the server is unreachable.
         """
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/maximo/oslc/whoami",
-                headers=self._headers(),
-            )
+        with rest_errors("Maximo", "health check"):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/maximo/oslc/whoami",
+                    headers=self._headers(),
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code != 200:
@@ -262,14 +266,15 @@ class MaximoConnector:
         if work_order.assigned_to:
             payload["lead"] = work_order.assigned_to
         headers = {**self._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "POST",
-                f"{self.url}/maximo/oslc/os/mxwo",
-                headers=headers,
-                json=payload,
-            )
+        with rest_errors("Maximo", "create work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "POST",
+                    f"{self.url}/maximo/oslc/os/mxwo",
+                    headers=headers,
+                    json=payload,
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code not in (200, 201):
@@ -317,14 +322,15 @@ class MaximoConnector:
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
         headers = {**self._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "PATCH",
-                f"{self.url}/maximo/oslc/os/mxwo/{work_order_id}",
-                headers=headers,
-                json=payload,
-            )
+        with rest_errors("Maximo", "update work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "PATCH",
+                    f"{self.url}/maximo/oslc/os/mxwo/{work_order_id}",
+                    headers=headers,
+                    json=payload,
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code not in (200, 204):
@@ -433,29 +439,30 @@ class MaximoConnector:
             initial_params["oslc.select"] = oslc_select
         params: dict[str, str] | None = initial_params
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while url is not None:
-                resp = await request_with_retry(
-                    client,
-                    "GET",
-                    url,
-                    headers=self._headers(),
-                    params=params,
-                )
-                if resp.status_code == 401:
-                    raise ConnectorAuthError("Maximo authentication failed")
-                if resp.status_code != 200:
-                    raise ConnectorError(
-                        f"Maximo GET {object_structure} failed: HTTP {resp.status_code}"
+        with rest_errors("Maximo", f"GET {object_structure}"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                while url is not None:
+                    resp = await request_with_retry(
+                        client,
+                        "GET",
+                        url,
+                        headers=self._headers(),
+                        params=params,
                     )
-                body = resp.json()
-                members = body.get("member", [])
-                all_items.extend(members)
-                # Follow OSLC pagination link
-                response_info = body.get("responseInfo", {})
-                url = response_info.get("nextPage")
-                # After the first request, params are embedded in nextPage URL
-                params = None
+                    if resp.status_code == 401:
+                        raise ConnectorAuthError("Maximo authentication failed")
+                    if resp.status_code != 200:
+                        raise ConnectorError(
+                            f"Maximo GET {object_structure} failed: HTTP {resp.status_code}"
+                        )
+                    body = resp.json()
+                    members = body.get("member", [])
+                    all_items.extend(members)
+                    # Follow OSLC pagination link
+                    response_info = body.get("responseInfo", {})
+                    url = response_info.get("nextPage")
+                    # After the first request, params are embedded in nextPage URL
+                    params = None
         logger.debug(
             "oslc_get",
             connector="MaximoConnector",
