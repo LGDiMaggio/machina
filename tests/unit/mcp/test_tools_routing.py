@@ -77,8 +77,9 @@ class TestCapabilityToToolMap:
             Capability.READ_CALENDAR_EVENTS,
             Capability.CREATE_CALENDAR_EVENT,
             Capability.DELETE_CALENDAR_EVENT,
-            # READ_FAILURE_MODES feeds the runtime's diagnose_failure
-            # harvest; the raw catalog has no standalone MCP tool yet.
+            # READ_FAILURE_MODES feeds the diagnosis catalog harvest
+            # (machina_diagnose_failure registers under READ_ASSETS); the
+            # raw catalog has no standalone MCP tool yet.
             Capability.READ_FAILURE_MODES,
         }
         empty = {cap for cap, tools in CAPABILITY_TO_TOOL.items() if not tools}

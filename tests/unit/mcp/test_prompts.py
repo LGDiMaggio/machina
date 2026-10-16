@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from machina.config.schema import MachinaConfig
@@ -57,18 +59,29 @@ class TestPromptRendering:
 
     @pytest.mark.asyncio
     async def test_diagnose_failure_prompt_honest_notes_contract(self) -> None:
-        # MCP parity with the agent-side honest-notes contract: a no-result
-        # diagnosis relays the result's note and asks for refined symptoms —
-        # never a synthesized ranking.
+        # MCP parity with the agent-side honest-notes contract: the prompt
+        # sends the client to a diagnosis tool a CMMS-backed server actually
+        # registers (it once pointed at one the MCP surface never exposed),
+        # and a no-result diagnosis relays the result's note and asks for
+        # refined symptoms — never a synthesized ranking.
+        from machina.config.schema import ConnectorConfig
         from machina.mcp.server import build_server
 
-        config = MachinaConfig()
+        config = MachinaConfig(
+            connectors={"cmms": ConnectorConfig(type="generic_cmms", settings={})}
+        )
         server = build_server(config)
         result = await server.get_prompt(
             "diagnose_asset_failure",
             arguments={"asset_id": "P-201"},
         )
         text = result.messages[0].content.text
+        named_tools = set(re.findall(r"`(machina_\w+)`", text))
+        registered = {t.name for t in server._tool_manager.list_tools()}
+        assert "machina_diagnose_failure" in named_tools
+        assert named_tools <= registered, (
+            f"prompt names unregistered tools: {named_tools - registered}"
+        )
         assert "`note`" in text
         assert "refine" in text.lower()
         assert "never guess or synthesize" in text.lower()

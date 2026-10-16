@@ -55,7 +55,7 @@ class TestBuildServer:
 
         tools = server._tool_manager.list_tools()
         assert {tool.name for tool in tools} == {fn.__name__ for fn in [*core, *VENDOR_TOOLS]}
-        assert (len(core), len(VENDOR_TOOLS)) == (15, 2)
+        assert (len(core), len(VENDOR_TOOLS)) == (16, 2)
         for tool in tools:
             assert "ctx" not in tool.parameters.get("properties", {}), tool.name
             assert tool.context_kwarg == "ctx", tool.name

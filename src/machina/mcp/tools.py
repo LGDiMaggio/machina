@@ -589,6 +589,56 @@ async def machina_get_alarms(
 
 
 # ---------------------------------------------------------------------------
+# Read tools — failure diagnosis
+# ---------------------------------------------------------------------------
+
+
+async def _find_asset(cmms: Any, asset_id: str) -> Any:
+    """Look up one asset on ``cmms``, or ``None`` when it does not exist.
+
+    ``READ_ASSETS`` guarantees only ``read_assets()``; ``get_asset`` is an
+    optional fast path (the Excel/CSV and SQL connectors do not implement
+    it), so fall back to scanning the full list.
+    """
+    if hasattr(cmms, "get_asset"):
+        return await cmms.get_asset(asset_id)
+    return next((a for a in await cmms.read_assets() if a.id == asset_id), None)
+
+
+async def machina_diagnose_failure(
+    ctx: Context,
+    asset_id: str,
+    symptoms: list[str],
+) -> dict[str, Any]:
+    """Diagnose probable failure modes for an asset from observed symptoms.
+
+    Matches symptoms, alarm parameters, or technician observations against
+    the configured failure-mode catalog for that asset and returns up to
+    five ranked catalog matches with recommended actions. Each entry's
+    ``confidence`` is the fraction (0-1) of that mode's typical indicators
+    the symptoms matched, not a probability. When nothing can be ranked,
+    the result's ``note`` says why: unknown asset, no catalog configured,
+    or nothing matched (listing the indicators the catalog knows).
+
+    Args:
+        asset_id: The asset experiencing issues.
+        symptoms: Observed symptoms (e.g. "high vibration", "noise").
+    """
+    from machina.agent.diagnosis import collect_failure_modes, diagnose_symptoms
+
+    runtime = _runtime(ctx)
+    asset = await _find_asset(runtime.get_primary_cmms(), asset_id)
+    # Same contract as the agent's diagnose_failure tool: an unknown asset is
+    # answered without a harvest, and an empty result always carries a note.
+    catalog = (
+        await collect_failure_modes(runtime.find_by_capability(Capability.READ_FAILURE_MODES))
+        if asset is not None
+        else []
+    )
+    return diagnose_symptoms(asset_id, asset, catalog, symptoms)
+
+
+# ---------------------------------------------------------------------------
 # Communication tools
 # ---------------------------------------------------------------------------
 
@@ -631,7 +681,10 @@ async def machina_send_message(
 # ---------------------------------------------------------------------------
 
 CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
-    Capability.READ_ASSETS: [machina_list_assets, machina_get_asset],
+    # Diagnosis rides on READ_ASSETS, the capability it cannot work without
+    # (it resolves the asset first); a missing failure-mode catalog is an
+    # answer — the tool's "no catalog" note — not a reason to hide the tool.
+    Capability.READ_ASSETS: [machina_list_assets, machina_get_asset, machina_diagnose_failure],
     Capability.READ_WORK_ORDERS: [machina_list_work_orders],
     Capability.GET_WORK_ORDER: [machina_get_work_order],
     Capability.CREATE_WORK_ORDER: [machina_create_work_order],
@@ -662,9 +715,10 @@ CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
     Capability.READ_CALENDAR_EVENTS: [],
     Capability.CREATE_CALENDAR_EVENT: [],
     Capability.DELETE_CALENDAR_EVENT: [],
-    # * Failure modes (READ_FAILURE_MODES) — the capability drives the
-    #   agent runtime's catalog harvest (``diagnose_failure`` consumes it
-    #   internally); no standalone MCP tool exposes the raw catalog yet.
+    # * Failure modes (READ_FAILURE_MODES) — the capability feeds the
+    #   catalog harvest behind ``machina_diagnose_failure`` (registered
+    #   under READ_ASSETS above) and the agent's ``diagnose_failure``; no
+    #   standalone MCP tool exposes the raw catalog yet.
     Capability.READ_FAILURE_MODES: [],
 }
 

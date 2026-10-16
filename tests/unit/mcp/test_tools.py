@@ -8,10 +8,11 @@ import pytest
 
 from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import AssetNotFoundError, SandboxViolationError
+from machina.exceptions import AssetNotFoundError, ConnectorError, SandboxViolationError
 from machina.runtime import MachinaRuntime
 
 
@@ -469,3 +470,221 @@ class TestGetSensorReading:
         runtime = MachinaRuntime(connectors={"iot": iot_conn})
         result = await machina_get_sensor_reading(_make_ctx(runtime), asset_id="P-001")
         assert result["temperature"] == 72.5
+
+
+DIAG_ASSETS = [
+    Asset(
+        id="P-201",
+        name="Cooling Water Pump",
+        type=AssetType.ROTATING_EQUIPMENT,
+        criticality=Criticality.A,
+        failure_modes=["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROSION-01"],
+    ),
+    Asset(id="HX-101", name="Heat Exchanger", type=AssetType.ROTATING_EQUIPMENT),
+]
+
+
+def _diag_catalog() -> list[FailureMode]:
+    """The pump's declared modes plus a conveyor mode it must never get."""
+    return [
+        FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "bearing_temperature_c",
+                "vibration_acceleration_g",
+            ],
+            recommended_actions=["replace_bearing", "check_alignment"],
+        ),
+        FailureMode(
+            code="SEAL-LEAK-01",
+            name="Mechanical Seal Leakage",
+            category="mechanical",
+            typical_indicators=["seal_pressure_bar", "leakage_rate_ml_min"],
+            recommended_actions=["replace_seal"],
+        ),
+        FailureMode(
+            code="IMP-EROSION-01",
+            name="Impeller Erosion",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "differential_pressure_bar",
+                "flow_rate_m3h",
+            ],
+            recommended_actions=["replace_impeller"],
+        ),
+        FailureMode(
+            code="BELT-WEAR-01",
+            name="Conveyor Belt Wear",
+            category="mechanical",
+            typical_indicators=["belt_speed_m_s", "vibration_velocity_mm_s"],
+            recommended_actions=["replace_belt"],
+        ),
+    ]
+
+
+def _catalog_provider(error: Exception | None = None) -> MagicMock:
+    """A connector declaring READ_FAILURE_MODES, serving ``_diag_catalog``."""
+    provider = MagicMock()
+    provider.capabilities = frozenset({Capability.READ_FAILURE_MODES})
+    provider.read_failure_modes = AsyncMock(return_value=_diag_catalog(), side_effect=error)
+    return provider
+
+
+def _diag_runtime(catalog_provider: MagicMock | None = None) -> MachinaRuntime:
+    """Primary CMMS serving ``DIAG_ASSETS``, plus an optional catalog provider."""
+    cmms = _mock_cmms()
+    cmms.get_asset = AsyncMock(side_effect={a.id: a for a in DIAG_ASSETS}.get)
+    connectors = {"cmms": cmms}
+    if catalog_provider is not None:
+        connectors["catalog"] = catalog_provider
+    return MachinaRuntime(connectors=connectors)
+
+
+class TestDiagnoseFailure:
+    """machina_diagnose_failure — the agent's ranking and honest notes, over MCP."""
+
+    @pytest.mark.asyncio
+    async def test_ranks_declared_modes_by_matched_indicators(self) -> None:
+        from machina.mcp.tools import machina_diagnose_failure
+
+        runtime = _diag_runtime(_catalog_provider())
+        result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="P-201", symptoms=["high vibration"]
+        )
+        # BELT-WEAR-01 lists a vibration indicator too, but the pump does not
+        # declare it.
+        assert [f["code"] for f in result["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        top = result["probable_failures"][0]
+        assert top["confidence"] == 0.67  # 2 of 3 indicators carry "vibration"
+        assert top["recommended_actions"] == ["replace_bearing", "check_alignment"]
+        assert result["asset_name"] == "Cooling Water Pump"
+        assert "note" not in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_asset_note_without_harvest(self) -> None:
+        from machina.mcp.tools import machina_diagnose_failure
+
+        provider = _catalog_provider()
+        runtime = _diag_runtime(provider)
+        result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="GHOST-9", symptoms=["vibration"]
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "Asset 'GHOST-9' not found in the asset registry."
+        assert "asset_name" not in result
+        provider.read_failure_modes.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_catalog_note(self) -> None:
+        from machina.mcp.tools import machina_diagnose_failure
+
+        runtime = _diag_runtime()  # no connector declares READ_FAILURE_MODES
+        result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="P-201", symptoms=["vibration"]
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "No failure-mode data configured on any connector."
+
+    @pytest.mark.asyncio
+    async def test_unreachable_catalog_provider_is_skipped(self) -> None:
+        """A catalog connector that failed to connect at startup contributes nothing."""
+        from machina.mcp.tools import machina_diagnose_failure
+
+        runtime = _diag_runtime(_catalog_provider(error=ConnectorError("not connected")))
+        result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="P-201", symptoms=["vibration"]
+        )
+        assert result["probable_failures"] == []
+        assert result["note"] == "No failure-mode data configured on any connector."
+
+    @pytest.mark.asyncio
+    async def test_no_match_note_lists_the_assets_indicators(self) -> None:
+        from machina.mcp.tools import machina_diagnose_failure
+
+        runtime = _diag_runtime(_catalog_provider())
+        result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="P-201", symptoms=["strange smell"]
+        )
+        assert result["probable_failures"] == []
+        assert result["note"].startswith("No catalog entry matched these symptoms.")
+        assert "bearing_temperature_c" in result["note"]
+        assert "belt_speed_m_s" not in result["note"]  # not one of the pump's modes
+
+    @pytest.mark.asyncio
+    async def test_resolves_asset_on_cmms_without_get_asset(self) -> None:
+        """READ_ASSETS guarantees only read_assets() — the Excel/CSV and SQL
+        connectors have no get_asset — so the lookup scans it instead."""
+        from machina.mcp.tools import machina_diagnose_failure
+
+        class _ReadAssetsOnlyCmms:
+            capabilities = frozenset({Capability.READ_ASSETS})
+
+            async def read_assets(self) -> list[Asset]:
+                return list(DIAG_ASSETS)
+
+        runtime = MachinaRuntime(
+            connectors={"cmms": _ReadAssetsOnlyCmms(), "catalog": _catalog_provider()}
+        )
+        found = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="P-201", symptoms=["high vibration"]
+        )
+        missing = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id="GHOST-9", symptoms=["vibration"]
+        )
+        assert [f["code"] for f in found["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        assert missing["note"] == "Asset 'GHOST-9' not found in the asset registry."
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("asset_id", "symptoms"),
+        [
+            ("P-201", ["high vibration"]),  # ranked matches
+            ("HX-101", ["high vibration"]),  # no declared modes: full catalog + note
+            ("P-201", ["strange smell"]),  # nothing matched: known-indicators note
+            ("GHOST-9", ["vibration"]),  # unknown asset
+        ],
+    )
+    async def test_matches_agent_diagnose_failure(
+        self, asset_id: str, symptoms: list[str]
+    ) -> None:
+        """Over the same assets and catalog, the MCP tool and the agent's
+        diagnose_failure tool give identical answers."""
+        from machina.agent.runtime import Agent
+        from machina.domain.plant import Plant
+        from machina.mcp.tools import machina_diagnose_failure
+
+        plant = Plant(name="Diag Plant")
+        for asset in DIAG_ASSETS:
+            plant.register_asset(asset)
+        agent = Agent(plant=plant, connectors=[_catalog_provider()])
+        agent_result = await agent._execute_tool(
+            "diagnose_failure", {"asset_id": asset_id, "symptoms": symptoms}
+        )
+
+        runtime = _diag_runtime(_catalog_provider())
+        mcp_result = await machina_diagnose_failure(
+            _make_ctx(runtime), asset_id=asset_id, symptoms=symptoms
+        )
+
+        assert mcp_result == agent_result
+
+    def test_registered_with_asset_reads_not_with_catalog_alone(self) -> None:
+        # The catalog is optional (its absence is the tool's "no catalog"
+        # note); an asset registry is not — the tool resolves the asset first.
+        from machina.mcp.tools import get_tools_for_capabilities
+
+        def names(*caps: Capability) -> set[str]:
+            return {t.__name__ for t in get_tools_for_capabilities(frozenset(caps))}
+
+        assert "machina_diagnose_failure" in names(Capability.READ_ASSETS)
+        assert "machina_diagnose_failure" not in names(Capability.READ_FAILURE_MODES)
