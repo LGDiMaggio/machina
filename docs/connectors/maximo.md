@@ -73,7 +73,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
+| `read_spare_parts` | Read inventory items (`mxinventory` object structure) — filter by `sku`; `mxinventory` has no asset relation, so a read filtered only by `asset_id` logs a warning and returns `[]` |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
 
 ### Convenience methods

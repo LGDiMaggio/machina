@@ -332,22 +332,46 @@ class UpKeepConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read spare parts (UpKeep calls them *parts*).
 
         Args:
+            asset_id: Accepted like every ``read_spare_parts``, but not
+                applied (see the note). Given without a ``sku`` it logs a
+                warning and returns ``[]`` instead of the whole inventory;
+                given with one, the ``sku`` alone filters the result.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
                 which prefers the physical part identifier.
 
         Note:
-            UpKeep's ``/api/v2/parts`` endpoint does not expose an
-            asset-compatibility relation, so filtering by asset is not
-            supported here. Use work-order line items to discover parts
-            associated with a specific asset.
+            UpKeep's ``/api/v2/parts`` endpoint does not expose an asset
+            relation. UpKeep lists the parts assigned to an asset on the
+            asset record (``GET /api/v2/assets/{id}``, ``parts``), which this
+            connector does not read yet, so filtering by asset is not
+            supported here.
         """
         self._ensure_connected()
+        if asset_id:
+            # Reading without the filter would hand back the entire inventory as
+            # if it were this asset's parts, so an asset-only read is refused
+            # (as SapPmConnector refuses an unfilterable BOM read).
+            logger.warning(
+                "spare_parts_asset_filter_unsupported",
+                connector="UpKeepConnector",
+                operation="read_spare_parts",
+                asset_id=asset_id,
+                message=(
+                    "asset_id ignored (/api/v2/parts has no asset relation); narrowing by sku"
+                    if sku
+                    else "asset_id ignored (/api/v2/parts has no asset relation) and no sku "
+                    "narrows the query: returning no parts"
+                ),
+            )
+            if not sku:
+                return []
         raw = await self._paginated_get("/api/v2/parts")
         parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
         if sku:
