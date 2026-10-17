@@ -46,7 +46,9 @@ def problems(result: Any) -> list[str]:
     facts, findings = result.get("facts"), result.get("findings")
     facts = facts if isinstance(facts, dict) else {}
     executed = facts.get("executed")
+    # Both or neither: not_executed() reads them together.
     skipped, by_module = facts.get("skipped_tests", []), facts.get("executed_by_module", {})
+    paired = ("skipped_tests" in facts) == ("executed_by_module" in facts)
     rules = {
         f"schema is not {SCHEMA}": result.get("schema") == SCHEMA,
         f"check is not one of {CHECKS}": result.get("check") in CHECKS,
@@ -54,14 +56,27 @@ def problems(result: Any) -> list[str]:
         f"status is not one of {STATUSES}": result.get("status") in STATUSES,
         "informational is not a boolean": isinstance(result.get("informational"), bool),
         "facts.executed is not a count": type(executed) is int and executed >= 0,
-        "findings are not {rule, message} objects": isinstance(findings, list)
-        and all(isinstance(f, dict) and {"rule", "message"} <= f.keys() for f in findings),
-        "facts.skipped_tests are not {test, reason} objects": isinstance(skipped, list)
-        and all(isinstance(s, dict) and {"test", "reason"} <= s.keys() for s in skipped),
+        "findings are not {rule, message[, detail]} strings": isinstance(findings, list)
+        and all(_strings(f, ("rule", "message"), ("detail",)) for f in findings),
+        "facts.skipped_tests are not {test, reason} strings": paired
+        and isinstance(skipped, list)
+        and all(_strings(s, ("test", "reason")) for s in skipped),
         "facts.executed_by_module is not a count per module": isinstance(by_module, dict)
         and all(type(count) is int for count in by_module.values()),
+        "facts.floor_notes is not a list of strings": isinstance(
+            facts.get("floor_notes", []), list
+        )
+        and all(isinstance(note, str) for note in facts.get("floor_notes", [])),
     }
     return [message for message, ok in rules.items() if not ok]
+
+
+def _strings(item: Any, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> bool:
+    """Whether ``item`` is a dict whose required and present optional keys are strings."""
+    return isinstance(item, dict) and all(
+        isinstance(item.get(key), str)
+        for key in required + tuple(k for k in optional if k in item)
+    )
 
 
 def not_executed(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -69,10 +84,16 @@ def not_executed(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     A test ran in a leg when its module executed there and the test is not
     among that leg's skips; a module-level skip id (no ``::``) ran nowhere
-    when no leg executed any test in that module.
+    when no leg executed any test in that module, or under that package (a
+    conftest.py skip names the package, not a module). Informational legs
+    are not coverage: a test only an unsupported Python ran is listed.
     """
     runs = [
-        leg for leg in legs if leg["check"] == "suite" and "executed_by_module" in leg["facts"]
+        leg
+        for leg in legs
+        if leg["check"] == "suite"
+        and not leg["informational"]
+        and "executed_by_module" in leg["facts"]
     ]
     executed = Counter[str]()
     skips: dict[str, dict[str, str]] = {}  # test id -> {variant: reason}
@@ -80,10 +101,14 @@ def not_executed(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         executed.update(leg["facts"]["executed_by_module"])
         for entry in leg["facts"]["skipped_tests"]:
             skips.setdefault(entry["test"], {})[leg["variant"]] = entry["reason"]
+
+    def executed_under(prefix: str) -> int:
+        return sum(n for m, n in executed.items() if m == prefix or m.startswith(prefix + "."))
+
     missing: dict[str, dict[str, set[str]]] = {}  # id -> {reason: variants}
     for test, reasons in skips.items():
         module = test_module(test)
-        if executed[module] == 0:
+        if executed_under(module) == 0:
             test = module  # the whole module ran nowhere: report it once
         elif "::" not in test or any(
             leg["facts"]["executed_by_module"].get(module, 0) and leg["variant"] not in reasons
@@ -209,8 +234,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", type=Path)
     args = parser.parse_args(argv)
 
-    report = build(args.results, args.expected.split())
-    text = markdown(report)
+    try:
+        report = build(args.results, args.expected.split())
+        text = markdown(report)
+    except Exception as exc:  # a result the schema check let through
+        # Never lose the report or let a crash read as red: say incomplete.
+        reason = f"the report could not be built: {exc!r}"
+        report = {"schema": "machina-audit-report/1", "verdict": "incomplete", "exit_code": 2}
+        report |= {"incomplete": [reason], "red": [], "expected": args.expected.split()}
+        text = f"# Quality audit: incomplete (exit 2)\n\n- incomplete: {reason}\n"
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "audit-report.json").write_text(json.dumps(report, indent=2) + "\n", "utf-8")
     (args.out / "audit-report.md").write_text(text, encoding="utf-8")

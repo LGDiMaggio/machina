@@ -23,9 +23,11 @@ on:
 permissions:
   contents: read
 
+# A new push supersedes a pull request's run; a manual run never cancels the
+# scheduled one, which shares its ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -264,7 +266,8 @@ jobs:
             floors-py3.11 windows-py3.12 ubuntu-26.04-py3.12 heavy-extras-py3.12
             package-smoke security
         run: |
-          python scripts/audit/report.py --results audit-results \
+          py="$(command -v python || command -v python3)"
+          "$py" scripts/audit/report.py --results audit-results \
             --expected "$EXPECTED_LEGS" --out audit-report --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the report

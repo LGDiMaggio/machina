@@ -63,7 +63,12 @@ def write_result(
         "variant": variant,
         "status": status,
         "informational": informational,
-        "facts": {"python": platform.python_version(), "platform": sys.platform, **facts},
+        "facts": {
+            "python": platform.python_version(),
+            "platform": sys.platform,
+            "executed": 0,  # the report requires it, even on a result that ran nothing
+            **facts,
+        },
         "findings": findings,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -84,18 +89,24 @@ def _cases(junit: Path) -> list[tuple[str, str, str, str]] | None:
         root = ET.parse(junit).getroot()
     except (OSError, ET.ParseError):
         return None
+    # A failure or error outranks a skip in the same case (a skipped test whose
+    # teardown errored); an xfail ran, so it is not a skip.
+    rank = {"failure": 2, "error": 2, "skipped": 1, "xfailed": 1}
     cases = []
     for case in root.iter("testcase"):
         outcome, message = "passed", ""
         for child in case:
-            if child.tag in ("failure", "error", "skipped"):
-                outcome, message = child.tag, child.get("message") or (child.text or "")
-                # A module skipped at import is one case whose message is only
-                # "collection skipped"; the reason is inside its text.
-                reason = re.search(r"Skipped: (.*?)['\"]\)\s*$", child.text or "")
-                if message == "collection skipped" and reason:
-                    message = reason[1]
-                break
+            tag = child.tag
+            if tag == "skipped" and child.get("type") == "pytest.xfail":
+                tag = "xfailed"
+            if rank.get(tag, 0) <= rank.get(outcome, 0):
+                continue
+            outcome, message = tag, child.get("message") or (child.text or "")
+            # A module skipped at import is one case whose message is only
+            # "collection skipped"; the reason is inside its text.
+            reason = re.search(r"Skipped: (.*?)['\"]\)\s*$", child.text or "")
+            if message == "collection skipped" and reason:
+                message = reason[1]
         cases.append((case.get("classname", ""), case.get("name", ""), outcome, message))
     return cases
 
@@ -134,12 +145,19 @@ def _core_versions() -> dict[str, str]:
 
 
 def _matches(classname: str, name: str, node: str) -> bool:
-    """Whether a JUnit case belongs to a pytest node id such as ``a/b.py::C::t``."""
-    path, *parts = node.split("::")
-    prefix = ".".join([path.removesuffix(".py").replace("/", "."), *parts[:-1]])
-    if not parts:
-        return classname == prefix or classname.startswith(prefix + ".")
-    return classname == prefix and (name == parts[-1] or name.startswith(parts[-1] + "["))
+    """Whether a JUnit case is in a pytest node: ``a/b.py``, ``a/b.py::C``, ``a/b.py::C::t``.
+
+    A node naming one test matches all of its parametrizations, unless it
+    names one itself (``a/b.py::t[x]``).
+    """
+    base, bracket, params = node.partition("[")
+    path, *parts = base.split("::")
+    target = ".".join([path.removesuffix(".py").replace("/", "."), *parts])
+    test, _, case_params = name.partition("[")
+    if bracket and case_params != params:
+        return False
+    case = f"{classname}.{test}" if classname else name
+    return case == target or case.startswith(target + ".")
 
 
 def suite(args: argparse.Namespace) -> int:
@@ -170,16 +188,19 @@ def suite(args: argparse.Namespace) -> int:
 
     failed = [case for case in cases if case[2] in ("failure", "error")]
     skipped = [case for case in cases if case[2] == "skipped"]
+    # A collection error is one case with no classname standing for a module
+    # that never ran: it is a failure, not an executed test.
+    ran = [case for case in cases if case[2] != "skipped" and (case[0] or case[2] != "error")]
     facts.update(
         pytest_exit_code=exit_code,
         tests=len(cases),
-        executed=len(cases) - len(skipped),
+        executed=len(ran),
         skipped=len(skipped),
         failed=len(failed),
         # Every skip with its reason, and executed tests per module, so the
         # report can name what no leg executed instead of counting it covered.
         skipped_tests=[{"test": _test_id(c, n), "reason": r[:300]} for c, n, _, r in skipped],
-        executed_by_module=Counter(_module(c, n) for c, n, o, _ in cases if o != "skipped"),
+        executed_by_module=Counter(_module(c, n) for c, n, _, _ in ran),
     )
     for classname, name, outcome, message in failed[:MAX_LISTED]:
         findings.append(finding(f"test-{outcome}", _test_id(classname, name), message))
@@ -192,7 +213,7 @@ def suite(args: argparse.Namespace) -> int:
     # A suite this leg exists to run that did not run leaves the leg unable to
     # judge it: incomplete, whatever the other tests did.
     for node in args.require:
-        if not any(c[2] != "skipped" and _matches(c[0], c[1], node) for c in cases):
+        if not any(_matches(c[0], c[1], node) for c in ran):
             module = node.split("::")[0].removesuffix(".py").replace("/", ".")
             reasons = sorted({r for c, n, _, r in skipped if _module(c, n) == module})
             findings.append(finding("required-suite-not-run", node, "; ".join(reasons)))
