@@ -45,12 +45,16 @@ jobs:
           - { variant: newest-py3.13, os: ubuntu-24.04, python: "3.13", install: newest }
           # Not supported yet (classifiers stop at 3.13): never changes the verdict.
           - { variant: newest-py3.14, os: ubuntu-24.04, python: "3.14", install: newest, informational: true }
-          # Core dependencies at the lowest version pyproject.toml admits.
+          # Each core dependency at the oldest installable release its
+          # declaration admits (scripts/audit/floors.py).
           - { variant: floors-py3.11, os: ubuntu-24.04, python: "3.11", install: floors }
           - { variant: windows-py3.12, os: windows-latest, python: "3.12", install: newest }
           # The image ubuntu-latest is moving to; ci.yml stays on 24.04 until then.
           - { variant: ubuntu-26.04-py3.12, os: ubuntu-26.04, python: "3.12", install: newest }
-          # CI skips the RAG golden-set, hybrid and reranker suites; here they must run.
+          # CI skips the RAG golden-set, hybrid and reranker suites; here they
+          # must run or the leg is incomplete. The SQL Server suite is not
+          # required yet: it also needs Docker and the ODBC driver, and the
+          # report lists it under "not executed in any leg" while it skips.
           - variant: heavy-extras-py3.12
             os: ubuntu-24.04
             python: "3.12"
@@ -83,11 +87,11 @@ jobs:
       - name: Install core dependencies at their floors
         if: matrix.install == 'floors'
         run: |
-          python scripts/audit/floors.py pyproject.toml > "$RUNNER_TEMP/floors.txt"
-          cat "$RUNNER_TEMP/floors.txt"
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip "uv==0.12.22"
+          python scripts/audit/floors.py --out "$RUNNER_TEMP/floors.txt" \
+            --facts "$RUNNER_TEMP/floors.json" 2>&1 | tee "$RUNNER_TEMP/install.log"
           python -m pip install -c "$RUNNER_TEMP/floors.txt" -e ".[dev]" 2>&1 \
-            | tee "$RUNNER_TEMP/install.log"
+            | tee -a "$RUNNER_TEMP/install.log"
 
       - name: Install the heavy RAG extras
         if: matrix.install == 'heavy'
@@ -115,12 +119,16 @@ jobs:
         if: always()
         env:
           VARIANT: ${{ matrix.variant }}
+          INSTALL: ${{ matrix.install }}
           INFORMATIONAL: ${{ matrix.informational || false }}
           REQUIRE: ${{ matrix.require }}
         run: |
           args=()
           for node in $REQUIRE; do args+=(--require "$node"); done
           if [ "$INFORMATIONAL" = "true" ]; then args+=(--informational); fi
+          if [ "$INSTALL" = "floors" ]; then
+            args+=(--facts-json "$RUNNER_TEMP/floors.json" --expect-pins "$RUNNER_TEMP/floors.txt")
+          fi
           py="$(command -v python || command -v python3)"
           "$py" scripts/audit/record.py suite --variant "$VARIANT" \
             --junit "$RUNNER_TEMP/junit.xml" \
@@ -185,23 +193,27 @@ jobs:
           python-version: "3.12"
 
       - name: Install pip-audit
-        run: python -m pip install --upgrade pip pip-audit
+        run: python -m pip install --upgrade pip "pip-audit==2.10.1"
 
-      # Fresh resolutions of core alone and of every runtime extra. pip-audit
-      # exits non-zero on a finding and on a failure alike, so its exit code is
-      # only logged: the record step reads the JSON and fails closed.
+      # Fresh resolutions of core alone and of every runtime extra, audited
+      # against the PyPI advisory database. pip-audit exits non-zero on a
+      # finding and on a failure alike, so its exit code is only logged. A
+      # resolution that does not install is not audited at all: its missing
+      # JSON makes the record step report an error, never a clean audit.
       - name: Audit fresh resolutions
         run: |
           for spec in "core=." "all=.[all]"; do
             label="${spec%%=*}"
             venv="$RUNNER_TEMP/venv-$label"
-            python -m venv "$venv" \
+            if python -m venv "$venv" \
               && "$venv/bin/python" -m pip install --upgrade pip \
-              && "$venv/bin/python" -m pip install "${spec#*=}" \
-              || echo "::warning::the $label resolution did not install"
-            site="$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-            pip-audit --path "$site" -f json -o "$RUNNER_TEMP/$label.json" \
-              || echo "pip-audit ($label) exited with status $?"
+              && "$venv/bin/python" -m pip install "${spec#*=}"; then
+              site="$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+              pip-audit --path "$site" -f json -o "$RUNNER_TEMP/$label.json" \
+                || echo "pip-audit ($label) exited with status $?"
+            else
+              echo "::error::the $label resolution did not install, so it was not audited"
+            fi
           done
 
       - name: Record the result

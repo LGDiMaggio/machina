@@ -7,6 +7,7 @@ its rules would otherwise go unnoticed until the next Monday.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,14 @@ def test_audit_triggers() -> None:
     assert set(triggers) == {"schedule", "workflow_dispatch", "pull_request"}
     assert not triggers["workflow_dispatch"], "manual runs take no inputs"
     assert set(triggers["pull_request"]) == {"paths"}
+
+
+def test_audit_tools_are_pinned() -> None:
+    # uv picks the floors and pip-audit judges vulnerabilities: a new release
+    # of either could change the verdict without any change in this repo.
+    text = AUDIT.read_text(encoding="utf-8")
+    for tool in ("uv", "pip-audit"):
+        assert re.search(rf'"{tool}==\d+(\.\d+)+"', text), f"{tool} is not pinned in audit.yml"
 
 
 def test_every_audit_job_has_a_timeout() -> None:
