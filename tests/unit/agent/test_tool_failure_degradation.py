@@ -12,6 +12,10 @@ keeping the scenarios that suite does not cover:
 - a raising write still aborts the turn, so it is never executed twice, on the
   direct path and on the two-turn confirmation path.
 
+``TestRefusedFilterValue`` comes from PR #119, whose per-tool handlers the
+guard replaces: a filter value the connector refuses (``DomainValidationError``)
+reaches the model as a tool error.
+
 An exception from a write leaves its outcome unknown (a POST can be applied
 and still answer 5xx or time out), and an error result would let the model
 re-issue it in the same turn: the per-turn memo deliberately skips error
@@ -32,7 +36,7 @@ from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorError, LLMError, MachinaError
+from machina.exceptions import ConnectorError, DomainValidationError, LLMError, MachinaError
 
 _ANSWER = "The maintenance system did not answer, so I could not look that up."
 
@@ -221,6 +225,75 @@ class TestReadFailureDegradesToToolError:
         # Argument names, not values: values can carry the user's free text.
         assert event["arg_keys"] == ["asset_id", "status"]
         assert "args" not in event
+
+
+_FILTER_REFUSAL = "asset_id contains '%', which a Maximo oslc.where value cannot carry"
+
+
+class _RefusingFilterConnector:
+    """CMMS stub whose filtered reads refuse the caller's value.
+
+    Stands in for a connector whose query helper rejects a value its filter
+    syntax cannot carry (Maximo's ``oslc.where``): the read raises
+    ``DomainValidationError`` before any request goes out.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.READ_WORK_ORDERS, Capability.GET_WORK_ORDER, Capability.READ_SPARE_PARTS}
+    )
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+        raise DomainValidationError(_FILTER_REFUSAL)
+
+    async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
+        raise DomainValidationError(_FILTER_REFUSAL)
+
+    async def read_spare_parts(self, **kwargs: Any) -> list[Any]:
+        raise DomainValidationError(_FILTER_REFUSAL)
+
+
+class TestRefusedFilterValue:
+    """A connector refusing a filter value degrades to a tool-level error.
+
+    The values come from the model's own tool arguments, so a refusal is the
+    model's to react to: it must not end the turn.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("read_work_orders", {"asset_id": "%"}),
+            ("get_work_order", {"work_order_id": "%"}),
+            ("check_spare_parts", {"asset_id": "%"}),
+        ],
+    )
+    async def test_refusal_is_returned_as_a_tool_error(
+        self, tool: str, args: dict[str, Any]
+    ) -> None:
+        agent = Agent(connectors=[_RefusingFilterConnector()])
+
+        assert await agent._execute_tool(tool, args) == {"error": _FILTER_REFUSAL}
+
+    @pytest.mark.asyncio
+    async def test_model_reads_the_refusal_and_the_turn_completes(self) -> None:
+        agent = Agent(connectors=[_RefusingFilterConnector()])
+        llm = _ScriptedLLM(("check_spare_parts", {"asset_id": "%"}), _ANSWER)
+        agent._llm = llm  # type: ignore[assignment]
+
+        resp = await agent.handle_message_full("Which spare parts fit asset %?")
+
+        assert resp.text == _ANSWER
+        assert llm.tool_results() == [{"error": _FILTER_REFUSAL}]
 
 
 class TestWriteFailureIsNotDegraded:
