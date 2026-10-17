@@ -10,7 +10,7 @@ import pytest
 import structlog
 
 from machina.agent.tool_errors import read_tool_error
-from machina.exceptions import ConnectorError, ConnectorTimeoutError
+from machina.exceptions import ConnectorError, ConnectorTimeoutError, DomainValidationError
 
 
 def _logged(exc: Exception) -> dict[str, Any]:
@@ -54,6 +54,15 @@ async def test_a_connector_error_is_logged_with_context_and_no_traceback() -> No
     assert event["asset_id"] == "P-201"
     assert event["error_type"] == "ConnectorTimeoutError"
     assert event["error"] == "CMMS timed out"
+    assert event["exc_info"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_domain_validation_error_is_logged_without_traceback() -> None:
+    """A refused argument is Machina's own, expected error, not a bug."""
+    event = _logged(DomainValidationError("asset_id contains a wildcard"))
+
+    assert event["error_type"] == "DomainValidationError"
     assert event["exc_info"] is False
 
 

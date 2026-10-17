@@ -271,6 +271,15 @@ _DUPLICATE_READ_NOTE = (
     "request it again — answer the user with the data you already have."
 )
 
+# Replayed instead of _DUPLICATE_READ_NOTE when the cached result is a failed
+# read whose retries are spent (_MAX_FAILED_READ_RETRIES): there is no data to
+# answer with, so the model should report the failure rather than ask again.
+_FAILED_READ_REPLAY_NOTE = (
+    "This exact request already failed earlier in this turn and was not sent "
+    "again. Do not request it again — tell the user this data is unavailable "
+    "right now."
+)
+
 # Hard cap on how many times the same side-effecting call may be suppressed in
 # one turn before the loop stops offering tools and forces a final answer. The
 # annotated duplicate result is only a cooperative hint; a model that ignores it
@@ -2372,10 +2381,12 @@ class Agent:
                         # Read-only call re-issued verbatim — replay the cached
                         # result instead of re-querying the connector, and nudge
                         # the model to answer with the data it already has.
+                        cached = executed_reads[call_key]
+                        failed = isinstance(cached, dict) and "error" in cached
                         tool_result = {
                             "already_retrieved": True,
-                            "note": _DUPLICATE_READ_NOTE,
-                            "result": executed_reads[call_key],
+                            "note": _FAILED_READ_REPLAY_NOTE if failed else _DUPLICATE_READ_NOTE,
+                            "result": cached,
                         }
                         logger.info(
                             "duplicate_read_call_suppressed",
@@ -2983,7 +2994,9 @@ class Agent:
                 tool=name,
                 connector=providers[0][0] if providers else "",
                 asset_id=args.get("asset_id", "") if isinstance(args, dict) else "",
-                args=args,
+                # Argument names only: values can carry free text from the
+                # conversation, which must not be logged in full.
+                arg_keys=sorted(args) if isinstance(args, dict) else [],
                 operation="execute_tool",
             )
 

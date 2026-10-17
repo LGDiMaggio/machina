@@ -14,7 +14,7 @@ from typing import Any
 import structlog
 
 from machina.agent.prompts import safe_text
-from machina.exceptions import ConnectorError
+from machina.exceptions import MachinaError
 
 logger = structlog.get_logger(__name__)
 
@@ -52,8 +52,9 @@ def read_tool_error(exc: Exception, event: str, **context: Any) -> dict[str, str
         **context,
         error_type=type(exc).__name__,
         error=str(exc),
-        # Anything but a ConnectorError is a bug or an unmapped library error:
-        # keep its traceback. A ConnectorError's message already says what failed.
-        exc_info=False if isinstance(exc, ConnectorError) else exc,
+        # Machina's own errors (a ConnectorError, or a DomainValidationError
+        # for a bad argument) already say what failed. Anything else is a bug
+        # or an unmapped library error: keep its traceback.
+        exc_info=False if isinstance(exc, MachinaError) else exc,
     )
     return {"error": safe_text(str(exc) or type(exc).__name__)}
