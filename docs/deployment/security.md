@@ -105,13 +105,17 @@ own payload, not an LLM hallucination.
   their basename, while deliberately preserving instructional system paths
   (`/etc`, `/usr/bin`, `C:\Program Files`) so technical-manual fidelity is
   kept. It is applied to chunk content in both runtime boundaries and to the
-  `execute_workflow` step `output_summary` / `error` payloads. It also matches
-  the doubled backslashes of `repr()` output (`'C:\\Users\\<user>\\…'`).
-- **Workflow prompts:** an `agent.reason` step's prompt goes to the model
-  provider too. Document chunks from a `docs.search_documents` step are
-  rendered by `format_document_results` (source through `safe_source`, content
-  through `safe_text`), and every other value interpolated into the prompt
-  (trigger fields, other step outputs) passes through `safe_text`.
+  `execute_workflow` step `error` payloads. It also matches the doubled
+  backslashes of `repr()` and JSON text (`'C:\\Users\\<user>\\…'`).
+- **Workflow outputs:** an `agent.reason` step's prompt goes to the model
+  provider, and so does the `output_summary` the agent's `execute_workflow`
+  tool returns for each step. Both are rendered by
+  `agent.prompts.render_for_llm`: document chunks from a
+  `docs.search_documents` step become a `Source:` line with the file name
+  (`safe_source`), page and section, then the text (`safe_text`); any other
+  value (trigger fields, other step outputs) passes through `safe_text`.
+  A path held in a field read on its own (`{find_doc.source}`) gets
+  `safe_text` only, so a path outside a user home is kept.
 - The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
   absolute file paths, directory structures, database schemas, or system
   architecture. This is a backstop, not the primary defence — the primary

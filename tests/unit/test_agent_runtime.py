@@ -2723,6 +2723,29 @@ class TestMutatingToolsRegistry:
         assert "create_work_order" in _SIDE_EFFECTING_TOOLS
         assert "execute_workflow" in _SIDE_EFFECTING_TOOLS
 
+    def test_every_builtin_tool_is_classified(self) -> None:
+        """A new tool fails this test until it is classified as a read or a write.
+
+        ``_execute_tool`` turns a raising tool into a retryable ``{"error": ...}``
+        unless the tool is in ``MUTATING_TOOLS``: a write left out of it would
+        be re-run after a failure whose outcome is unknown.
+        """
+        from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
+
+        reads = {
+            "search_assets",
+            "list_assets",
+            "get_asset_details",
+            "read_work_orders",
+            "get_work_order",
+            "search_documents",
+            "check_spare_parts",
+            "diagnose_failure",
+            "get_maintenance_schedule",
+        }
+        names = {t["function"]["name"] for t in BUILTIN_TOOLS}
+        assert names - MUTATING_TOOLS == reads
+
 
 class TestHandleMessage:
     """Test handle_message — full pipeline."""
@@ -3604,6 +3627,35 @@ class TestAgentWorkflows:
         assert "read_spare_parts" in steps["check_spare_parts"]["error"]
         assert steps["gated"]["skipped"] is True
         assert steps["gated"]["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_execute_workflow_tool_summarises_documents_without_paths(self) -> None:
+        """A docs step's chunks reach the model by file name, never by path.
+
+        The summary used to be the chunks' repr, with every source path in it:
+        a path outside a user home survived the scrub.
+        """
+        from machina.connectors.capabilities import Capability
+        from machina.workflows import Step, Workflow
+
+        docs = MagicMock()
+        docs.capabilities = frozenset({Capability.SEARCH_DOCUMENTS})
+        docs.search_documents = AsyncMock(
+            return_value=[
+                DocumentChunk("Grease every 2000 h.", source="/srv/plant/docs/guide.md", page=3),
+                DocumentChunk("Seal kit SK-7.", source=r"C:\Users\mrossi\Manuals\pump.pdf"),
+            ]
+        )
+        wf = Workflow(name="Docs", steps=[Step("search", action="docs.search_documents")])
+        agent = Agent(connectors=[docs], workflows=[wf])
+
+        out = await agent._tool_execute_workflow("Docs")
+
+        summary = out["steps"][0]["output_summary"]
+        assert "Source: guide.md (p. 3)\nGrease every 2000 h." in summary
+        assert "Source: pump.pdf\nSeal kit SK-7." in summary
+        assert "/srv/plant" not in summary
+        assert "mrossi" not in summary
 
     def test_sandbox_flag(self) -> None:
         agent = Agent(sandbox=True)

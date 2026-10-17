@@ -83,50 +83,6 @@ def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[s
     }
 
 
-def _is_document_chunk(value: Any) -> bool:
-    """Whether *value* reads as a retrieved document chunk.
-
-    Duck-typed on ``content`` and ``source``, as the agent reads search
-    results, so any document connector's chunk type qualifies.
-    """
-    return isinstance(getattr(value, "content", None), str) and isinstance(
-        getattr(value, "source", None), str
-    )
-
-
-def _render_for_llm(value: Any) -> str:
-    """Render one resolved value for an ``agent.reason`` prompt.
-
-    The prompt goes to the model provider, so it gets the same treatment as
-    the agent's own context. A document chunk, or a list of them (the output
-    of a ``docs.search_documents`` step), is rendered like the agent's
-    document context: the source reduced to its file name, then page,
-    section and the full text. Any other value is ``str()``-rendered and
-    scrubbed of user-home and UNC paths. Plain ``str()`` sends each chunk's
-    ``repr``, which carries the absolute source path and only a 60-character
-    preview of the text.
-    """
-    # Imported here: machina.agent imports this module (the agent runs workflows).
-    from machina.agent.prompts import format_document_results, safe_source, safe_text
-
-    chunks = [value] if _is_document_chunk(value) else value
-    if isinstance(chunks, list | tuple) and chunks and all(map(_is_document_chunk, chunks)):
-        return format_document_results(
-            [
-                {
-                    "content": safe_text(chunk.content),
-                    "source": safe_source(chunk.source),
-                    "page": getattr(chunk, "page", ""),
-                    "section_title": getattr(chunk, "section_title", ""),
-                    "is_table": getattr(chunk, "is_table", False),
-                }
-                for chunk in chunks
-            ],
-            limit=None,
-        )
-    return safe_text(str(value))
-
-
 class WorkflowEngine:
     """Executes :class:`Workflow` definitions step by step.
 
@@ -436,7 +392,12 @@ class WorkflowEngine:
         if self._llm is None:
             raise WorkflowError(f"Step '{step.name}' requires an LLM but none is configured")
 
-        resolved_prompt = context.resolve(step.prompt, render=_render_for_llm)
+        # Imported here: machina.agent imports this module (the agent runs workflows).
+        from machina.agent.prompts import render_for_llm
+
+        # The prompt goes to the model provider: interpolated values must not
+        # carry filesystem paths (document chunks render by file name).
+        resolved_prompt = context.resolve(step.prompt, render=render_for_llm)
 
         if self.sandbox:
             logger.info(

@@ -246,6 +246,29 @@ class TestWriteFailureIsNotDegraded:
         assert conn.calls == 1
 
     @pytest.mark.asyncio
+    async def test_failed_write_approved_by_a_confirmer_aborts_the_turn(self) -> None:
+        """Synchronous-confirmer path (a CLI): the approved write fails once, is not re-run."""
+        conn = _FailingConnector(
+            Capability.CREATE_WORK_ORDER, ConnectorError("CMMS answered HTTP 500")
+        )
+        agent = Agent(plant=_plant(), connectors=[conn])
+        write = ("create_work_order", _CREATE_ARGS)
+        agent._llm = _ScriptedLLM(write, write, _ANSWER)  # type: ignore[assignment]
+        asked: list[str] = []
+
+        async def approve(prompt: str) -> bool:
+            asked.append(prompt)
+            return True
+
+        with pytest.raises(LLMError):
+            await agent.handle_message_full(
+                "Create a work order for P-201: replace the bearing", confirmer=approve
+            )
+
+        assert len(asked) == 1
+        assert conn.calls == 1
+
+    @pytest.mark.asyncio
     async def test_failed_confirmed_write_is_not_left_pending(self) -> None:
         """Two-turn path: the confirmed write fails once and cannot be confirmed again."""
         conn = _FailingConnector(

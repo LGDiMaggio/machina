@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from typing import Any
 
 import httpx
@@ -54,7 +55,8 @@ async def test_a_connector_error_is_logged_with_context_and_no_traceback() -> No
     assert event["asset_id"] == "P-201"
     assert event["error_type"] == "ConnectorTimeoutError"
     assert event["error"] == "CMMS timed out"
-    assert event["exc_info"] is False
+    assert "traceback" not in event
+    assert "exc_info" not in event
 
 
 @pytest.mark.asyncio
@@ -63,18 +65,53 @@ async def test_a_domain_validation_error_is_logged_without_traceback() -> None:
     event = _logged(DomainValidationError("asset_id contains a wildcard"))
 
     assert event["error_type"] == "DomainValidationError"
-    assert event["exc_info"] is False
+    assert "traceback" not in event
+
+
+def _map_work_order(payload: dict[str, Any]) -> None:
+    """A mapper that fails while its caller's frame holds credentials."""
+    headers = {"Authorization": "Bearer s3cr3t-token"}  # noqa: F841 — a frame local
+    payload["wonum"]
+
+
+def _raised() -> Exception:
+    try:
+        _map_work_order({})
+    except KeyError as exc:
+        return exc
+    raise AssertionError("expected KeyError")
 
 
 @pytest.mark.asyncio
 async def test_any_other_exception_keeps_its_traceback() -> None:
     """A mapper bug or an unmapped library error must stay debuggable."""
-    exc = KeyError("wonum")
-
-    event = _logged(exc)
+    event = _logged(_raised())
 
     assert event["error_type"] == "KeyError"
-    assert event["exc_info"] is exc
+    assert "_map_work_order" in event["traceback"]
+    assert event["traceback"].rstrip().endswith("KeyError: 'wonum'")
+    assert "exc_info" not in event
+
+
+@pytest.mark.asyncio
+async def test_a_logged_traceback_carries_no_frame_locals() -> None:
+    """structlog's console renderer prints the locals of an ``exc_info`` traceback.
+
+    The traceback is logged as plain text instead, so an auth header held in a
+    connector's frame never reaches the log.
+    """
+    out = io.StringIO()
+    structlog.configure(
+        processors=[structlog.dev.ConsoleRenderer(colors=False)],
+        logger_factory=structlog.PrintLoggerFactory(file=out),
+    )
+    try:
+        read_tool_error(_raised(), "read_tool_failed", connector="cmms_0")
+    finally:
+        structlog.reset_defaults()
+
+    assert "_map_work_order" in out.getvalue()
+    assert "s3cr3t-token" not in out.getvalue()
 
 
 @pytest.mark.asyncio

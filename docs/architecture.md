@@ -105,9 +105,9 @@ schedules or subscribes to it automatically.
 
 The engine routes each step's `action`:
 
-- `agent.reason` — an LLM call with the step's prompt. Values interpolated
-  into it carry no filesystem paths: document chunks are rendered as file
-  name, page, section and text (see
+- `agent.reason` — an LLM call with the step's prompt. Document chunks
+  interpolated into it are rendered by file name, page, section and text, and
+  other values lose user-home and UNC paths (see
   [Security](deployment/security.md#source-path-sanitisation-at-the-llm-boundary));
 - `channels.send_message` — a message through the first communication connector;
 - `failure_analyzer.*`, `work_order_factory.*`, `maintenance_scheduler.*`,

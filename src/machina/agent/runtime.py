@@ -39,6 +39,7 @@ from machina.agent.prompts import (
     DOC_DISPLAY_WINDOW,
     build_context_message,
     build_system_prompt,
+    render_for_llm,
     safe_source,
     safe_text,
 )
@@ -3730,9 +3731,11 @@ class Agent:
                         # A skipped step can still carry the error that caused
                         # the skip: without this flag it reads as a failure.
                         "skipped": sr.skipped,
-                        # Scrub user-home / UNC paths from step output and error
-                        # text before it enters the LLM message history.
-                        "output_summary": safe_text(str(sr.output)[:500]) if sr.output else None,
+                        # Keep filesystem paths out of the LLM message history:
+                        # document chunks render by file name, other output and
+                        # error text lose user-home / UNC paths. Scrub, then
+                        # truncate, so a cut never splits a path mid-way.
+                        "output_summary": render_for_llm(sr.output)[:500] if sr.output else None,
                         "error": safe_text(str(sr.error)) if sr.error else None,
                     }
                     for sr in result.step_results

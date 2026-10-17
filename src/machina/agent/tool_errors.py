@@ -9,6 +9,7 @@ failed read is logged, scrubbed and shown to the model the same way everywhere.
 from __future__ import annotations
 
 import asyncio
+import traceback
 from typing import Any
 
 import structlog
@@ -47,14 +48,12 @@ def read_tool_error(exc: Exception, event: str, **context: Any) -> dict[str, str
     task = asyncio.current_task()
     if task is not None and task.cancelling():
         raise asyncio.CancelledError from exc
-    logger.warning(
-        event,
-        **context,
-        error_type=type(exc).__name__,
-        error=str(exc),
-        # Machina's own errors (a ConnectorError, or a DomainValidationError
-        # for a bad argument) already say what failed. Anything else is a bug
-        # or an unmapped library error: keep its traceback.
-        exc_info=False if isinstance(exc, MachinaError) else exc,
-    )
+    # Machina's own errors (a ConnectorError, or a DomainValidationError for a
+    # bad argument) already say what failed. Anything else is a bug or an
+    # unmapped library error: keep its traceback, as plain text. Not as
+    # ``exc_info``: structlog's console renderer prints each frame's local
+    # variables, and a REST connector's frames hold its auth headers.
+    if not isinstance(exc, MachinaError):
+        context["traceback"] = "".join(traceback.format_exception(exc))
+    logger.warning(event, **context, error_type=type(exc).__name__, error=str(exc))
     return {"error": safe_text(str(exc) or type(exc).__name__)}

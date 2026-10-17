@@ -347,17 +347,19 @@ _OPAQUE_SOURCE_PLACEHOLDER = "<document>"
 # does NOT match instructional system paths (``/etc``, ``/usr/bin``,
 # ``C:\\Program Files``) so technical manuals keep full fidelity — those carry
 # no privacy/infra signal. :func:`safe_source` is stricter because a source is
-# never instructional. A Windows separator is a RUN of backslashes, not one:
-# ``repr()`` of a container (a list of document chunks, a dict) doubles every
-# backslash (``'C:\\\\Users\\\\me\\\\a.pdf'``), and such reprs reach the LLM
-# through workflow step outputs and tool-result summaries. A UNC match must
-# start the path, so the doubled separators of an escaped system path
-# (``C:\\\\Windows\\\\System32``) are not mistaken for a share.
+# never instructional. Windows paths are also matched in escaped form:
+# ``repr()`` of a container (a list of document chunks, a dict) and JSON double
+# every backslash (``'C:\\\\Users\\\\me\\\\a.pdf'``), and such text reaches the
+# LLM through workflow step outputs and tool-result summaries. A UNC path is
+# matched with its exact separator widths (``\\\\host\\share`` plain,
+# ``\\\\\\\\host\\\\share`` escaped), so escaped text that only contains
+# doubled backslashes (``C:\\\\Windows\\\\System32``, ``..\\\\data\\\\x.csv``,
+# a regex such as ``\\\\d+``) is not mistaken for a share.
 _USER_PATH_RE = re.compile(
     r"""(?ix)
     (?:
-        (?<![\w\\])(?<!\b[A-Za-z]:)                 # (not mid-path, not after a drive)
-        \\{2,}[^\s\\/]+(?:\\+[^\s\\/]+)+            # UNC \\host\share\...
+        \\{2}[^\s\\/]+(?:\\[^\s\\/]+)+              # UNC \\host\share\...
+      | \\{4}[^\s\\/]+(?:\\{2}[^\s\\/]+)+           # the same, escaped
       | [A-Za-z]:(?:\\+|/)Users(?:\\+|/)[^\s\\/]+(?:(?:\\+|/)[^\s\\/]+)*   # X:\Users\<user>\...
       | /(?:home|Users)/[^\s/]+(?:/[^\s/]+)*        # /home/<user>/..., /Users/<user>/...
     )
@@ -487,9 +489,15 @@ _safe_source = safe_source
 DOC_DISPLAY_WINDOW = 5
 
 
-def format_document_results(
-    results: list[dict[str, Any]], *, limit: int | None = DOC_DISPLAY_WINDOW
-) -> str:
+def _document_ref(source: str, page: Any, section_title: str, is_table: bool) -> str:
+    """Render ``Source: <file> (p. N) § <section> [TABLE]`` for one document."""
+    page_ref = f" (p. {page})" if page else ""
+    section_ref = f" § {section_title}" if section_title else ""
+    table_tag = " [TABLE]" if is_table else ""
+    return f"Source: {safe_source(source)}{page_ref}{section_ref}{table_tag}"
+
+
+def format_document_results(results: list[dict[str, Any]]) -> str:
     """Format document search results for the prompt.
 
     Args:
@@ -499,10 +507,6 @@ def format_document_results(
             that index (see :data:`machina.agent.citations.CITATION_PROMPT`).
             The opaque ``chunk_id`` is deliberately **not** surfaced — it is
             resolved server-side from the display position.
-        limit: How many results to render, or ``None`` for all of them.
-            Defaults to :data:`DOC_DISPLAY_WINDOW`, the window the agent's
-            citation registry indexes. A workflow prompt has no citation
-            registry, so it renders every result its search returned.
 
     Returns:
         Formatted document excerpts.
@@ -511,23 +515,76 @@ def format_document_results(
         return "No relevant documents found."
 
     lines = [f"**Relevant Documents ({len(results)}):**"]
-    for i, result in enumerate(results[:limit], 1):
-        # Defence-in-depth: sanitise here too in case an upstream caller
-        # forgot to.  Idempotent for already-sanitised values.
-        source = safe_source(result.get("source", "unknown"))
-        page = result.get("page", "")
-        section_title = result.get("section_title", "")
+    for i, result in enumerate(results[:DOC_DISPLAY_WINDOW], 1):
+        # Defence-in-depth: _document_ref sanitises the source here too, in
+        # case an upstream caller forgot to.  Idempotent for already-sanitised
+        # values.
+        ref = _document_ref(
+            result.get("source", "unknown"),
+            result.get("page", ""),
+            result.get("section_title", ""),
+            bool(result.get("is_table")),
+        )
         # Pass the full chunk content. The retrieval layer already
         # returns parent-section text bounded by the splitter's
         # max_parent_chars; truncating again here would defeat
         # parent-document retrieval (Unit 5).
         content = result.get("content", "")
-        page_ref = f" (p. {page})" if page else ""
-        section_ref = f" § {section_title}" if section_title else ""
-        table_tag = " [TABLE]" if result.get("is_table") else ""
-        lines.append(f"\n  [{i}] Source: {source}{page_ref}{section_ref}{table_tag}")
+        lines.append(f"\n  [{i}] {ref}")
         lines.append(f"  {content}")
     return "\n".join(lines)
+
+
+def _is_document_chunk(value: Any) -> bool:
+    """Whether *value* reads as a retrieved document chunk.
+
+    Duck-typed on ``content`` and ``source``, as the agent reads search
+    results, so any document connector's chunk type qualifies.
+    """
+    return isinstance(getattr(value, "content", None), str) and isinstance(
+        getattr(value, "source", None), str
+    )
+
+
+def render_for_llm(value: Any) -> str:
+    """Render a workflow value for text that is sent to the LLM.
+
+    Used for the values interpolated into a workflow ``agent.reason`` prompt
+    and for the step outputs the agent's ``execute_workflow`` tool returns.
+    ``str()`` would render each document chunk as its ``repr``, which carries
+    the absolute source path and only a 60-character preview of the text.
+
+    A document chunk, or a list or tuple of them (the output of a
+    ``docs.search_documents`` step), is rendered as one block per chunk: a
+    ``Source:`` line with the file name only (:func:`safe_source`), page,
+    section and table tag, then the full text with user-home and UNC paths
+    scrubbed (:func:`safe_text`). There is no ``[i]`` index: these blocks are
+    outside the agent's citation registry, so an index would read as a
+    citation it cannot resolve. Any other value is ``str()``-rendered and
+    passed through :func:`safe_text`, which reduces user-home and UNC paths
+    to their file name and leaves other absolute paths (``/etc/...``) as they
+    are.
+
+    Args:
+        value: A step output, trigger field, or field of either.
+
+    Returns:
+        The text to put in front of the model.
+    """
+    chunks = [value] if _is_document_chunk(value) else value
+    if isinstance(chunks, list | tuple) and chunks and all(map(_is_document_chunk, chunks)):
+        return "\n\n".join(
+            _document_ref(
+                chunk.source,
+                getattr(chunk, "page", ""),
+                getattr(chunk, "section_title", ""),
+                bool(getattr(chunk, "is_table", False)),
+            )
+            + "\n"
+            + safe_text(chunk.content)
+            for chunk in chunks
+        )
+    return safe_text(str(value))
 
 
 def build_context_message(

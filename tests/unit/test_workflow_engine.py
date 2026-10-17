@@ -358,6 +358,8 @@ class TestLLMPromptPaths:
         assert "Source: lube_schedule.xlsx [TABLE]" in prompt
         assert _PROCEDURE in prompt
         assert "Give the root cause." in prompt
+        # No [n] index: these chunks are outside the agent's citation registry.
+        assert "[1]" not in prompt
 
     @pytest.mark.asyncio
     async def test_sandbox_preview_carries_no_paths(self) -> None:
