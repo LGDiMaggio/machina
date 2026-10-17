@@ -9,3 +9,14 @@ codecov:
 
 comment:
   after_n_builds: 2
+
+# With the default `target: auto`, codecov/patch compares against the base
+# report and, when the PR has none, passes with "No report found to compare
+# against" without measuring anything. An explicit target is measured against
+# the PR's own diff whether or not a base report exists. This does not fix a
+# wrong base; scripts/codecov_base_check.py checks that (see CONTRIBUTING.md).
+coverage:
+  status:
+    patch:
+      default:
+        target: 100%
