@@ -1,0 +1,264 @@
+# Weekly repository quality audit. Report-only.
+#
+# Each leg uploads one result file (scripts/audit/record.py), even when it
+# fails; the report job merges them into audit-report.json and the step
+# summary, and its exit code is the verdict: 0 green, 1 red, 2 incomplete.
+# Nothing here writes to the repository or the issue tracker, calls an AI
+# service or reads a secret, and no step uses continue-on-error, so each
+# leg's job carries its own status. tests/test_workflow_policy.py pins this.
+name: Quality audit
+
+on:
+  schedule:
+    # Mondays 05:17 UTC; off the hour, when scheduled runs queue the longest.
+    - cron: "17 5 * * 1"
+  # No inputs: an input would add a shell-injection surface.
+  workflow_dispatch:
+  # A change to the audit runs the audit before it merges.
+  pull_request:
+    paths:
+      - ".github/workflows/audit.yml"
+      - "scripts/audit/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  suite:
+    name: Suite ${{ matrix.variant }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The newest releases, with the extras ci-extras installs.
+          - { variant: newest-py3.11, os: ubuntu-24.04, python: "3.11", install: newest }
+          - { variant: newest-py3.12, os: ubuntu-24.04, python: "3.12", install: newest }
+          - { variant: newest-py3.13, os: ubuntu-24.04, python: "3.13", install: newest }
+          # Not supported yet (classifiers stop at 3.13): never changes the verdict.
+          - { variant: newest-py3.14, os: ubuntu-24.04, python: "3.14", install: newest, informational: true }
+          # Core dependencies at the lowest version pyproject.toml admits.
+          - { variant: floors-py3.11, os: ubuntu-24.04, python: "3.11", install: floors }
+          - { variant: windows-py3.12, os: windows-latest, python: "3.12", install: newest }
+          # The image ubuntu-latest is moving to; ci.yml stays on 24.04 until then.
+          - { variant: ubuntu-26.04-py3.12, os: ubuntu-26.04, python: "3.12", install: newest }
+          # CI skips the RAG golden-set, hybrid and reranker suites; here they must run.
+          - variant: heavy-extras-py3.12
+            os: ubuntu-24.04
+            python: "3.12"
+            install: heavy
+            require: >-
+              tests/integration/test_document_store_golden.py
+              tests/integration/test_document_store_extras.py::test_reranker_runs_on_top_of_hybrid_fusion
+              tests/unit/connectors/docs/test_hybrid.py
+    defaults:
+      run:
+        # The same commands on Windows; GitHub runs bash with -eo pipefail.
+        shell: bash
+    env:
+      EXTRAS: dev,excel,calendar,litellm,mcp
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the newest releases
+        if: matrix.install == 'newest'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[$EXTRAS]" 2>&1 | tee "$RUNNER_TEMP/install.log"
+
+      - name: Install core dependencies at their floors
+        if: matrix.install == 'floors'
+        run: |
+          python scripts/audit/floors.py pyproject.toml > "$RUNNER_TEMP/floors.txt"
+          cat "$RUNNER_TEMP/floors.txt"
+          python -m pip install --upgrade pip
+          python -m pip install -c "$RUNNER_TEMP/floors.txt" -e ".[dev]" 2>&1 \
+            | tee "$RUNNER_TEMP/install.log"
+
+      - name: Install the heavy RAG extras
+        if: matrix.install == 'heavy'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,docs-rag-pro]" 2>&1 | tee "$RUNNER_TEMP/install.log"
+          # Best effort: the SQL Server suite also needs Docker and the ODBC driver.
+          if python -m pip install -e ".[sql]" "testcontainers[mssql]"; then
+            echo "SQL_EXTRA=installed" >> "$GITHUB_ENV"
+          else
+            echo "SQL_EXTRA=not-installable" >> "$GITHUB_ENV"
+          fi
+
+      # The exit code tells the record step a failed run from an interrupted one.
+      - name: Tests
+        run: |
+          set +e
+          python -m pytest tests/ -p no:cacheprovider --junitxml="$RUNNER_TEMP/junit.xml"
+          status=$?
+          echo "$status" > "$RUNNER_TEMP/pytest-exit-code"
+          exit "$status"
+
+      # Runs after a failed setup too; python3 covers a failed setup-python.
+      - name: Record the result
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+          INFORMATIONAL: ${{ matrix.informational || false }}
+          REQUIRE: ${{ matrix.require }}
+        run: |
+          args=()
+          for node in $REQUIRE; do args+=(--require "$node"); done
+          if [ "$INFORMATIONAL" = "true" ]; then args+=(--informational); fi
+          py="$(command -v python || command -v python3)"
+          "$py" scripts/audit/record.py suite --variant "$VARIANT" \
+            --junit "$RUNNER_TEMP/junit.xml" \
+            --exit-code-file "$RUNNER_TEMP/pytest-exit-code" \
+            --install-log "$RUNNER_TEMP/install.log" \
+            --fact "sql_extra=${SQL_EXTRA:-}" \
+            "${args[@]}" --out audit-results/result.json
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: leg-${{ matrix.variant }}
+          path: audit-results/
+          if-no-files-found: error
+
+  package-smoke:
+    name: Package smoke (wheel and sdist)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build the sdist and the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # Runs after a failed build too: no distributions is an error result.
+      - name: Install into fresh venvs and smoke each extra
+        if: always()
+        run: python scripts/audit/package_smoke.py --dist dist --out audit-results/result.json
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: leg-package-smoke
+          path: audit-results/
+          if-no-files-found: error
+
+  security:
+    name: Vulnerability audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+
+      # Fresh resolutions of core alone and of every runtime extra. pip-audit
+      # exits non-zero on a finding and on a failure alike, so its exit code is
+      # only logged: the record step reads the JSON and fails closed.
+      - name: Audit fresh resolutions
+        run: |
+          for spec in "core=." "all=.[all]"; do
+            label="${spec%%=*}"
+            venv="$RUNNER_TEMP/venv-$label"
+            python -m venv "$venv" \
+              && "$venv/bin/python" -m pip install --upgrade pip \
+              && "$venv/bin/python" -m pip install "${spec#*=}" \
+              || echo "::warning::the $label resolution did not install"
+            site="$("$venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+            pip-audit --path "$site" -f json -o "$RUNNER_TEMP/$label.json" \
+              || echo "pip-audit ($label) exited with status $?"
+          done
+
+      - name: Record the result
+        if: always()
+        run: |
+          python scripts/audit/record.py security \
+            --audit "core=$RUNNER_TEMP/core.json" --audit "all=$RUNNER_TEMP/all.json" \
+            --out audit-results/result.json
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: leg-security
+          path: audit-results/
+          if-no-files-found: error
+
+  report:
+    name: Audit report
+    needs: [suite, package-smoke, security]
+    # Runs after failed legs too: a leg without a result makes it incomplete.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Each artifact lands in its own subdirectory of audit-results.
+      - name: Download every leg's result
+        uses: actions/download-artifact@v8
+        with:
+          pattern: leg-*
+          path: audit-results
+
+      - name: Build the report
+        if: always()
+        env:
+          # One entry per leg (pinned by tests/test_workflow_policy.py), so a
+          # leg that uploaded nothing is reported missing, not dropped.
+          EXPECTED_LEGS: >-
+            newest-py3.11 newest-py3.12 newest-py3.13 newest-py3.14
+            floors-py3.11 windows-py3.12 ubuntu-26.04-py3.12 heavy-extras-py3.12
+            package-smoke security
+        run: |
+          python scripts/audit/report.py --results audit-results \
+            --expected "$EXPECTED_LEGS" --out audit-report --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audit-report
+          path: audit-report/
+          retention-days: 90
