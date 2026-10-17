@@ -163,7 +163,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
-    wheels, sdists = sorted(args.dist.glob("*.whl")), sorted(args.dist.glob("*.tar.gz"))
+    # Absolute paths: every command runs from the temporary directory.
+    dist = args.dist.resolve()
+    wheels, sdists = sorted(dist.glob("*.whl")), sorted(dist.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
         message = f"want one wheel and one sdist, found {len(wheels)} and {len(sdists)}"
         missing = [finding("no-distributions", message)]

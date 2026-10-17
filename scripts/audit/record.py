@@ -161,11 +161,15 @@ def security(args: argparse.Namespace) -> int:
         for dep in audited:
             for vuln in dep.get("vulns", []):
                 key = (dep["name"], dep["version"], vuln["id"])
-                entry = advisories.setdefault(key, {"vuln": vuln, "labels": []})
-                entry["labels"].append(label)
+                # pip-audit can list one advisory twice for a dependency.
+                entry = advisories.setdefault(key, {"vuln": vuln, "labels": {}})
+                entry["labels"][label] = None
     for (name, version, vuln_id), entry in sorted(advisories.items()):
         fixes = ", ".join(entry["vuln"].get("fix_versions") or []) or "none yet"
-        detail = f"resolutions: {', '.join(entry['labels'])}; fixed in: {fixes}"
+        aliases = ", ".join(entry["vuln"].get("aliases") or []) or "none"
+        detail = (
+            f"resolutions: {', '.join(entry['labels'])}; fixed in: {fixes}; aliases: {aliases}"
+        )
         findings.append(finding("vulnerability", f"{name} {version}: {vuln_id}", detail))
     facts["vulnerabilities"] = len(advisories)
     if status == "pass" and advisories:

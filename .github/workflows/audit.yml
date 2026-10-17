@@ -93,7 +93,7 @@ jobs:
         if: matrix.install == 'heavy'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,docs-rag-pro]" 2>&1 | tee "$RUNNER_TEMP/install.log"
+          python -m pip install -e ".[$EXTRAS,docs-rag-pro]" 2>&1 | tee "$RUNNER_TEMP/install.log"
           # Best effort: the SQL Server suite also needs Docker and the ODBC driver.
           if python -m pip install -e ".[sql]" "testcontainers[mssql]"; then
             echo "SQL_EXTRA=installed" >> "$GITHUB_ENV"
