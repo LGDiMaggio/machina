@@ -6,6 +6,7 @@ import pytest
 
 from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.prompts import (
+    DOC_DISPLAY_WINDOW,
     _safe_source,
     build_context_message,
     build_system_prompt,
@@ -15,9 +16,11 @@ from machina.agent.prompts import (
     format_resolved_entities,
     format_spare_parts_context,
     format_work_orders_context,
+    render_for_llm,
     safe_source,
     safe_text,
 )
+from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.spare_part import SparePart
@@ -175,6 +178,58 @@ class TestFormatDocumentResults:
         text = format_document_results(results)
         assert "manual.pdf" in text
         assert "12" in text
+
+    def test_renders_the_citation_window(self) -> None:
+        results = [
+            {"content": "x", "source": f"doc_{i}.md", "page": 2, "section_title": "Seals"}
+            for i in range(7)
+        ]
+
+        text = format_document_results(results)
+
+        assert "Relevant Documents (7)" in text
+        assert "  [1] Source: doc_0.md (p. 2) § Seals\n  x" in text
+        assert f"doc_{DOC_DISPLAY_WINDOW - 1}.md" in text
+        assert f"doc_{DOC_DISPLAY_WINDOW}.md" not in text
+
+
+class TestRenderForLlm:
+    """Workflow values rendered for the LLM carry no filesystem paths."""
+
+    def test_chunks_render_by_file_name_without_a_citation_index(self) -> None:
+        chunks = [
+            DocumentChunk(
+                r"Replace the seal. Notes in C:\Users\tedib\notes\seal.txt",
+                source=r"D:\Plant\Manuals\pump.pdf",
+                page=4,
+                section_title="Seals",
+            ),
+            DocumentChunk("Torque table", source="/srv/docs/torque.xlsx", is_table=True),
+        ]
+
+        text = render_for_llm(chunks)
+
+        assert text == (
+            "Source: pump.pdf (p. 4) § Seals\nReplace the seal. Notes in seal.txt"
+            "\n\nSource: torque.xlsx [TABLE]\nTorque table"
+        )
+
+    def test_a_single_chunk_and_a_tuple_render_the_same_way(self) -> None:
+        chunk = DocumentChunk("x", source="/home/me/a.pdf")
+
+        assert render_for_llm(chunk) == render_for_llm((chunk,)) == "Source: a.pdf\nx"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ([], "[]"),
+            ({"export": r"C:\Users\tedib\out\v.csv"}, "{'export': 'v.csv'}"),
+            ("Edit /etc/fstab", "Edit /etc/fstab"),
+            (None, "None"),
+        ],
+    )
+    def test_other_values_render_as_scrubbed_text(self, value: object, expected: str) -> None:
+        assert render_for_llm(value) == expected
 
 
 class TestFormatResolvedEntities:
@@ -377,6 +432,45 @@ class TestSafeText:
     def test_trailing_sentence_punctuation_not_swallowed_into_name(self) -> None:
         # A trailing period belongs to the sentence, not the filename.
         assert safe_text("see /home/me/notes.md.") == "see notes.md."
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ({"source": r"C:\Users\tedib\manuals\pump.pdf"}, "{'source': 'pump.pdf'}"),
+            ({"source": r"\\FILESRV01\manuals\seal.pdf"}, "{'source': 'seal.pdf'}"),
+            (
+                [DocumentChunk("x", source=r"C:\Users\tedib\m\pump.pdf", page=3)],
+                "[DocumentChunk(source='pump.pdf', page=3, text='x')]",
+            ),
+            # An escape sequence right before the share still ends a word.
+            ("log\n" + r"\\FILESRV01\manuals\seal.pdf", r"'log\nseal.pdf'"),
+        ],
+    )
+    def test_repr_escaped_paths_are_scrubbed(self, value: object, expected: str) -> None:
+        """``repr()`` of a container doubles every backslash of a Windows path.
+
+        Such reprs reach the LLM through workflow step outputs, so the doubled
+        separators must not hide the path.
+        """
+        assert safe_text(repr(value)) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            repr(r"C:\Windows\System32\drivers\etc\hosts"),
+            repr(r"C:\Program Files\App\app.exe"),
+            r'"logs": "%ProgramData%\\Vendor\\logs"',
+            r'"export": "..\\data\\export.csv"',
+            r"match \\d+\\.\\d+ in the reading",
+        ],
+    )
+    def test_escaped_text_that_is_not_a_share_is_kept(self, text: str) -> None:
+        """Doubled backslashes alone (escaped system or relative paths, regexes)
+        are not a UNC share."""
+        assert safe_text(text) == text
+
+    def test_unc_share_right_after_a_label_is_scrubbed(self) -> None:
+        assert safe_text(r"Location:\\FILESRV01\manuals\seal.pdf") == "Location:seal.pdf"
 
 
 class TestFormatDocumentResultsSanitization:

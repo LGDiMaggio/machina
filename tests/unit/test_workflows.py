@@ -475,6 +475,15 @@ class TestWorkflowContext:
         ctx.mark_step_failed("check_spare_parts")
         assert ctx.resolve_input_value("{check_spare_parts}") is None
 
+    def test_resolve_renders_values_with_the_given_renderer(self) -> None:
+        """The renderer applies to resolved values only, not to markers or literals."""
+        ctx = WorkflowContext({"asset_id": "P-201"})
+        ctx.mark_step_failed("check_spare_parts")
+        rendered = ctx.resolve(
+            "{trigger.asset_id} {check_spare_parts} {missing}", render=lambda v: f"<{v}>"
+        )
+        assert rendered == "<P-201> [check_spare_parts failed] {missing}"
+
 
 class TestBuiltinAlarmToWorkorder:
     """Test the built-in alarm_to_workorder template loads correctly."""
