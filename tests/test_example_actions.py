@@ -98,7 +98,8 @@ def _collect_domain_service_methods() -> dict[str, set[str]]:
 # Special actions handled by the workflow engine directly
 SPECIAL_ACTIONS = {"agent.reason", "channels.send_message"}
 
-# Actions that require connectors not yet built (documented as future)
+# Actions kept only as sandbox-placeholder demos: no Capability backs them, so
+# they cannot resolve to a connector when run live.
 FUTURE_ACTIONS = {"erp.create_purchase_order"}
 
 

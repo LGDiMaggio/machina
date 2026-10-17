@@ -92,7 +92,8 @@ spare_part_reorder = Workflow(
             ),
             on_error=ErrorPolicy.SKIP,
         ),
-        # NOTE: requires an ERP connector (planned for v0.3+).
+        # NOTE: Machina ships no ERP connector, and create_purchase_order is
+        # not a connector Capability, so run live the workflow stops here.
         # In sandbox mode this step is blocked automatically (is_write=True).
         Step(
             "place_order",
@@ -158,9 +159,9 @@ preventive_scheduling = Workflow(
             action="channels.send_message",
             template=(
                 "Weekly Preventive Plan\n"
-                "Plans due: {scan_plans.count}\n"
+                "Plans due: {scan_plans}\n"
                 "Priority: {prioritize_work}\n"
-                "WOs created: {create_work_orders.count}"
+                "WOs created: {create_work_orders}"
             ),
             on_error=ErrorPolicy.NOTIFY,
         ),
@@ -225,7 +226,7 @@ async def run_demo(llm: str, sandbox: bool) -> None:
     status = "SUCCESS" if result.success else "PARTIAL"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
     for sr in result.steps:
-        icon = "+" if sr.success else "~" if sr.skipped else "x"
+        icon = "~" if sr.skipped else "+" if sr.success else "x"
         print(f"    [{icon}] {sr.name}")
 
     await agent.stop()
