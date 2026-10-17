@@ -6,6 +6,7 @@ import pytest
 
 from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.prompts import (
+    DOC_DISPLAY_WINDOW,
     _safe_source,
     build_context_message,
     build_system_prompt,
@@ -18,6 +19,7 @@ from machina.agent.prompts import (
     safe_source,
     safe_text,
 )
+from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.alarm import Alarm, Severity
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.spare_part import SparePart
@@ -175,6 +177,22 @@ class TestFormatDocumentResults:
         text = format_document_results(results)
         assert "manual.pdf" in text
         assert "12" in text
+
+    def test_renders_the_citation_window_by_default(self) -> None:
+        results = [{"content": "x", "source": f"doc_{i}.md"} for i in range(7)]
+
+        text = format_document_results(results)
+
+        assert "Relevant Documents (7)" in text
+        assert f"doc_{DOC_DISPLAY_WINDOW - 1}.md" in text
+        assert f"doc_{DOC_DISPLAY_WINDOW}.md" not in text
+
+    def test_limit_none_renders_every_result(self) -> None:
+        results = [{"content": "x", "source": f"doc_{i}.md"} for i in range(7)]
+
+        text = format_document_results(results, limit=None)
+
+        assert all(f"[{i + 1}] Source: doc_{i}.md" in text for i in range(7))
 
 
 class TestFormatResolvedEntities:
@@ -377,6 +395,39 @@ class TestSafeText:
     def test_trailing_sentence_punctuation_not_swallowed_into_name(self) -> None:
         # A trailing period belongs to the sentence, not the filename.
         assert safe_text("see /home/me/notes.md.") == "see notes.md."
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ({"source": r"C:\Users\tedib\manuals\pump.pdf"}, "{'source': 'pump.pdf'}"),
+            ({"source": r"\\FILESRV01\manuals\seal.pdf"}, "{'source': 'seal.pdf'}"),
+            (
+                [DocumentChunk("x", source=r"C:\Users\tedib\m\pump.pdf", page=3)],
+                "[DocumentChunk(source='pump.pdf', page=3, text='x')]",
+            ),
+        ],
+    )
+    def test_repr_escaped_paths_are_scrubbed(self, value: object, expected: str) -> None:
+        """``repr()`` of a container doubles every backslash of a Windows path.
+
+        Such reprs reach the LLM through workflow step outputs, so the doubled
+        separators must not hide the path.
+        """
+        assert safe_text(repr(value)) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            repr(r"C:\Windows\System32\drivers\etc\hosts"),
+            repr(r"C:\Program Files\App\app.exe"),
+        ],
+    )
+    def test_repr_escaped_system_paths_are_kept(self, text: str) -> None:
+        """Doubled separators inside an escaped system path are not a UNC share."""
+        assert safe_text(text) == text
+
+    def test_unc_share_right_after_a_label_is_scrubbed(self) -> None:
+        assert safe_text(r"Location:\\FILESRV01\manuals\seal.pdf") == "Location:seal.pdf"
 
 
 class TestFormatDocumentResultsSanitization:

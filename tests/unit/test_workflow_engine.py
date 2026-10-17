@@ -10,6 +10,7 @@ import pytest
 
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.capabilities import Capability
+from machina.connectors.docs.document_store import DocumentChunk
 from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import (
@@ -32,6 +33,7 @@ class _FakeLLM:
         self.model = "fake:model"
         self._response = response
         self.call_count = 0
+        self.prompts: list[str] = []
 
     async def complete(
         self,
@@ -39,6 +41,7 @@ class _FakeLLM:
         **kwargs: Any,
     ) -> str:
         self.call_count += 1
+        self.prompts.append(messages[-1]["content"])
         return self._response
 
 
@@ -260,6 +263,167 @@ class TestLLMSteps:
         )
         result = await engine.execute(wf)
         assert result.success is True
+
+
+class _FakeDocsConnector:
+    """Document store stub returning fixed chunks."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.SEARCH_DOCUMENTS})
+
+    def __init__(self, chunks: list[DocumentChunk]) -> None:
+        self._chunks = chunks
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def search_documents(self, query: str = "", **kwargs: Any) -> list[DocumentChunk]:
+        return self._chunks
+
+
+_PROCEDURE = (
+    "Lock out the motor, remove the coupling guard, then pull the drive-end "
+    "bearing with the hydraulic puller. Torque the housing bolts to 45 Nm."
+)
+
+# One chunk per absolute-path shape a document store can hand back: a Windows
+# user home, a POSIX home, a UNC share, and an absolute path outside any home.
+_LEAKY_CHUNKS = [
+    DocumentChunk(
+        _PROCEDURE,
+        source=r"C:\Users\luigi\Documents\manuals\pump_p201.pdf",
+        page=12,
+        section_title="Bearing replacement",
+    ),
+    DocumentChunk("Grease every 2000 h.", source="/home/luigi/manuals/bearing_guide.md", page=3),
+    DocumentChunk("Seal kit SK-7.", source=r"\\FILESRV01\maintenance\manuals\seal_kit.pdf"),
+    DocumentChunk("Lube table.", source="/srv/plant/docs/lube_schedule.xlsx", is_table=True),
+]
+
+# A directory component of each source above. None of them may reach the LLM.
+_PATH_FRAGMENTS = ["luigi", "Users", "FILESRV01", "maintenance", "/srv/plant", ":\\", "\\\\"]
+
+
+class TestLLMPromptPaths:
+    """Step outputs reach an ``agent.reason`` prompt without filesystem paths.
+
+    Interpolated with plain ``str()``, a ``docs.search_documents`` output put
+    each chunk's ``repr`` in the prompt, absolute source path included.
+    """
+
+    @staticmethod
+    def _engine(llm: _FakeLLM, chunks: list[DocumentChunk], **kwargs: Any) -> WorkflowEngine:
+        registry = ConnectorRegistry()
+        registry.register("docs", _FakeDocsConnector(chunks))
+        return WorkflowEngine(registry=registry, llm=llm, tracer=ActionTracer(), **kwargs)
+
+    @staticmethod
+    def _workflow(prompt: str) -> Workflow:
+        return Workflow(
+            name="Diagnose",
+            steps=[
+                Step(
+                    "search_manuals",
+                    action="docs.search_documents",
+                    inputs={"query": "{trigger.parameter}"},
+                ),
+                Step("diagnose_llm", action="agent.reason", prompt=prompt),
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_document_search_output_reaches_the_llm_without_paths(self) -> None:
+        llm = _FakeLLM()
+        engine = self._engine(llm, _LEAKY_CHUNKS)
+
+        result = await engine.execute(
+            self._workflow("Manual sections: {search_manuals}\n\nGive the root cause."),
+            trigger_event={"parameter": "vibration"},
+        )
+
+        assert result.success is True
+        (prompt,) = llm.prompts
+        for fragment in _PATH_FRAGMENTS:
+            assert fragment not in prompt
+        # Provenance survives: file name, page, section, table tag, and the
+        # full chunk text rather than a repr's 60-character preview.
+        assert "Source: pump_p201.pdf (p. 12) § Bearing replacement" in prompt
+        assert "Source: bearing_guide.md (p. 3)" in prompt
+        assert "Source: seal_kit.pdf" in prompt
+        assert "Source: lube_schedule.xlsx [TABLE]" in prompt
+        assert _PROCEDURE in prompt
+        assert "Give the root cause." in prompt
+
+    @pytest.mark.asyncio
+    async def test_sandbox_preview_carries_no_paths(self) -> None:
+        """The sandbox reply quotes the prompt and becomes a step output too."""
+        llm = _FakeLLM()
+        engine = self._engine(llm, _LEAKY_CHUNKS, sandbox=True)
+
+        result = await engine.execute(self._workflow("{search_manuals}"))
+
+        output = result.step_results[1].output
+        assert llm.call_count == 0
+        assert "pump_p201.pdf" in output
+        for fragment in _PATH_FRAGMENTS:
+            assert fragment not in output
+
+    @pytest.mark.asyncio
+    async def test_every_chunk_is_rendered(self) -> None:
+        """No citation window here: a workflow asking for more chunks gets them all."""
+        llm = _FakeLLM()
+        chunks = [
+            DocumentChunk(f"Note {i}.", source=f"/home/luigi/m/doc_{i}.md") for i in range(7)
+        ]
+        engine = self._engine(llm, chunks)
+
+        await engine.execute(self._workflow("{search_manuals}"))
+
+        (prompt,) = llm.prompts
+        assert all(f"Source: doc_{i}.md" in prompt for i in range(7))
+
+    @pytest.mark.asyncio
+    async def test_other_values_are_scrubbed_of_user_paths(self) -> None:
+        """Trigger fields and non-document outputs lose user-home and UNC paths only."""
+
+        class _Exporter:
+            def run(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "export": r"C:\Users\luigi\exports\vibration.csv",
+                    "chunks": [_LEAKY_CHUNKS[2]],
+                }
+
+        llm = _FakeLLM()
+        engine = WorkflowEngine(llm=llm, tracer=ActionTracer(), services={"exporter": _Exporter()})
+        wf = Workflow(
+            name="Scrub",
+            steps=[
+                Step("export", action="exporter.run"),
+                Step(
+                    "reason",
+                    action="agent.reason",
+                    prompt="Log {trigger.log}. Then edit {trigger.config}. Data: {export}",
+                ),
+            ],
+        )
+
+        await engine.execute(
+            wf, trigger_event={"log": "/home/luigi/alarm.log", "config": "/etc/fstab"}
+        )
+
+        (prompt,) = llm.prompts
+        assert "luigi" not in prompt
+        assert "FILESRV01" not in prompt
+        assert "Log alarm.log." in prompt
+        assert "vibration.csv" in prompt
+        assert "seal_kit.pdf" in prompt
+        # An instructional system path is kept, as in the agent's own context.
+        assert "edit /etc/fstab" in prompt
 
 
 # ---------------------------------------------------------------------------

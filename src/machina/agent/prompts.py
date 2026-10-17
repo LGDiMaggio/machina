@@ -347,12 +347,18 @@ _OPAQUE_SOURCE_PLACEHOLDER = "<document>"
 # does NOT match instructional system paths (``/etc``, ``/usr/bin``,
 # ``C:\\Program Files``) so technical manuals keep full fidelity — those carry
 # no privacy/infra signal. :func:`safe_source` is stricter because a source is
-# never instructional.
+# never instructional. A Windows separator is a RUN of backslashes, not one:
+# ``repr()`` of a container (a list of document chunks, a dict) doubles every
+# backslash (``'C:\\\\Users\\\\me\\\\a.pdf'``), and such reprs reach the LLM
+# through workflow step outputs and tool-result summaries. A UNC match must
+# start the path, so the doubled separators of an escaped system path
+# (``C:\\\\Windows\\\\System32``) are not mistaken for a share.
 _USER_PATH_RE = re.compile(
     r"""(?ix)
     (?:
-        \\\\[^\s\\/]+(?:\\[^\s\\/]+)+               # UNC \\host\share\...
-      | [A-Za-z]:[\\/]Users[\\/][^\s\\/]+(?:[\\/][^\s\\/]+)*   # X:\Users\<user>\...
+        (?<![\w\\])(?<!\b[A-Za-z]:)                 # (not mid-path, not after a drive)
+        \\{2,}[^\s\\/]+(?:\\+[^\s\\/]+)+            # UNC \\host\share\...
+      | [A-Za-z]:(?:\\+|/)Users(?:\\+|/)[^\s\\/]+(?:(?:\\+|/)[^\s\\/]+)*   # X:\Users\<user>\...
       | /(?:home|Users)/[^\s/]+(?:/[^\s/]+)*        # /home/<user>/..., /Users/<user>/...
     )
     """
@@ -481,7 +487,9 @@ _safe_source = safe_source
 DOC_DISPLAY_WINDOW = 5
 
 
-def format_document_results(results: list[dict[str, Any]]) -> str:
+def format_document_results(
+    results: list[dict[str, Any]], *, limit: int | None = DOC_DISPLAY_WINDOW
+) -> str:
     """Format document search results for the prompt.
 
     Args:
@@ -491,6 +499,10 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
             that index (see :data:`machina.agent.citations.CITATION_PROMPT`).
             The opaque ``chunk_id`` is deliberately **not** surfaced — it is
             resolved server-side from the display position.
+        limit: How many results to render, or ``None`` for all of them.
+            Defaults to :data:`DOC_DISPLAY_WINDOW`, the window the agent's
+            citation registry indexes. A workflow prompt has no citation
+            registry, so it renders every result its search returned.
 
     Returns:
         Formatted document excerpts.
@@ -499,7 +511,7 @@ def format_document_results(results: list[dict[str, Any]]) -> str:
         return "No relevant documents found."
 
     lines = [f"**Relevant Documents ({len(results)}):**"]
-    for i, result in enumerate(results[:DOC_DISPLAY_WINDOW], 1):
+    for i, result in enumerate(results[:limit], 1):
         # Defence-in-depth: sanitise here too in case an upstream caller
         # forgot to.  Idempotent for already-sanitised values.
         source = safe_source(result.get("source", "unknown"))

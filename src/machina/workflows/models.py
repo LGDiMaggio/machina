@@ -403,7 +403,7 @@ class WorkflowContext:
             return getattr(value, field_name)
         return _UNRESOLVED
 
-    def resolve(self, template: str) -> str:
+    def resolve(self, template: str, render: Callable[[Any], str] = str) -> str:
         """Interpolate ``{key}`` placeholders in *template*, returning a string.
 
         Supported patterns:
@@ -411,6 +411,10 @@ class WorkflowContext:
         * ``{trigger.field}`` — value from the trigger event.
         * ``{step_name}`` — full output of a prior step (str-coerced).
         * ``{step_name.field}`` — nested field access (dict or object).
+
+        Each resolved value is turned into text by *render* (``str`` by
+        default). The engine passes an LLM-safe renderer for ``agent.reason``
+        prompts, so step outputs reach the model without filesystem paths.
 
         Unresolved placeholders are left as-is so the missing
         substitution is visible in the rendered string, and a structured
@@ -436,7 +440,7 @@ class WorkflowContext:
                     return f"[{step_name} failed]"
                 logger.warning("template_unresolved", expression=expr)
                 return match.group(0)
-            return str(value)
+            return render(value)
 
         return _PLACEHOLDER_RE.sub(_replacer, template)
 
