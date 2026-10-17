@@ -14,7 +14,7 @@ from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, DomainValidationError
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
 
@@ -876,3 +876,154 @@ class TestUpdateWorkOrder:
         # Verify the PATCH carried the CSRF token
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
         assert patch_req.headers.get("X-CSRF-Token") == "csrf-upd"
+
+
+# ---------------------------------------------------------------------------
+# Caller values in $filter
+# ---------------------------------------------------------------------------
+
+# Closes the string literal and widens the filter if interpolated raw.
+_BREAKOUT = "x' or 1 eq 1 or Equipment eq 'y"
+# The same value as an OData string literal: delimited, embedded quotes doubled.
+_BREAKOUT_LITERAL = "'x'' or 1 eq 1 or Equipment eq ''y'"
+
+
+class TestFilterValueQuoting:
+    """Caller values reach $filter as OData string literals, never as syntax."""
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": f"Equipment eq {_BREAKOUT_LITERAL}"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_asset(_BREAKOUT) is None
+
+    @pytest.mark.asyncio
+    async def test_read_work_orders(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{
+                    "$filter": (
+                        f"Equipment eq {_BREAKOUT_LITERAL} and "
+                        "MaintenanceOrderSystemStatus eq 'REL'' or ''1'' eq ''1'"
+                    )
+                },
+            ),
+            json={"d": {"results": []}},
+        )
+        wos = await connector.read_work_orders(asset_id=_BREAKOUT, status="REL' or '1' eq '1")
+        assert wos == []
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$top": "1", "$filter": f"MaintenanceOrder eq {_BREAKOUT_LITERAL}"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_work_order(_BREAKOUT) is None
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_sku(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_BILL_OF_MATERIAL_SRV",
+                "BillOfMaterialItem",
+                **{"$filter": f"BillOfMaterialComponent eq {_BREAKOUT_LITERAL}"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.read_spare_parts(sku=_BREAKOUT) == []
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_asset_on_configured_field(self, httpx_mock) -> None:
+        custom = SapPmConnector(
+            url=BASE,
+            auth=BasicAuth(username="u", password="p"),
+            bom_service="API_EQUIPMENT",
+            bom_entity_set="EquipmentBOM",
+            bom_material_field="Material",
+            bom_equipment_field="Equipment",
+        )
+        await _connect(httpx_mock, custom)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "EquipmentBOM",
+                **{"$filter": f"Equipment eq {_BREAKOUT_LITERAL} and Material eq 'MAT''001'"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await custom.read_spare_parts(asset_id=_BREAKOUT, sku="MAT'001") == []
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{
+                    "$filter": (
+                        f"Equipment eq {_BREAKOUT_LITERAL} and "
+                        "(MaintenanceOrderSystemStatus eq 'CNF' or "
+                        "MaintenanceOrderSystemStatus eq 'TECO' or "
+                        "MaintenanceOrderSystemStatus eq 'CLSD')"
+                    )
+                },
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.read_maintenance_history(_BREAKOUT) == []
+
+    @pytest.mark.asyncio
+    async def test_percent_encoded_quote_stays_data(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A pre-encoded ``%27`` reaches the gateway as three characters, not a quote."""
+        await _connect(httpx_mock, connector)
+        smuggled = "x%27 or 1 eq 1 or Equipment eq %27y"
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": f"Equipment eq '{smuggled}'"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_asset(smuggled) is None
+        # httpx encodes the "%" itself, so one round of decoding yields "%27" again.
+        assert "%2527" in str(httpx_mock.get_requests()[-1].url)
+
+    @pytest.mark.asyncio
+    async def test_non_string_value_is_refused_before_any_request(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(DomainValidationError, match="asset_id must be a string"):
+            await connector.get_asset(10000001)  # type: ignore[arg-type]
+        # Only the $metadata handshake went out.
+        assert [r.url.path for r in httpx_mock.get_requests()] == [
+            "/sap/opu/odata/sap/API_EQUIPMENT/$metadata"
+        ]

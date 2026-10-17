@@ -38,7 +38,7 @@ from machina.connectors.cmms.mappers.sap_pm import (
 from machina.connectors.cmms.mappers.sap_pm import (
     reverse_status as _reverse_status,
 )
-from machina.connectors.cmms.sap_pm import SapPmConnector, _require_httpx
+from machina.connectors.cmms.sap_pm import SapPmConnector, _odata_literal, _require_httpx
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -48,7 +48,7 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorError, DomainValidationError
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -315,6 +315,43 @@ class TestReverseMapping:
         assert _reverse_status(WorkOrderStatus.COMPLETED) == "CNF"
         assert _reverse_status(WorkOrderStatus.CLOSED) == "TECO"
         assert _reverse_status(WorkOrderStatus.CANCELLED) == "DLFL"
+
+
+# ---------------------------------------------------------------------------
+# OData string literals
+# ---------------------------------------------------------------------------
+
+
+class TestODataLiteral:
+    """Caller values reach a ``$filter`` expression only through ``_odata_literal``."""
+
+    def test_value_is_single_quoted(self) -> None:
+        assert _odata_literal("10000001", field="asset_id") == "'10000001'"
+
+    @pytest.mark.parametrize(
+        ("value", "literal"),
+        [
+            ("O'Neil", "'O''Neil'"),
+            ("'", "''''"),
+            ("x' or 1 eq 1 or Equipment eq 'y", "'x'' or 1 eq 1 or Equipment eq ''y'"),
+        ],
+    )
+    def test_embedded_single_quote_is_doubled(self, value: str, literal: str) -> None:
+        assert _odata_literal(value, field="asset_id") == literal
+
+    def test_empty_value_is_an_empty_literal(self) -> None:
+        assert _odata_literal("", field="asset_id") == "''"
+
+    def test_other_characters_pass_through_verbatim(self) -> None:
+        # Inside an OData string literal only the single quote is syntax.
+        # Percent-encoding the query string is httpx's job, not the literal's.
+        value = 'A%B*C"D\\E,F(G)H&I#J'
+        assert _odata_literal(value, field="sku") == f"'{value}'"
+
+    @pytest.mark.parametrize("value", [10000001, None, ["10000001"]])
+    def test_non_string_is_refused(self, value: object) -> None:
+        with pytest.raises(DomainValidationError, match="asset_id must be a string"):
+            _odata_literal(value, field="asset_id")
 
 
 # ---------------------------------------------------------------------------

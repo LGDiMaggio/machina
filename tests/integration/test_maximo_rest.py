@@ -14,7 +14,7 @@ from machina.domain.asset import Asset, AssetType
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, DomainValidationError
 
 BASE = "https://maximo.example.com"
 OSLC = f"{BASE}/maximo/oslc"
@@ -652,3 +652,60 @@ class TestRetryBehaviour:
         assets = await connector.read_assets()
         assert len(assets) == 1
         assert assets[0].id == "A1"
+
+
+# ---------------------------------------------------------------------------
+# Caller values in oslc.where
+# ---------------------------------------------------------------------------
+
+# Every method that puts a caller-supplied value into oslc.where, called with it.
+_FILTERED_CALLS = [
+    pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
+    pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
+    pytest.param(lambda c, v: c.read_work_orders(asset_id=v), id="read_work_orders-asset_id"),
+    pytest.param(lambda c, v: c.read_work_orders(status=v), id="read_work_orders-status"),
+    pytest.param(lambda c, v: c.read_spare_parts(sku=v), id="read_spare_parts-sku"),
+    pytest.param(lambda c, v: c.read_maintenance_history(v), id="read_maintenance_history"),
+    # Re-fetches by wonum after the PATCH, so the value must be refused before it.
+    pytest.param(lambda c, v: c.update_work_order(v, description="x"), id="update_work_order"),
+]
+
+# Values that would rewrite or widen the query if they reached oslc.where.
+_HOSTILE_VALUES = [
+    pytest.param('PUMP-201" or assetnum="%', id="quote-breakout"),
+    pytest.param("%", id="like-wildcard"),
+    pytest.param("*", id="not-null-test"),
+    pytest.param("PUMP-201,COMP-301", id="qbe-value-list"),
+    pytest.param("!=PUMP-201", id="qbe-operator"),
+    pytest.param("null", id="qbe-null-keyword"),
+    pytest.param("   ", id="blank"),
+]
+
+
+class TestOslcWhereValues:
+    @pytest.mark.asyncio
+    async def test_identifier_punctuation_reaches_the_clause_verbatim(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(
+                "mxasset",
+                **{"oslc.pageSize": "1", "oslc.where": 'assetnum="BR300/P_201 O\'NEIL"'},
+            ),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.get_asset("BR300/P_201 O'NEIL") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", _HOSTILE_VALUES)
+    @pytest.mark.parametrize("call", _FILTERED_CALLS)
+    async def test_hostile_value_is_refused_before_any_request(
+        self, httpx_mock, connector: MaximoConnector, call, value: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(DomainValidationError):
+            await call(connector, value)
+        # Only the whoami handshake went out: no OSLC query, no PATCH.
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]
