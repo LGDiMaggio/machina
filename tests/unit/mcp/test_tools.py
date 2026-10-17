@@ -53,6 +53,15 @@ SAMPLE_WO = WorkOrder(
 )
 
 
+class _ReadAssetsOnlyCmms:
+    """A CMMS with only the READ_ASSETS contract: ``read_assets()``, no ``get_asset``."""
+
+    capabilities = frozenset({Capability.READ_ASSETS})
+
+    async def read_assets(self) -> list[Asset]:
+        return SAMPLE_ASSETS
+
+
 class TestListAssets:
     @pytest.mark.asyncio
     async def test_returns_assets(self) -> None:
@@ -98,6 +107,24 @@ class TestGetAsset:
         result = await machina_get_asset(_make_ctx(runtime), "X-999")
         assert "error" in result
         assert "X-999" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_found_on_primary_without_get_asset(self) -> None:
+        """READ_ASSETS guarantees only read_assets(); get_asset is optional."""
+        from machina.mcp.tools import machina_get_asset
+
+        runtime = MachinaRuntime(connectors={"cmms": _ReadAssetsOnlyCmms()})
+        result = await machina_get_asset(_make_ctx(runtime), "V-001")
+        assert result["id"] == "V-001"
+        assert result["name"] == "Valve 1"
+
+    @pytest.mark.asyncio
+    async def test_not_found_on_primary_without_get_asset(self) -> None:
+        from machina.mcp.tools import machina_get_asset
+
+        runtime = MachinaRuntime(connectors={"cmms": _ReadAssetsOnlyCmms()})
+        result = await machina_get_asset(_make_ctx(runtime), "X-999")
+        assert result == {"error": "Asset 'X-999' not found"}
 
 
 class TestListWorkOrders:
@@ -198,6 +225,38 @@ class TestCreateWorkOrder:
         # The actual create should never have been called
         conn.create_work_order = AsyncMock()
         assert not conn.create_work_order.called
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_asset_raises_on_primary_without_get_asset(self) -> None:
+        """The read-validation scans read_assets() when the primary has no get_asset."""
+        from machina.mcp.tools import machina_create_work_order
+
+        runtime = MachinaRuntime(connectors={"cmms": _ReadAssetsOnlyCmms()})
+        with pytest.raises(AssetNotFoundError, match="X-999"):
+            await machina_create_work_order(
+                _make_ctx(runtime),
+                asset_id="X-999",
+                description="test",
+            )
+
+    @pytest.mark.asyncio
+    async def test_existing_asset_passes_on_primary_without_get_asset(self) -> None:
+        from machina.mcp.tools import machina_create_work_order
+
+        class _WritableCmms(_ReadAssetsOnlyCmms):
+            capabilities = frozenset({Capability.READ_ASSETS, Capability.CREATE_WORK_ORDER})
+
+            async def create_work_order(self, wo: WorkOrder) -> WorkOrder:
+                return wo
+
+        runtime = MachinaRuntime(connectors={"cmms": _WritableCmms()})
+        result = await machina_create_work_order(
+            _make_ctx(runtime),
+            asset_id="V-001",
+            description="stem leak",
+        )
+        assert result["asset_id"] == "V-001"
+        assert result["description"] == "stem leak"
 
 
 class TestUpdateWorkOrder:

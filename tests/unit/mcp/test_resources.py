@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from machina.config.schema import MachinaConfig
+from machina.connectors.capabilities import Capability
+from machina.domain.asset import Asset, AssetType
 from machina.mcp.resources import BUILTIN_FAILURE_TAXONOMY
 
 
@@ -68,10 +70,21 @@ class TestFailureTaxonomy:
             assert "detection_methods" in fm
 
 
+class _ReadAssetsOnlyCmms:
+    """A CMMS with only the READ_ASSETS contract: ``read_assets()``, no ``get_asset``."""
+
+    capabilities = frozenset({Capability.READ_ASSETS})
+
+    async def read_assets(self) -> list[Asset]:
+        return [
+            Asset(id="EQ-1", name="Pump 1", type=AssetType.ROTATING_EQUIPMENT),
+            Asset(id="EQ-2", name="Pump 2", type=AssetType.ROTATING_EQUIPMENT),
+        ]
+
+
 class TestAssetResource:
     @pytest.mark.asyncio
     async def test_read_existing_asset(self) -> None:
-        from machina.domain.asset import Asset, AssetType
         from machina.mcp.server import build_server
         from machina.runtime import MachinaRuntime
 
@@ -123,6 +136,41 @@ class TestAssetResource:
             assert len(content) == 1
             data = json.loads(content[0].content)
             assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_read_existing_asset_on_primary_without_get_asset(self) -> None:
+        """READ_ASSETS guarantees only read_assets(); get_asset is optional."""
+        from machina.mcp.server import build_server
+        from machina.runtime import MachinaRuntime
+
+        runtime = MachinaRuntime(connectors={"cmms": _ReadAssetsOnlyCmms()})
+        server = build_server(MachinaConfig())
+
+        with patch.object(server, "get_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            mock_ctx.return_value.request_context.lifespan_context = {"runtime": runtime}
+
+            results = list(await server.read_resource("machina://v1/assets/EQ-2"))
+
+        data = json.loads(results[0].content)
+        assert data["id"] == "EQ-2"
+        assert data["name"] == "Pump 2"
+
+    @pytest.mark.asyncio
+    async def test_read_nonexistent_asset_on_primary_without_get_asset(self) -> None:
+        from machina.mcp.server import build_server
+        from machina.runtime import MachinaRuntime
+
+        runtime = MachinaRuntime(connectors={"cmms": _ReadAssetsOnlyCmms()})
+        server = build_server(MachinaConfig())
+
+        with patch.object(server, "get_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            mock_ctx.return_value.request_context.lifespan_context = {"runtime": runtime}
+
+            results = list(await server.read_resource("machina://v1/assets/X-999"))
+
+        assert json.loads(results[0].content) == {"error": "Asset 'X-999' not found"}
 
 
 class TestWorkOrderResource:

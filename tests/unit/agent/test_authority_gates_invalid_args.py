@@ -139,9 +139,10 @@ class _TwoBadThenAnswerLLM:
 
 
 class _NoArgEmptyLLM:
-    def __init__(self) -> None:
+    def __init__(self, arguments: str = "") -> None:
         self.model = "fake:model"
         self._n = 0
+        self._arguments = arguments
         self.seen_messages: list[dict[str, Any]] | None = None
 
     async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
@@ -152,8 +153,9 @@ class _NoArgEmptyLLM:
     ) -> dict[str, Any]:
         self._n += 1
         if self._n == 1:
-            # Empty arguments string — a valid no-arg call, NOT a parse failure.
-            return {"content": "", "tool_calls": [_tc("list_assets", "", "e1")]}
+            # Empty arguments string by default — a valid no-arg call, NOT a
+            # parse failure.
+            return {"content": "", "tool_calls": [_tc("list_assets", self._arguments, "e1")]}
         self.seen_messages = list(messages)
         return {"content": "Listed.", "tool_calls": None}
 
@@ -210,3 +212,25 @@ class TestInvalidArgs:
         # reached the model) and no invalid-args error was fed back.
         assert _INVALID_ARGS_MESSAGE not in dumped
         assert "P-201" in dumped
+
+    @pytest.mark.asyncio
+    async def test_null_args_on_a_no_arg_tool_is_a_no_arg_call(self) -> None:
+        # Some providers serialize a model-written ``"arguments": null`` as the
+        # text "null". For a tool that declares no parameters it names no
+        # arguments, like an empty string; a tool with parameters still gets
+        # the invalid-args error (test_agent_runtime.TestNonObjectToolArguments).
+        llm = _NoArgEmptyLLM("null")
+        agent = Agent(plant=_plant(), llm=llm, connectors=[_ReadAssetsConnector()])
+        text = await agent._llm_loop([{"role": "user", "content": "list all"}], "c1")
+        assert text == "Listed."
+        dumped = json.dumps(llm.seen_messages, default=str)
+        assert _INVALID_ARGS_MESSAGE not in dumped
+        assert "P-201" in dumped
+
+    @pytest.mark.asyncio
+    async def test_unparseable_args_on_a_no_arg_tool_are_still_fed_back(self) -> None:
+        llm = _NoArgEmptyLLM("{not json")
+        agent = Agent(plant=_plant(), llm=llm, connectors=[_ReadAssetsConnector()])
+        await agent._llm_loop([{"role": "user", "content": "list all"}], "c1")
+        tool_results = [m["content"] for m in llm.seen_messages or [] if m.get("role") == "tool"]
+        assert tool_results == [json.dumps({"error": _INVALID_ARGS_MESSAGE})]

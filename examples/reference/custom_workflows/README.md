@@ -15,7 +15,7 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, it needs a connector that declares `create_purchase_order`, or the workflow stops there.
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
 
 ```python
 from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy, GuardCondition
@@ -57,7 +57,7 @@ spare_part_reorder = Workflow(
 
 Meant for a weekly run -- its trigger records the schedule (Mondays at 6 AM), but Machina does not schedule anything: start it from cron, Task Scheduler or your own service with `agent.trigger_workflow("Preventive Maintenance Scheduler")`. Scans for due plans, LLM prioritizes, batch-creates work orders.
 
-Caveat: no connector reports when a plan last ran, so unless your code records each plan's last execution on the scheduler, `scan_due_plans` assumes every plan ran exactly one interval ago and reports every active plan as due today. Feed it real execution dates before acting on the list:
+Caveat: no connector reports when a plan last ran, so unless your code records each plan's last execution on the scheduler, `scan_due_plans` assumes every plan ran exactly one interval ago and reports every active calendar plan as due today. Plans that recur only on operating hours or a meter reading are never reported as due; `maintenance_scheduler.plans_without_calendar_due_date` lists them. Feed it real execution dates before acting on the list:
 
 ```python
 preventive_scheduling = Workflow(
@@ -72,7 +72,7 @@ preventive_scheduling = Workflow(
         Step("create_work_orders",  action="work_order_factory.create_batch",
              is_write=True, on_error=ErrorPolicy.RETRY, retries=3),
         Step("notify_planners",     action="channels.send_message",
-             template="Plans due: {scan_plans.count}..."),
+             template="Plans due: {scan_plans}..."),
     ],
 )
 ```

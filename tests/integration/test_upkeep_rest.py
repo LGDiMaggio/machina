@@ -9,9 +9,9 @@ import pytest
 
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
-from machina.domain.maintenance_plan import MaintenancePlan
+from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
-from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
+from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 BASE = "https://api.onupkeep.com"
@@ -179,6 +179,60 @@ class TestReadWorkOrders:
         wos = await connector.read_work_orders(asset_id="a1", status="complete")
         assert wos == []
 
+    @pytest.mark.asyncio
+    async def test_read_work_orders_maps_documented_statuses(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """UpKeep reports ``onHold`` and ``inProgress``; neither may read as CREATED."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"},
+                    {"id": "wo2", "title": "Fix pump", "status": "onHold", "assetId": "a1"},
+                    {"id": "wo3", "title": "Fix pump", "status": "inProgress", "assetId": "a1"},
+                    {"id": "wo4", "title": "Fix pump", "status": "complete", "assetId": "a1"},
+                ],
+            },
+        )
+        wos = await connector.read_work_orders()
+        assert [wo.status for wo in wos] == [
+            WorkOrderStatus.CREATED,
+            WorkOrderStatus.ASSIGNED,
+            WorkOrderStatus.IN_PROGRESS,
+            WorkOrderStatus.COMPLETED,
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status"),
+        [
+            (WorkOrderStatus.CREATED, "open"),
+            (WorkOrderStatus.ASSIGNED, "onHold"),
+            (WorkOrderStatus.IN_PROGRESS, "inProgress"),
+            (WorkOrderStatus.COMPLETED, "complete"),
+            (WorkOrderStatus.CLOSED, "complete"),
+            (WorkOrderStatus.CANCELLED, "onHold"),
+        ],
+    )
+    async def test_status_filter_sends_documented_value(
+        self,
+        httpx_mock,
+        connector: UpKeepConnector,
+        status: WorkOrderStatus,
+        upkeep_status: str,
+    ) -> None:
+        """The ``status`` filter accepts only open, onHold, inProgress and complete."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status={upkeep_status}",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status=status) == []
+
 
 # ---------------------------------------------------------------------------
 # Create work order
@@ -341,29 +395,164 @@ class TestReadSpareParts:
 # ---------------------------------------------------------------------------
 
 
+PM_URL = f"{BASE}/api/v2/pm?includes=schedules&pageSize=100"
+
+
 class TestReadMaintenancePlans:
     @pytest.mark.asyncio
     async def test_read_maintenance_plans(self, httpx_mock, connector: UpKeepConnector) -> None:
+        """The "Get all PMs" response (developers.onupkeep.com/#get-all-pms).
+
+        The documented template is soft-deleted; its deletedAt/deletedBy
+        markers are left out so it reads as a live one.
+        """
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
-            url=f"{BASE}/api/v2/preventive-maintenance?limit=100&offset=0",
+            url=f"{PM_URL}&page=1",
             json={
-                "results": [
+                "data": [
                     {
-                        "id": "pm-1",
-                        "title": "Weekly inspection",
-                        "assetId": "a1",
-                        "frequencyDays": 7,
-                        "status": "active",
-                    },
+                        "__v": 0,
+                        "_id": "6568e5bf7a771cd3d83b337c",
+                        "category": "Inspection",
+                        "createFirstWO": True,
+                        "createdAt": "2023-11-30T19:42:55.984Z",
+                        "createdBy": "N5lbFIv8LW",
+                        "estimatedTime": 100,
+                        "files": ["trfyrp53kw"],
+                        "images": [],
+                        "legacyPMId": "t69EvI5kMq",
+                        "mainDescription": "Oil change #FP-ZFP-1",
+                        "name": "Oil change #FP-ZFP-1",
+                        "note": "Oil change for asset #FP-ZFP-1",
+                        "partInventories": [],
+                        "priority": 3,
+                        "requiresSignature": False,
+                        "role": "JtdU6sKOwD",
+                        "schedules": [
+                            {
+                                "asset": "BcmoxOY4mE",
+                                "assignee": "Fu8PEA9P9G",
+                                "bySetPosition": [],
+                                "cadenceFreq": "DAILY",
+                                "cadenceInterval": 3,
+                                "cadenceType": "manual",
+                                "endDate": "2024-10-09T08:42:24.000Z",
+                                "excludedates": [],
+                                "id": "65672e0c90176209662a4fc2",
+                                "includeDates": [],
+                                "isBasedOnCompletion": False,
+                                "location": "c78MVjkbvh",
+                                "monthdays": [],
+                                "nextDueDate": "2023-12-11T08:42:24.000Z",
+                                "nextTriggerDate": "2023-12-10T08:42:24.000Z",
+                                "pmTemplate": "65672e0c90176209662a4fc1",
+                                "repeatFrequency": "MONTHLY",
+                                "repeatInterval": 7,
+                                "role": "PUlegnw3ml",
+                                "scheduleType": "EVERY_N_MONTHS",
+                                "startDate": "2023-12-10T08:42:24.000Z",
+                                "supportUsers": ["IDb8mbMV9l"],
+                                "team": "SFejxVqERT",
+                                "timeZone": "Asia/Kolkata",
+                                "weekdays": [],
+                            },
+                            {
+                                "asset": "BcmoxOY4mE",
+                                "assignee": "Fu8PEA9P9G",
+                                "bySetPosition": [],
+                                "endDate": "2024-10-09T16:23:35.000Z",
+                                "excludedates": [],
+                                "id": "65672e0c90176209662a4fc4",
+                                "includeDates": [],
+                                "location": "c78MVjkbvh",
+                                "meter": "vXMGBoLMJv",
+                                "meterConditionValue": 10000,
+                                "meterDueFrequency": "weeks",
+                                "meterDueInterval": 1,
+                                "monthdays": [],
+                                "nextMeterReading": 45750,
+                                "pmTemplate": "65672e0c90176209662a4fc1",
+                                "role": "PUlegnw3ml",
+                                "startDate": "2023-12-10T16:23:35.000Z",
+                                "supportUsers": ["IDb8mbMV9l"],
+                                "team": "SFejxVqERT",
+                                "timeZone": "Asia/Kolkata",
+                                "weekdays": [],
+                            },
+                        ],
+                        "tasks": [],
+                        "updatedAt": "2023-11-30T19:43:30.230Z",
+                    }
                 ],
+                "pagination": {
+                    "currentPage": 1,
+                    "currentPageSize": 25,
+                    "nextPage": None,
+                    "previousPage": None,
+                    "totalCount": 2,
+                    "totalPages": 1,
+                },
+                "success": True,
             },
         )
         plans = await connector.read_maintenance_plans()
-        assert len(plans) == 1
-        assert isinstance(plans[0], MaintenancePlan)
-        assert plans[0].interval.days == 7
+        assert all(isinstance(p, MaintenancePlan) for p in plans)
+        assert [p.id for p in plans] == ["65672e0c90176209662a4fc2", "65672e0c90176209662a4fc4"]
+        assert {p.asset_id for p in plans} == {"BcmoxOY4mE"}
+        assert {p.name for p in plans} == {"Oil change #FP-ZFP-1"}
+        assert plans[0].interval == Interval(months=7)
+        assert plans[1].interval == Interval()  # meter-triggered
+        assert plans[0].estimated_duration_hours == 100
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans_pagination(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Pages are numbered from 1; a page shorter than pageSize is the last."""
+        await _connect(httpx_mock, connector)
+
+        def template(i: int) -> dict[str, object]:
+            schedule = {
+                "id": f"s{i}",
+                "asset": "a1",
+                "repeatFrequency": "WEEKLY",
+                "repeatInterval": 1,
+            }
+            return {"_id": f"t{i}", "name": f"PM {i}", "schedules": [schedule], "tasks": []}
+
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{PM_URL}&page=1",
+            json={"data": [template(i) for i in range(100)]},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{PM_URL}&page=2",
+            json={"data": [template(100)]},
+        )
+        plans = await connector.read_maintenance_plans()
+        assert len(plans) == 101
+        assert plans[-1].id == "s100"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans_auth_failure(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", url=f"{PM_URL}&page=1", status_code=401)
+        with pytest.raises(ConnectorAuthError):
+            await connector.read_maintenance_plans()
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_plans_server_error(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", url=f"{PM_URL}&page=1", status_code=500)
+        with pytest.raises(ConnectorError, match="GET /api/v2/pm failed"):
+            await connector.read_maintenance_plans()
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +634,6 @@ class TestUpdateWorkOrder:
                 },
             },
         )
-        from machina.domain.work_order import WorkOrderStatus
-
         updated = await connector.update_work_order("wo1", status=WorkOrderStatus.CLOSED)
         assert updated.id == "wo1"
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
@@ -454,6 +641,40 @@ class TestUpdateWorkOrder:
 
         payload = json.loads(patch_req.content)
         assert payload["status"] == "complete"  # CLOSED → UpKeep "complete"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status", "read_back"),
+        [
+            (WorkOrderStatus.ASSIGNED, "onHold", WorkOrderStatus.ASSIGNED),
+            (WorkOrderStatus.IN_PROGRESS, "inProgress", WorkOrderStatus.IN_PROGRESS),
+            # UpKeep has no cancelled state: the order is put on hold and reads back so.
+            (WorkOrderStatus.CANCELLED, "onHold", WorkOrderStatus.ASSIGNED),
+        ],
+    )
+    async def test_update_work_order_sends_documented_status(
+        self,
+        httpx_mock,
+        connector: UpKeepConnector,
+        status: WorkOrderStatus,
+        upkeep_status: str,
+        read_back: WorkOrderStatus,
+    ) -> None:
+        """The PATCH body's ``status`` accepts only open, onHold, inProgress and complete."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": upkeep_status, "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        updated = await connector.update_work_order("wo1", status=status)
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        assert json.loads(patch_req.content) == {"status": upkeep_status}
+        assert updated.status == read_back
 
 
 # ---------------------------------------------------------------------------

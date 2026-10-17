@@ -357,13 +357,15 @@ _TOOL_CALL_LEAK_FALLBACK = (
     "capable model."
 )
 
-# Fed back to the model (as the tool result) when it supplies a non-empty but
-# unparseable arguments blob, so it can retry with valid JSON instead of the
-# error being silently swallowed as ``{}`` and crashing a downstream tool that
-# needs required keys. FIXED text — never the raw exception, which echoes the
+# Fed back to the model (as the tool result) when its arguments are not a JSON
+# object (an unparseable blob, or valid JSON of another type such as [],
+# "P-201", 7 or null), so it can retry with an object instead of the error
+# being silently swallowed as ``{}`` and crashing a downstream tool that needs
+# required keys. FIXED text — never the raw exception, which echoes the
 # offending (possibly injected) argument bytes back into the prompt (H1).
 _INVALID_ARGS_MESSAGE = (
-    "Arguments could not be parsed as valid JSON. Retry this call with valid JSON arguments."
+    "Arguments must be a JSON object of this tool's parameters; these were not valid "
+    "JSON or not an object. Retry this call with a JSON object of arguments."
 )
 
 # Hard cap on how many unparseable-argument retries one turn may feed back
@@ -2150,6 +2152,12 @@ class Agent:
         ``role:tool`` message and no risk of a second write here.
         """
         tools = self._get_available_tools()
+        # Offered tools whose schema declares no parameters (list_assets).
+        no_arg_tools: set[str] = {
+            tool["function"]["name"]
+            for tool in tools
+            if not tool.get("function", {}).get("parameters", {}).get("properties")
+        }
 
         # Per-turn memo of side-effecting tool calls (keyed by name + args).
         # If the model re-requests the same write across loop iterations — the
@@ -2229,6 +2237,7 @@ class Agent:
             for tc in tool_calls:
                 func_name = tc.function.name
                 raw_arguments = getattr(tc.function, "arguments", None)
+                args: Any
                 if raw_arguments is None or not str(raw_arguments).strip():
                     # No arguments supplied — a valid no-arg call (e.g.
                     # list_assets), not a parse failure.
@@ -2237,34 +2246,45 @@ class Agent:
                     try:
                         args = json.loads(raw_arguments)
                     except (json.JSONDecodeError, TypeError, ValueError):
-                        # Genuinely malformed args. Instead of silently coercing to
-                        # {} (which masks the error and crashes a tool that needs
-                        # required keys like asset_id), feed a FIXED error back so
-                        # the model self-corrects. Bounded by
-                        # _MAX_ARG_CORRECTION_ATTEMPTS so persistent junk still
-                        # terminates (H1). The counter advances once per
-                        # ITERATION (below), not once per bad call, so a single
-                        # iteration emitting several malformed calls still leaves
-                        # the model its full quota of correction rounds.
-                        iteration_had_arg_error = True
-                        logger.warning(
-                            "invalid_tool_arguments",
-                            agent=self.name,
-                            tool=func_name,
-                            operation="llm_loop",
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
-                                "tool_call_id": tc.id,
-                            }
-                        )
-                        # The fed-back error is new information; mark progress so a
-                        # single bad call doesn't trip the no-progress guard — the
-                        # dedicated counter is the real bound.
-                        iteration_made_progress = True
-                        continue
+                        args = None  # unparseable — rejected with non-objects below
+                    else:
+                        if args is None and func_name in no_arg_tools:
+                            # JSON null on a tool that declares no parameters
+                            # names no arguments, like absent ones: a valid
+                            # no-arg call, not a malformed one.
+                            args = {}
+                if not isinstance(args, dict):
+                    # Genuinely malformed args: unparseable, or valid JSON that is
+                    # not an object ([], "P-201", 7, null). Every tool schema is an
+                    # object and the write gates and tool handlers read
+                    # args.get(...), so a non-object would raise AttributeError
+                    # and end the turn. Instead of silently coercing to {} (which
+                    # masks the error and crashes a tool that needs required keys
+                    # like asset_id), feed a FIXED error back so the model
+                    # self-corrects. Bounded by _MAX_ARG_CORRECTION_ATTEMPTS so
+                    # persistent junk still terminates (H1). The counter advances
+                    # once per ITERATION (below), not once per bad call, so a
+                    # single iteration emitting several malformed calls still
+                    # leaves the model its full quota of correction rounds.
+                    iteration_had_arg_error = True
+                    logger.warning(
+                        "invalid_tool_arguments",
+                        agent=self.name,
+                        tool=func_name,
+                        operation="llm_loop",
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps({"error": _INVALID_ARGS_MESSAGE}),
+                            "tool_call_id": tc.id,
+                        }
+                    )
+                    # The fed-back error is new information; mark progress so a
+                    # single bad call doesn't trip the no-progress guard — the
+                    # dedicated counter is the real bound.
+                    iteration_made_progress = True
+                    continue
 
                 # Canonical key for EVERY call (read or write), used for both the
                 # read-replay cache and the no-progress detector.
@@ -3652,6 +3672,9 @@ class Agent:
                     {
                         "step": sr.step_name,
                         "success": sr.success,
+                        # A skipped step can still carry the error that caused
+                        # the skip: without this flag it reads as a failure.
+                        "skipped": sr.skipped,
                         # Scrub user-home / UNC paths from step output and error
                         # text before it enters the LLM message history.
                         "output_summary": safe_text(str(sr.output)[:500]) if sr.output else None,

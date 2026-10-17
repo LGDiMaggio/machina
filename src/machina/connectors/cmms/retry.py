@@ -9,15 +9,19 @@ around ``httpx.AsyncClient.request()`` that retries on:
 * ``httpx.TimeoutException``, ``httpx.ConnectError``, ``httpx.ReadError``
   — common transient network errors, for idempotent methods only.
 
-A numeric ``Retry-After`` header on a retried response replaces the
-computed backoff.
+Retries use exponential backoff capped at ``max_backoff``. A numeric
+``Retry-After`` header on a retried response replaces the computed
+backoff when it is at most ``max_backoff``; a longer one ends the
+retries and the response is returned, because a retry inside the
+server's window would most likely be refused again and waiting it out
+would block the caller. No single wait exceeds ``max_backoff``, so one
+call sleeps at most ``max_retries * max_backoff`` in total.
 
-Retries use exponential backoff with a cap. Non-retryable status codes
-(4xx other than 429, 5xx other than 503) are returned to the caller
-unchanged so the connector layer can raise its domain-specific
-exceptions. The final response after exhausting retries is also
-returned, allowing the caller to still see the last ``status_code`` and
-headers.
+Non-retryable status codes (4xx other than 429, 5xx other than 503) are
+returned to the caller unchanged so the connector layer can raise its
+domain-specific exceptions. The final response after exhausting retries
+is also returned, allowing the caller to still see the last
+``status_code`` and headers.
 
 Example:
     ```python
@@ -85,7 +89,9 @@ async def request_with_retry(
         max_retries: Maximum number of retry attempts after the initial
             request. ``0`` disables retries.
         base_backoff: Initial exponential-backoff delay in seconds.
-        max_backoff: Cap on backoff delay in seconds.
+        max_backoff: Longest single wait, in seconds. The exponential
+            backoff is capped at it, and a numeric ``Retry-After`` longer
+            than it is not waited out: the response is returned instead.
         retry_on_network_error: Whether to retry on network/timeout errors.
             ``None`` (default) derives it from the method: idempotent methods
             (GET/HEAD/OPTIONS/PUT/DELETE) retry, non-idempotent ones
@@ -97,12 +103,14 @@ async def request_with_retry(
 
     Returns:
         The final ``httpx.Response``. This is either the first success,
-        the first non-retryable response, or the final retry response
-        after ``max_retries`` have been exhausted.
+        the first non-retryable response, a retryable response whose
+        ``Retry-After`` exceeds ``max_backoff``, or the final retry
+        response after ``max_retries`` have been exhausted.
 
     Raises:
         httpx.TimeoutException, httpx.ConnectError, httpx.ReadError:
-            Only re-raised when retries are exhausted.
+            Re-raised once retries are exhausted, or on the first failure
+            when network-error retries are off (POST/PATCH by default).
     """
     import httpx
 
@@ -158,8 +166,24 @@ async def request_with_retry(
             return resp
 
         retry_after = resp.headers.get("Retry-After", "").strip()
-        if retry_after.isdigit():
+        # delay-seconds is ASCII digits; str.isdigit() alone also accepts
+        # characters such as superscripts, which float() rejects.
+        if retry_after.isascii() and retry_after.isdigit():
             backoff = float(retry_after)
+            if backoff > max_backoff:
+                # Retrying before the server's window ends would most likely
+                # draw the same answer, and sleeping through it would block the
+                # caller for that long: hand the response back so the
+                # connector raises its error now.
+                logger.warning(
+                    "http_retry_after_exceeds_max_backoff",
+                    retry_after=backoff,
+                    max_backoff=max_backoff,
+                    status_code=resp.status_code,
+                    method=method,
+                    url=url,
+                )
+                return resp
         else:
             backoff = min(base_backoff * (2**attempt), max_backoff)
         logger.warning(

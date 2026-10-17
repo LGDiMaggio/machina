@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Runners are pinned to ubuntu-24.04, the image ubuntu-latest resolved to
+# until GitHub began moving it to Ubuntu 26.04 (rollout 2026-10-19 to
+# 2026-11-19). Move the label on purpose, after the jobs pass on
+# ubuntu-26.04, so an image change never lands mid-review.
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -51,16 +55,22 @@ jobs:
           coverage report --include='src/machina/observability/**' --fail-under=85
           coverage report --include='src/machina/workflows/**'     --fail-under=90
 
+      # Codecov merges every upload for a commit into one report. This job
+      # installs no optional extras, so its report alone shows 0% for the
+      # modules only ci-extras imports (mcp, excel, calendar, litellm); the
+      # `core` and `extras` flags keep the two uploads apart.
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v7
         with:
           files: ./coverage.xml
+          flags: core
+          name: core-py3.12
           fail_ci_if_error: false
 
   ci-extras:
     name: Tests with optional extras (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -78,11 +88,20 @@ jobs:
           pip install -e ".[dev,excel,calendar,litellm,mcp]"
 
       - name: Tests (incl. previously-skipped optional-dep suites)
-        run: pytest tests/ -v
+        run: pytest tests/ -v --cov=machina --cov-report=xml
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage.xml
+          flags: extras
+          name: extras-py3.12
+          fail_ci_if_error: false
 
   validate-examples:
     name: Validate examples & doc snippets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -110,7 +129,7 @@ jobs:
 
   docs:
     name: Docs build (strict)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 

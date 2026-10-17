@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from machina.mcp.tools import _find_asset
+
 if TYPE_CHECKING:
     from machina.runtime import MachinaRuntime
 
@@ -108,7 +110,7 @@ def register_resources(server: Any) -> None:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)
         cmms = runtime.get_primary_cmms()
-        asset = await cmms.get_asset(asset_id)  # type: ignore[attr-defined]
+        asset = await _find_asset(cmms, asset_id)
         if asset is None:
             return json.dumps({"error": f"Asset {asset_id!r} not found"})
         return asset.model_dump_json()  # type: ignore[no-any-return]

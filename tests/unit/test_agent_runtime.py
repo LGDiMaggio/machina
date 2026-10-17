@@ -15,6 +15,8 @@ import pytest
 from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.runtime import (
     _ECHO_SIMILARITY_THRESHOLD,
+    _INVALID_ARGS_MESSAGE,
+    _MAX_ARG_CORRECTION_ATTEMPTS,
     _REPEATED_RESPONSE_FALLBACK,
     Agent,
     _format_response_for_channel,
@@ -539,6 +541,52 @@ class _FakeLLMBadArgs:
             tc.id = "call_bad"
             return {"content": "", "tool_calls": [tc]}
         return {"content": "Handled bad args gracefully.", "tool_calls": None}
+
+
+# Tool-call arguments that ``json.loads`` accepts but that are not the JSON
+# object every tool's schema declares.
+_NON_OBJECT_ARGUMENTS = ["[]", '"P-201"', "7", "null"]
+
+
+class _FakeLLMNonObjectArgs:
+    """Fake LLM whose ``tool`` call carries valid JSON that is not an object.
+
+    Emits the call on its first tool round (every round when ``persistent``),
+    otherwise answers in text. Keeps the latest messages it was sent so a test
+    can assert what the runtime fed back.
+    """
+
+    def __init__(self, tool: str, arguments: str, *, persistent: bool = False) -> None:
+        self.model = "fake:model"
+        self._tool = tool
+        self._arguments = arguments
+        self._persistent = persistent
+        self.tool_rounds = 0
+        self.seen_messages: list[dict[str, Any]] = []
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        self.seen_messages = list(messages)
+        return "Forced final answer."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self.tool_rounds += 1
+        self.seen_messages = list(messages)
+        if self.tool_rounds == 1 or self._persistent:
+            tc = MagicMock()
+            tc.function.name = self._tool
+            tc.function.arguments = self._arguments
+            tc.id = f"call_{self.tool_rounds:03d}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Corrected and answered.", "tool_calls": None}
 
 
 class _FakeLLMRaises:
@@ -2794,6 +2842,86 @@ class TestLlmLoop:
         assert result == ""
 
 
+class TestNonObjectToolArguments:
+    """Arguments that parse as JSON but not as an object are malformed too.
+
+    ``json.loads`` accepts ``[]`` / ``"P-201"`` / ``7`` / ``null``, so without
+    a dict check such a call reached ``args.get(...)`` downstream and raised
+    ``AttributeError``. It must instead be fed back like unparseable JSON: the
+    fixed error, the same correction budget, the same warning.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("arguments", _NON_OBJECT_ARGUMENTS)
+    async def test_write_tool_args_fed_back_not_executed(self, arguments: str) -> None:
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        llm = _FakeLLMNonObjectArgs("create_work_order", arguments)
+        agent._llm = llm  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Create a work order for P-201")
+
+        # The turn completes on the model's own answer after one correction round.
+        assert response.text == "Corrected and answered."
+        assert response.completeness == "complete"
+        fed_back = [m["content"] for m in llm.seen_messages if m.get("tool_call_id") == "call_001"]
+        assert fed_back == [json.dumps({"error": _INVALID_ARGS_MESSAGE})]
+        # Rejected before the write path: nothing executed, nothing parked.
+        assert conn.create_calls == 0
+        assert agent._pending_actions == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("arguments", _NON_OBJECT_ARGUMENTS)
+    async def test_read_tool_args_fed_back_not_executed(self, arguments: str) -> None:
+        agent = Agent(connectors=[_FakeConnector()])
+        llm = _FakeLLMNonObjectArgs("read_work_orders", arguments)
+        agent._llm = llm  # type: ignore[assignment]
+        await agent.start()
+
+        response = await agent.handle_message_full("Show the work orders for P-201")
+
+        assert response.text == "Corrected and answered."
+        assert response.completeness == "complete"
+        # The actionable fixed error, not a tool result or an exception string.
+        fed_back = [m["content"] for m in llm.seen_messages if m.get("tool_call_id") == "call_001"]
+        assert fed_back == [json.dumps({"error": _INVALID_ARGS_MESSAGE})]
+
+    @pytest.mark.asyncio
+    async def test_persistent_non_object_args_share_the_correction_budget(self) -> None:
+        import structlog
+
+        conn = _CountingCreateWoConnector()
+        agent = Agent(connectors=[conn])
+        llm = _FakeLLMNonObjectArgs("create_work_order", "[]", persistent=True)
+        agent._llm = llm  # type: ignore[assignment]
+        await agent.start()
+        events: list[dict[str, Any]] = []
+
+        def _capture(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append(dict(event_dict))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            response = await agent.handle_message_full("Create a work order for P-201")
+        finally:
+            structlog.reset_defaults()
+
+        # One fed-back error and one warning per round, then tools are withdrawn
+        # and the answer is forced — the budget unparseable JSON gets.
+        assert llm.tool_rounds == _MAX_ARG_CORRECTION_ATTEMPTS
+        tool_messages = [m["content"] for m in llm.seen_messages if m["role"] == "tool"]
+        assert (
+            tool_messages
+            == [json.dumps({"error": _INVALID_ARGS_MESSAGE})] * _MAX_ARG_CORRECTION_ATTEMPTS
+        )
+        warned_tools = [e["tool"] for e in events if e.get("event") == "invalid_tool_arguments"]
+        assert warned_tools == ["create_work_order"] * _MAX_ARG_CORRECTION_ATTEMPTS
+        assert response.completeness == "partial"
+        assert conn.create_calls == 0
+
+
 class TestEmptyResponseFallback:
     """An empty rendered answer must surface a fallback, never blank output.
 
@@ -3117,6 +3245,33 @@ class TestAgentWorkflows:
         agent = Agent()
         with pytest.raises(WorkflowError, match="not registered"):
             await agent.trigger_workflow("Nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_execute_workflow_tool_reports_skipped_steps(self) -> None:
+        """A skipped step is flagged, so the error it keeps is not read as a failure."""
+        from machina.workflows import Step, Workflow
+        from machina.workflows.models import ErrorPolicy, GuardCondition
+
+        wf = Workflow(
+            name="Skips",
+            steps=[
+                # No connector reads spare parts: the step fails and is skipped.
+                Step(
+                    "check_spare_parts", action="cmms.read_spare_parts", on_error=ErrorPolicy.SKIP
+                ),
+                Step("gated", guard=GuardCondition(check=lambda _ctx: False)),
+            ],
+        )
+        agent = Agent(workflows=[wf])
+
+        out = await agent._tool_execute_workflow("Skips")
+
+        assert out["success"] is True
+        steps = {s["step"]: s for s in out["steps"]}
+        assert steps["check_spare_parts"]["skipped"] is True
+        assert "read_spare_parts" in steps["check_spare_parts"]["error"]
+        assert steps["gated"]["skipped"] is True
+        assert steps["gated"]["error"] is None
 
     def test_sandbox_flag(self) -> None:
         agent = Agent(sandbox=True)
