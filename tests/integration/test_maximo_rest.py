@@ -587,13 +587,23 @@ class TestUpdateWorkOrder:
     async def test_update_work_order_id_stays_one_path_segment(
         self, httpx_mock, connector: MaximoConnector
     ) -> None:
-        """Interpolated as-is, this ID would PATCH ``/os/mxasset/PUMP-201``."""
+        """Interpolated as-is, this ID would PATCH ``/os/mxwo/WO-1/mxasset``."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
-            method="PATCH", url=f"{OSLC}/os/mxwo/..%2Fmxasset%2FPUMP-201", status_code=404
+            method="PATCH", url=f"{OSLC}/os/mxwo/WO-1%2Fmxasset", status_code=404
         )
         with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order("WO-1/mxasset", description="x")
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_refuses_a_dot_segment_id_before_patching(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Behind a proxy that decodes ``%2F``, this ID would PATCH ``/os/mxasset/PUMP-201``."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
             await connector.update_work_order("../mxasset/PUMP-201", description="x")
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]
 
 
 # ---------------------------------------------------------------------------

@@ -484,23 +484,25 @@ class TestRestGetWorkOrder:
         await _connect_with_health(httpx_mock, conn)
         httpx_mock.add_response(
             method="GET",
-            url=f"{BASE_URL}/work_orders/..%2Fusers%2F1%3Frole%3Dadmin",
+            url=f"{BASE_URL}/work_orders/wo1%2Fusers%3Frole%3Dadmin",
             status_code=404,
         )
         httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets/a%2Fb%23c", status_code=404)
 
-        assert await conn.get_work_order("../users/1?role=admin") is None
+        assert await conn.get_work_order("wo1/users?role=admin") is None
         assert await conn.get_asset("a/b#c") is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("record_id", ["..", "../users/1"])
     async def test_dot_segment_ids_are_refused(
-        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector, record_id: str
     ) -> None:
+        """A proxy that decodes ``%2F`` would resolve ``../users/1`` into ``/users/1``."""
         conn = rest_connector_with_endpoints
         await _connect_with_health(httpx_mock, conn)
 
         with pytest.raises(ConnectorError, match="Invalid record ID"):
-            await conn.get_work_order("..")
+            await conn.get_work_order(record_id)
 
     @pytest.mark.asyncio
     async def test_empty_asset_id_is_refused_not_listed(
