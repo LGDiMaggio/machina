@@ -556,6 +556,36 @@ class TestRestUpdateWorkOrder:
         assert body["description"] == "Updated"
 
     @pytest.mark.asyncio
+    async def test_update_work_order_id_stays_one_path_segment(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        """Interpolated as-is, this ID would PATCH ``/work_orders/wo1/assets``."""
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE_URL}/work_orders/wo1%2Fassets", json={"ok": True}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/wo1%2Fassets",
+            json={"id": "wo1/assets", "asset_id": "P-201", "description": "x"},
+        )
+        updated = await conn.update_work_order("wo1/assets", description="x")
+        assert updated.id == "wo1/assets"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record_id", ["..", "../users/1"])
+    async def test_update_work_order_refuses_a_dot_segment_id_before_any_request(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector, record_id: str
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn.update_work_order(record_id, description="x")
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
     async def test_update_work_order_with_field_map(self, httpx_mock) -> None:
         """When field_map is configured, outgoing keys are remapped."""
         conn = GenericCmmsConnector(
