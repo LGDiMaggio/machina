@@ -392,7 +392,12 @@ class WorkflowEngine:
         if self._llm is None:
             raise WorkflowError(f"Step '{step.name}' requires an LLM but none is configured")
 
-        resolved_prompt = context.resolve(step.prompt)
+        # Imported here: machina.agent imports this module (the agent runs workflows).
+        from machina.agent.prompts import render_for_llm
+
+        # The prompt goes to the model provider: interpolated values must not
+        # carry filesystem paths (document chunks render by file name).
+        resolved_prompt = context.resolve(step.prompt, render=render_for_llm)
 
         if self.sandbox:
             logger.info(
