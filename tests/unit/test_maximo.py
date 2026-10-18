@@ -258,7 +258,7 @@ class TestOslcEq:
 
     Maximo documents no escape syntax inside an ``oslc.where`` string and hands
     the value to its QBE framework, so a value carrying query syntax is refused
-    rather than escaped. Adapted from #119's ``_oslc_literal`` tests.
+    rather than escaped.
     """
 
     @pytest.mark.parametrize(
@@ -278,7 +278,7 @@ class TestOslcEq:
             _oslc_eq("assetnum", f"PUMP{char}201")
         assert f"contains {char!r}" in str(exc_info.value)
 
-    @pytest.mark.parametrize("value", ["PUMP\n201", "PUMP\t201", "PUMP\x00201", "PUMP​201"])
+    @pytest.mark.parametrize("value", ["PUMP\n201", "PUMP\t201", "PUMP\x00201", "PUMP\u200b201"])
     def test_non_printable_character_is_refused(self, value: str) -> None:
         with pytest.raises(ConnectorError, match="contains a non-printable character"):
             _oslc_eq("assetnum", value)

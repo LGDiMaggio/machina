@@ -721,7 +721,7 @@ _HOSTILE_VALUES = [
 
 
 class TestOslcWhereValues:
-    """#119's hostile-value matrix, against every oslc.where call site."""
+    """Each hostile value against every method that builds an oslc.where clause."""
 
     @pytest.mark.asyncio
     async def test_identifier_punctuation_reaches_the_clause_verbatim(
