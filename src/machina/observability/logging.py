@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import traceback
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -27,6 +28,27 @@ def _redact_secrets(
         if any(pattern in key.lower() for pattern in _REDACT_PATTERNS):
             event_dict[key] = "***REDACTED***"
     return event_dict
+
+
+def traceback_text(exc: BaseException) -> str:
+    """Format *exc*'s traceback as plain text, for an event's ``exception`` field.
+
+    Machina logs ``exception=traceback_text(exc)`` instead of
+    ``exc_info=True``: the text has the exception type, message, chained
+    causes and each frame's file, line and function, but never the frames'
+    local variables, whatever renderer the application configured.
+    structlog's default console renderer prints those locals for an
+    ``exc_info`` when rich is installed, and a REST connector's frames hold
+    its auth headers.
+
+    Args:
+        exc: The exception to format.
+
+    Returns:
+        The traceback as ``format_exc_info`` renders it, without the
+        trailing newline.
+    """
+    return "".join(traceback.format_exception(exc)).removesuffix("\n")
 
 
 def configure_logging(

@@ -23,6 +23,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus
 from machina.connectors.capabilities import Capability
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.observability.logging import traceback_text
 
 logger = structlog.get_logger(__name__)
 
@@ -218,8 +219,10 @@ class OpcUaConnector:
         if self._client is not None:
             try:
                 await self._client.disconnect()
-            except Exception:
-                logger.debug("disconnect_error", connector="OpcUaConnector", exc_info=True)
+            except Exception as exc:
+                logger.debug(
+                    "disconnect_error", connector="OpcUaConnector", exception=traceback_text(exc)
+                )
         self._client = None
         self._connected = False
         logger.info("disconnected", connector="OpcUaConnector")
@@ -433,12 +436,12 @@ class OpcUaConnector:
         if sub._opcua_subscription is not None:
             try:
                 await sub._opcua_subscription.delete()
-            except Exception:
+            except Exception as exc:
                 logger.debug(
                     "subscription_delete_error",
                     connector="OpcUaConnector",
                     subscription_id=sub.id,
-                    exc_info=True,
+                    exception=traceback_text(exc),
                 )
 
     @staticmethod
@@ -549,10 +552,10 @@ class _DataChangeHandler:
 
         try:
             await self._callback(alarm)
-        except Exception:
+        except Exception as exc:
             logger.error(
                 "alarm_callback_error",
                 connector="OpcUaConnector",
                 alarm_id=alarm.id,
-                exc_info=True,
+                exception=traceback_text(exc),
             )

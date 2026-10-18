@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
+import logging
 import warnings
 from typing import Any, ClassVar
 
 import pytest
+import structlog
 
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.capabilities import Capability
 from machina.connectors.docs.document_store import DocumentChunk
+from machina.observability.logging import configure_logging
 from machina.observability.tracing import ActionTracer
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import (
@@ -1618,27 +1623,92 @@ class TestGuardExceptionLogging:
         assert result.step_results[0].skipped is True
 
     @pytest.mark.asyncio
-    async def test_guard_exception_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Guard exceptions produce a warning log entry."""
-        import logging
-
-        def bad_guard(ctx: dict) -> bool:
-            raise RuntimeError("Database connection lost")
-
-        engine = WorkflowEngine()
-        wf = Workflow(
-            name="GuardLog",
-            steps=[
-                Step(
-                    "guarded",
-                    action="",
-                    guard=GuardCondition(check=bad_guard, description="db guard"),
-                ),
-            ],
+    @pytest.mark.parametrize("host_config", ["frame_locals_renderer", "structlog_defaults"])
+    async def test_guard_exception_is_logged_without_frame_locals(
+        self,
+        host_config: str,
+        frame_locals_renderer: structlog.dev.ConsoleRenderer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An application that never calls ``configure_logging()`` (structlog's
+        defaults print frame locals when rich is installed), or configures a
+        renderer that does, still gets no credential from the guard's frame."""
+        stream = io.StringIO()
+        structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=stream))
+        if host_config == "frame_locals_renderer":
+            structlog.configure(processors=[frame_locals_renderer])
+        # A module logger cached by an earlier test would bypass this config.
+        monkeypatch.setattr(
+            "machina.workflows.engine.logger", structlog.get_logger("machina.workflows.engine")
         )
-        with caplog.at_level(logging.WARNING):
-            await engine.execute(wf)
+        try:
+            await WorkflowEngine().execute(_workflow_guarded_by(_guard_reading_the_cmms))
+        finally:
+            structlog.reset_defaults()
 
-        # structlog may not write to caplog by default, but the logger.warning
-        # call should produce output — verify step was skipped (behaviour test)
-        assert wf.steps[0].guard is not None
+        output = stream.getvalue()
+        assert "guard_exception" in output
+        assert "_guard_reading_the_cmms" in output
+        assert "RuntimeError: Database connection lost" in output
+        for secret in _GUARD_SECRETS:
+            assert secret not in output
+
+    @pytest.mark.asyncio
+    async def test_guard_exception_is_logged_as_json_with_its_traceback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = logging.getLogger()
+        handlers, level = root.handlers[:], root.level
+        configure_logging(json_output=True)
+        stream = io.StringIO()
+        root.handlers[0].setStream(stream)  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            "machina.workflows.engine.logger", structlog.get_logger("machina.workflows.engine")
+        )
+        try:
+            await WorkflowEngine().execute(_workflow_guarded_by(_guard_reading_the_cmms))
+        finally:
+            structlog.reset_defaults()
+            root.handlers[:] = handlers
+            root.setLevel(level)
+
+        [event] = [
+            line
+            for line in map(json.loads, stream.getvalue().splitlines())
+            if line["event"] == "guard_exception"
+        ]
+        assert event["step"] == "guarded"
+        assert event["guard"] == "cmms guard"
+        assert "exc_info" not in event
+        assert "_guard_reading_the_cmms" in event["exception"]
+        assert event["exception"].endswith("RuntimeError: Database connection lost")
+        for secret in _GUARD_SECRETS:
+            assert secret not in stream.getvalue()
+
+
+# Values a guard's frame holds while it reads a REST CMMS.
+_GUARD_SECRETS = (
+    "Bearer s3cr3t-bearer-token",
+    "s3cr3t-password",
+    "s3cr3t-api-key",
+    "s3cr3t-client-secret",
+)
+
+
+def _guard_reading_the_cmms(ctx: dict[str, Any]) -> bool:
+    headers = {"Authorization": _GUARD_SECRETS[0]}  # noqa: F841 — a frame local
+    password = _GUARD_SECRETS[1]  # noqa: F841
+    api_key = _GUARD_SECRETS[2]  # noqa: F841
+    client_secret = _GUARD_SECRETS[3]  # noqa: F841
+    raise RuntimeError("Database connection lost")
+
+
+def _workflow_guarded_by(check: Any) -> Workflow:
+    return Workflow(
+        name="GuardLog",
+        steps=[
+            Step(
+                "guarded", action="", guard=GuardCondition(check=check, description="cmms guard")
+            ),
+        ],
+    )

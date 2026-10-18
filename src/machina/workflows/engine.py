@@ -18,6 +18,7 @@ import structlog
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.capabilities import Capability
 from machina.exceptions import WorkflowError
+from machina.observability.logging import traceback_text
 from machina.observability.tracing import ActionTracer
 from machina.workflows.models import (
     ErrorPolicy,
@@ -219,7 +220,7 @@ class WorkflowEngine:
                     "guard_exception",
                     step=step.name,
                     guard=step.guard.description,
-                    exc_info=True,
+                    exception=traceback_text(exc),
                 )
                 should_run = False
                 guard_error = f"Guard raised {type(exc).__name__}: {exc}"
