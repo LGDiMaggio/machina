@@ -7,6 +7,7 @@ order history into the conversation.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -340,46 +341,213 @@ _NON_PATH_CHARS: frozenset[str] = frozenset("\"'{}[]()")
 _OPAQUE_SOURCE_PLACEHOLDER = "<document>"
 
 
+# Placeholder :func:`safe_text` emits for a path whose only identifying
+# component is its last one: a bare home directory (the user name) or a share
+# with nothing below it (shares are often named after their user,
+# ``\\\\fs01\\mrossi$``).
+_REDACTED_PATH_PLACEHOLDER = "<path>"
+
 # Identity- or infrastructure-revealing absolute paths that may be embedded in
-# free text (document body, error messages) and reach the LLM verbatim. Matches
-# user-home paths (``C:\\Users\\<user>\\...``, ``/home/<user>/...``,
-# ``/Users/<user>/...``) and UNC shares (``\\\\host\\share\\...``). Deliberately
-# does NOT match instructional system paths (``/etc``, ``/usr/bin``,
-# ``C:\\Program Files``) so technical manuals keep full fidelity — those carry
-# no privacy/infra signal. :func:`safe_source` is stricter because a source is
-# never instructional. Windows paths are also matched in escaped form:
-# ``repr()`` of a container (a list of document chunks, a dict) and JSON double
-# every backslash (``'C:\\\\Users\\\\me\\\\a.pdf'``), and such text reaches the
-# LLM through workflow step outputs and tool-result summaries. A UNC path is
-# matched with its exact separator widths (``\\\\host\\share`` plain,
-# ``\\\\\\\\host\\\\share`` escaped), so escaped text that only contains
-# doubled backslashes (``C:\\\\Windows\\\\System32``, ``..\\\\data\\\\x.csv``,
-# a regex such as ``\\\\d+``) is not mistaken for a share.
-_USER_PATH_RE = re.compile(
-    r"""(?ix)
-    (?:
-        \\{2}[^\s\\/]+(?:\\[^\s\\/]+)+              # UNC \\host\share\...
-      | \\{4}[^\s\\/]+(?:\\{2}[^\s\\/]+)+           # the same, escaped
-      | [A-Za-z]:(?:\\+|/)Users(?:\\+|/)[^\s\\/]+(?:(?:\\+|/)[^\s\\/]+)*   # X:\Users\<user>\...
-      | /(?:home|Users)/[^\s/]+(?:/[^\s/]+)*        # /home/<user>/..., /Users/<user>/...
-    )
+# free text (document body, error messages) and reach the LLM verbatim: user
+# homes (``C:\\Users\\<user>\\...``, ``/home/<user>/...``,
+# ``/Users/<user>/...``) and network shares (``\\\\host\\share\\...``,
+# ``//host/share/...``, ``smb://host/...``, ``file://host/...``), including the
+# ``\\\\?\\`` long-path forms and ``file:`` URIs. Instructional system paths
+# (``/etc``, ``/usr/bin``, ``C:\\Program Files``) are deliberately NOT matched
+# so technical manuals keep full fidelity. :func:`safe_source` is stricter
+# because a source is never instructional.
+#
+# A path-segment word excludes whitespace, separators and the characters
+# Windows forbids in file names (``: * ? " < > |``), so the second drive colon
+# in ``C:\\Users\\me and C:\\x`` ends the user segment instead of being
+# swallowed into it.
+_PATH_WORD = r"""[^\s\\/:*?"<>|]"""
+# Windows drive paths separate with a run of backslashes (``repr()`` and JSON
+# double every one) or a slash (how ``pathlib`` renders them).
+_DRIVE_SEP = r"(?:\\+|/)"
+
+# A path head runs up to and including the separator after the component that
+# names a person or a machine: the ``Users`` / ``home`` directory, or the host.
+# What follows it starts with the user or share name.
+_HEAD_DRIVE = (
+    r"(?:file:(?://localhost)?/*)?"  # file:///C:/...
+    r"(?:(?:\\{2}|\\{4}|//)[?.]" + _DRIVE_SEP + r")?"  # \\?\C:\, \\.\C:\, //?/C:/
+    r"[A-Za-z]:" + _DRIVE_SEP + r"Users" + _DRIVE_SEP
+)
+_HEAD_WSL = r"(?:file://(?:localhost)?)?/mnt/[A-Za-z]/Users/"  # a Windows profile seen from WSL
+_HEAD_POSIX = r"(?:file://(?:localhost)?)?/(?:home|Users)/"
+
+
+def _unc_head_and_sep(width: int) -> tuple[str, str]:
+    """The ``\\\\host\\`` head and separator of a UNC path escaped *width* times.
+
+    Each width is matched exactly (one backslash plain, two in ``repr()`` or
+    JSON, four when such text is escaped again), so escaped text that only
+    holds doubled backslashes (``C:\\\\Windows``, ``..\\\\data\\\\x.csv``, a
+    regex such as ``\\\\d+``) is not taken for a share. ``\\\\?\\`` and
+    ``\\\\.\\`` device paths are not shares unless they continue ``UNC\\``.
     """
+    backslashes = r"\\" * width
+    sep = backslashes + r"(?!\\)"
+    head = (
+        backslashes * 2
+        + r"(?:[?.]"
+        + backslashes
+        + "UNC"
+        + backslashes
+        + r")?(?![?.]\\)"
+        + _PATH_WORD
+        + "+"
+        + sep
+    )
+    return head, sep
+
+
+_UNC_FORMS = tuple(_unc_head_and_sep(width) for width in (4, 2, 1))
+
+# URI schemes that address a file share. Other URIs (mqtt://broker/topic,
+# opc.tcp://plc:4840/...) name a service endpoint, not a filesystem path.
+_SHARE_SCHEMES: tuple[str, ...] = ("file", "smb", "cifs", "nfs", "sftp", "scp", "afp")
+# A share URI's authority, ``[user@]host[:port]``, with or without a path.
+_HEAD_SHARE_URI = (
+    r"(?<![\w+.-])(?:" + "|".join(_SHARE_SCHEMES) + r")://" + _PATH_WORD + r"++(?::\d++)?/?"
+)
+# A bare ``//host/`` share, only after a boundary so that URLs and floor
+# division (``total//count/2``) are not taken for one.
+_HEAD_SLASH_UNC = r"(?<![\w)\]}.:/\\~-])//(?:[?.]/UNC/)?(?![?.]/)" + _PATH_WORD + "+/"
+
+_PATH_HEADS = (
+    _HEAD_DRIVE,
+    *(head for head, _ in _UNC_FORMS),
+    _HEAD_SHARE_URI,
+    _HEAD_SLASH_UNC,
+    _HEAD_WSL,
+    _HEAD_POSIX,
+)
+_PATH_HEAD_RE = re.compile("(?i:" + "|".join(_PATH_HEADS) + ")")
+
+# A folder holding user accounts. The component after it is an account name,
+# also when the folder sits under a share (``\\\\PC01\\C$\\Users\\mrossi``).
+_ACCOUNT_DIRS = frozenset({"users", "home", "users$", "home$"})
+
+
+def _spaced_tail(sep: str) -> str:
+    """Path tail whose inner segments may contain spaces (Windows forms).
+
+    A segment of up to four space-separated words (eight after ``OneDrive -``,
+    the synced tenant folder) counts only when a separator follows it
+    (``Mario Rossi\\Documents``), so prose after a path is left alone. The
+    last segment never extends across a space: the text after the cut is the
+    rest of the file name. The atomic group keeps the scan linear.
+    """
+    words = r"[ ]+" + _PATH_WORD + r"+"
+    inner = (
+        r"(?>OneDrive[ ]+-(?:" + words + r"){1,6}"
+        r"|" + _PATH_WORD + r"+(?:" + words + r"){0,3})" + sep
+    )
+    return r"(?:(?:" + inner + r")+(?:" + _PATH_WORD + r"+)?|" + _PATH_WORD + r"+)"
+
+
+def _plain_tail(sep: str) -> str:
+    """Path tail without spaces (POSIX and ``//host`` forms).
+
+    Linux and macOS account names cannot contain spaces, and prose such as
+    ``7 mm/s`` would otherwise join the path.
+    """
+    return r"(?:" + _PATH_WORD + r"+(?:" + sep + _PATH_WORD + r"+)*" + sep + r"?)"
+
+
+def _quoted_path(quote: str) -> str:
+    """A path that starts right after *quote* and runs to the same quote.
+
+    Quoted paths (``repr()``, JSON, ``str(OSError)``, Markdown code) are
+    unambiguous, so their segments may hold any number of spaces. Inside
+    single quotes an apostrophe followed by a letter (``D'Amico``) belongs to
+    the name; any other apostrophe closes the path.
+    """
+    excluded = quote + r"\n\r:*?<>|" + ('"' if quote != '"' else "")
+    body = "[^" + excluded + "]"
+    close = quote
+    if quote == "'":
+        body = "(?:" + body + r"|'(?=[^\W\d_]))"
+        close = r"'(?![^\W\d_])"
+    heads = "|".join(_PATH_HEADS)
+    return "(?<=" + quote + ")(?:" + heads + ")" + body + "*(?=" + close + ")"
+
+
+# Web URLs are matched first and kept whole: their paths are server-side
+# (``https://example.com/users/mario/``), and matching them stops the path
+# alternatives from cutting into them. The token ends at whitespace, quotes,
+# brackets, a backslash, a query or list delimiter (``= & , ; |``) or before a
+# drive, so a JSON or CSV neighbour and a local path passed as a query value
+# (``?path=C:/Users/...``) are still scanned. Ending early changes no URL
+# text by itself: the rest is rewritten only where it holds a path.
+_KEPT_URL = (
+    r"(?P<url>(?<![\w+.-])(?:"
+    + "|".join(re.escape(scheme.removesuffix("://")) for scheme in _REMOTE_URL_SCHEMES)
+    + r")://(?:(?![A-Za-z]:[\\/])[^\s'\"<>()\[\]{}\\|^`=&,;])*)"
+)
+
+_USER_PATH_RE = re.compile(
+    "(?i:"
+    + _KEPT_URL
+    + "".join("|" + _quoted_path(quote) for quote in "'\"`")
+    + "|"
+    + _HEAD_DRIVE
+    + _spaced_tail(_DRIVE_SEP)
+    + "|"
+    + _HEAD_WSL
+    + _spaced_tail("/")
+    + "".join("|" + head + _spaced_tail(sep) for head, sep in _UNC_FORMS)
+    + "|"
+    + _HEAD_SHARE_URI
+    + _plain_tail("/")
+    + "?|"
+    + _HEAD_SLASH_UNC
+    + _plain_tail("/")
+    + "|"
+    + _HEAD_POSIX
+    + _plain_tail("/")
+    + ")"
 )
 
 
-def _path_basename(match: re.Match[str]) -> str:
-    """Reduce a matched absolute path to its final component (basename).
+def _components_after_head(path: str) -> list[str] | None:
+    """The components after a user-home or share head, or ``None`` without one."""
+    head = _PATH_HEAD_RE.match(path)
+    if head is None:
+        return None
+    return [part for part in re.split(r"[\\/]+", path[head.end() :]) if part]
 
-    Trailing sentence punctuation captured by the greedy path match is
-    re-appended so prose like ``...see /home/me/notes.md.`` keeps its period.
+
+def _names_only_an_account(parts: list[str]) -> bool:
+    """Whether the last of *parts* is a user or share name, not a file.
+
+    True for a lone component after the head (the user or the share) and for
+    an account under a ``Users``/``home`` folder.
     """
+    return len(parts) <= 1 or parts[-2].lower() in _ACCOUNT_DIRS
+
+
+def _scrub_path(match: re.Match[str]) -> str:
+    """Reduce a matched path to its file name, or to a placeholder.
+
+    A path whose last component names an account (see
+    :func:`_names_only_an_account`) becomes :data:`_REDACTED_PATH_PLACEHOLDER`.
+    Trailing sentence punctuation captured by the match is re-appended so
+    ``see /home/me/notes.md.`` keeps its period.
+    """
+    if match.group("url") is not None:
+        return match.group(0)
     matched = match.group(0)
     core = matched.rstrip(".,;:!?")
     trailing = matched[len(core) :]
-    for part in reversed(re.split(r"[\\/]+", core)):
-        if part:
-            return part + trailing
-    return _OPAQUE_SOURCE_PLACEHOLDER + trailing
+    parts = _components_after_head(core)
+    if parts is None:
+        parts = [part for part in re.split(r"[\\/]+", core) if part]
+    if _names_only_an_account(parts):
+        return _REDACTED_PATH_PLACEHOLDER + trailing
+    return parts[-1] + trailing
 
 
 def safe_text(text: str) -> str:
@@ -387,26 +555,30 @@ def safe_text(text: str) -> str:
 
     Document body text and error messages can embed absolute paths that name a
     user account (``C:\\Users\\tedib\\...``, ``/home/me/...``) or an internal
-    host/share (``\\\\FILESRV01\\manuals\\...``). These reach the LLM verbatim
-    via chunk ``content`` and tool/workflow error strings — the same disclosure
-    class :func:`safe_source` closes for the ``source`` field. Each such path is
-    reduced to its basename so the surrounding prose stays intelligible.
+    host/share (``\\\\FILESRV01\\manuals\\...``, ``//FILESRV01/manuals/...``,
+    ``file://FILESRV01/...``). These reach the LLM verbatim via chunk
+    ``content`` and tool/workflow error strings — the same disclosure class
+    :func:`safe_source` closes for the ``source`` field. Each such path is
+    reduced to its file name so the surrounding prose stays intelligible; a
+    bare home directory or a share with nothing below it becomes ``<path>``.
+    Escaped (``repr()``/JSON) and quoted forms are covered, including profile
+    names with spaces.
 
     Deliberately conservative: instructional system paths (``/etc/...``,
-    ``/usr/bin``, ``C:\\Program Files\\...``) are left untouched so technical
-    manuals that legitimately reference them keep full fidelity. Only user-home
-    and UNC paths — which carry privacy/infra signal and no instructional
-    value — are redacted.
+    ``/usr/bin``, ``C:\\Program Files\\...``), relative paths and web URLs are
+    left untouched so technical manuals keep full fidelity. Only user-home and
+    network-share paths — which carry privacy/infra signal and no
+    instructional value — are redacted.
 
     Args:
         text: Free text that may contain embedded absolute paths.
 
     Returns:
-        The text with user-home / UNC paths reduced to basenames.
+        The text with user-home and network-share paths reduced to file names.
     """
     if not text:
         return text
-    return _USER_PATH_RE.sub(_path_basename, text)
+    return _USER_PATH_RE.sub(_scrub_path, text)
 
 
 def safe_source(source: str) -> str:
@@ -443,6 +615,14 @@ def safe_source(source: str) -> str:
     # Server-side URL identifiers reveal no host filesystem detail.
     if source.startswith(_REMOTE_URL_SCHEMES):
         return source
+
+    # A bare home directory or a share with nothing below it: the last
+    # component is the user (or a share named after one), never a file name.
+    # Checked before the scheme strip below, which would drop a share URI's
+    # host and with it the head.
+    after_head = _components_after_head(source)
+    if after_head is not None and _names_only_an_account(after_head):
+        return _OPAQUE_SOURCE_PLACEHOLDER
 
     # Local-by-protocol or unknown-scheme URIs — strip the scheme and
     # re-sanitise the path component as if it had been emitted directly.
@@ -546,7 +726,92 @@ def _is_document_chunk(value: Any) -> bool:
     )
 
 
-def render_for_llm(value: Any) -> str:
+def _render_chunk(chunk: Any) -> str:
+    """Render one document chunk as its ``Source:`` line and scrubbed text."""
+    return (
+        _document_ref(
+            chunk.source,
+            getattr(chunk, "page", ""),
+            getattr(chunk, "section_title", ""),
+            bool(getattr(chunk, "is_table", False)),
+        )
+        + "\n"
+        + safe_text(chunk.content)
+    )
+
+
+class _RenderedChunk:
+    """Stands in for a document chunk inside a container being rendered.
+
+    Its ``repr`` is the chunk's rendered block, so ``str()`` of the container
+    shows the block instead of the chunk's own repr.
+    """
+
+    __slots__ = ("_text",)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __repr__(self) -> str:
+        return self._text
+
+
+# How deep render_for_llm looks into nested dicts, lists and tuples for chunks.
+_MAX_RENDER_DEPTH = 8
+
+
+def _with_rendered_chunks(value: Any, depth: int = 0) -> Any:
+    """Copy *value*, replacing document chunks inside plain containers.
+
+    Only exact ``dict``, ``list`` and ``tuple`` values are copied, so other
+    types keep their own ``repr``. One-shot iterators are never consumed.
+    """
+    if _is_document_chunk(value):
+        return _RenderedChunk(_render_chunk(value))
+    if depth >= _MAX_RENDER_DEPTH:
+        return value
+    if type(value) is dict:
+        return {key: _with_rendered_chunks(item, depth + 1) for key, item in value.items()}
+    if type(value) is list:
+        return [_with_rendered_chunks(item, depth + 1) for item in value]
+    if type(value) is tuple:
+        return tuple(_with_rendered_chunks(item, depth + 1) for item in value)
+    return value
+
+
+# A ``source`` key with a quoted value, as dict reprs (``'source': '...'``),
+# JSON (``"source": "..."``) and dataclass reprs (``source='...'``) render it.
+_SOURCE_FIELD_RE = re.compile(
+    r"""(?<!\w)(?P<key>(?:'source'|"source")\s*:\s*|source\s*=\s*)"""
+    r"""(?:'(?P<single>(?:[^'\\\n]|\\.)*)'|"(?P<double>(?:[^"\\\n]|\\.)*)")""",
+    re.IGNORECASE,
+)
+
+_URI_SCHEME_RE = re.compile(r"([A-Za-z][\w+.-]*)://")
+
+
+def _safe_source_value(value: str) -> str:
+    """Sanitise a value read from a ``source`` field.
+
+    A document source keeps its file name only (:func:`safe_source`). A URI
+    of a service that is not a file share (``mqtt://broker/topic``, the
+    ``source`` of an :class:`~machina.domain.alarm.Alarm`) gets the free-text
+    policy instead, so its topic or node path survives.
+    """
+    scheme = _URI_SCHEME_RE.match(value)
+    if scheme and scheme.group(1).lower() not in _SHARE_SCHEMES:
+        return safe_text(value)
+    return safe_source(value)
+
+
+def _reduce_source_field(match: re.Match[str]) -> str:
+    quote, value = ("'", match.group("single"))
+    if value is None:
+        quote, value = ('"', match.group("double"))
+    return f"{match.group('key')}{quote}{_safe_source_value(value)}{quote}"
+
+
+def render_for_llm(value: Any, key: str | None = None) -> str:
     """Render a workflow value for text that is sent to the LLM.
 
     Used for the values interpolated into a workflow ``agent.reason`` prompt
@@ -557,34 +822,41 @@ def render_for_llm(value: Any) -> str:
     A document chunk, or a list or tuple of them (the output of a
     ``docs.search_documents`` step), is rendered as one block per chunk: a
     ``Source:`` line with the file name only (:func:`safe_source`), page,
-    section and table tag, then the full text with user-home and UNC paths
+    section and table tag, then the full text with user-home and share paths
     scrubbed (:func:`safe_text`). There is no ``[i]`` index: these blocks are
     outside the agent's citation registry, so an index would read as a
-    citation it cannot resolve. Any other value is ``str()``-rendered and
-    passed through :func:`safe_text`, which reduces user-home and UNC paths
-    to their file name and leaves other absolute paths (``/etc/...``) as they
-    are.
+    citation it cannot resolve. Chunks nested in dicts, lists and tuples
+    render as the same blocks.
+
+    A value read from a ``source`` field (*key*), and any quoted ``source``
+    value in the rendered text (dict and dataclass reprs, JSON), is a
+    document source and keeps its file name only. Everything else passes
+    through :func:`safe_text`, which reduces user-home and share paths to
+    their file name and leaves other absolute paths (``/etc/...``) as they
+    are. A string or path value is scanned as one quoted value, so a value
+    that is exactly a home directory becomes ``<path>`` even when the user
+    name contains spaces.
 
     Args:
         value: A step output, trigger field, or field of either.
+        key: The field *value* was read from (``{step.source}`` gives
+            ``"source"``), or ``None`` for a whole output or trigger.
 
     Returns:
         The text to put in front of the model.
     """
+    if key is not None and key.lower() == "source" and isinstance(value, str):
+        return _safe_source_value(value)
     chunks = [value] if _is_document_chunk(value) else value
     if isinstance(chunks, list | tuple) and chunks and all(map(_is_document_chunk, chunks)):
-        return "\n\n".join(
-            _document_ref(
-                chunk.source,
-                getattr(chunk, "page", ""),
-                getattr(chunk, "section_title", ""),
-                bool(getattr(chunk, "is_table", False)),
-            )
-            + "\n"
-            + safe_text(chunk.content)
-            for chunk in chunks
-        )
-    return safe_text(str(value))
+        return "\n\n".join(_render_chunk(chunk) for chunk in chunks)
+    text = _SOURCE_FIELD_RE.sub(_reduce_source_field, str(_with_rendered_chunks(value)))
+    if isinstance(value, str | os.PathLike) and '"' not in text and "\n" not in text:
+        # A whole value has known ends, so it is scanned as one quoted value:
+        # a value that is exactly a path (``C:\Users\Mario Rossi``) is then
+        # reduced as one path, spaces included.
+        return safe_text(f'"{text}"')[1:-1]
+    return safe_text(text)
 
 
 def build_context_message(
