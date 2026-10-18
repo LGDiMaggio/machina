@@ -36,6 +36,14 @@ def configure_logging(
 ) -> None:
     """Configure structured logging for Machina.
 
+    A logged exception is rendered as a plain-text traceback, in the
+    ``exception`` field: type, message and each frame's file, line and
+    function, never the frames' local variables (a REST connector's frames
+    hold its auth headers). This covers structlog events and records from
+    third-party libraries that reach the root handler installed here. A
+    handler an application adds later formats third-party records itself,
+    so it needs its own ``format_exc_info`` to keep their locals out.
+
     Args:
         level: Log level name (DEBUG, INFO, WARNING, ERROR).
         json_output: If True, emit JSON lines; otherwise human-readable.
@@ -47,13 +55,18 @@ def configure_logging(
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
+        # Render ``exc_info`` while the exception is current; see below.
+        structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
 
     if json_output:
         renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer()
+        # The exception reaches the renderer already rendered. Without
+        # ``plain_traceback``, structlog < 26.1 warns about that whenever rich
+        # is installed.
+        renderer = structlog.dev.ConsoleRenderer(exception_formatter=structlog.dev.plain_traceback)
 
     structlog.configure(
         processors=[
@@ -65,9 +78,17 @@ def configure_logging(
         cache_logger_on_first_use=True,
     )
 
+    # Every record reaches the renderer with its traceback as plain text:
+    # structlog's console renderer prints each frame's locals when rich is
+    # installed, and JSON output would otherwise carry no traceback at all.
+    # Running ``format_exc_info`` here as well covers third-party records,
+    # which skip the chain above; on structlog events it finds nothing left.
+    # Do not swap it for ``dict_tracebacks``, whose locals default is on, and
+    # keep ``keep_exc_info`` off so the stdlib formatter adds no traceback.
     formatter = structlog.stdlib.ProcessorFormatter(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.format_exc_info,
             renderer,
         ],
     )
@@ -93,9 +114,8 @@ def get_logger(name: str | None = None, **initial_context: str) -> structlog.std
             (e.g. ``connector="sap_pm"``, ``asset_id="P-201"``).
 
     Returns:
-        A bound structlog logger.
+        A bound structlog logger. It takes its configuration on first use,
+        so a module-level logger follows a later ``configure_logging()``.
     """
-    logger: structlog.stdlib.BoundLogger = structlog.get_logger(name)
-    if initial_context:
-        logger = logger.bind(**initial_context)
+    logger: structlog.stdlib.BoundLogger = structlog.get_logger(name, **initial_context)
     return logger

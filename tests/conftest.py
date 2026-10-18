@@ -6,12 +6,16 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 
 from machina.connectors.base import set_sandbox_mode
 from machina.domain.alarm import Alarm, Severity
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from typing import TextIO
+
+    from structlog.typing import ExcInfo
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -37,6 +41,25 @@ def _reset_sandbox_mode() -> Iterator[None]:
         yield
     finally:
         set_sandbox_mode(False)
+
+
+def _print_frame_locals(sio: TextIO, exc_info: ExcInfo) -> None:
+    """Write every traceback frame's local variables, as rich's ``show_locals`` does."""
+    tb = exc_info[2]
+    while tb is not None:
+        sio.write(f"\n{tb.tb_frame.f_code.co_name} locals: {tb.tb_frame.f_locals!r}")
+        tb = tb.tb_next
+
+
+@pytest.fixture
+def frame_locals_renderer() -> structlog.dev.ConsoleRenderer:
+    """A console renderer that prints frame locals for any ``exc_info`` it receives.
+
+    It stands in for structlog's default renderer with ``rich`` installed
+    (``RichTracebackFormatter(show_locals=True)``), so a leak test fails
+    whether or not ``rich`` is in the environment.
+    """
+    return structlog.dev.ConsoleRenderer(colors=False, exception_formatter=_print_frame_locals)
 
 
 @pytest.fixture

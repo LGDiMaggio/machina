@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import io
+import json
 import logging
+from typing import TYPE_CHECKING, Any
+
+import pytest
+import structlog
 
 from machina.observability.logging import configure_logging, get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    """Undo ``configure_logging()``: root handlers, root level and structlog's config.
+
+    ``configure_logging()`` turns on ``cache_logger_on_first_use``. Left on, it
+    pins a module-level logger that a later test uses to whatever configuration
+    is active at that moment.
+    """
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()
+        root.handlers[:] = handlers
+        root.setLevel(level)
 
 
 class TestConfigureLogging:
@@ -61,3 +88,154 @@ class TestGetLogger:
     def test_get_logger_without_context(self) -> None:
         logger = get_logger("test.module")
         assert hasattr(logger, "info")  # structlog BoundLogger or LazyProxy
+
+
+# Values a REST connector's frame holds while an exception passes through it.
+_SECRETS = (
+    "Bearer s3cr3t-bearer-token",
+    "s3cr3t-password",
+    "s3cr3t-api-key",
+    "s3cr3t-client-secret",
+)
+
+
+def _call_cmms() -> None:
+    """Fail while this frame holds credentials, as ``_rest_read_work_orders`` does."""
+    headers = {"Authorization": _SECRETS[0]}  # noqa: F841 — a frame local
+    password = _SECRETS[1]  # noqa: F841
+    api_key = _SECRETS[2]  # noqa: F841
+    client_secret = _SECRETS[3]  # noqa: F841
+    raise RuntimeError("CMMS returned 401")
+
+
+def _map_response() -> None:
+    """Re-raise the CMMS failure as a mapping error, from a frame holding a token."""
+    token = _SECRETS[0]  # noqa: F841 — a frame local
+    try:
+        _call_cmms()
+    except RuntimeError as exc:
+        raise KeyError("wonum") from exc
+
+
+def _log_structlog_failure(log: Any = None, fail: Callable[[], None] = _call_cmms) -> None:
+    try:
+        fail()
+    except Exception:
+        (log or structlog.get_logger("test.locals")).error("cmms_call_failed", exc_info=True)
+
+
+def _log_stdlib_failure() -> None:
+    """Log the way a third-party library does, through stdlib ``logging``."""
+    try:
+        _call_cmms()
+    except RuntimeError:
+        logging.getLogger("thirdparty.client").exception("request failed")
+
+
+_SOURCES = {"structlog": _log_structlog_failure, "stdlib": _log_stdlib_failure}
+
+
+def _configure(*, json_output: bool = False, renderer: Any = None) -> io.StringIO:
+    """Run ``configure_logging()`` and return the stream its handler writes to.
+
+    With *renderer*, the formatter's final renderer is swapped for it; every
+    processor that runs before the renderer stays as configured.
+    """
+    configure_logging(json_output=json_output)
+    handler = logging.getLogger().handlers[0]
+    stream = io.StringIO()
+    handler.setStream(stream)  # type: ignore[attr-defined]
+    if renderer is not None:
+        formatter: Any = handler.formatter
+        formatter.processors = [*formatter.processors[:-1], renderer]
+    return stream
+
+
+def _assert_traceback_without_locals(output: str, *expected: str) -> None:
+    assert "Traceback (most recent call last)" in output
+    for text in expected:
+        assert text in output
+    for secret in _SECRETS:
+        assert secret not in output
+
+
+class TestTracebacksCarryNoFrameLocals:
+    """A logged exception keeps its frames and message, never the frames' variables."""
+
+    @pytest.mark.parametrize("source", sorted(_SOURCES))
+    def test_console_renderer_never_receives_the_traceback_object(
+        self, source: str, frame_locals_renderer: structlog.dev.ConsoleRenderer
+    ) -> None:
+        stream = _configure(renderer=frame_locals_renderer)
+
+        _SOURCES[source]()
+
+        _assert_traceback_without_locals(
+            stream.getvalue(), "_call_cmms", "RuntimeError: CMMS returned 401"
+        )
+
+    @pytest.mark.parametrize("source", sorted(_SOURCES))
+    def test_console_output_of_the_configured_renderer(self, source: str) -> None:
+        """End to end, through the renderer ``configure_logging()`` builds (rich's
+        traceback formatter shows locals by default when rich is installed)."""
+        stream = _configure()
+
+        _SOURCES[source]()
+
+        _assert_traceback_without_locals(
+            stream.getvalue(), "_call_cmms", "RuntimeError: CMMS returned 401"
+        )
+
+    @pytest.mark.parametrize("source", sorted(_SOURCES))
+    def test_json_output_carries_the_traceback_as_a_string(self, source: str) -> None:
+        stream = _configure(json_output=True)
+
+        _SOURCES[source]()
+
+        line = json.loads(stream.getvalue())
+        assert "exc_info" not in line
+        assert isinstance(line["exception"], str)
+        _assert_traceback_without_locals(
+            line["exception"], "_call_cmms", "RuntimeError: CMMS returned 401"
+        )
+        _assert_traceback_without_locals(stream.getvalue())
+
+    def test_a_chained_exception_keeps_both_tracebacks(
+        self, frame_locals_renderer: structlog.dev.ConsoleRenderer
+    ) -> None:
+        stream = _configure(renderer=frame_locals_renderer)
+
+        _log_structlog_failure(fail=_map_response)
+
+        output = stream.getvalue()
+        _assert_traceback_without_locals(
+            output,
+            "_call_cmms",
+            "RuntimeError: CMMS returned 401",
+            "direct cause of the following exception",
+            "_map_response",
+            "KeyError: 'wonum'",
+        )
+
+    def test_a_logger_made_before_configure_logging_uses_its_handler(self) -> None:
+        """A module-level ``get_logger(__name__, connector=...)`` runs at import,
+        before the application calls ``configure_logging()``."""
+        log = get_logger("test.early", connector="cmms_0")
+        stream = _configure(json_output=True)
+
+        _log_structlog_failure(log)
+
+        line = json.loads(stream.getvalue())
+        assert line["connector"] == "cmms_0"
+        _assert_traceback_without_locals(line["exception"], "_call_cmms")
+
+
+def test_secret_named_fields_are_redacted() -> None:
+    stream = _configure(json_output=True)
+
+    structlog.get_logger("test.redact").info("connecting", password="hunter2", api_key="k-123")
+
+    line = json.loads(stream.getvalue())
+    assert line["password"] == "***REDACTED***"
+    assert line["api_key"] == "***REDACTED***"
+    assert "hunter2" not in stream.getvalue()
