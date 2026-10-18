@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -228,6 +230,91 @@ class TestTracebacksCarryNoFrameLocals:
         line = json.loads(stream.getvalue())
         assert line["connector"] == "cmms_0"
         _assert_traceback_without_locals(line["exception"], "_call_cmms")
+
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "machina"
+
+
+def _is_traceback_text_call(node: ast.expr) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (isinstance(func, ast.Name) and func.id == "traceback_text") or (
+        isinstance(func, ast.Attribute) and func.attr == "traceback_text"
+    )
+
+
+def _locals_capable_calls(source: str) -> list[tuple[int, str]]:
+    """Calls that can hand a renderer a live traceback, and with it frame locals.
+
+    Machina logs ``exception=traceback_text(exc)`` instead: an application that
+    never calls ``configure_logging()`` renders with structlog's defaults, which
+    print every frame's locals for an ``exc_info`` when rich is installed.
+    Keyword arguments forwarded through ``**kwargs`` are not seen.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "exc_info":
+                found.append((node.lineno, "exc_info="))
+            elif keyword.arg in {"show_locals", "capture_locals"} and not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is False
+            ):
+                found.append((node.lineno, f"{keyword.arg}="))
+            elif keyword.arg == "exception" and not _is_traceback_text_call(keyword.value):
+                found.append((node.lineno, "exception= not from traceback_text()"))
+        # ``Task.exception()`` takes no arguments; a logger's takes the event.
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in {"exception", "aexception"}
+            and (node.args or node.keywords)
+        ):
+            found.append((node.lineno, f".{func.attr}(...)"))
+    return found
+
+
+class TestNoLocalsCapableLogCalls:
+    """Machina's own log calls never pass a live exception to a renderer."""
+
+    def test_machina_source_has_none(self) -> None:
+        found = [
+            f"{path.relative_to(_SRC.parent)}:{line}: {call}"
+            for path in sorted(_SRC.rglob("*.py"))
+            for line, call in _locals_capable_calls(path.read_text(encoding="utf-8"))
+        ]
+
+        assert found == []
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            'log.warning("e", exc_info=True)',
+            "log.bind(exc_info=exc)",
+            'logger.exception("e")',
+            'logger.exception(f"e {x}")',
+            "logger.aexception(event)",
+            "RichTracebackFormatter(show_locals=True)",
+            "TracebackException.from_exception(exc, capture_locals=flag)",
+            'log.warning("e", exception=exc)',
+        ],
+    )
+    def test_the_scan_flags(self, call: str) -> None:
+        assert _locals_capable_calls(call)
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            "task.exception()",
+            'log.warning("e", exception=traceback_text(exc))',
+            'log.warning("e", exception=logging_module.traceback_text(exc))',
+            "RichTracebackFormatter(show_locals=False)",
+        ],
+    )
+    def test_the_scan_ignores(self, call: str) -> None:
+        assert _locals_capable_calls(call) == []
 
 
 def test_secret_named_fields_are_redacted() -> None:
