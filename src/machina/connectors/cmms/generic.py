@@ -23,7 +23,6 @@ from pydantic import Field, ValidationError
 from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,
@@ -41,6 +40,7 @@ from machina.connectors.cmms.pagination import (
     PageNumberPagination,
     PaginationStrategy,
 )
+from machina.connectors.cmms.paths import path_segment
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan

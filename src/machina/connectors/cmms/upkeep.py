@@ -23,9 +23,9 @@ import structlog
 
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
+from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import (
     WorkOrder,
