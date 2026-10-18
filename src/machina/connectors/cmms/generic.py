@@ -23,7 +23,7 @@ from pydantic import Field, ValidationError
 from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
-from machina.connectors.cmms._url import path_segment
+from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,

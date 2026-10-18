@@ -1,4 +1,4 @@
-"""URL helpers shared by the REST CMMS connectors."""
+"""URL-path helper shared by the CMMS REST connectors."""
 
 from __future__ import annotations
 
