@@ -269,9 +269,16 @@ def _is_traceback_text_call(node: ast.expr) -> bool:
     )
 
 
-# Keywords that switch frame locals on, and formatters that show them by default.
+# Keywords that switch frame locals on, formatters that show them by default,
+# and structlog's prebuilt instances of those formatters.
 _LOCALS_KEYWORDS = {"show_locals", "capture_locals", "tracebacks_show_locals"}
 _LOCALS_BY_DEFAULT = {"RichTracebackFormatter", "ExceptionDictTransformer"}
+_LOCALS_INSTANCES = {
+    "dict_tracebacks",
+    "rich_traceback",
+    "better_traceback",
+    "default_exception_formatter",
+}
 
 
 def _name(node: ast.expr) -> str | None:
@@ -292,8 +299,11 @@ def _locals_capable_calls(source: str) -> list[tuple[int, str]]:
     """
     found = []
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Name | ast.Attribute) and _name(node) == "dict_tracebacks":
-            found.append((node.lineno, "dict_tracebacks"))
+        if (
+            isinstance(node, ast.Name | ast.Attribute)
+            and (name := _name(node)) in _LOCALS_INSTANCES
+        ):
+            found.append((node.lineno, name))
         if not isinstance(node, ast.Call):
             continue
         for keyword in node.keywords:
@@ -348,6 +358,7 @@ class TestNoLocalsCapableLogCalls:
             "structlog.dev.RichTracebackFormatter()",
             "ExceptionDictTransformer()",
             "processors = [structlog.processors.dict_tracebacks]",
+            "ConsoleRenderer(exception_formatter=structlog.dev.rich_traceback)",
             "RichHandler(rich_tracebacks=True, tracebacks_show_locals=True)",
             "TracebackException.from_exception(exc, capture_locals=flag)",
             'log.warning("e", exception=exc)',
@@ -369,6 +380,26 @@ class TestNoLocalsCapableLogCalls:
     )
     def test_the_scan_ignores(self, call: str) -> None:
         assert _locals_capable_calls(call) == []
+
+
+def test_an_event_below_the_level_never_formats_its_traceback() -> None:
+    """At INFO, a debug event with ``exc_info`` is dropped before formatting."""
+    formatted: list[bool] = []
+
+    class _CountedError(Exception):
+        def __str__(self) -> str:
+            formatted.append(True)
+            return "counted"
+
+    stream = _configure()
+
+    try:
+        raise _CountedError
+    except _CountedError:
+        structlog.get_logger("test.level").debug("skipped", exc_info=True)
+
+    assert stream.getvalue() == ""
+    assert formatted == []
 
 
 def test_secret_named_fields_are_redacted() -> None:
