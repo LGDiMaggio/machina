@@ -376,7 +376,7 @@ class FakeResponse(io.BytesIO):
 def test_codecov_retries_transient_server_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     answers: list[Any] = [http_error(503, {}), FakeResponse(b'{"ok": true}')]
 
-    def fake_urlopen(url: str) -> Any:
+    def fake_urlopen(url: str, timeout: float) -> Any:
         answer = answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -388,8 +388,39 @@ def test_codecov_retries_transient_server_errors(monkeypatch: pytest.MonkeyPatch
 
 
 def test_codecov_returns_a_client_error_with_its_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(url: str) -> Any:
+    def fake_urlopen(url: str, timeout: float) -> Any:
         raise http_error(404, {"detail": "missing"})
 
     monkeypatch.setattr(cbc.urllib.request, "urlopen", fake_urlopen)
     assert cbc.Sources("o/r").codecov("compare/?pullid=1") == (404, {"detail": "missing"})
+
+
+def test_codecov_retries_a_network_timeout_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers: list[Any] = [TimeoutError("timed out"), FakeResponse(b'{"ok": true}')]
+
+    def fake_urlopen(url: str, timeout: float) -> Any:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cbc.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cbc.time, "sleep", lambda seconds: None)
+    assert cbc.Sources("o/r").codecov("pulls/1/") == (200, {"ok": True})
+
+
+def test_codecov_reports_a_persistent_network_failure_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: float) -> Any:
+        calls.append(url)
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setattr(cbc.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cbc.time, "sleep", lambda seconds: None)
+    status, body = cbc.Sources("o/r", attempts=3).codecov("pulls/1/")
+    assert status == 599
+    assert "network error" in body["detail"]
+    assert len(calls) == 3

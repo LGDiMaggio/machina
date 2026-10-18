@@ -38,6 +38,7 @@ from typing import Any
 
 DEFAULT_SLUG = "LGDiMaggio/machina"
 CODECOV_API = "https://api.codecov.io/api/v2/github/{owner}/repos/{name}"
+REQUEST_TIMEOUT = 30  # seconds per Codecov request
 FLAGS = ("core", "extras")  # one coverage upload per flag, see .github/workflows/ci.yml
 # GitHub lists at most this many commits of a PR; past it Codecov's walk cannot be reproduced.
 GITHUB_PR_COMMIT_LIMIT = 250
@@ -157,20 +158,30 @@ class Sources:
         return dict(runs[0]) if runs else None
 
     def codecov(self, path: str) -> tuple[int, dict[str, Any]]:
-        """GET a Codecov API path; 5xx answers are transient and retried."""
+        """GET a Codecov API path.
+
+        5xx answers and network failures are transient and retried; a network failure that
+        outlasts the retries comes back as status 599 so the check fails instead of crashing.
+        """
         url = f"{self.codecov_root}/{path}"
         for attempt in range(self.attempts):
+            last = attempt == self.attempts - 1
             try:
-                with urllib.request.urlopen(url) as response:
+                with urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT) as response:
                     return response.status, dict(json.load(response))
             except urllib.error.HTTPError as error:
-                if error.code >= 500 and attempt < self.attempts - 1:
+                if error.code >= 500 and not last:
                     time.sleep(2 * (attempt + 1))
                     continue
                 try:
                     return error.code, dict(json.load(error))
                 except ValueError:
                     return error.code, {}
+            except (urllib.error.URLError, TimeoutError) as error:
+                if not last:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return 599, {"detail": f"network error: {error}"}
         return 599, {}
 
 
