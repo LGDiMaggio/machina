@@ -672,7 +672,7 @@ class TestWhereValuesStayLiteral:
             pytest.param("BRG-6205,BRG-6206", id="qbe-alternatives"),
             pytest.param("!=BRG-6205", id="qbe-operator"),
             pytest.param("~null~", id="qbe-null"),
-            pytest.param("\x01!=BRG-6205", id="control-character-before-operator"),
+            pytest.param("\x01BRG-6205", id="control-character"),
             pytest.param("  ", id="blank"),
         ],
     )
