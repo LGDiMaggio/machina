@@ -209,6 +209,7 @@ paged reads and startup.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.
+- **Filter values and keys**: equipment, order and material numbers and statuses reach `$filter` as OData string literals with any `'` doubled, so a value cannot close its literal and add a clause; a number is sent as its digits. The `MaintenanceOrder(...)` key of `update_work_order` is also percent-encoded (`/`, `?`, `#`, `%`, `(`, `)`), so it stays one path segment.
 
 ## API Reference
 
