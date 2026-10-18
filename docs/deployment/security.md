@@ -105,33 +105,45 @@ own payload, not an LLM hallucination.
   that names a user or a file-share host to its file name:
 
     - user homes: `C:\Users\<user>\…` (backslashes or slashes, `\\?\` and
-      `//?/` long-path prefixes, `file:///C:/Users/…`), WSL
-      `/mnt/<drive>/Users/<user>/…`, `/home/<user>/…`, `/Users/<user>/…`;
+      `//?/` long-path prefixes, `file:///C:/Users/…`), WSL, Cygwin and Git
+      Bash `/mnt/<drive>/Users/<user>/…` and `/<drive>/Users/<user>/…`, and
+      `/home/<user>/…` or `/Users/<user>/…`, also below other folders of an
+      absolute path (`/srv/backup/home/<user>/…`);
     - shares: `\\host\share\…`, `\\?\UNC\host\…`, `//host/share/…`, and
       `file:`, `smb:`, `cifs:`, `nfs:`, `sftp:`, `scp:` and `afp:` URIs,
-      user and port included (`sftp://user@host:2222/…`).
+      user, password and port included (`smb://user:pass@host:445/…`,
+      `file:////host/share/…`).
 
-    A path whose last component names an account (a bare home directory, a
-    share with nothing below it, or a folder right under `Users`/`home`, as in
-    `\\PC01\C$\Users\<user>`) becomes `<path>`. Escaped text is matched too:
-    the doubled backslashes of `repr()` and JSON (`'C:\\Users\\<user>\\…'`),
-    and text escaped twice. A path in quotes (`repr()`, JSON, `str(OSError)`,
-    Markdown code) may contain spaces up to the closing quote, so profile names
-    such as `Mario Rossi` and OneDrive folders are covered. Unquoted Windows
-    paths accept segments of up to four words (eight after `OneDrive -`) when
-    a separator follows.
+    A path whose last component names an account becomes `<path>`: a bare home
+    directory, a share with nothing below it, or, below a share, a folder
+    right under `Users`, `home`, `homes` or `profiles` (`\\PC01\C$\Users\<user>`,
+    `\\NAS01\homes\<user>`). Escaped text is matched too: the doubled
+    backslashes of `repr()` and JSON (`'C:\\Users\\<user>\\…'`), and text
+    escaped twice. Paths joined without whitespace (`a.pdf;C:\Users\…`, `PATH`
+    lists) are found one by one. In quotes (`repr()`, JSON, `str(OSError)`,
+    Markdown code) the user or share name, a `OneDrive - …` folder and the file
+    name may contain spaces, so profile names such as `Mario Rossi` are
+    covered; a quoted command or sentence that only starts with a path keeps
+    its words. Unquoted Windows paths accept a folder of up to four words, the
+    later ones capitalised (`Mario Rossi`), or eight words after `OneDrive -`,
+    when a separator follows.
 
     Deliberately preserved, so manuals and messages keep full fidelity:
     instructional system paths (`/etc`, `/usr/bin`, `C:\Program Files`,
-    `C:\Windows\System32`), relative paths, `\\.\pipe\…` device paths, web URLs
+    `C:\Windows\System32`), relative and menu paths (`Settings/Users/Roles`),
+    REST paths (`/api/users/42`), `\\.\pipe\…` device paths, web URLs
     (`http(s)`, `s3`, `gs`, `ftp(s)`, kept whole) and service URIs
     (`mqtt://broker/topic`, `opc.tcp://plc:4840/…`). Known limits:
 
-    - an unquoted bare profile path whose name contains a space keeps the
-      words after the first (`C:\Users\Mario Rossi` at the end of a
-      sentence);
+    - an unquoted profile path keeps the later words of a user name with a
+      lowercase word or more than four words (`C:\Users\Maria de la Cruz\…`),
+      and of a bare spaced name at the end of a sentence
+      (`C:\Users\Mario Rossi`);
+    - a capitalised word right before a slash or backslash can be taken for a
+      folder (`C:\Users\me\x.csv Line 2\P-202` keeps only `P-202`);
     - a web URL whose own path names a user (`http://intranet/home/<user>/…`)
-      is kept;
+      is kept, and a protocol-relative URL (`//cdn.example.com/lib.js`) reads
+      as a share;
     - a bare `\\host` with no share is not matched, because it cannot be told
       apart from escaped regex text such as `\\d+`.
 - **Workflow outputs:** an `agent.reason` step's prompt goes to the model
@@ -145,11 +157,12 @@ own payload, not an LLM hallucination.
       same way.
     - A value read from a `source` field (`{find_doc.source}`,
       `{trigger.source}`), and a quoted `source` value in a rendered dict,
-      dataclass repr or JSON string, keeps its file name only. A service URI
-      in a `source` field, such as an alarm's `mqtt://` origin, keeps its
-      topic.
+      dataclass repr or JSON string, keeps only its file name when it is an
+      absolute path or a file-share URI. Any other source, such as an alarm's
+      `mqtt://` origin, an OPC-UA node id or a relative path, keeps its text.
     - Any other value passes through `safe_text`. A value that is exactly a
-      home directory becomes `<path>`, spaces in the user name included.
+      home directory or share becomes `<path>`, spaces in the user name
+      included.
 - **Not yet covered:** the MCP server's tool results (`machina_search_manuals`
   chunk content, `{"error": str(exc)}` results) do not yet pass through
   `safe_text`; only the `source` field is sanitised there.

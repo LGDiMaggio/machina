@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import PureWindowsPath
 
@@ -300,6 +301,66 @@ class TestRenderForLlm:
         assert "/srv/docs" not in text
         assert text.startswith("{'source': ")
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/home/luigi/log.txt shows 7 mm/s vibration",
+            r"C:\Users\mrossi\data.csv not found; check backup\2024 folder",
+            "//FILESRV01/share/a.pdf was replaced by the 7 mm/s trend",
+        ],
+    )
+    def test_a_value_that_starts_with_a_path_renders_like_free_text(self, value: str) -> None:
+        text = render_for_llm(value)
+
+        assert text == safe_text(value)
+        for fragment in ("luigi", "mrossi", "FILESRV01"):
+            assert fragment not in text
+
+    @pytest.mark.parametrize(
+        "value",
+        ["ns=2;s=Line1/P201/Vibration", "SCADA/Line1/P201", "manuals/pump.md"],
+    )
+    def test_a_source_that_is_not_an_absolute_path_keeps_its_context(self, value: str) -> None:
+        """An OPC-UA node id, a tag path or a relative path names no user or host."""
+        assert render_for_llm(value, key="source") == value
+        assert render_for_llm({"source": value}) == repr({"source": value})
+
+    def test_a_home_relative_source_loses_its_directory(self) -> None:
+        assert render_for_llm("~/manuals/x.pdf", key="source") == "x.pdf"
+
+    def test_a_nested_chunk_body_keeps_its_source_assignments(self) -> None:
+        chunk = DocumentChunk("Config: source = '/etc/hosts'", source="m.pdf")
+
+        nested = render_for_llm({"hits": [chunk, None]})
+
+        assert "Source: m.pdf\nConfig: source = '/etc/hosts'" in nested
+        assert render_for_llm([chunk]) == "Source: m.pdf\nConfig: source = '/etc/hosts'"
+
+    def test_a_chunk_nested_deeper_than_the_copy_limit_loses_its_directory(self) -> None:
+        value: object = _NESTED_CHUNK
+        for _ in range(10):
+            value = [value]
+
+        text = render_for_llm(value)
+
+        assert "pump.pdf" in text
+        for fragment in ("Plant", "Manuals", "Mario"):
+            assert fragment not in text
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("source='" + "a" * 300_000, id="unclosed-source-value"),
+            pytest.param("{'source': '" + "\\\\" * 150_000, id="escaped-source-value"),
+            pytest.param("C:\\Users\\" + "a b" * 100_000, id="long-whole-value"),
+            pytest.param({"source": "/srv/" + "a/" * 100_000}, id="deep-source-path"),
+        ],
+    )
+    def test_rendering_stays_linear_on_adversarial_input(self, value: object) -> None:
+        start = time.perf_counter()
+        render_for_llm(value)
+        assert time.perf_counter() - start < 2.0
+
     def test_a_generator_output_is_not_consumed(self) -> None:
         chunks = (c for c in [_NESTED_CHUNK])
 
@@ -485,6 +546,9 @@ class TestSafeSource:
     def test_long_path_and_forward_slash_shares_reduce_to_file_name(self, source: str) -> None:
         assert safe_source(source) == "x.pdf"
 
+    def test_a_folder_named_home_below_a_profile_is_an_ordinary_folder(self) -> None:
+        assert safe_source(r"C:\Users\me\Documents\home\guide.pdf") == "guide.pdf"
+
     def test_private_alias_still_resolves_to_same_function(self) -> None:
         """The ``_safe_source`` private alias remains for backwards compatibility."""
         assert _safe_source is safe_source
@@ -648,12 +712,23 @@ class TestSafeText:
             # A local path passed in a URL query, and a CSV neighbour of a URL.
             "https://viewer.local/open?path=C:/Users/mrossi/a.pdf",
             "https://wiki.local/doc,C:/Users/mrossi/a.pdf",
+            # How pathname2url writes a UNC path, and a password in the authority.
+            "file:////FILESRV01/share/a.pdf",
+            "file://///FILESRV01/share/a.pdf",
+            "smb://mrossi:S3cret@FILESRV01/share/a.pdf",
+            "cifs://FILESRV01/share/a.pdf",
+            "nfs://FILESRV01/share/a.pdf",
+            "scp://mrossi@FILESRV01/data/a.pdf",
+            "afp://FILESRV01/share/a.pdf",
+            "file://localhost/C:/Users/mrossi/a.pdf",
+            "file://localhost/home/luigi/a.pdf",
         ],
     )
     def test_unc_and_uri_variants_lose_their_host(self, text: str) -> None:
         out = safe_text(text)
         assert "a.pdf" in out
-        for fragment in ("FILESRV01", "Mario", "Rossi", "mrossi", "luigi", "Users", "share"):
+        fragments = ("FILESRV01", "Mario", "Rossi", "mrossi", "luigi", "Users", "share", "S3cret")
+        for fragment in fragments:
             assert fragment not in out
 
     @pytest.mark.parametrize(
@@ -683,6 +758,13 @@ class TestSafeText:
             "mqtt://broker01/plant/line1/p201/vibration",
             "opc.tcp://plc-line2:4840/ns=2;s=Pump.Vibration",
             "file:///etc/fstab",
+            # Relative paths, URL paths and REST paths are not homes.
+            "Go to Settings/Users/Roles to add a technician.",
+            "mqtt://broker01/cell3/robot1/home/state",
+            "GET /api/users/42 returned 404",
+            # A scheme named in Markdown, and escaped newlines in notebook JSON.
+            "Use ``smb://`` or ``file://`` URIs for shares.",
+            r'"source": ["import os\n", "os.getcwd()\n"]',
             r"\\.\pipe\docker_engine",
             "x = total//count/2  # integer division",
             "```python\nopen('/etc/hosts')\n```\n\n**Bold** and `inline/code`",
@@ -693,13 +775,86 @@ class TestSafeText:
     def test_text_without_a_user_or_host_path_is_unchanged(self, text: str) -> None:
         assert safe_text(text) == text
 
-    def test_prose_after_a_profile_path_is_kept(self) -> None:
-        assert safe_text(r"C:\Users\me and C:\x") == r"<path> and C:\x"
-        assert (
-            safe_text(r"Copy C:\Users\me to the folder Logs\2024")
-            == r"Copy <path> to the folder Logs\2024"
-        )
-        assert safe_text("Readings in /home/me show 7 mm/s") == "Readings in <path> show 7 mm/s"
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"C:\Users\me and C:\x", r"<path> and C:\x"),
+            (r"Copy C:\Users\me to the folder Logs\2024", r"Copy <path> to the folder Logs\2024"),
+            ("Readings in /home/me show 7 mm/s", "Readings in <path> show 7 mm/s"),
+            # A slash or backslash a few words after the path is prose, not a folder.
+            (
+                r"Log at C:\Users\mrossi\vib.csv, 7.1 mm/s peak on P-201",
+                "Log at vib.csv, 7.1 mm/s peak on P-201",
+            ),
+            (r"See C:\Users\mrossi\x.csv and/or the backup", "See x.csv and/or the backup"),
+            (r"Log \\FILESRV01\share\log.txt on P-201\P-202", r"Log log.txt on P-201\P-202"),
+        ],
+    )
+    def test_prose_after_a_path_is_kept(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"C:\Users\mrossi\x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (r"C:\Users\mrossi\x.pdf,C:\Users\luigi\y.pdf", "x.pdf,y.pdf"),
+            (r"(C:\Users\mrossi\x.pdf)C:\Users\luigi\y.pdf", "(x.pdf)y.pdf"),
+            (r"\\FILESRV01\share\x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (r"/home/mrossi/x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (repr(r"C:\Users\mrossi\x.pdf;C:\Users\luigi\y.pdf"), "'x.pdf;y.pdf'"),
+            ("PATH=/usr/bin:/home/luigi/bin", "PATH=/usr/bin:bin"),
+        ],
+    )
+    def test_paths_joined_without_whitespace_are_each_scrubbed(
+        self, text: str, expected: str
+    ) -> None:
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                str(
+                    subprocess.CalledProcessError(
+                        1, "/home/luigi/venv/bin/python run.py --out out/res.csv"
+                    )
+                ),
+                "Command 'python run.py --out out/res.csv' returned non-zero exit status 1.",
+            ),
+            (
+                '{"msg": "/home/luigi/data.csv has 7 mm/s peaks"}',
+                '{"msg": "data.csv has 7 mm/s peaks"}',
+            ),
+            ("`/home/luigi/bin/run.sh --input data/x.csv`", "`run.sh --input data/x.csv`"),
+            (r"'C:\Users\me\My Documents\pump manual.pdf'", "'pump manual.pdf'"),
+        ],
+    )
+    def test_quoted_text_that_starts_with_a_path_keeps_its_words(
+        self, text: str, expected: str
+    ) -> None:
+        """Only the user name, a OneDrive folder and the file name may hold spaces in quotes."""
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("/srv/backup/home/luigi/x.pdf", "x.pdf"),
+            ("Moved to /srv/backup/home/luigi.", "Moved to <path>."),
+            ("/c/Users/Mario Rossi/Documents/x.pdf", "x.pdf"),
+            (r"\\NAS01\homes\luigi", "<path>"),
+            (r"\\FILESRV01\Profiles$\mrossi", "<path>"),
+            (r"\\FS01\users$\mrossi", "<path>"),
+            (r"\\FS01\home$\mrossi", "<path>"),
+            (
+                r"C:\Users\mrossi\OneDrive - Universita degli Studi di Napoli Federico II\x.pdf",
+                "x.pdf",
+            ),
+            # Below a home head, a folder named users is an ordinary folder.
+            ('File "/home/luigi/proj/users/models.py", line 3', 'File "models.py", line 3'),
+        ],
+    )
+    def test_more_home_and_share_layouts(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
 
     def test_a_json_neighbour_of_a_url_is_still_scrubbed(self) -> None:
         raw = r'{"url":"https://x.com/a","p":"C:\\Users\\me\\x.pdf"}'
