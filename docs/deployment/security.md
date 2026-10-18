@@ -99,23 +99,60 @@ own payload, not an LLM hallucination.
   protected at the prompt-formatting layer.
 - **Beyond the `source` field (v0.3.1):** absolute paths can also be embedded
   in the chunk **content** text itself and in **workflow error / output
-  strings** that flow back to the LLM. `agent.prompts.safe_text` scrubs those
-  — it reduces identity-/infrastructure-revealing paths (user-home dirs like
-  `C:\Users\<user>\…`, `/home/<user>/…`, and UNC shares `\\host\share\…`) to
-  their basename, while deliberately preserving instructional system paths
-  (`/etc`, `/usr/bin`, `C:\Program Files`) so technical-manual fidelity is
-  kept. It is applied to chunk content in both runtime boundaries and to the
-  `execute_workflow` step `error` payloads. It also matches the doubled
-  backslashes of `repr()` and JSON text (`'C:\\Users\\<user>\\…'`).
+  strings** that flow back to the LLM. `agent.prompts.safe_text` scrubs those.
+  It is applied to chunk content in both runtime boundaries, to tool errors
+  and to the `execute_workflow` step `error` payloads. It reduces each path
+  that names a user or a file-share host to its file name:
+
+    - user homes: `C:\Users\<user>\…` (backslashes or slashes, `\\?\` and
+      `//?/` long-path prefixes, `file:///C:/Users/…`), WSL
+      `/mnt/<drive>/Users/<user>/…`, `/home/<user>/…`, `/Users/<user>/…`;
+    - shares: `\\host\share\…`, `\\?\UNC\host\…`, `//host/share/…`, and
+      `file:`, `smb:`, `cifs:`, `nfs:`, `sftp:`, `scp:` and `afp:` URIs,
+      user and port included (`sftp://user@host:2222/…`).
+
+    A path whose last component names an account (a bare home directory, a
+    share with nothing below it, or a folder right under `Users`/`home`, as in
+    `\\PC01\C$\Users\<user>`) becomes `<path>`. Escaped text is matched too:
+    the doubled backslashes of `repr()` and JSON (`'C:\\Users\\<user>\\…'`),
+    and text escaped twice. A path in quotes (`repr()`, JSON, `str(OSError)`,
+    Markdown code) may contain spaces up to the closing quote, so profile names
+    such as `Mario Rossi` and OneDrive folders are covered. Unquoted Windows
+    paths accept segments of up to four words (eight after `OneDrive -`) when
+    a separator follows.
+
+    Deliberately preserved, so manuals and messages keep full fidelity:
+    instructional system paths (`/etc`, `/usr/bin`, `C:\Program Files`,
+    `C:\Windows\System32`), relative paths, `\\.\pipe\…` device paths, web URLs
+    (`http(s)`, `s3`, `gs`, `ftp(s)`, kept whole) and service URIs
+    (`mqtt://broker/topic`, `opc.tcp://plc:4840/…`). Known limits:
+
+    - an unquoted bare profile path whose name contains a space keeps the
+      words after the first (`C:\Users\Mario Rossi` at the end of a
+      sentence);
+    - a web URL whose own path names a user (`http://intranet/home/<user>/…`)
+      is kept;
+    - a bare `\\host` with no share is not matched, because it cannot be told
+      apart from escaped regex text such as `\\d+`.
 - **Workflow outputs:** an `agent.reason` step's prompt goes to the model
   provider, and so does the `output_summary` the agent's `execute_workflow`
   tool returns for each step. Both are rendered by
-  `agent.prompts.render_for_llm`: document chunks from a
-  `docs.search_documents` step become a `Source:` line with the file name
-  (`safe_source`), page and section, then the text (`safe_text`); any other
-  value (trigger fields, other step outputs) passes through `safe_text`.
-  A path held in a field read on its own (`{find_doc.source}`) gets
-  `safe_text` only, so a path outside a user home is kept.
+  `agent.prompts.render_for_llm`:
+
+    - Document chunks from a `docs.search_documents` step become a `Source:`
+      line with the file name (`safe_source`), page and section, then the text
+      (`safe_text`). Chunks nested in dicts, lists and tuples are rendered the
+      same way.
+    - A value read from a `source` field (`{find_doc.source}`,
+      `{trigger.source}`), and a quoted `source` value in a rendered dict,
+      dataclass repr or JSON string, keeps its file name only. A service URI
+      in a `source` field, such as an alarm's `mqtt://` origin, keeps its
+      topic.
+    - Any other value passes through `safe_text`. A value that is exactly a
+      home directory becomes `<path>`, spaces in the user name included.
+- **Not yet covered:** the MCP server's tool results (`machina_search_manuals`
+  chunk content, `{"error": str(exc)}` results) do not yet pass through
+  `safe_text`; only the `source` field is sanitised there.
 - The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
   absolute file paths, directory structures, database schemas, or system
   architecture. This is a backstop, not the primary defence — the primary
