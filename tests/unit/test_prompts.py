@@ -325,6 +325,20 @@ class TestRenderForLlm:
         assert render_for_llm(value, key="source") == value
         assert render_for_llm({"source": value}) == repr({"source": value})
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (r"C:\Users\Luigi di Maggio", "<path>"),
+            (r"C:\Users\luigi di maggio x y\x.pdf", "x.pdf"),
+            # A whole value that starts with a bare home is taken as one path.
+            ("/home/luigi has 2 GB free", "<path>"),
+        ],
+    )
+    def test_a_whole_value_led_by_a_path_is_scanned_as_one_path(
+        self, value: str, expected: str
+    ) -> None:
+        assert render_for_llm(value) == expected
+
     def test_a_home_relative_source_loses_its_directory(self) -> None:
         assert render_for_llm("~/manuals/x.pdf", key="source") == "x.pdf"
 
@@ -354,6 +368,7 @@ class TestRenderForLlm:
             pytest.param("{'source': '" + "\\\\" * 150_000, id="escaped-source-value"),
             pytest.param("C:\\Users\\" + "a b" * 100_000, id="long-whole-value"),
             pytest.param({"source": "/srv/" + "a/" * 100_000}, id="deep-source-path"),
+            pytest.param({"hits": [_NESTED_CHUNK] * 10_000}, id="many-nested-chunks"),
         ],
     )
     def test_rendering_stays_linear_on_adversarial_input(self, value: object) -> None:
@@ -722,6 +737,14 @@ class TestSafeText:
             "afp://FILESRV01/share/a.pdf",
             "file://localhost/C:/Users/mrossi/a.pdf",
             "file://localhost/home/luigi/a.pdf",
+            # WebDAV UNC hosts carry @SSL / @port.
+            r"\\FILESRV01@SSL\DavWWWRoot\share\a.pdf",
+            r"\\FILESRV01@SSL@443\DavWWWRoot\a.pdf",
+            "PureWindowsPath('//FILESRV01@SSL/DavWWWRoot/a.pdf')",
+            # A database URL with an empty authority, and a macOS volume.
+            "sqlite:////home/luigi/a.pdf",
+            "/Volumes/Macintosh HD/Users/mrossi/a.pdf",
+            "/cygdrive/c/Users/luigi/a.pdf",
         ],
     )
     def test_unc_and_uri_variants_lose_their_host(self, text: str) -> None:
@@ -762,6 +785,8 @@ class TestSafeText:
             "Go to Settings/Users/Roles to add a technician.",
             "mqtt://broker01/cell3/robot1/home/state",
             "GET /api/users/42 returned 404",
+            "GET /api/Users/42 and /v/users/42 returned 404",
+            "mqtt://broker01/site/c/Users/state",
             # A scheme named in Markdown, and escaped newlines in notebook JSON.
             "Use ``smb://`` or ``file://`` URIs for shares.",
             r'"source": ["import os\n", "os.getcwd()\n"]',
@@ -803,6 +828,11 @@ class TestSafeText:
             (r"/home/mrossi/x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
             (repr(r"C:\Users\mrossi\x.pdf;C:\Users\luigi\y.pdf"), "'x.pdf;y.pdf'"),
             ("PATH=/usr/bin:/home/luigi/bin", "PATH=/usr/bin:bin"),
+            ("//FS01/s/x.pdf;//FS02/s/y.pdf", "x.pdf;y.pdf"),
+            (r"\\FS01\s\x.pdf;\\FS02\s\y.pdf", "x.pdf;y.pdf"),
+            ("smb://FS01/s/x.pdf;smb://FS02/s/y.pdf", "x.pdf;y.pdf"),
+            ("/home/a/x.pdf;/home/b/y.pdf", "x.pdf;y.pdf"),
+            (r"smb://FILESRV01,C:\Users\luigi\y.pdf", "<path>,y.pdf"),
         ],
     )
     def test_paths_joined_without_whitespace_are_each_scrubbed(
@@ -851,6 +881,27 @@ class TestSafeText:
             ),
             # Below a home head, a folder named users is an ordinary folder.
             ('File "/home/luigi/proj/users/models.py", line 3', 'File "models.py", line 3'),
+            # ...unless what follows it has no extension: another account.
+            ("/home/luigi/backup/home/mrossi", "<path>"),
+            (r"\\FS01\profiles\mrossi", "<path>"),
+            (r"\\FS01\homes$\mrossi", "<path>"),
+            # A share host whose name ends in home or users is still a host.
+            (r"\\nas-home\Users\mrossi", "<path>"),
+            (r"\\NAS-HOME\homes\mrossi", "<path>"),
+            ("smb://nas-users/Users/mrossi", "<path>"),
+            # A user name may hold lowercase words; a deeper folder capitals and digits.
+            (r"C:\Users\Maria de la Cruz\Documents\x.pdf", "x.pdf"),
+            (repr(r"C:\Users\Maria de la Cruz\My Documents\x.pdf"), "'x.pdf'"),
+            (r'{"p": "C:\\Users\\luigi di maggio\\New Folder\\x.pdf"}', '{"p": "x.pdf"}'),
+            (r"C:\Users\mrossi\Backup 2024\x.pdf", "x.pdf"),
+            (r"C:\Users\me\Projekt Čapek\x.pdf", "x.pdf"),
+            (r"C:\Users\me\Отчёт Петров\x.pdf", "x.pdf"),
+            (
+                r"C:\Users\mrossi\OneDrive - Uno Due Tre Quattro Cinque Sei Sette Otto\x.pdf",
+                "x.pdf",
+            ),
+            # A home after a compiler option letter.
+            ("gcc -I/home/luigi/include/x.h", "gcc -Ix.h"),
         ],
     )
     def test_more_home_and_share_layouts(self, text: str, expected: str) -> None:
@@ -886,6 +937,16 @@ class TestSafeText:
             pytest.param("https://" + "a" * 300_000, id="long-url"),
             pytest.param("https://a/" + "C" * 300_000, id="url-drive-lookahead"),
             pytest.param("C:\\Users\\" + "OneDrive - a " * 25_000, id="onedrive-words"),
+            pytest.param("'C:\\Users\\x" + "\\OneDrive -  a" * 200, id="quoted-onedrive-spaces"),
+            pytest.param("'" + "/home" * 50_000, id="quoted-home-runs"),
+            pytest.param('"' + "/Users" * 50_000, id="quoted-users-runs"),
+            pytest.param("'C:\\Users\\" + "\\" * 50_000, id="quoted-drive-backslashes"),
+            pytest.param("/a" * 100_000, id="posix-segments-no-home"),
+            pytest.param("/" + "ab/" * 100_000, id="posix-deep-no-home"),
+            pytest.param("/%" * 100_000, id="posix-percent-segments"),
+            pytest.param(" -I/a" * 50_000, id="option-flag-starts"),
+            pytest.param("/Volumes/" + "a b/" * 50_000, id="volume-prefix"),
+            pytest.param("x.pdf;" * 50_000, id="list-separators"),
         ],
     )
     def test_matching_stays_linear_on_adversarial_input(self, text: str) -> None:

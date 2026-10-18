@@ -106,41 +106,51 @@ own payload, not an LLM hallucination.
 
     - user homes: `C:\Users\<user>\…` (backslashes or slashes, `\\?\` and
       `//?/` long-path prefixes, `file:///C:/Users/…`), WSL, Cygwin and Git
-      Bash `/mnt/<drive>/Users/<user>/…` and `/<drive>/Users/<user>/…`, and
-      `/home/<user>/…` or `/Users/<user>/…`, also below other folders of an
-      absolute path (`/srv/backup/home/<user>/…`);
-    - shares: `\\host\share\…`, `\\?\UNC\host\…`, `//host/share/…`, and
-      `file:`, `smb:`, `cifs:`, `nfs:`, `sftp:`, `scp:` and `afp:` URIs,
-      user, password and port included (`smb://user:pass@host:445/…`,
-      `file:////host/share/…`).
+      Bash `/mnt/<drive>/Users/<user>/…` and `/<drive>/Users/<user>/…`,
+      `/home/<user>/…`, `/Users/<user>/…` and macOS
+      `/Volumes/<volume>/Users/<user>/…`, and `/home/<user>/…` below other
+      folders of an absolute path (`/srv/backup/home/<user>/…`), also behind
+      an empty-authority URI (`sqlite:////home/<user>/…`) or an option letter
+      (`-I/home/<user>/…`);
+    - shares: `\\host\share\…` (WebDAV `\\host@SSL\DavWWWRoot\…` included),
+      `\\?\UNC\host\…`, `//host/share/…`, and `file:`, `smb:`, `cifs:`,
+      `nfs:`, `sftp:`, `scp:` and `afp:` URIs, user, password and port
+      included (`smb://user:pass@host:445/…`, `file:////host/share/…`).
 
     A path whose last component names an account becomes `<path>`: a bare home
-    directory, a share with nothing below it, or, below a share, a folder
-    right under `Users`, `home`, `homes` or `profiles` (`\\PC01\C$\Users\<user>`,
-    `\\NAS01\homes\<user>`). Escaped text is matched too: the doubled
-    backslashes of `repr()` and JSON (`'C:\\Users\\<user>\\…'`), and text
-    escaped twice. Paths joined without whitespace (`a.pdf;C:\Users\…`, `PATH`
-    lists) are found one by one. In quotes (`repr()`, JSON, `str(OSError)`,
-    Markdown code) the user or share name, a `OneDrive - …` folder and the file
-    name may contain spaces, so profile names such as `Mario Rossi` are
-    covered; a quoted command or sentence that only starts with a path keeps
-    its words. Unquoted Windows paths accept a folder of up to four words, the
-    later ones capitalised (`Mario Rossi`), or eight words after `OneDrive -`,
+    directory, a share with nothing below it, or a folder right under `Users`,
+    `home`, `homes` or `profiles` (`\\PC01\C$\Users\<user>`,
+    `\\NAS01\homes\<user>`, `/home/<user>/backup/home/<other>`); below a
+    profile or home, such a folder followed by a file name with an extension
+    is an ordinary folder (`/home/<user>/proj/users/models.py`). Escaped text
+    is matched too: the doubled backslashes of `repr()` and JSON
+    (`'C:\\Users\\<user>\\…'`), and text escaped twice. Paths joined without
+    whitespace (`a.pdf;C:\Users\…`, `PATH` lists) are found one by one. In
+    quotes (`repr()`, JSON, `str(OSError)`, Markdown code) the user or share
+    name, a `OneDrive - …` folder and the file name may contain spaces, and
+    another folder may hold capitalised words; a quoted command or sentence
+    that only starts with a path keeps its words. Unquoted Windows paths
+    accept a user name of up to four words (`Maria de la Cruz`), a deeper
+    folder of up to four words whose later ones are capitalised or digits
+    (`My Documents`, `Backup 2024`), and eight words after `OneDrive -`, each
     when a separator follows.
 
     Deliberately preserved, so manuals and messages keep full fidelity:
     instructional system paths (`/etc`, `/usr/bin`, `C:\Program Files`,
     `C:\Windows\System32`), relative and menu paths (`Settings/Users/Roles`),
-    REST paths (`/api/users/42`), `\\.\pipe\…` device paths, web URLs
-    (`http(s)`, `s3`, `gs`, `ftp(s)`, kept whole) and service URIs
+    REST paths (`/api/users/42`, `/api/Users/42`), `\\.\pipe\…` device paths,
+    web URLs (`http(s)`, `s3`, `gs`, `ftp(s)`, kept whole) and service URIs
     (`mqtt://broker/topic`, `opc.tcp://plc:4840/…`). Known limits:
 
-    - an unquoted profile path keeps the later words of a user name with a
-      lowercase word or more than four words (`C:\Users\Maria de la Cruz\…`),
-      and of a bare spaced name at the end of a sentence
+    - an unquoted profile path keeps the later words of a user name with more
+      than four words, and of a bare spaced name at the end of a sentence
       (`C:\Users\Mario Rossi`);
-    - a capitalised word right before a slash or backslash can be taken for a
-      folder (`C:\Users\me\x.csv Line 2\P-202` keeps only `P-202`);
+    - prose within four words after a user name, or a capitalised word or
+      digit before a later slash or backslash, can be taken for a folder
+      (`C:\Users\me\x.csv Line 2\P-202` keeps only `P-202`);
+    - an absolute path with a `/home/` segment is treated as a home
+      (`/api/home/dashboard`), and a lowercase `/users/<user>/` (a
+      case-insensitive macOS volume) is not matched;
     - a web URL whose own path names a user (`http://intranet/home/<user>/…`)
       is kept, and a protocol-relative URL (`//cdn.example.com/lib.js`) reads
       as a share;
@@ -160,9 +170,12 @@ own payload, not an LLM hallucination.
       dataclass repr or JSON string, keeps only its file name when it is an
       absolute path or a file-share URI. Any other source, such as an alarm's
       `mqtt://` origin, an OPC-UA node id or a relative path, keeps its text.
-    - Any other value passes through `safe_text`. A value that is exactly a
-      home directory or share becomes `<path>`, spaces in the user name
-      included.
+    - Any other value passes through `safe_text`. A value that starts with a
+      home or share path is scanned as one quoted value, so a value that is
+      exactly a home directory or share becomes `<path>` whatever words the
+      user name holds; a value that starts with a bare home directory and
+      continues with prose (`/home/<user> has 2 GB free`) also becomes
+      `<path>`.
 - **Not yet covered:** the MCP server's tool results (`machina_search_manuals`
   chunk content, `{"error": str(exc)}` results) do not yet pass through
   `safe_text`; only the `source` field is sanitised there.
