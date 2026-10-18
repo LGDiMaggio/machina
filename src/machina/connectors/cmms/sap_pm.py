@@ -49,6 +49,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
+from machina.connectors.cmms.paths import checked_path_id
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import ConnectorAuthError, ConnectorError
@@ -95,10 +96,16 @@ def _odata_key(value: object) -> str:
 
     On top of :func:`_odata_string`, percent-encodes the characters that would
     end the segment or the path (``/``, ``?``, ``#``), start an escape (``%``)
-    or close the key predicate (``(``, ``)``), so a key such as
-    ``1')/../Equipment('X`` cannot address a different resource.
+    or close the key predicate (``(``, ``)``), and refuses a key with an
+    empty, ``.`` or ``..`` part as every path ID is
+    (:func:`~machina.connectors.cmms.paths.checked_path_id`), so a key such
+    as ``1')/../Equipment('X`` cannot address a different resource.
+
+    Raises:
+        ConnectorError: If the key is empty or has an empty, ``.`` or ``..``
+            part.
     """
-    return quote(_odata_string(value), safe="'")
+    return quote(_odata_string(checked_path_id(value)), safe="'")
 
 
 def _is_csrf_challenge(resp: Any) -> bool:

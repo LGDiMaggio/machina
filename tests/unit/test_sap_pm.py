@@ -328,10 +328,7 @@ class TestReverseMapping:
 
 
 class TestODataString:
-    """Caller values reach ``$filter`` only through ``_odata_string``.
-
-    Adapted from #119's ``_odata_literal`` tests.
-    """
+    """Caller values reach ``$filter`` only through ``_odata_string``."""
 
     def test_value_is_single_quoted(self) -> None:
         assert _odata_string("10000001") == "'10000001'"
@@ -371,10 +368,20 @@ class TestODataKey:
     def test_path_and_key_syntax_is_percent_encoded(self) -> None:
         assert _odata_key("a/b?c#d%e(f)") == "'a%2Fb%3Fc%23d%25e%28f%29'"
 
-    def test_key_cannot_close_its_literal_or_climb_to_another_entity_set(self) -> None:
-        assert _odata_key("1')/../../API_EQUIPMENT/Equipment('10000001") == (
-            "'1''%29%2F..%2F..%2FAPI_EQUIPMENT%2FEquipment%28''10000001'"
+    def test_key_cannot_close_its_literal_or_leave_its_segment(self) -> None:
+        assert _odata_key("1')/API_EQUIPMENT/Equipment('10000001") == (
+            "'1''%29%2FAPI_EQUIPMENT%2FEquipment%28''10000001'"
         )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "..", "x/../y", "a//b", "1')/../../API_EQUIPMENT/Equipment('10000001"],
+    )
+    def test_key_with_an_empty_or_dot_part_is_refused(self, value: str) -> None:
+        # As for every ID in a URL path: a proxy that decodes %2F before
+        # normalizing would otherwise resolve the dot parts.
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            _odata_key(value)
 
 
 # ---------------------------------------------------------------------------

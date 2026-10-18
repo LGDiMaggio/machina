@@ -12,28 +12,41 @@ from machina.exceptions import ConnectorError
 _PATH_SEPARATORS = re.compile(r"[/\\]")
 
 
-def path_segment(record_id: object) -> str:
-    """Encode a caller-supplied ID as exactly one URL path segment.
+def checked_path_id(record_id: object) -> str:
+    """Return a caller-supplied ID as text, refusing one that could leave its path segment.
 
-    IDs reach REST paths from LLM and MCP-client input, so ``/``, ``?``,
-    ``#`` and ``%`` are percent-encoded and the dot segments that HTTP
-    clients normalize away are refused — an ID can never address a
-    different endpoint than the one configured. An ID whose parts between
-    ``/`` or ``\\`` separators include an empty, ``.`` or ``..`` part is
-    refused as well: a proxy that decodes ``%2F`` before normalizing the
-    path (nginx with a URI in ``proxy_pass``, which also merges ``//``)
-    would resolve it into another resource or the collection itself. A
-    non-string ID (a number from a workflow event or model JSON) is
-    formatted with ``str()`` first.
+    IDs reach REST paths from LLM and MCP-client input. Percent-encoding
+    keeps ``/`` inside one segment for the HTTP client, but a proxy that
+    decodes ``%2F`` before normalizing the path (nginx with a URI in
+    ``proxy_pass``, which also merges ``//``) would resolve an empty, ``.``
+    or ``..`` part into another resource or the collection itself. An ID
+    with such a part between ``/`` or ``\\`` separators is therefore
+    refused; ``""``, ``.`` and ``..`` are the one-part cases. A non-string
+    ID (a number from a workflow event or model JSON) is formatted with
+    ``str()``.
 
     Raises:
         ConnectorError: If the ID is empty or has an empty, ``.`` or ``..``
             part. The message does not repeat the ID.
     """
-    segment = str(record_id)
-    if any(part in ("", ".", "..") for part in _PATH_SEPARATORS.split(segment)):
+    text = str(record_id)
+    if any(part in ("", ".", "..") for part in _PATH_SEPARATORS.split(text)):
         raise ConnectorError(
             "Invalid record ID: an ID cannot be empty, and no part of it between "
             "'/' or '\\' separators can be empty, '.' or '..'"
         )
-    return quote(segment, safe="")
+    return text
+
+
+def path_segment(record_id: object) -> str:
+    """Encode a caller-supplied ID as exactly one URL path segment.
+
+    ``/``, ``?``, ``#`` and ``%`` are percent-encoded, and an ID that could
+    still leave the segment is refused (:func:`checked_path_id`), so an ID
+    can never address a different endpoint than the one configured.
+
+    Raises:
+        ConnectorError: If the ID is empty or has an empty, ``.`` or ``..``
+            part. The message does not repeat the ID.
+    """
+    return quote(checked_path_id(record_id), safe="")

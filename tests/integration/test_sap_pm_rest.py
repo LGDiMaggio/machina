@@ -931,10 +931,7 @@ class TestFilterValuesStayLiteral:
     async def test_percent_encoded_quote_stays_data(
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
-        """A pre-encoded ``%27`` reaches the gateway as three characters, not a quote.
-
-        Ported from #119.
-        """
+        """A pre-encoded ``%27`` reaches the gateway as three characters, not a quote."""
         await _connect(httpx_mock, connector)
         smuggled = "x%27 or 1 eq 1 or Equipment eq %27y"
         httpx_mock.add_response(
@@ -1027,11 +1024,10 @@ class TestFilterValuesStayLiteral:
     async def test_update_work_order_key_predicate(
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
-        """The key can neither close its literal nor climb to another entity set.
+        """The key can neither close its literal nor leave its path segment.
 
         Interpolated as-is, this ID makes the URL path
-        ``MaintenanceOrder('1')/../../API_EQUIPMENT/Equipment('10000001')``,
-        which the HTTP client normalizes into a PATCH on an equipment record.
+        ``MaintenanceOrder('1')/API_EQUIPMENT/Equipment('10000001')``.
         """
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
@@ -1043,10 +1039,27 @@ class TestFilterValuesStayLiteral:
         httpx_mock.add_response(
             method="PATCH",
             url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder("
-            "'1''%29%2F..%2F..%2FAPI_EQUIPMENT%2FEquipment%28''10000001')",
+            "'1''%29%2FAPI_EQUIPMENT%2FEquipment%28''10000001')",
             status_code=404,
         )
         with pytest.raises(ConnectorError, match="HTTP 404"):
             await connector.update_work_order(
+                "1')/API_EQUIPMENT/Equipment('10000001", description="x"
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_refuses_a_dot_segment_key_before_any_request(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Interpolated as-is, this ID makes the URL path
+        ``MaintenanceOrder('1')/../../API_EQUIPMENT/Equipment('10000001')``,
+        which the HTTP client normalizes into a PATCH on an equipment record;
+        percent-encoded, a proxy that decodes ``%2F`` could still do so.
+        """
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await connector.update_work_order(
                 "1')/../../API_EQUIPMENT/Equipment('10000001", description="x"
             )
+        assert len(httpx_mock.get_requests()) == sent
