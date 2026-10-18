@@ -731,9 +731,11 @@ class TestMqttDispatchMessage:
         assert len(received) == 0
 
     @pytest.mark.asyncio
-    async def test_a_payload_that_fails_to_parse_is_logged_with_its_traceback(
+    async def test_a_payload_that_fails_to_parse_is_logged_by_error_type(
         self, mqtt_events: list[MutableMapping[str, Any]]
     ) -> None:
+        """A parse failure repeats for every message on the topic, so the event
+        names the error without formatting a traceback each time."""
         from machina.connectors.iot.mqtt import _SubscriptionEntry
 
         received: list[Alarm] = []
@@ -752,8 +754,9 @@ class TestMqttDispatchMessage:
         assert received == []
         event = _logged(mqtt_events, "payload_parse_error")
         assert event["topic"] == "sensor/temp"
-        assert "_parse_payload" in event["exception"]
-        assert "'protobuf' is not a valid PayloadFormat" in event["exception"]
+        assert event["error_type"] == "ValueError"
+        assert event["error"] == "'protobuf' is not a valid PayloadFormat"
+        assert "exception" not in event
 
     @pytest.mark.asyncio
     async def test_dispatch_handles_callback_error(

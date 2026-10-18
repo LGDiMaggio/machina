@@ -418,11 +418,14 @@ class MqttConnector:
         try:
             value = self._parse_payload(payload, cfg)
         except Exception as exc:
+            # No traceback: a parse failure recurs for every message on the
+            # topic, and formatting one costs more than parsing the payload.
             logger.debug(
                 "payload_parse_error",
                 connector="MqttConnector",
                 topic=topic,
-                exception=traceback_text(exc),
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
             return
 

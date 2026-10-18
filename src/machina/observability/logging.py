@@ -71,13 +71,17 @@ def configure_logging(
         json_output: If True, emit JSON lines; otherwise human-readable.
     """
     shared_processors: list[structlog.types.Processor] = [
+        # Drop events below the level first, so ``format_exc_info`` below
+        # never formats a traceback for an event that is then discarded.
+        structlog.stdlib.filter_by_level,
         structlog.contextvars.merge_contextvars,
         _redact_secrets,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
-        # Render ``exc_info`` while the exception is current; see below.
+        # Render ``exc_info`` while the exception is current, so the event
+        # carries text to every handler, including one added later; see below.
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]

@@ -219,6 +219,31 @@ class TestTracebacksCarryNoFrameLocals:
             "KeyError: 'wonum'",
         )
 
+    def test_a_handler_added_after_configure_logging_gets_the_text(
+        self, frame_locals_renderer: structlog.dev.ConsoleRenderer
+    ) -> None:
+        """A handler an application adds itself formats records with its own
+        processors; a structlog event reaches it with the traceback already
+        rendered as text."""
+        _configure()
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(
+            structlog.stdlib.ProcessorFormatter(
+                processors=[
+                    structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                    frame_locals_renderer,
+                ]
+            )
+        )
+        logging.getLogger().addHandler(handler)
+
+        _log_structlog_failure()
+
+        _assert_traceback_without_locals(
+            stream.getvalue(), "_call_cmms", "RuntimeError: CMMS returned 401"
+        )
+
     def test_a_logger_made_before_configure_logging_uses_its_handler(self) -> None:
         """A module-level ``get_logger(__name__, connector=...)`` runs at import,
         before the application calls ``configure_logging()``."""
@@ -244,6 +269,19 @@ def _is_traceback_text_call(node: ast.expr) -> bool:
     )
 
 
+# Keywords that switch frame locals on, and formatters that show them by default.
+_LOCALS_KEYWORDS = {"show_locals", "capture_locals", "tracebacks_show_locals"}
+_LOCALS_BY_DEFAULT = {"RichTracebackFormatter", "ExceptionDictTransformer"}
+
+
+def _name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
 def _locals_capable_calls(source: str) -> list[tuple[int, str]]:
     """Calls that can hand a renderer a live traceback, and with it frame locals.
 
@@ -254,19 +292,25 @@ def _locals_capable_calls(source: str) -> list[tuple[int, str]]:
     """
     found = []
     for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name | ast.Attribute) and _name(node) == "dict_tracebacks":
+            found.append((node.lineno, "dict_tracebacks"))
         if not isinstance(node, ast.Call):
             continue
         for keyword in node.keywords:
             if keyword.arg == "exc_info":
                 found.append((node.lineno, "exc_info="))
-            elif keyword.arg in {"show_locals", "capture_locals"} and not (
+            elif keyword.arg in _LOCALS_KEYWORDS and not (
                 isinstance(keyword.value, ast.Constant) and keyword.value.value is False
             ):
                 found.append((node.lineno, f"{keyword.arg}="))
             elif keyword.arg == "exception" and not _is_traceback_text_call(keyword.value):
                 found.append((node.lineno, "exception= not from traceback_text()"))
-        # ``Task.exception()`` takes no arguments; a logger's takes the event.
         func = node.func
+        if _name(func) in _LOCALS_BY_DEFAULT and not any(
+            keyword.arg == "show_locals" for keyword in node.keywords
+        ):
+            found.append((node.lineno, f"{_name(func)}() shows locals by default"))
+        # ``Task.exception()`` takes no arguments; a logger's takes the event.
         if (
             isinstance(func, ast.Attribute)
             and func.attr in {"exception", "aexception"}
@@ -280,9 +324,13 @@ class TestNoLocalsCapableLogCalls:
     """Machina's own log calls never pass a live exception to a renderer."""
 
     def test_machina_source_has_none(self) -> None:
+        paths = sorted(_SRC.rglob("*.py"))
+        # An empty scan would pass: make sure it read the package.
+        assert _SRC / "observability" / "logging.py" in paths
+
         found = [
             f"{path.relative_to(_SRC.parent)}:{line}: {call}"
-            for path in sorted(_SRC.rglob("*.py"))
+            for path in paths
             for line, call in _locals_capable_calls(path.read_text(encoding="utf-8"))
         ]
 
@@ -297,6 +345,10 @@ class TestNoLocalsCapableLogCalls:
             'logger.exception(f"e {x}")',
             "logger.aexception(event)",
             "RichTracebackFormatter(show_locals=True)",
+            "structlog.dev.RichTracebackFormatter()",
+            "ExceptionDictTransformer()",
+            "processors = [structlog.processors.dict_tracebacks]",
+            "RichHandler(rich_tracebacks=True, tracebacks_show_locals=True)",
             "TracebackException.from_exception(exc, capture_locals=flag)",
             'log.warning("e", exception=exc)',
         ],
@@ -311,6 +363,8 @@ class TestNoLocalsCapableLogCalls:
             'log.warning("e", exception=traceback_text(exc))',
             'log.warning("e", exception=logging_module.traceback_text(exc))',
             "RichTracebackFormatter(show_locals=False)",
+            "ExceptionDictTransformer(show_locals=False)",
+            "RichHandler(rich_tracebacks=True, tracebacks_show_locals=False)",
         ],
     )
     def test_the_scan_ignores(self, call: str) -> None:
