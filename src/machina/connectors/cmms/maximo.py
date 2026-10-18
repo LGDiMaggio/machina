@@ -17,6 +17,10 @@ The vendor payload ↔ Machina entity mapping lives as pure functions in
 :mod:`machina.connectors.cmms.mappers.maximo` so it can be unit-tested
 without HTTP mocks.
 
+Caller-supplied filter values (asset, work order and item numbers, status
+codes) reach an ``oslc.where`` clause only through :func:`_oslc_eq`, which
+refuses any value Maximo's query syntax would read as more than a literal.
+
 See also:
     https://developer.ibm.com/apis/catalog/maximo--maximo-manage-rest-api/Introduction
 """
@@ -62,37 +66,51 @@ def _require_httpx() -> Any:
     return httpx
 
 
+# Characters an oslc.where string value cannot carry. IBM documents no escape
+# syntax inside the quotes, and Maximo maps the clause onto its QBE framework,
+# which reads these as query syntax: the literal's own quote and the OSLC escape
+# character, the % * ? wildcards (a bare "*" is the not-null test), comma and
+# bracket value lists, and the = ! < > ~ operators (~null~ matches empty fields).
+_OSLC_RESERVED_CHARS = frozenset('"\\%*?,[]=!<>~')
+
+
 def _oslc_eq(attribute: str, value: object) -> str:
     """Build the exact-match ``oslc.where`` term ``attribute="value"``.
 
     Values reach these terms from LLM and MCP-client input. Maximo documents no
-    escape inside a where literal, and ``oslc.where`` maps onto its QBE
-    framework, where ``%`` is a LIKE wildcard, ``"*"`` means "not null",
-    ``~null~`` matches empty fields, commas separate alternatives and a leading
-    ``!=``, ``<`` or ``>`` changes the comparison. A value using any of these —
-    or a ``"`` or ``\\`` that could end the literal, or a control character a
-    server-side trim could remove in front of an operator — is refused rather
-    than escaped, so a term can only ever match its own value.
+    escape inside a where literal, so a value its query syntax could read as
+    more than a literal is refused rather than escaped: one containing a
+    character of :data:`_OSLC_RESERVED_CHARS` or a non-printable character (a
+    server-side trim could remove it in front of an operator), a blank value
+    (an empty QBE value constrains nothing, so the term would stop filtering),
+    or QBE's ``null`` keyword. Anything else is matched exactly, which is why
+    ``_`` passes: it is a wildcard only inside a LIKE match, and only ``%``
+    asks for one. A non-string value (a number from a workflow event or model
+    JSON) is formatted with ``str()`` first.
 
     Raises:
-        ConnectorError: If the value is blank or ``*``, contains ``"``, ``\\``,
-            ``%``, ``,``, ``~`` or a non-printable character, or starts with
-            ``=``, ``!``, ``<`` or ``>``.
+        ConnectorError: If the value cannot be expressed as an exact match.
+            The message names the offending characters or rule, never the
+            value: it can reach the LLM as a tool result.
     """
     text = str(value)
     stripped = text.strip()
-    if (
-        stripped in ("", "*")
-        or stripped.startswith(("=", "!", "<", ">"))
-        or any(char in text for char in '"\\%,~')
-        or not text.isprintable()
-    ):
-        raise ConnectorError(
-            f"Invalid {attribute} {text!r} for a Maximo query: a value to match exactly "
-            "cannot be blank or '*', contain '\"', '\\', '%', ',', '~' or a "
-            "non-printable character, or start with '=', '!', '<' or '>'"
-        )
-    return f'{attribute}="{text}"'
+    reserved = sorted(set(text) & _OSLC_RESERVED_CHARS)
+    if not stripped:
+        problem = "is blank"
+    elif stripped.lower() == "null":
+        problem = "is the QBE keyword 'null'"
+    elif reserved:
+        problem = "contains " + ", ".join(map(repr, reserved))
+    elif not text.isprintable():
+        problem = "contains a non-printable character"
+    else:
+        return f'{attribute}="{text}"'
+    raise ConnectorError(
+        f"Invalid {attribute} for a Maximo query: the value {problem}. oslc.where has "
+        "no escape, so a value to match exactly cannot be blank or 'null', or "
+        "contain a non-printable character or any of: " + " ".join(sorted(_OSLC_RESERVED_CHARS))
+    )
 
 
 class MaximoConnector:

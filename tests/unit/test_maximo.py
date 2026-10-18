@@ -33,7 +33,7 @@ from machina.connectors.cmms.mappers.maximo import (
 from machina.connectors.cmms.mappers.maximo import (
     reverse_worktype as _reverse_worktype,
 )
-from machina.connectors.cmms.maximo import MaximoConnector, _require_httpx
+from machina.connectors.cmms.maximo import MaximoConnector, _oslc_eq, _require_httpx
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -246,6 +246,63 @@ class TestReverseMapping:
         assert _reverse_worktype(WorkOrderType.PREVENTIVE) == "PM"
         assert _reverse_worktype(WorkOrderType.PREDICTIVE) == "CP"
         assert _reverse_worktype(WorkOrderType.IMPROVEMENT) == "EV"
+
+
+# ---------------------------------------------------------------------------
+# oslc.where terms
+# ---------------------------------------------------------------------------
+
+
+class TestOslcEq:
+    """Caller values reach an ``oslc.where`` clause only through ``_oslc_eq``.
+
+    Maximo documents no escape syntax inside an ``oslc.where`` string and hands
+    the value to its QBE framework, so a value carrying query syntax is refused
+    rather than escaped. Adapted from #119's ``_oslc_literal`` tests.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        ["PUMP-201", "11430", "BRG.6205", "PUMP_201", "BR300/1", "PUMP 201", "O'NEIL", "PUMPE-Ü1"],
+    )
+    def test_identifier_is_double_quoted_verbatim(self, value: str) -> None:
+        assert _oslc_eq("assetnum", value) == f'assetnum="{value}"'
+
+    def test_int_is_quoted_like_its_digits(self) -> None:
+        # Tool arguments parsed from model JSON can carry an asset number as a number.
+        assert _oslc_eq("assetnum", 11430) == 'assetnum="11430"'
+
+    @pytest.mark.parametrize("char", list('"\\%*?,[]=!<>~'))
+    def test_query_syntax_character_is_refused_and_named(self, char: str) -> None:
+        with pytest.raises(ConnectorError, match="Invalid assetnum") as exc_info:
+            _oslc_eq("assetnum", f"PUMP{char}201")
+        assert f"contains {char!r}" in str(exc_info.value)
+
+    @pytest.mark.parametrize("value", ["PUMP\n201", "PUMP\t201", "PUMP\x00201", "PUMP​201"])
+    def test_non_printable_character_is_refused(self, value: str) -> None:
+        with pytest.raises(ConnectorError, match="contains a non-printable character"):
+            _oslc_eq("assetnum", value)
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_value_is_refused(self, value: str) -> None:
+        # A blank QBE value constrains nothing: the clause would stop filtering.
+        with pytest.raises(ConnectorError, match="the value is blank"):
+            _oslc_eq("assetnum", value)
+
+    @pytest.mark.parametrize("value", ["null", "NULL", " Null "])
+    def test_qbe_null_keyword_is_refused(self, value: str) -> None:
+        with pytest.raises(ConnectorError, match="the QBE keyword 'null'"):
+            _oslc_eq("assetnum", value)
+
+    def test_refusal_names_the_characters_not_the_value(self) -> None:
+        # The message reaches the LLM as a tool result, so it must not echo the
+        # (possibly injected) value back into the prompt.
+        with pytest.raises(ConnectorError) as exc_info:
+            _oslc_eq("assetnum", 'PUMP-201" or assetnum="%')
+        message = str(exc_info.value)
+        assert "contains '\"', '%', '='" in message
+        assert "PUMP-201" not in message
+        assert "or assetnum" not in message
 
 
 # ---------------------------------------------------------------------------
