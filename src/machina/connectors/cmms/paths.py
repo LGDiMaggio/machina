@@ -21,19 +21,22 @@ def checked_path_id(record_id: object) -> str:
     ``proxy_pass``, which also merges ``//``) would resolve an empty, ``.``
     or ``..`` part into another resource or the collection itself. An ID
     with such a part between ``/`` or ``\\`` separators is therefore
-    refused; ``""``, ``.`` and ``..`` are the one-part cases. A non-string
-    ID (a number from a workflow event or model JSON) is formatted with
-    ``str()``.
+    refused; ``""``, ``.`` and ``..`` are the one-part cases. A part is
+    judged by what precedes its first ``;``, because a servlet container
+    drops ``;`` path parameters before resolving dot segments (``..;`` is
+    ``..`` there). A non-string ID (a number from a workflow event or model
+    JSON) is formatted with ``str()``.
 
     Raises:
         ConnectorError: If the ID is empty or has an empty, ``.`` or ``..``
             part. The message does not repeat the ID.
     """
     text = str(record_id)
-    if any(part in ("", ".", "..") for part in _PATH_SEPARATORS.split(text)):
+    parts = _PATH_SEPARATORS.split(text)
+    if any(part.split(";", 1)[0] in ("", ".", "..") for part in parts):
         raise ConnectorError(
             "Invalid record ID: an ID cannot be empty, and no part of it between "
-            "'/' or '\\' separators can be empty, '.' or '..'"
+            "'/' or '\\' separators can be empty, '.' or '..', including before a ';'"
         )
     return text
 

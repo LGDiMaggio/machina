@@ -19,6 +19,7 @@ from machina.exceptions import ConnectorError
         ("a b", "a%20b"),
         ("a..b", "a..b"),
         (".x/..y", ".x%2F..y"),
+        ("WO;1", "WO%3B1"),
         (123, "123"),
     ],
 )
@@ -41,6 +42,12 @@ def test_id_is_encoded_as_one_path_segment(record_id: object, segment: str) -> N
         pytest.param("/", id="separator-only"),
         pytest.param("a//b", id="empty-inner-part"),
         pytest.param("a/", id="empty-trailing-part"),
+        # A servlet container drops ";" path parameters before resolving dot
+        # segments, so "..;" behind a decoding proxy is "..".
+        pytest.param("..;", id="dot-dot-with-path-parameter"),
+        pytest.param("a/..;x/b", id="inner-dot-dot-with-path-parameter"),
+        pytest.param(".;x", id="dot-with-path-parameter"),
+        pytest.param(";x", id="empty-before-path-parameter"),
     ],
 )
 def test_id_that_could_leave_its_segment_is_refused(record_id: str) -> None:
@@ -49,5 +56,5 @@ def test_id_that_could_leave_its_segment_is_refused(record_id: str) -> None:
     # One fixed message: it names the rule, never the caller's ID.
     assert str(exc_info.value) == (
         "Invalid record ID: an ID cannot be empty, and no part of it between "
-        "'/' or '\\' separators can be empty, '.' or '..'"
+        "'/' or '\\' separators can be empty, '.' or '..', including before a ';'"
     )
