@@ -928,6 +928,29 @@ class TestFilterValuesStayLiteral:
         assert await connector.get_asset(10000001) is None
 
     @pytest.mark.asyncio
+    async def test_percent_encoded_quote_stays_data(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A pre-encoded ``%27`` reaches the gateway as three characters, not a quote.
+
+        Ported from #119.
+        """
+        await _connect(httpx_mock, connector)
+        smuggled = "x%27 or 1 eq 1 or Equipment eq %27y"
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": f"Equipment eq '{smuggled}'"},
+            ),
+            json={"d": {"results": []}},
+        )
+        assert await connector.get_asset(smuggled) is None
+        # httpx encodes the "%" itself, so one round of decoding yields "%27" again.
+        assert "%2527" in str(httpx_mock.get_requests()[-1].url)
+
+    @pytest.mark.asyncio
     async def test_read_work_orders(self, httpx_mock, connector: SapPmConnector) -> None:
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(

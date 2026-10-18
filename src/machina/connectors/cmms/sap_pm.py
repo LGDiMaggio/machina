@@ -26,6 +26,10 @@ The vendor payload ↔ Machina entity mapping lives as pure functions in
 :mod:`machina.connectors.cmms.mappers.sap_pm` so it can be unit-tested
 without HTTP mocks.
 
+Caller-supplied filter values (equipment, order and material numbers, status
+codes) reach a ``$filter`` expression only as OData string literals built by
+:func:`_odata_string`, and an entity key only through :func:`_odata_key`.
+
 See also:
     https://api.sap.com/api/API_EQUIPMENT/overview
     https://api.sap.com/api/API_MAINTENANCEORDER/overview
@@ -77,9 +81,24 @@ def _odata_string(value: object) -> str:
 
     Filter values and entity keys reach OData from LLM and MCP-client input.
     With its quotes doubled a value cannot close the literal and append a
-    clause — ``X' or Equipment ne '`` would otherwise read every row.
+    clause — ``X' or Equipment ne '`` would otherwise read every row. Percent-
+    encoding the query string is left to httpx, which encodes a literal ``%``
+    as well: a pre-encoded ``%27`` reaches the gateway as text, not as a quote.
+    A non-string value (a number from a workflow event or model JSON) is
+    formatted with ``str()`` first.
     """
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _odata_key(value: object) -> str:
+    """Render ``value`` as an OData key literal that stays in one URL path segment.
+
+    On top of :func:`_odata_string`, percent-encodes the characters that would
+    end the segment or the path (``/``, ``?``, ``#``), start an escape (``%``)
+    or close the key predicate (``(``, ``)``), so a key such as
+    ``1')/../Equipment('X`` cannot address a different resource.
+    """
+    return quote(_odata_string(value), safe="'")
 
 
 def _is_csrf_challenge(resp: Any) -> bool:
@@ -389,12 +408,9 @@ class SapPmConnector:
             payload["MaintenanceOrderDesc"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
-        # The key literal is percent-encoded as well, so ``/``, ``?`` and ``#``
-        # in an ID stay inside this one path segment.
-        key = quote(_odata_string(work_order_id), safe="'")
         resp = await self._write_with_csrf(
             "PATCH",
-            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({key})",
+            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({_odata_key(work_order_id)})",
             payload,
         )
         if resp.status_code == 401:
