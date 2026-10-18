@@ -382,10 +382,14 @@ _UNC_HOST_WORD = r"""(?:(?!""" + _PATH_BREAK + r""")[^\s\\/:*?"<>|'`])"""
 _DRIVE_SEP = r"(?:\\++|/)"
 # Where a POSIX path may start: not inside a word, a relative path
 # (``Settings/Users/Roles``) or a URL path (``mqtt://broker/x/home/state``),
-# except right after a command-line option letter (``-I/home/...``). Every
-# character a POSIX head scans through freely is in this set too, so no path
-# start lies inside a span already scanned, which keeps matching linear.
-_POSIX_START = r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<![\w.~@+%/-]))"
+# except right after a command-line option letter (``-I/home/...``) or a
+# leading ``..`` (``../../home/...``). Every character a POSIX head scans
+# through freely is in the excluded set too, so no path start lies inside a
+# span already scanned, which keeps matching linear.
+_POSIX_START = (
+    r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<=^\.\.)|(?<=[\s\"'`(=]\.\.)"
+    r"|(?<![\w.~@+%#/-]))"
+)
 # A URI with an empty authority in front of an absolute path:
 # ``file:///home/...``, ``sqlite:////home/...``.
 _EMPTY_AUTHORITY_URI = r"(?<![\w+.-])[A-Za-z][\w+.-]*://(?:localhost)?/?(?=/)"
@@ -411,7 +415,7 @@ _HEAD_WINDOWS_MOUNT = (
 _HEAD_POSIX = (
     r"(?:" + _EMPTY_AUTHORITY_URI + "|" + _POSIX_START + r")"
     r"(?>/(?:Volumes/[^/\\\n\"'<>|]{1,255}+/)?"
-    r"(?:(?:[\w.~@+%-]++/)+?(?-i:home)|(?-i:home|Users))/)"
+    r"(?:(?:[\w.~@+%#-]++/+)+?(?-i:home)|(?-i:home|Users))/)"
 )
 
 
@@ -464,18 +468,39 @@ def _spaced_tail(sep: str) -> str:
 
     The first segment, the user or share name, may hold up to four words of
     any case (``Maria de la Cruz``). A deeper folder may hold up to four
-    words whose later ones start with a capital letter or a digit
-    (``My Documents``, ``Backup 2024``), and a ``OneDrive -`` folder eight
-    more of any case. Either counts only when a separator follows, so prose
-    after the path is kept (``vib.csv, 7.1 mm/s``). The last segment never
-    extends across a space: the text after the cut is the rest of the file
-    name. The atomic groups keep the scan linear.
+    words when its first word is capitalised and has no dot (``New folder``,
+    ``Documenti tecnici``), or else when its later words start with a
+    capital letter or a digit (``x64 Release``); a ``OneDrive -`` folder may
+    hold eight more of any case. Each counts only when a separator follows,
+    so prose after a file name is kept (``vib.csv, 7.1 mm/s``). The last
+    segment never extends across a space: the text after the cut is the rest
+    of the file name. The atomic groups keep the scan linear.
     """
     word = r"[ ]+" + _PATH_WORD + "+"
     capitalised_word = r"[ ]+" + _CAPITAL + _PATH_WORD + "*"
+    titled_first_word = _CAPITAL + r"(?:(?!\.)" + _PATH_WORD + ")*"
     onedrive = r"OneDrive[ ]+-(?:" + word + r"){1,8}"
     account = r"(?>" + onedrive + "|" + _PATH_WORD + r"+(?:" + word + r"){0,3})" + sep
-    folder = r"(?>" + onedrive + "|" + _PATH_WORD + r"+(?:" + capitalised_word + r"){0,3})" + sep
+    # The separator sits inside each alternative, so a form that stops short
+    # of one (``Report`` in ``Report.v2``) gives way to the next form.
+    folder = (
+        r"(?>"
+        + onedrive
+        + sep
+        + "|"
+        + titled_first_word
+        + r"(?:"
+        + word
+        + r"){0,3}"
+        + sep
+        + "|"
+        + _PATH_WORD
+        + r"+(?:"
+        + capitalised_word
+        + r"){0,3}"
+        + sep
+        + ")"
+    )
     return (
         r"(?:" + account + r"(?:" + folder + r")*(?:" + _PATH_WORD + r"+)?|" + _PATH_WORD + r"+)"
     )
@@ -539,10 +564,17 @@ def _quoted_path(quote: str) -> str:
     sep = r"[\\/]++"
     # One space after the dash, then ``char`` (which holds spaces) does the
     # rest: a single parse, where ``[ ]+`` before it backtracked exponentially.
+    # The other two forms are told apart by their first character, and the
+    # atomic group keeps a folder loop from retrying them.
     folder = (
-        r"(?:OneDrive[ ]+-[ ]"
+        r"(?>OneDrive[ ]+-[ ]"
         + char
         + "++|"
+        + _CAPITAL
+        + char_no_space
+        + r"*+(?:[ ]+"
+        + char_no_space
+        + r"++){0,3}+|"
         + char_no_space
         + r"++(?:[ ]+"
         + _CAPITAL

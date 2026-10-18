@@ -902,6 +902,18 @@ class TestSafeText:
             ),
             # A home after a compiler option letter.
             ("gcc -I/home/luigi/include/x.h", "gcc -Ix.h"),
+            # Deeper folders that start with a capitalised word, or carry a dot.
+            (r"C:\Users\mario rossi\Desktop\New folder\x.pdf", "x.pdf"),
+            (
+                str(FileNotFoundError(2, "x", r"C:\Users\mrossi\Documenti tecnici\x.pdf")),
+                "[Errno 2] x: 'x.pdf'",
+            ),
+            (repr(r"\\FS01\share\Dati tecnici\mrossi\x.pdf"), "'x.pdf'"),
+            (r"C:\Users\mrossi\Report.v2\x.pdf", "x.pdf"),
+            # Empty components, '#' in a folder, and a relative path into a home.
+            ("/mnt//home/luigi/x.pdf", "x.pdf"),
+            ("/mnt/nas#1/home/luigi/x.pdf", "x.pdf"),
+            ("cat ../../home/luigi/notes.txt", "cat ..notes.txt"),
         ],
     )
     def test_more_home_and_share_layouts(self, text: str, expected: str) -> None:
@@ -947,6 +959,12 @@ class TestSafeText:
             pytest.param(" -I/a" * 50_000, id="option-flag-starts"),
             pytest.param("/Volumes/" + "a b/" * 50_000, id="volume-prefix"),
             pytest.param("x.pdf;" * 50_000, id="list-separators"),
+            pytest.param("'C:\\Users\\x" + "\\Aa" * 50_000, id="quoted-capitalised-folders"),
+            pytest.param("'C:\\Users\\x" + "\\Aa bb" * 30_000, id="quoted-titled-folders"),
+            pytest.param("C:\\Users\\x\\" + "Aa bb cc\\" * 30_000, id="titled-folders"),
+            pytest.param(" ../a" * 50_000, id="dotdot-starts"),
+            pytest.param("/#" * 100_000, id="posix-hash-segments"),
+            pytest.param("/a//" * 75_000, id="posix-empty-components"),
         ],
     )
     def test_matching_stays_linear_on_adversarial_input(self, text: str) -> None:

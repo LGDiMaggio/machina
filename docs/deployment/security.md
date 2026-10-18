@@ -110,8 +110,8 @@ own payload, not an LLM hallucination.
       `/home/<user>/…`, `/Users/<user>/…` and macOS
       `/Volumes/<volume>/Users/<user>/…`, and `/home/<user>/…` below other
       folders of an absolute path (`/srv/backup/home/<user>/…`), also behind
-      an empty-authority URI (`sqlite:////home/<user>/…`) or an option letter
-      (`-I/home/<user>/…`);
+      an empty-authority URI (`sqlite:////home/<user>/…`), an option letter
+      (`-I/home/<user>/…`) or a leading `../`;
     - shares: `\\host\share\…` (WebDAV `\\host@SSL\DavWWWRoot\…` included),
       `\\?\UNC\host\…`, `//host/share/…`, and `file:`, `smb:`, `cifs:`,
       `nfs:`, `sftp:`, `scp:` and `afp:` URIs, user, password and port
@@ -128,12 +128,14 @@ own payload, not an LLM hallucination.
     whitespace (`a.pdf;C:\Users\…`, `PATH` lists) are found one by one. In
     quotes (`repr()`, JSON, `str(OSError)`, Markdown code) the user or share
     name, a `OneDrive - …` folder and the file name may contain spaces, and
-    another folder may hold capitalised words; a quoted command or sentence
-    that only starts with a path keeps its words. Unquoted Windows paths
-    accept a user name of up to four words (`Maria de la Cruz`), a deeper
-    folder of up to four words whose later ones are capitalised or digits
-    (`My Documents`, `Backup 2024`), and eight words after `OneDrive -`, each
-    when a separator follows.
+    another folder may hold words as in unquoted paths; a quoted command or
+    sentence that only starts with a path and a lowercase word keeps its
+    words. Unquoted Windows paths accept a user name of up to four words
+    (`Maria de la Cruz`), a deeper
+    folder of up to four words that starts with a capitalised word
+    (`New folder`, `Documenti tecnici`) or whose later words are capitalised
+    or digits (`x64 Release`), and eight words after `OneDrive -`, each when a
+    separator follows.
 
     Deliberately preserved, so manuals and messages keep full fidelity:
     instructional system paths (`/etc`, `/usr/bin`, `C:\Program Files`,
@@ -145,9 +147,12 @@ own payload, not an LLM hallucination.
     - an unquoted profile path keeps the later words of a user name with more
       than four words, and of a bare spaced name at the end of a sentence
       (`C:\Users\Mario Rossi`);
-    - prose within four words after a user name, or a capitalised word or
-      digit before a later slash or backslash, can be taken for a folder
-      (`C:\Users\me\x.csv Line 2\P-202` keeps only `P-202`);
+    - prose within four words after a user name or a capitalised folder, or a
+      capitalised word or digit before a later slash or backslash, can be
+      taken for a folder (`C:\Users\me\x.csv Line 2\P-202` keeps only
+      `P-202`);
+    - a POSIX path below a folder whose name holds a space
+      (`/srv/my backup/home/<user>`) is not matched;
     - an absolute path with a `/home/` segment is treated as a home
       (`/api/home/dashboard`), and a lowercase `/users/<user>/` (a
       case-insensitive macOS volume) is not matched;
