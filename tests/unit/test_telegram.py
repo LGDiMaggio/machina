@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import sys
 from types import ModuleType
 from typing import Any
@@ -10,13 +12,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from machina.connectors.comms.cli import CliChannel
-from machina.connectors.comms.telegram import IncomingMessage, TelegramConnector
+from machina.connectors.comms.telegram import IncomingMessage, TelegramConnector, _RedactToken
 from machina.connectors.comms.types import (
     SupportsConfirmation,
     supports_sync_confirmation,
 )
 from machina.exceptions import ConnectorAuthError, ConnectorError
-from machina.observability.logging import traceback_text
+from machina.observability.logging import configure_logging, traceback_text
 
 
 class TestIncomingMessage:
@@ -485,3 +487,87 @@ class TestBotTokenStaysOutOfLogs:
             await conn.listen(_no_reply)
 
         assert exc_info.value is failure
+
+    @pytest.mark.asyncio
+    async def test_httpx_request_lines_carry_no_token(self) -> None:
+        """httpx logs every request URL at INFO, and the Bot API URL holds the token."""
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        httpx_logger = logging.getLogger("httpx")
+        handler, level = _Capture(), httpx_logger.level
+        httpx_logger.addHandler(handler)
+        httpx_logger.setLevel(logging.INFO)
+        conn = TelegramConnector(bot_token=_TOKEN)
+        ext = MagicMock()
+        try:
+            with patch.dict(sys.modules, {"telegram.ext": ext}):
+                await conn.connect()
+            # The call httpx makes after each request.
+            httpx_logger.info(
+                'HTTP Request: %s %s "%s %d %s"',
+                "POST",
+                f"https://api.telegram.org/bot{_TOKEN}/getUpdates",
+                "HTTP/1.1",
+                200,
+                "OK",
+            )
+            await conn.disconnect()
+            httpx_logger.info("after disconnect %s", _TOKEN)
+        finally:
+            httpx_logger.removeHandler(handler)
+            httpx_logger.setLevel(level)
+
+        logged, after = (r.getMessage() for r in records)
+        assert _TOKEN not in logged
+        assert "https://api.telegram.org/bot<redacted>/getUpdates" in logged
+        # disconnect() takes the filter off again.
+        assert _TOKEN in after
+
+    def test_a_malformed_record_passes_through(self) -> None:
+        record = logging.LogRecord("httpx", logging.INFO, __file__, 1, "%s %s", ("one",), None)
+
+        assert _RedactToken(_TOKEN).filter(record) is True
+
+    @pytest.mark.asyncio
+    async def test_rejected_token_reaches_no_log_line_with_the_real_library(self) -> None:
+        """End to end: python-telegram-bot, httpx and ``configure_logging()``.
+
+        Every Bot API call answers 401, as for a revoked token. The token must
+        appear neither in httpx's request line nor in the exception a host
+        logs when ``agent.run()`` fails.
+        """
+        pytest.importorskip("telegram")
+        import httpx
+        import structlog
+
+        async def _unauthorized(self: Any, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401, json={"ok": False, "error_code": 401, "description": "Unauthorized"}
+            )
+
+        root = logging.getLogger()
+        handlers, level = root.handlers[:], root.level
+        out = io.StringIO()
+        try:
+            configure_logging(json_output=True)
+            root.handlers[0].stream = out  # type: ignore[attr-defined]
+            with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", _unauthorized):
+                conn = TelegramConnector(bot_token=_TOKEN)
+                await conn.connect()
+                with pytest.raises(ConnectorAuthError) as exc_info:
+                    await conn.listen(_no_reply)
+                logging.getLogger("host").error("agent_failed", exc_info=exc_info.value)
+                await conn.disconnect()
+        finally:
+            structlog.reset_defaults()
+            root.handlers[:] = handlers
+            root.setLevel(level)
+
+        logged = out.getvalue()
+        assert "getMe" in logged  # httpx's request line was logged...
+        assert "ConnectorAuthError" in logged  # ...and so was the failure
+        assert _TOKEN not in logged

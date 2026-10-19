@@ -211,7 +211,9 @@ default.
   structlog configuration, including none at all.
 - Exception messages are logged verbatim, and the traceback shows each frame's
   source line.
-- A Telegram bot token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
+- The Telegram bot token is kept out of log output:
+  - httpx logs every request URL at INFO, and the Bot API carries the token in that URL. `TelegramConnector` replaces its token with `<redacted>` in the `httpx` logger's records while it is connected.
+  - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
 - Other credentials that a library puts into an exception message or a request URL are not scrubbed. Keep them out of URLs, and treat log output as sensitive.
 
 **Mitigations:**

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any, ClassVar
 
 import structlog
@@ -34,6 +35,30 @@ def __getattr__(name: str) -> Any:
 
         return CliChannel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class _RedactToken(logging.Filter):
+    """Replace one bot token in the log records a logger emits.
+
+    The Bot API puts the token in every request URL
+    (``https://api.telegram.org/bot<token>/getUpdates``), and httpx logs each
+    request URL at INFO, so under ``configure_logging()`` every poll would
+    write the token to the log.
+    """
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # a malformed record is the logging module's to report
+            return True
+        if self._token in message:
+            record.msg = message.replace(self._token, "<redacted>")
+            record.args = None
+        return True
 
 
 class TelegramConnector:
@@ -73,6 +98,7 @@ class TelegramConnector:
         self._allowed_chat_ids = set(allowed_chat_ids) if allowed_chat_ids else None
         self._connected = False
         self._application: Any = None
+        self._log_filter: _RedactToken | None = None
 
     async def connect(self) -> None:
         """Validate bot token and prepare the Telegram application."""
@@ -92,6 +118,9 @@ class TelegramConnector:
                 "Install with: pip install machina-ai[telegram]"
             )
             raise ImportError(msg) from None
+        if self._log_filter is None:
+            self._log_filter = _RedactToken(self._bot_token)
+            logging.getLogger("httpx").addFilter(self._log_filter)
         self._connected = True
 
     async def disconnect(self) -> None:
@@ -101,6 +130,9 @@ class TelegramConnector:
                 await self._application.shutdown()
         self._application = None
         self._connected = False
+        if self._log_filter is not None:
+            logging.getLogger("httpx").removeFilter(self._log_filter)
+            self._log_filter = None
         logger.info("disconnected", connector="TelegramConnector")
 
     async def health_check(self) -> ConnectorHealth:
