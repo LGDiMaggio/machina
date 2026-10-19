@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Maximo `read_maintenance_history` sends an `oslc.where` clause the OSLC query grammar accepts.** It filtered on `assetnum="<id>" and (status="COMP" or status="CLOSE")`, but `and` is the only boolean operator `oslc.where` accepts and grouping parentheses are not part of its grammar, so Maximo's parser rejects the clause (`BMXAA8744E`). The two statuses are now listed through `in`: `assetnum="<id>" and status in ["COMP","CLOSE"]`. The asset term is still built by the same exact-match check as the other Maximo filters.
+
 ### Security
 
 - **SAP PM and Maximo filters keep caller-supplied values inside their string literals.** Asset, work-order and material IDs and raw status strings reach these read methods from LLM and MCP tool arguments and were interpolated into server-side filters as-is, so a value such as `X' or Equipment ne '` turned an exact lookup into an unbounded read paged entirely into memory. SAP PM now doubles single quotes in every OData `$filter` string literal and in the `MaintenanceOrder('…')` key of `update_work_order`; the key is also percent-encoded so an ID cannot leave its path segment, and a key with an empty, `.` or `..` part is refused (unencoded, `1')/../../API_EQUIPMENT/Equipment('10000001` was normalized by the HTTP client into a PATCH on an equipment record). Maximo documents no escape inside an `oslc.where` string literal, and `oslc.where` maps onto its QBE framework, which reads wildcards (`%`, `*`, `?`), value lists (`,`, `[ ]`) and operators (`=`, `!`, `<`, `>`, `~`) inside the quotes as query syntax. A value that contains any of `" \ % * ? , [ ] = ! < > ~` or a non-printable character, is blank, or is the keyword `null` is therefore refused with `ConnectorError` before any request — including the PATCH of `update_work_order`, whose read-back looks the order up by `wonum`. The refusal names the offending characters, never the value, since it reaches the model as a tool result. Ordinary values produce the same filters as before, and numeric IDs are still sent as their digits.
