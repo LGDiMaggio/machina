@@ -302,6 +302,11 @@ class WorkflowResult:
 # ------------------------------------------------------------------
 
 
+def _render_str(value: Any, field_name: str | None) -> str:
+    """Default renderer for :meth:`WorkflowContext.resolve`: ``str(value)``."""
+    return str(value)
+
+
 class WorkflowContext:
     """Mutable bag of data passed through a workflow execution.
 
@@ -403,7 +408,9 @@ class WorkflowContext:
             return getattr(value, field_name)
         return _UNRESOLVED
 
-    def resolve(self, template: str, render: Callable[[Any], str] = str) -> str:
+    def resolve(
+        self, template: str, render: Callable[[Any, str | None], str] = _render_str
+    ) -> str:
         """Interpolate ``{key}`` placeholders in *template*, returning a string.
 
         Supported patterns:
@@ -412,9 +419,12 @@ class WorkflowContext:
         * ``{step_name}`` — full output of a prior step (str-coerced).
         * ``{step_name.field}`` — nested field access (dict or object).
 
-        Each resolved value is turned into text by *render* (``str`` by
-        default). The engine passes an LLM-safe renderer for ``agent.reason``
-        prompts, so step outputs reach the model without filesystem paths.
+        Each resolved value is turned into text by ``render(value, field)``,
+        where *field* is the field name the placeholder read (``"source"``
+        for ``{find_doc.source}``) or ``None`` for a whole step output or the
+        whole trigger. The default is ``str(value)``. The engine passes an
+        LLM-safe renderer for ``agent.reason`` prompts, so step outputs reach
+        the model without filesystem paths.
 
         Unresolved placeholders are left as-is so the missing
         substitution is visible in the rendered string, and a structured
@@ -440,7 +450,8 @@ class WorkflowContext:
                     return f"[{step_name} failed]"
                 logger.warning("template_unresolved", expression=expr)
                 return match.group(0)
-            return render(value)
+            _, _, field_name = expr.partition(".")
+            return render(value, field_name or None)
 
         return _PLACEHOLDER_RE.sub(_replacer, template)
 

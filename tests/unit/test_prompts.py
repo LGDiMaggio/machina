@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import time
+from pathlib import PureWindowsPath
+
 import pytest
 
 from machina.agent.entity_resolver import ResolvedEntity
@@ -193,6 +197,16 @@ class TestFormatDocumentResults:
         assert f"doc_{DOC_DISPLAY_WINDOW}.md" not in text
 
 
+# Longer than the 60 characters a DocumentChunk repr previews.
+_NESTED_CHUNK = DocumentChunk(
+    r"Replace seal kit SK-7 on the drive end. Notes for the next shift are in "
+    r"C:\Users\Mario Rossi\notes\seal.txt as usual.",
+    source=r"D:\Plant\Manuals\pump.pdf",
+    page=3,
+    section_title="Bearings",
+)
+
+
 class TestRenderForLlm:
     """Workflow values rendered for the LLM carry no filesystem paths."""
 
@@ -230,6 +244,160 @@ class TestRenderForLlm:
     )
     def test_other_values_render_as_scrubbed_text(self, value: object, expected: str) -> None:
         assert render_for_llm(value) == expected
+
+    def test_a_source_field_renders_as_a_file_name(self) -> None:
+        assert render_for_llm("/srv/plant/docs/lube.md", key="source") == "lube.md"
+        assert render_for_llm(r"D:\Plant\Manuals\x.pdf", key="Source") == "x.pdf"
+        assert render_for_llm("/home/me", key="source") == "<document>"
+        # Any other field keeps the free-text policy.
+        assert render_for_llm("/etc/fstab", key="config") == "/etc/fstab"
+        # A service URI in a source field (an Alarm's origin) keeps its topic.
+        alarm_source = "mqtt://broker01/plant/line1/p201/vibration"
+        assert render_for_llm(alarm_source, key="source") == alarm_source
+
+    @pytest.mark.parametrize(
+        "value",
+        [r"C:\Users\Mario Rossi", PureWindowsPath(r"C:\Users\Mario Rossi"), "/home/luigi"],
+    )
+    def test_a_value_that_is_a_home_directory_becomes_a_placeholder(self, value: object) -> None:
+        assert render_for_llm(value, key="home_dir") == "<path>"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"results": [_NESTED_CHUNK], "count": 1},
+            [None, _NESTED_CHUNK],
+            ("hits", (_NESTED_CHUNK,)),
+        ],
+    )
+    def test_chunks_nested_in_containers_render_as_blocks(self, value: object) -> None:
+        text = render_for_llm(value)
+
+        assert "Source: pump.pdf (p. 3) § Bearings\n" in text
+        # The full text, not a repr's 60-character preview.
+        assert (
+            _NESTED_CHUNK.content.replace(r"C:\Users\Mario Rossi\notes\seal.txt", "seal.txt")
+            in text
+        )
+        for fragment in ("Plant", "Mario", "Rossi", "DocumentChunk("):
+            assert fragment not in text
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ({"source": r"D:\Plant\Manuals\x.pdf"}, "{'source': 'x.pdf'}"),
+            ('{"source": "/srv/plant/docs/x.md", "page": 2}', '{"source": "x.md", "page": 2}'),
+            ("Found(source='/srv/plant/docs/x.md', score=0.9)", "Found(source='x.md', score=0.9)"),
+            ({"resource": "/srv/plant/docs/x.md"}, "{'resource': '/srv/plant/docs/x.md'}"),
+        ],
+    )
+    def test_source_keys_in_rendered_text_are_reduced(self, value: object, expected: str) -> None:
+        assert render_for_llm(value) == expected
+
+    def test_a_source_name_with_an_apostrophe_loses_its_directory(self) -> None:
+        """``repr`` switches to double quotes for such a value."""
+        text = render_for_llm({"source": "/srv/docs/Manuale d'uso.pdf"})
+
+        assert "/srv/docs" not in text
+        assert text.startswith("{'source': ")
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/home/luigi/log.txt shows 7 mm/s vibration",
+            r"C:\Users\mrossi\data.csv not found; check backup\2024 folder",
+            "//FILESRV01/share/a.pdf was replaced by the 7 mm/s trend",
+        ],
+    )
+    def test_a_value_that_starts_with_a_path_renders_like_free_text(self, value: str) -> None:
+        text = render_for_llm(value)
+
+        assert text == safe_text(value)
+        for fragment in ("luigi", "mrossi", "FILESRV01"):
+            assert fragment not in text
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "ns=2;s=Line1/P201/Vibration",
+            "SCADA/Line1/P201",
+            "manuals/pump.md",
+            "mqtt://localhost/home/boiler/temp",
+        ],
+    )
+    def test_a_source_that_is_not_an_absolute_path_keeps_its_context(self, value: str) -> None:
+        """An OPC-UA node id, a tag path, a topic or a relative path names no user or host."""
+        assert render_for_llm(value, key="source") == value
+        assert render_for_llm({"source": value}) == repr({"source": value})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (r"C:\Users\Luigi di Maggio", "<path>"),
+            (r"C:\Users\luigi di maggio x y\x.pdf", "x.pdf"),
+            # A whole value that starts with a bare home is taken as one path.
+            ("/home/luigi has 2 GB free", "<path>"),
+            (r"\\PC01\C$\Users\john smith", "<path>"),
+            (PureWindowsPath(r"\\PC01\C$\Users\john smith\Documents\x.pdf"), "x.pdf"),
+        ],
+    )
+    def test_a_whole_value_led_by_a_path_is_scanned_as_one_path(
+        self, value: object, expected: str
+    ) -> None:
+        assert render_for_llm(value) == expected
+
+    def test_a_home_relative_source_loses_its_directory(self) -> None:
+        assert render_for_llm("~/manuals/x.pdf", key="source") == "x.pdf"
+
+    def test_a_nested_chunk_body_keeps_its_source_assignments(self) -> None:
+        chunk = DocumentChunk("Config: source = '/etc/hosts'", source="m.pdf")
+
+        nested = render_for_llm({"hits": [chunk, None]})
+
+        assert "Source: m.pdf\nConfig: source = '/etc/hosts'" in nested
+        assert render_for_llm([chunk]) == "Source: m.pdf\nConfig: source = '/etc/hosts'"
+
+    def test_every_nested_chunk_gets_its_own_block(self) -> None:
+        chunks = [DocumentChunk(f"Note {i}.", source=f"/srv/docs/doc_{i}.md") for i in range(12)]
+
+        text = render_for_llm({"hits": chunks})
+
+        for i in range(12):
+            assert f"Source: doc_{i}.md\nNote {i}." in text
+        assert "\x00" not in text
+
+    def test_a_chunk_nested_deeper_than_the_copy_limit_loses_its_directory(self) -> None:
+        value: object = _NESTED_CHUNK
+        for _ in range(10):
+            value = [value]
+
+        text = render_for_llm(value)
+
+        assert "pump.pdf" in text
+        for fragment in ("Plant", "Manuals", "Mario"):
+            assert fragment not in text
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("source='" + "a" * 150_000, id="unclosed-source-value"),
+            pytest.param("{'source': '" + "\\\\" * 75_000, id="escaped-source-value"),
+            pytest.param("C:\\Users\\" + "a b" * 100_000, id="long-whole-value"),
+            pytest.param({"source": "/srv/" + "a/" * 100_000}, id="deep-source-path"),
+            pytest.param("\\\\h\\s\\Users\\" + "a b" * 100_000, id="whole-value-spaced-account"),
+        ],
+    )
+    def test_rendering_stays_linear_on_adversarial_input(self, value: object) -> None:
+        start = time.perf_counter()
+        render_for_llm(value)
+        assert time.perf_counter() - start < 2.0
+
+    def test_a_generator_output_is_not_consumed(self) -> None:
+        chunks = (c for c in [_NESTED_CHUNK])
+
+        render_for_llm(chunks)
+
+        assert list(chunks) == [_NESTED_CHUNK]
 
 
 class TestFormatResolvedEntities:
@@ -380,6 +548,42 @@ class TestSafeSource:
         assert safe_source("[/var/data/file.md]") == "<document>"
         assert safe_source("(quoted: /etc/secret.conf)") == "<document>"
 
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "/home/me",
+            "/Users/mario",
+            r"C:\Users\Mario Rossi",
+            r"\\FILESRV01\mrossi$",
+            "//FILESRV01/share",
+            "file://FILESRV01/share",
+            "smb://FILESRV01/mrossi$",
+            r"\\PC01\C$\Users\mrossi",
+            "smb://nas01/homes/john smith",
+            "ssh://git@gitsrv/home/mrossi",
+        ],
+    )
+    def test_a_bare_home_or_share_returns_placeholder(self, source: str) -> None:
+        """Its last component is the user (or a share named after one)."""
+        assert safe_source(source) == "<document>"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            r"\\?\UNC\FILESRV01\share\x.pdf",
+            r"\\?\C:\Users\Mario Rossi\x.pdf",
+            "//FILESRV01/share/x.pdf",
+            r"C:\Users\Mario Rossi\OneDrive - ACME S.p.A\x.pdf",
+            "ssh://git@gitsrv/home/mrossi/x.pdf",
+            "davs://FILESRV01/share/x.pdf",
+        ],
+    )
+    def test_long_path_and_forward_slash_shares_reduce_to_file_name(self, source: str) -> None:
+        assert safe_source(source) == "x.pdf"
+
+    def test_a_folder_named_home_below_a_profile_is_an_ordinary_folder(self) -> None:
+        assert safe_source(r"C:\Users\me\Documents\home\guide.pdf") == "guide.pdf"
+
     def test_private_alias_still_resolves_to_same_function(self) -> None:
         """The ``_safe_source`` private alias remains for backwards compatibility."""
         assert _safe_source is safe_source
@@ -471,6 +675,367 @@ class TestSafeText:
 
     def test_unc_share_right_after_a_label_is_scrubbed(self) -> None:
         assert safe_text(r"Location:\\FILESRV01\manuals\seal.pdf") == "Location:seal.pdf"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                r"No such file: C:\Users\Mario Rossi\Documents\pump.pdf now",
+                "No such file: pump.pdf now",
+            ),
+            (repr(r"C:\Users\Mario Rossi\Documents\pump.pdf"), "'pump.pdf'"),
+            (r'{"p": "C:\\Users\\Mario Rossi\\pump.pdf"}', '{"p": "pump.pdf"}'),
+            (
+                str(
+                    FileNotFoundError(
+                        2, "No such file or directory", r"C:\Users\Mario Rossi\x.xlsx"
+                    )
+                ),
+                "[Errno 2] No such file or directory: 'x.xlsx'",
+            ),
+            (r"C:\Users\mrossi\OneDrive - ACME S.p.A\Manuali\pump.pdf", "pump.pdf"),
+            (repr(r"C:\Users\mrossi\OneDrive - ACME S.p.A\Manuali\pump.pdf"), "'pump.pdf'"),
+            # How pathlib renders Windows paths: forward slashes, spaces kept.
+            ("PureWindowsPath('C:/Users/Mario Rossi/x.pdf')", "PureWindowsPath('x.pdf')"),
+            ("`C:\\Users\\Mario Rossi\\x.pdf`", "`x.pdf`"),
+            ("Open C:/Users/Mario Rossi/Documents/pump.pdf now", "Open pump.pdf now"),
+            ("Open /mnt/c/Users/Mario Rossi/Documents/pump.pdf now", "Open pump.pdf now"),
+            (r"C:\Users\mrossi\OneDrive - Rossi Impianti S.r.l\Manuali\pump.pdf", "pump.pdf"),
+            (r"Cannot open 'C:\Users\D'Amico\Documents\x.pdf'", "Cannot open 'x.pdf'"),
+        ],
+    )
+    def test_user_names_with_spaces_are_scrubbed(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Permission denied: '/home/luigi'.", "Permission denied: '<path>'."),
+            ("see /home/luigi and /Users/mario.", "see <path> and <path>."),
+            (r"Profile C:\Users\mrossi\ missing", "Profile <path> missing"),
+            (repr(r"C:\Users\Mario Rossi"), "'<path>'"),
+            ("`C:\\Users\\Mario Rossi` is the profile", "`<path>` is the profile"),
+            # A home folder reached through a share: the account is still last.
+            (r"Access denied: \\PC01\C$\Users\mrossi", "Access denied: <path>"),
+            (r"\\wsl.localhost\Ubuntu\home\luigi", "<path>"),
+            # A closing bracket the path did not open stays in the prose.
+            (r"(C:\Users\mrossi)", "(<path>)"),
+            ("[/home/mrossi], {/home/luigi}.", "[<path>], {<path>}."),
+            ("/System/Volumes/Data/Users/mrossi", "<path>"),
+            (r"C:\Documents and Settings\mrossi", "<path>"),
+        ],
+    )
+    def test_a_bare_home_directory_becomes_a_placeholder(self, text: str, expected: str) -> None:
+        """The last component of a home directory is the user name itself."""
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "//FILESRV01/share/a.pdf",
+            "PureWindowsPath('//FILESRV01/share/a.pdf')",
+            r"\\?\UNC\FILESRV01\share\a.pdf",
+            repr(r"\\?\UNC\FILESRV01\share\a.pdf"),
+            r"\\?\C:\Users\Mario Rossi\a.pdf",
+            "PureWindowsPath('//?/C:/Users/Mario Rossi/a.pdf')",
+            "file://FILESRV01/share/a.pdf",
+            "file:///C:/Users/mrossi/a.pdf",
+            "file:///C:/Users/Mario%20Rossi/a.pdf",
+            "file:///home/luigi/a.pdf",
+            "smb://FILESRV01/share/a.pdf",
+            r"\\FILESRV01\Shared Docs\a.pdf",
+            r"\\.\UNC\FILESRV01\share\a.pdf",
+            "smb://FILESRV01:445/share/a.pdf",
+            "sftp://mrossi@FILESRV01:2222/data/a.pdf",
+            # Repr text escaped a second time doubles every backslash again.
+            repr(repr(r"\\FILESRV01\share\a.pdf")),
+            # A local path passed in a URL query, and a CSV neighbour of a URL.
+            "https://viewer.local/open?path=C:/Users/mrossi/a.pdf",
+            "https://wiki.local/doc,C:/Users/mrossi/a.pdf",
+            # How pathname2url writes a UNC path, and a password in the authority.
+            "file:////FILESRV01/share/a.pdf",
+            "file://///FILESRV01/share/a.pdf",
+            "smb://mrossi:S3cret@FILESRV01/share/a.pdf",
+            "cifs://FILESRV01/share/a.pdf",
+            "nfs://FILESRV01/share/a.pdf",
+            "scp://mrossi@FILESRV01/data/a.pdf",
+            "afp://FILESRV01/share/a.pdf",
+            "file://localhost/C:/Users/mrossi/a.pdf",
+            "file://localhost/home/luigi/a.pdf",
+            # WebDAV UNC hosts carry @SSL / @port.
+            r"\\FILESRV01@SSL\DavWWWRoot\share\a.pdf",
+            r"\\FILESRV01@SSL@443\DavWWWRoot\a.pdf",
+            "PureWindowsPath('//FILESRV01@SSL/DavWWWRoot/a.pdf')",
+            # A database URL with an empty authority, and a macOS volume.
+            "sqlite:////home/luigi/a.pdf",
+            "/Volumes/Macintosh HD/Users/mrossi/a.pdf",
+            "/cygdrive/c/Users/luigi/a.pdf",
+            "/System/Volumes/Data/Users/mrossi/a.pdf",
+            "/mnt/windows/Users/mrossi/Documents/a.pdf",
+            r"C:\Documents and Settings\mrossi\a.pdf",
+            # Win32 accepts a slash after a UNC host, and a backslash after //host.
+            r"\\FILESRV01/share/a.pdf",
+            r"//FILESRV01\share\a.pdf",
+            "dav://FILESRV01/share/a.pdf",
+            "davs://FILESRV01/share/a.pdf",
+            "ssh://git@FILESRV01/home/luigi/a.pdf",
+            "smb://[fe80::1%eth0]:445/share/a.pdf",
+        ],
+    )
+    def test_unc_and_uri_variants_lose_their_host(self, text: str) -> None:
+        out = safe_text(text)
+        assert "a.pdf" in out
+        fragments = ("FILESRV01", "Mario", "Rossi", "mrossi", "luigi", "Users", "share", "S3cret")
+        for fragment in fragments:
+            assert fragment not in out
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"\\FILESRV01\mrossi$", "<path>"),
+            ("//FILESRV01/share", "<path>"),
+            ("file://FILESRV01/share", "<path>"),
+            ("Mounted smb://FILESRV01:445 as S:", "Mounted <path> as S:"),
+        ],
+    )
+    def test_a_share_without_a_path_becomes_a_placeholder(self, text: str, expected: str) -> None:
+        """A share can be named after its user (``\\\\fs01\\mrossi$``)."""
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            r'"logs": "C:\\Windows\\System32\\winevt\\Logs"',
+            r"..\data\export.csv and manuals/pump.md",
+            r"%ProgramData%\Vendor\logs",
+            "https://example.com/users/mario/profile and http://intranet/home/x",
+            "s3://bucket/home/luigi/report.pdf, gs://bucket/Users/x.pdf",
+            "ftp://ftp.example.com/pub/manual.pdf",
+            "https://example.com/search?q=pump&lang=it",
+            # Service endpoints are not filesystem paths.
+            "mqtt://broker01/plant/line1/p201/vibration",
+            "opc.tcp://plc-line2:4840/ns=2;s=Pump.Vibration",
+            "file:///etc/fstab",
+            # Relative paths, URL paths and REST paths are not homes.
+            "Go to Settings/Users/Roles to add a technician.",
+            "mqtt://broker01/cell3/robot1/home/state",
+            "GET /api/users/42 returned 404",
+            "GET /api/Users/42 and /v/users/42 returned 404",
+            "mqtt://broker01/site/c/Users/state",
+            "/mnt/data/export.csv",
+            'See folder ../home/docs/manual.md or <a href="../home/index.html">',
+            # A service on localhost names a topic; three slashes make a
+            # SQLAlchemy URL relative.
+            "mqtt://localhost/home/sensors/temp and ws://localhost/home/feed",
+            "opc.tcp://localhost/home/line1",
+            "sqlite:///home/data.db and jdbc:sqlite:///home/data.db",
+            # Escaped text with a slash after a drive, and an escaped regex.
+            r'"bin": "C:\\tools/bin/x.exe"',
+            r'"re": "^\\w+/\\d+$"',
+            # A scheme named in Markdown, and escaped newlines in notebook JSON.
+            "Use ``smb://`` or ``file://`` URIs for shares.",
+            r'"source": ["import os\n", "os.getcwd()\n"]',
+            r"\\.\pipe\docker_engine",
+            "x = total//count/2  # integer division",
+            "```python\nopen('/etc/hosts')\n```\n\n**Bold** and `inline/code`",
+            "Code BEAR-WEAR-01 on asset P-201, 7.1 mm/s.",
+            "see https://docs.example.com/a?b=1, then /usr/local/bin/tool.",
+        ],
+    )
+    def test_text_without_a_user_or_host_path_is_unchanged(self, text: str) -> None:
+        assert safe_text(text) == text
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"C:\Users\me and C:\x", r"<path> and C:\x"),
+            (r"Copy C:\Users\me to the folder Logs\2024", r"Copy <path> to the folder Logs\2024"),
+            ("Readings in /home/me show 7 mm/s", "Readings in <path> show 7 mm/s"),
+            # A slash or backslash a few words after the path is prose, not a folder.
+            (
+                r"Log at C:\Users\mrossi\vib.csv, 7.1 mm/s peak on P-201",
+                "Log at vib.csv, 7.1 mm/s peak on P-201",
+            ),
+            (r"See C:\Users\mrossi\x.csv and/or the backup", "See x.csv and/or the backup"),
+            (r"Log \\FILESRV01\share\log.txt on P-201\P-202", r"Log log.txt on P-201\P-202"),
+            (r"(see C:\Users\me\report(1).pdf).", "(see report(1).pdf)."),
+            (r"Saved as C:\Users\me\report(1)", "Saved as report(1)"),
+        ],
+    )
+    def test_prose_after_a_path_is_kept(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (r"C:\Users\mrossi\x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (r"C:\Users\mrossi\x.pdf,C:\Users\luigi\y.pdf", "x.pdf,y.pdf"),
+            (r"(C:\Users\mrossi\x.pdf)C:\Users\luigi\y.pdf", "(x.pdf)y.pdf"),
+            (r"\\FILESRV01\share\x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (r"/home/mrossi/x.pdf;C:\Users\luigi\y.pdf", "x.pdf;y.pdf"),
+            (repr(r"C:\Users\mrossi\x.pdf;C:\Users\luigi\y.pdf"), "'x.pdf;y.pdf'"),
+            ("PATH=/usr/bin:/home/luigi/bin", "PATH=/usr/bin:bin"),
+            ("//FS01/s/x.pdf;//FS02/s/y.pdf", "x.pdf;y.pdf"),
+            (r"\\FS01\s\x.pdf;\\FS02\s\y.pdf", "x.pdf;y.pdf"),
+            ("smb://FS01/s/x.pdf;smb://FS02/s/y.pdf", "x.pdf;y.pdf"),
+            ("/home/a/x.pdf;/home/b/y.pdf", "x.pdf;y.pdf"),
+            (r"smb://FILESRV01,C:\Users\luigi\y.pdf", "<path>,y.pdf"),
+        ],
+    )
+    def test_paths_joined_without_whitespace_are_each_scrubbed(
+        self, text: str, expected: str
+    ) -> None:
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                str(
+                    subprocess.CalledProcessError(
+                        1, "/home/luigi/venv/bin/python run.py --out out/res.csv"
+                    )
+                ),
+                "Command 'python run.py --out out/res.csv' returned non-zero exit status 1.",
+            ),
+            (
+                '{"msg": "/home/luigi/data.csv has 7 mm/s peaks"}',
+                '{"msg": "data.csv has 7 mm/s peaks"}',
+            ),
+            ("`/home/luigi/bin/run.sh --input data/x.csv`", "`run.sh --input data/x.csv`"),
+            (r"'C:\Users\me\My Documents\pump manual.pdf'", "'pump manual.pdf'"),
+        ],
+    )
+    def test_quoted_text_that_starts_with_a_path_keeps_its_words(
+        self, text: str, expected: str
+    ) -> None:
+        """Only the user name, a OneDrive folder and the file name may hold spaces in quotes."""
+        assert safe_text(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("/srv/backup/home/luigi/x.pdf", "x.pdf"),
+            ("Moved to /srv/backup/home/luigi.", "Moved to <path>."),
+            ("/c/Users/Mario Rossi/Documents/x.pdf", "x.pdf"),
+            (r"\\NAS01\homes\luigi", "<path>"),
+            (r"\\FILESRV01\Profiles$\mrossi", "<path>"),
+            (r"\\FS01\users$\mrossi", "<path>"),
+            (r"\\FS01\home$\mrossi", "<path>"),
+            (
+                r"C:\Users\mrossi\OneDrive - Universita degli Studi di Napoli Federico II\x.pdf",
+                "x.pdf",
+            ),
+            # Below a home head, a folder named users is an ordinary folder.
+            ('File "/home/luigi/proj/users/models.py", line 3', 'File "models.py", line 3'),
+            # ...unless what follows it has no extension: another account.
+            ("/home/luigi/backup/home/mrossi", "<path>"),
+            (r"\\FS01\profiles\mrossi", "<path>"),
+            (r"\\FS01\homes$\mrossi", "<path>"),
+            # A share host whose name ends in home or users is still a host.
+            (r"\\nas-home\Users\mrossi", "<path>"),
+            (r"\\NAS-HOME\homes\mrossi", "<path>"),
+            ("smb://nas-users/Users/mrossi", "<path>"),
+            # A user name may hold lowercase words; a deeper folder capitals and digits.
+            (r"C:\Users\Maria de la Cruz\Documents\x.pdf", "x.pdf"),
+            (repr(r"C:\Users\Maria de la Cruz\My Documents\x.pdf"), "'x.pdf'"),
+            (r'{"p": "C:\\Users\\luigi di maggio\\New Folder\\x.pdf"}', '{"p": "x.pdf"}'),
+            (r"C:\Users\mrossi\Backup 2024\x.pdf", "x.pdf"),
+            (r"C:\Users\me\Projekt Čapek\x.pdf", "x.pdf"),
+            (r"C:\Users\me\Отчёт Петров\x.pdf", "x.pdf"),
+            (
+                r"C:\Users\mrossi\OneDrive - Uno Due Tre Quattro Cinque Sei Sette Otto\x.pdf",
+                "x.pdf",
+            ),
+            # A home after a compiler option letter.
+            ("gcc -I/home/luigi/include/x.h", "gcc -Ix.h"),
+            # Deeper folders that start with a capitalised word, or carry a dot.
+            (r"C:\Users\mario rossi\Desktop\New folder\x.pdf", "x.pdf"),
+            (
+                str(FileNotFoundError(2, "x", r"C:\Users\mrossi\Documenti tecnici\x.pdf")),
+                "[Errno 2] x: 'x.pdf'",
+            ),
+            (repr(r"\\FS01\share\Dati tecnici\mrossi\x.pdf"), "'x.pdf'"),
+            (r"C:\Users\mrossi\Report.v2\x.pdf", "x.pdf"),
+            # Empty components and '#' in a folder.
+            ("/mnt//home/luigi/x.pdf", "x.pdf"),
+            ("/mnt/nas#1/home/luigi/x.pdf", "x.pdf"),
+            # A user right under a share's accounts folder may hold lowercase words.
+            (r"\\PC01\C$\Users\john smith\Documents\x.pdf", "x.pdf"),
+            (r"\\NAS01\homes\maria rossi\Documenti\x.pdf", "x.pdf"),
+            (r'"\\NAS01\profiles\anna maria\Desktop\x.pdf"', '"x.pdf"'),
+            (str([r"\\PC01\C$\Users\john smith\Documents\x.pdf"]), "['x.pdf']"),
+            ("//PC01/C$/Users/john smith/Documents/x.pdf", "x.pdf"),
+            ("smb://nas01/homes/john smith/x.pdf", "x.pdf"),
+            (r"C:\Users\me\backup\Users\john smith\x.pdf", "x.pdf"),
+            # A bracketed IPv6 share host.
+            ("smb://[fe80::1]/mrossi$/x.pdf", "x.pdf"),
+            ("smb://[fe80::1]/mrossi$", "<path>"),
+        ],
+    )
+    def test_more_home_and_share_layouts(self, text: str, expected: str) -> None:
+        assert safe_text(text) == expected
+
+    def test_a_json_neighbour_of_a_url_is_still_scrubbed(self) -> None:
+        raw = r'{"url":"https://x.com/a","p":"C:\\Users\\me\\x.pdf"}'
+        assert safe_text(raw) == r'{"url":"https://x.com/a","p":"x.pdf"}'
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("\\" * 150_000, id="backslash-run"),
+            pytest.param(("\\\\" + "a" * 50 + " ") * 5_000, id="unc-host-no-share"),
+            pytest.param(
+                ("C:" + "\\" * 1_000 + "Users" + "\\" * 1_000) * 100, id="drive-separator-runs"
+            ),
+            pytest.param("\\\\a" + ("\\" * 3 + "b") * 75_000, id="unc-odd-separators"),
+            pytest.param("a\\\\" * 100_000, id="word-double-backslash"),
+            pytest.param("C:\\\\" * 75_000, id="drive-double-backslash"),
+            pytest.param(("C:\\Users\\" + "a\\" * 10 + " ") * 10_000, id="many-profile-paths"),
+            pytest.param("C:\\Users\\a" + " b" * 150_000, id="spaced-words-no-separator"),
+            pytest.param("C:\\Users\\a " + "b" * 300_000, id="long-word-after-space"),
+            pytest.param("'C:\\Users\\" + "a b" * 100_000, id="unclosed-single-quote"),
+            pytest.param("'C:\\Users\\" + "a'b" * 100_000, id="apostrophes-in-quote"),
+            pytest.param('"/home/a ' + "'/home/a " * 15_000, id="nested-unclosed-quotes"),
+            pytest.param("/" * 300_000, id="slash-run"),
+            pytest.param("//a/" * 75_000, id="slash-unc-run"),
+            pytest.param("file://" * 40_000, id="scheme-run"),
+            pytest.param("smb://" + "a" * 300_000, id="share-uri-long-host"),
+            pytest.param("/home/" + "a /" * 100_000, id="home-spaced"),
+            pytest.param("`C:\\Users\\" + "x " * 100_000, id="unclosed-backtick"),
+            pytest.param("https://" + "a" * 300_000, id="long-url"),
+            pytest.param("https://a/" + "C" * 300_000, id="url-drive-lookahead"),
+            pytest.param("C:\\Users\\" + "OneDrive - a " * 25_000, id="onedrive-words"),
+            pytest.param("'C:\\Users\\x" + "\\OneDrive -  a" * 200, id="quoted-onedrive-spaces"),
+            pytest.param("'" + "/home" * 50_000, id="quoted-home-runs"),
+            pytest.param('"' + "/Users" * 50_000, id="quoted-users-runs"),
+            pytest.param("'C:\\Users\\" + "\\" * 50_000, id="quoted-drive-backslashes"),
+            pytest.param("/a" * 100_000, id="posix-segments-no-home"),
+            pytest.param("/" + "ab/" * 100_000, id="posix-deep-no-home"),
+            pytest.param("/%" * 100_000, id="posix-percent-segments"),
+            pytest.param(" -I/a" * 50_000, id="option-flag-starts"),
+            pytest.param("/Volumes/" + "a b/" * 50_000, id="volume-prefix"),
+            pytest.param("x.pdf;" * 50_000, id="list-separators"),
+            pytest.param("'C:\\Users\\x" + "\\Aa" * 50_000, id="quoted-capitalised-folders"),
+            pytest.param("'C:\\Users\\x" + "\\Aa bb" * 30_000, id="quoted-titled-folders"),
+            pytest.param("C:\\Users\\x\\" + "Aa bb cc\\" * 30_000, id="titled-folders"),
+            pytest.param(" ../a" * 50_000, id="dotdot-starts"),
+            pytest.param("/#" * 100_000, id="posix-hash-segments"),
+            pytest.param("/a//" * 75_000, id="posix-empty-components"),
+            pytest.param("\\\\h\\s\\Users\\" + "a b " * 75_000, id="spaced-account-no-separator"),
+            pytest.param("//h/users/a b/" * 20_000, id="share-accounts-folders"),
+            pytest.param('"\\\\h\\homes\\a b' * 20_000, id="quoted-accounts-folders"),
+            pytest.param("\\\\h/" * 75_000, id="unc-slash-separators"),
+            pytest.param("smb://[" + "a" * 300_000, id="unclosed-ipv6-host"),
+            pytest.param("C:\\Users\\a" + ")" * 300_000, id="closing-brackets"),
+            pytest.param("/mnt/a" * 50_000, id="mount-prefixes"),
+        ],
+    )
+    def test_matching_stays_linear_on_adversarial_input(self, text: str) -> None:
+        """A backtracking blow-up would take minutes on these; linear takes milliseconds."""
+        start = time.perf_counter()
+        safe_text(text)
+        assert time.perf_counter() - start < 2.0
 
 
 class TestFormatDocumentResultsSanitization:

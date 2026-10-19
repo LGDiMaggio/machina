@@ -432,6 +432,61 @@ class TestLLMPromptPaths:
         # An instructional system path is kept, as in the agent's own context.
         assert "edit /etc/fstab" in prompt
 
+    @pytest.mark.asyncio
+    async def test_a_source_field_reaches_the_llm_as_a_file_name(self) -> None:
+        """``{step.source}`` is a document source, not free text: no directory survives."""
+
+        class _Finder:
+            def find(self, **kwargs: Any) -> DocumentChunk:
+                return _LEAKY_CHUNKS[3]
+
+        llm = _FakeLLM()
+        engine = WorkflowEngine(llm=llm, tracer=ActionTracer(), services={"finder": _Finder()})
+        wf = Workflow(
+            name="Cite",
+            steps=[
+                Step("find_doc", action="finder.find"),
+                Step(
+                    "reason",
+                    action="agent.reason",
+                    prompt="Cite {find_doc.source} and {trigger.source}. Edit {trigger.config}.",
+                ),
+            ],
+        )
+
+        await engine.execute(
+            wf,
+            trigger_event={"source": r"D:\Plant\Manuals\pump.pdf", "config": "/etc/fstab"},
+        )
+
+        (prompt,) = llm.prompts
+        assert prompt == "Cite lube_schedule.xlsx and pump.pdf. Edit /etc/fstab."
+
+    @pytest.mark.asyncio
+    async def test_chunks_inside_a_structured_output_carry_no_paths(self) -> None:
+        class _Searcher:
+            def run(self, **kwargs: Any) -> dict[str, Any]:
+                return {"hits": list(_LEAKY_CHUNKS), "count": len(_LEAKY_CHUNKS)}
+
+        llm = _FakeLLM()
+        engine = WorkflowEngine(llm=llm, tracer=ActionTracer(), services={"search": _Searcher()})
+        wf = Workflow(
+            name="Nested",
+            steps=[
+                Step("search", action="search.run"),
+                Step("reason", action="agent.reason", prompt="Context: {search}"),
+            ],
+        )
+
+        await engine.execute(wf)
+
+        (prompt,) = llm.prompts
+        for fragment in _PATH_FRAGMENTS:
+            assert fragment not in prompt
+        assert "Source: pump_p201.pdf (p. 12) § Bearing replacement" in prompt
+        assert _PROCEDURE in prompt
+        assert "'count': 4" in prompt
+
 
 # ---------------------------------------------------------------------------
 # Tests — connector dispatch

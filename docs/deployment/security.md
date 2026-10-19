@@ -99,23 +99,112 @@ own payload, not an LLM hallucination.
   protected at the prompt-formatting layer.
 - **Beyond the `source` field (v0.3.1):** absolute paths can also be embedded
   in the chunk **content** text itself and in **workflow error / output
-  strings** that flow back to the LLM. `agent.prompts.safe_text` scrubs those
-  — it reduces identity-/infrastructure-revealing paths (user-home dirs like
-  `C:\Users\<user>\…`, `/home/<user>/…`, and UNC shares `\\host\share\…`) to
-  their basename, while deliberately preserving instructional system paths
-  (`/etc`, `/usr/bin`, `C:\Program Files`) so technical-manual fidelity is
-  kept. It is applied to chunk content in both runtime boundaries and to the
-  `execute_workflow` step `error` payloads. It also matches the doubled
-  backslashes of `repr()` and JSON text (`'C:\\Users\\<user>\\…'`).
+  strings** that flow back to the LLM. `agent.prompts.safe_text` scrubs those.
+  It is applied to chunk content in both runtime boundaries, to tool errors
+  and to the `execute_workflow` step `error` payloads. It reduces each path
+  that names a user or a file-share host to its file name:
+
+    - user homes: `C:\Users\<user>\…` and `C:\Documents and Settings\<user>\…`
+      (backslashes or slashes, `\\?\` and `//?/` long-path prefixes,
+      `file:///C:/Users/…`), WSL, Cygwin and Git Bash
+      `/mnt/<drive>/Users/<user>/…` and `/<drive>/Users/<user>/…`,
+      `/home/<user>/…`, `/Users/<user>/…`, the same below a macOS volume
+      (`/Volumes/<volume>/Users/<user>/…`, `/System/Volumes/Data/Users/<user>/…`)
+      or a mount point (`/mnt/<disk>/Users/<user>/…`), and `/home/<user>/…`
+      below other folders of an absolute path (`/srv/backup/home/<user>/…`),
+      also behind `file:///` or `file://localhost/`, the four-slash URI form
+      of other schemes (`sqlite:////home/<user>/…`) or an option letter
+      (`-I/home/<user>/…`);
+    - shares: `\\host\share\…` (WebDAV `\\host@SSL\DavWWWRoot\…` included,
+      and a slash after the host, `\\host/share/…`), `\\?\UNC\host\…`,
+      `//host/share/…` and `//host\share\…`, and `file:`, `smb:`, `cifs:`,
+      `nfs:`, `sftp:`, `scp:`, `ssh:`, `afp:`, `dav:` and `davs:` URIs, user,
+      password, port and bracketed IPv6 hosts included
+      (`smb://user:pass@host:445/…`, `smb://[fe80::1]/…`,
+      `file:////host/share/…`).
+
+    A path whose last component names an account becomes `<path>`: a bare home
+    directory, a share with nothing below it, or a folder right under `Users`,
+    `home`, `homes` or `profiles` (`\\PC01\C$\Users\<user>`,
+    `\\NAS01\homes\<user>`, `/home/<user>/backup/home/<other>`); below a
+    profile or home, such a folder followed by a file name with an extension
+    is an ordinary folder (`/home/<user>/proj/users/models.py`). Escaped text
+    is matched too: the doubled backslashes of `repr()` and JSON
+    (`'C:\\Users\\<user>\\…'`), and text escaped twice. Paths joined without
+    whitespace (`a.pdf;C:\Users\…`, `PATH` lists) are found one by one, and a
+    closing bracket the path did not open stays in the prose
+    (`(C:\Users\<user>)` becomes `(<path>)`). In
+    quotes (`repr()`, JSON, `str(OSError)`, Markdown code) the user or share
+    name, a `OneDrive - …` folder and the file name may contain spaces, and
+    another folder may hold words as in unquoted paths; a quoted command or
+    sentence that only starts with a path and a lowercase word keeps its
+    words. Unquoted Windows paths and shares accept a user name of up to four
+    words (`Maria de la Cruz`), also right under a share's accounts folder
+    (`\\PC01\C$\Users\john smith\…`, `smb://nas01/homes/john smith/…`), a deeper
+    folder of up to four words that starts with a capitalised word
+    (`New folder`, `Documenti tecnici`) or whose later words are capitalised
+    or digits (`x64 Release`), and eight words after `OneDrive -`, each when a
+    separator follows.
+
+    Deliberately preserved, so manuals and messages keep full fidelity:
+    instructional system paths (`/etc`, `/usr/bin`, `C:\Program Files`,
+    `C:\Windows\System32`), relative and menu paths (`Settings/Users/Roles`),
+    REST paths (`/api/users/42`, `/api/Users/42`), `\\.\pipe\…` device paths,
+    web URLs (`http(s)`, `s3`, `gs`, `ftp(s)`, kept whole), service URIs, also
+    on localhost (`mqtt://broker/topic`, `mqtt://localhost/home/…`,
+    `opc.tcp://plc:4840/…`), and relative database URLs
+    (`sqlite:///home/data.db`). Known limits:
+
+    - an unquoted profile path keeps the later words of a user name with more
+      than four words, and of a bare spaced name at the end of a sentence
+      (`C:\Users\Mario Rossi`);
+    - prose within four words after a user name or a capitalised folder, or a
+      capitalised word or digit before a later slash or backslash, can be
+      taken for a folder (`C:\Users\me\x.csv Line 2\P-202` keeps only
+      `P-202`);
+    - a POSIX path below a folder whose name holds a space
+      (`/srv/my backup/home/<user>`) is not matched, nor is `/Users/<user>`
+      below folders other than those listed above (`/srv/backup/Users/<user>`)
+      or a Linux removable-media mount (`/media/<user>/…`,
+      `/run/media/<user>/…`);
+    - a relative path into a home (`../../home/<user>/…`) is kept, like any
+      relative path;
+    - Windows profiles below an NT device or volume path
+      (`\Device\HarddiskVolume3\Users\<user>`, `\\?\Volume{…}\Users\<user>`)
+      or a drive folder (`E:\Backup\Users\<user>`), JSON with escaped slashes
+      (`"\/home\/<user>\/…"`) and a user name holding a non-breaking space are
+      not matched;
+    - an absolute path with a `/home/` segment is treated as a home
+      (`/api/home/dashboard`), and a lowercase `/users/<user>/` (a
+      case-insensitive macOS volume) is not matched;
+    - a web URL whose own path names a user (`http://intranet/home/<user>/…`)
+      is kept, and a protocol-relative URL (`//cdn.example.com/lib.js`) reads
+      as a share;
+    - a bare `\\host` with no share is not matched, because it cannot be told
+      apart from escaped regex text such as `\\d+`.
 - **Workflow outputs:** an `agent.reason` step's prompt goes to the model
   provider, and so does the `output_summary` the agent's `execute_workflow`
   tool returns for each step. Both are rendered by
-  `agent.prompts.render_for_llm`: document chunks from a
-  `docs.search_documents` step become a `Source:` line with the file name
-  (`safe_source`), page and section, then the text (`safe_text`); any other
-  value (trigger fields, other step outputs) passes through `safe_text`.
-  A path held in a field read on its own (`{find_doc.source}`) gets
-  `safe_text` only, so a path outside a user home is kept.
+  `agent.prompts.render_for_llm`:
+
+    - Document chunks from a `docs.search_documents` step become a `Source:`
+      line with the file name (`safe_source`), page and section, then the text
+      (`safe_text`). Chunks nested in dicts, lists and tuples are rendered the
+      same way.
+    - A value read from a `source` field (`{find_doc.source}`,
+      `{trigger.source}`), and a quoted `source` value in a rendered dict,
+      dataclass repr or JSON string, keeps only its file name when it is an
+      absolute path or a file-share URI. Any other source, such as an alarm's
+      `mqtt://` origin, an OPC-UA node id or a relative path, keeps its text.
+    - Any other value passes through `safe_text`. A value that starts with a
+      home or share path is scanned as one quoted value, so a value that is
+      exactly a home directory or share becomes `<path>` whatever words the
+      user name holds; a value that starts with a bare home directory and
+      continues with prose (`/home/<user> has 2 GB free`) also becomes
+      `<path>`.
+- **Not yet covered:** the MCP server's tool results (`machina_search_manuals`
+  chunk content, `{"error": str(exc)}` results) do not yet pass through
+  `safe_text`; only the `source` field is sanitised there.
 - The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
   absolute file paths, directory structures, database schemas, or system
   architecture. This is a backstop, not the primary defence — the primary

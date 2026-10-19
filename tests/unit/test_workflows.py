@@ -480,9 +480,22 @@ class TestWorkflowContext:
         ctx = WorkflowContext({"asset_id": "P-201"})
         ctx.mark_step_failed("check_spare_parts")
         rendered = ctx.resolve(
-            "{trigger.asset_id} {check_spare_parts} {missing}", render=lambda v: f"<{v}>"
+            "{trigger.asset_id} {check_spare_parts} {missing}", render=lambda v, _: f"<{v}>"
         )
         assert rendered == "<P-201> [check_spare_parts failed] {missing}"
+
+    def test_resolve_tells_the_renderer_which_field_was_read(self) -> None:
+        ctx = WorkflowContext({"source": "a.pdf"})
+        ctx.set_step_output("find", {"source": "b.pdf"})
+
+        rendered = ctx.resolve(
+            "{trigger.source} {find.source} {find} {trigger}",
+            render=lambda value, field: f"{field}={value}",
+        )
+
+        assert rendered == (
+            "source=a.pdf source=b.pdf None={'source': 'b.pdf'} None={'source': 'a.pdf'}"
+        )
 
 
 class TestBuiltinAlarmToWorkorder:
