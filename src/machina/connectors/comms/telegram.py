@@ -15,7 +15,7 @@ import structlog
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
 
@@ -193,7 +193,20 @@ class TelegramConnector:
         self._application.add_handler(TGMsgHandler(filters.TEXT & ~filters.COMMAND, _on_message))
 
         logger.info("listening", connector="TelegramConnector")
-        await self._application.initialize()
+        try:
+            await self._application.initialize()
+        except Exception as exc:
+            from telegram.error import (  # type: ignore[import-not-found,unused-ignore]
+                InvalidToken,
+            )
+
+            if isinstance(exc, InvalidToken):
+                # python-telegram-bot puts the rejected token in the message
+                # ("The token `<token>` was rejected by the server."). Raise
+                # without it and without the chained exception, so no
+                # traceback or log line carries the token.
+                raise ConnectorAuthError("Telegram rejected the bot token") from None
+            raise
         await self._application.start()
         await self._application.updater.start_polling()
 

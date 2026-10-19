@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+from types import ModuleType
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +15,8 @@ from machina.connectors.comms.types import (
     SupportsConfirmation,
     supports_sync_confirmation,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.observability.logging import traceback_text
 
 
 class TestIncomingMessage:
@@ -423,3 +426,62 @@ class TestTelegramListen:
         mock_update.message.chat_id = 999
         await captured_on_message(mock_update, MagicMock())
         handler.assert_not_awaited()
+
+
+_TOKEN = "123456789:AAFakeTokenValue_ShouldNeverBeLogged0"
+
+
+class _InvalidToken(Exception):  # noqa: N818 — mirrors the library's class name
+    """Stands in for ``telegram.error.InvalidToken``."""
+
+
+def _telegram_modules() -> dict[str, Any]:
+    error_module = ModuleType("telegram.error")
+    error_module.InvalidToken = _InvalidToken  # type: ignore[attr-defined]
+    return {"telegram": MagicMock(), "telegram.ext": MagicMock(), "telegram.error": error_module}
+
+
+def _rejecting_app(error: Exception) -> MagicMock:
+    app = MagicMock()
+    app.initialize = AsyncMock(side_effect=error)
+    return app
+
+
+async def _no_reply(msg: IncomingMessage) -> str:
+    return ""
+
+
+class TestBotTokenStaysOutOfLogs:
+    """The bot token never reaches an exception message or a log line."""
+
+    @pytest.mark.asyncio
+    async def test_rejected_token_raises_without_the_token(self) -> None:
+        """python-telegram-bot's own message names the token; ours does not."""
+        conn = TelegramConnector(bot_token=_TOKEN)
+        conn._connected = True
+        conn._application = _rejecting_app(
+            _InvalidToken(f"The token `{_TOKEN}` was rejected by the server.")
+        )
+
+        with (
+            patch.dict(sys.modules, _telegram_modules()),
+            pytest.raises(ConnectorAuthError, match="rejected the bot token") as exc_info,
+        ):
+            await conn.listen(_no_reply)
+
+        assert _TOKEN not in str(exc_info.value)
+        # Neither the traceback nor the chained exception a log would print.
+        assert _TOKEN not in traceback_text(exc_info.value)
+        assert exc_info.value.__suppress_context__ is True
+
+    @pytest.mark.asyncio
+    async def test_other_startup_failures_propagate_unchanged(self) -> None:
+        conn = TelegramConnector(bot_token=_TOKEN)
+        conn._connected = True
+        failure = RuntimeError("network unreachable")
+        conn._application = _rejecting_app(failure)
+
+        with patch.dict(sys.modules, _telegram_modules()), pytest.raises(RuntimeError) as exc_info:
+            await conn.listen(_no_reply)
+
+        assert exc_info.value is failure
