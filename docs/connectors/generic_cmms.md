@@ -206,4 +206,5 @@ exists returns the existing record.
 
 Capabilities are computed per instance, from the mode and the configured
 endpoints. With sandbox mode on, creates and updates never run
-(`@sandbox_aware`).
+(`@sandbox_aware`). In both modes, `read_maintenance_history` raises
+`ConnectorError` for a missing or blank `asset_id`, as the vendor connectors do.

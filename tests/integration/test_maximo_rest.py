@@ -596,8 +596,17 @@ class TestReadMaintenanceHistory:
 
     @pytest.mark.parametrize(
         "next_page",
-        [{}, {"href": ""}, {"href": None}, {"href": 7}, "", 7, []],
-        ids=["no-href", "empty-href", "null-href", "number-href", "empty", "number", "list"],
+        [{}, {"href": ""}, {"href": "  "}, {"href": None}, {"href": 7}, "", 7, []],
+        ids=[
+            "no-href",
+            "empty-href",
+            "blank-href",
+            "null-href",
+            "number-href",
+            "empty",
+            "number",
+            "list",
+        ],
     )
     @pytest.mark.asyncio
     async def test_read_maintenance_history_refuses_a_next_page_without_a_url(
@@ -619,6 +628,124 @@ class TestReadMaintenanceHistory:
         with pytest.raises(ConnectorError, match=r"^Maximo returned a nextPage link without"):
             await connector.read_maintenance_history("PUMP-201")
         assert len(httpx_mock.get_requests()) == 2  # connect + the first page
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "https://attacker.example.net/maximo/oslc/os/mxwo?pageno=2",
+            "http://maximo.example.com/maximo/oslc/os/mxwo?pageno=2",
+            "https://maximo.example.com:9443/maximo/oslc/os/mxwo?pageno=2",
+            "//attacker.example.net/maximo/oslc/os/mxwo?pageno=2",
+            "https://maximo.example.com:99999/maximo/oslc/os/mxwo?pageno=2",
+        ],
+        ids=["other-host", "plain-http", "other-port", "scheme-relative", "invalid-port"],
+    )
+    @pytest.mark.asyncio
+    async def test_next_page_on_another_origin_is_refused(
+        self, httpx_mock, connector: MaximoConnector, href: str
+    ) -> None:
+        """Every page carries the API key, so the link must stay on the connector's
+        scheme, host and port. Maximo builds links from its own configured
+        address, which behind a proxy can be an internal host or plain HTTP."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {"nextPage": {"href": href}},
+            },
+        )
+        with pytest.raises(ConnectorError, match="another scheme, host or port") as exc_info:
+            await connector.read_maintenance_history("PUMP-201")
+        assert "attacker" not in str(exc_info.value)
+        assert "9443" not in str(exc_info.value)
+        assert len(httpx_mock.get_requests()) == 2  # connect + the first page
+
+    @pytest.mark.asyncio
+    async def test_relative_next_page_link_is_resolved_on_the_same_host(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        next_url = f"{OSLC}/os/mxwo?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {
+                    "nextPage": {"href": "/maximo/oslc/os/mxwo?pageno=2&oslc.pageSize=100"}
+                },
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_url,
+            json={"member": [{"wonum": "WO-H2", "status": "CLOSE"}]},
+        )
+        history = await connector.read_maintenance_history("PUMP-201")
+        assert [wo.id for wo in history] == ["WO-H1", "WO-H2"]
+        assert httpx_mock.get_requests()[-1].url == httpx.URL(next_url)
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_next_page_link_is_refused(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A server that links a page to itself would otherwise be read forever."""
+        await _connect(httpx_mock, connector)
+        page2 = f"{OSLC}/os/mxwo?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {"nextPage": {"href": page2}},
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=page2,
+            json={
+                "member": [{"wonum": "WO-H2", "status": "CLOSE"}],
+                "responseInfo": {"nextPage": {"href": page2}},
+            },
+        )
+        with pytest.raises(ConnectorError, match="already returned"):
+            await connector.read_maintenance_history("PUMP-201")
+        assert len(httpx_mock.get_requests()) == 3  # connect + page 1 + page 2 once
+
+    @pytest.mark.asyncio
+    async def test_rows_past_the_safety_cap_are_refused(
+        self, httpx_mock, connector: MaximoConnector, monkeypatch
+    ) -> None:
+        """Paging bounds each request, not the read: past the cap it raises."""
+        monkeypatch.setattr(MaximoConnector, "_MAX_OSLC_ROWS", 2)
+        await _connect(httpx_mock, connector)
+        page2 = f"{OSLC}/os/mxwo?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1"}, {"wonum": "WO-H2"}],
+                "responseInfo": {"nextPage": {"href": page2}},
+            },
+        )
+        httpx_mock.add_response(method="GET", url=page2, json={"member": [{"wonum": "WO-H3"}]})
+        with pytest.raises(ConnectorError, match="2-row safety cap"):
+            await connector.read_maintenance_history("PUMP-201")
+
+    @pytest.mark.asyncio
+    async def test_a_null_next_page_ends_the_read(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={"member": [{"wonum": "WO-H1"}], "responseInfo": {"nextPage": None}},
+        )
+        history = await connector.read_maintenance_history("PUMP-201")
+        assert [wo.id for wo in history] == ["WO-H1"]
 
     @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "unresolved"])
     @pytest.mark.asyncio
@@ -876,13 +1003,17 @@ class TestWhereValuesStayLiteral:
 
 
 # Every method that puts a caller-supplied value into oslc.where, called with it.
+def _read_history(conn: MaximoConnector, value: object):
+    return conn.read_maintenance_history(value)  # type: ignore[arg-type]
+
+
 _FILTERED_CALLS = [
     pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
     pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
     pytest.param(lambda c, v: c.read_work_orders(asset_id=v), id="read_work_orders-asset_id"),
     pytest.param(lambda c, v: c.read_work_orders(status=v), id="read_work_orders-status"),
     pytest.param(lambda c, v: c.read_spare_parts(sku=v), id="read_spare_parts-sku"),
-    pytest.param(lambda c, v: c.read_maintenance_history(v), id="read_maintenance_history"),
+    pytest.param(_read_history, id="read_maintenance_history"),
     # Re-fetches by wonum after the PATCH, so the value must be refused before it.
     pytest.param(lambda c, v: c.update_work_order(v, description="x"), id="update_work_order"),
 ]
@@ -939,7 +1070,12 @@ class TestOslcWhereValues:
         await _connect(httpx_mock, connector)
         # read_maintenance_history refuses a blank asset ID with its own
         # missing-ID message before the value reaches _oslc_eq.
-        with pytest.raises(ConnectorError, match=r"for a Maximo query|requires an asset_id"):
+        expected = (
+            "requires an asset_id"
+            if call is _read_history and not value.strip()
+            else "for a Maximo query"
+        )
+        with pytest.raises(ConnectorError, match=expected):
             await call(connector, value)
         # Only the whoami handshake went out: no OSLC query, no PATCH.
         assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]

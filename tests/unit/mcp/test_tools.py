@@ -463,15 +463,19 @@ class TestGetMaintenanceHistory:
         assert result == [{"error": "read_maintenance_history requires an asset_id"}]
         assert httpx_mock.get_requests() == []
 
+    @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "none"])
     @pytest.mark.asyncio
-    async def test_missing_asset_id_never_reaches_the_work_order_fallback(self) -> None:
+    async def test_missing_asset_id_never_reaches_the_work_order_fallback(
+        self, asset_id: str | None
+    ) -> None:
         """Without a history method the tool reads work orders by asset, and
-        ``read_work_orders(asset_id="")`` means every work order."""
+        ``read_work_orders(asset_id="")`` means every work order. ``None`` only
+        arrives from a direct Python call; the MCP schema requires a string."""
         from machina.mcp.tools import machina_get_maintenance_history
 
         conn = _WorkOrdersOnlyCmms()
         runtime = MachinaRuntime(connectors={"cmms": conn})
-        result = await machina_get_maintenance_history(_make_ctx(runtime), "")
+        result = await machina_get_maintenance_history(_make_ctx(runtime), asset_id)  # type: ignore[arg-type]
         assert result == [{"error": "read_maintenance_history requires an asset_id"}]
         conn.read_work_orders.assert_not_called()
 

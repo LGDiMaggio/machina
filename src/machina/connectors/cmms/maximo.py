@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import urljoin, urlsplit
 
 import structlog
 from pydantic import Field
@@ -105,25 +106,56 @@ def _require_httpx() -> Any:
     return httpx
 
 
-def _next_page_url(next_page: object) -> str | None:
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """Return the scheme, host and port of ``url``, the port defaulted by scheme.
+
+    Raises:
+        ValueError: If ``url`` cannot be split or its port is not a valid number.
+    """
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def _next_page_url(next_page: object, current_url: str) -> str | None:
     """Return the URL of the next OSLC page, or ``None`` after the last page.
 
     Maximo's JSON API gives the link as ``responseInfo.nextPage`` =
     ``{"href": "<url>"}``, the field IBM's own REST clients follow, and leaves
-    ``nextPage`` out on the last page. A bare URL string is followed too. Any
-    other value is refused rather than read as the last page, which would
-    return the pages read so far as the whole result.
+    ``nextPage`` out on the last page. A bare URL string is followed too, and a
+    relative link is resolved against ``current_url``.
+
+    Every page is requested with the connector's credentials, so the link must
+    keep the scheme, host and port of ``current_url``. Maximo builds its links
+    from its own configured address, which behind a proxy can be an internal
+    host or plain HTTP. Any other value is refused rather than read as the last
+    page, which would return the pages read so far as the whole result.
 
     Raises:
-        ConnectorError: If ``nextPage`` is present but carries no URL.
+        ConnectorError: If ``nextPage`` carries no URL, or its URL has another
+            scheme, host or port. Neither message repeats the URL, which can
+            name an internal host.
     """
     if next_page is None:
         return None
     if isinstance(next_page, dict):
         next_page = next_page.get("href")
-    if isinstance(next_page, str) and next_page:
-        return next_page
-    raise ConnectorError("Maximo returned a nextPage link without an href URL")
+    if not isinstance(next_page, str) or not next_page.strip():
+        raise ConnectorError("Maximo returned a nextPage link without an href URL")
+    try:
+        url = urljoin(current_url, next_page.strip())
+        same_origin = _origin(url) == _origin(current_url)
+    except ValueError:
+        same_origin = False
+    if not same_origin:
+        raise ConnectorError(
+            "Maximo returned a nextPage link to another scheme, host or port than "
+            "the connector URL; refusing to send the connector's credentials there"
+        )
+    return url
 
 
 # Characters an oslc.where string value cannot carry. IBM documents no escape
@@ -230,6 +262,9 @@ class MaximoConnector:
     )
 
     _PAGE_SIZE: ClassVar[int] = 100
+    # Cap on rows accumulated across the pages of one read, as SAP PM's
+    # _MAX_ODATA_ROWS: paging chunks the fetch but does not bound memory.
+    _MAX_OSLC_ROWS: ClassVar[int] = 50_000
 
     def __init__(
         self,
@@ -534,7 +569,7 @@ class MaximoConnector:
         """Fetch all pages from a Maximo OSLC object structure.
 
         Maximo paginates OSLC results via a ``responseInfo.nextPage``
-        link in each page.
+        link in each page (see :func:`_next_page_url`).
 
         Args:
             object_structure: The Maximo OS name (e.g. ``mxasset``, ``mxwo``).
@@ -544,6 +579,11 @@ class MaximoConnector:
 
         Returns:
             Flat list of all result dicts across all pages.
+
+        Raises:
+            ConnectorError: On an HTTP error, a next-page link that cannot be
+                followed or repeats an earlier one, or more than
+                :attr:`_MAX_OSLC_ROWS` rows.
         """
         httpx = _require_httpx()
         size = page_size or self._PAGE_SIZE
@@ -557,6 +597,7 @@ class MaximoConnector:
         if oslc_select:
             initial_params["oslc.select"] = oslc_select
         params: dict[str, str] | None = initial_params
+        followed: set[str] = set()
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while url is not None:
@@ -576,9 +617,22 @@ class MaximoConnector:
                 body = resp.json()
                 members = body.get("member", [])
                 all_items.extend(members)
+                if len(all_items) > self._MAX_OSLC_ROWS:
+                    raise ConnectorError(
+                        f"Maximo GET {object_structure} exceeded the "
+                        f"{self._MAX_OSLC_ROWS}-row safety cap — refusing to load an "
+                        "unbounded result set into memory. Narrow the query with oslc.where."
+                    )
                 # Follow the OSLC next-page link. It repeats the query, so the
                 # first request's params are not sent again.
-                url = _next_page_url(body.get("responseInfo", {}).get("nextPage"))
+                url = _next_page_url(body.get("responseInfo", {}).get("nextPage"), url)
+                if url in followed:
+                    raise ConnectorError(
+                        f"Maximo GET {object_structure} returned a nextPage link it had "
+                        "already returned — refusing to read the same page again"
+                    )
+                if url is not None:
+                    followed.add(url)
                 params = None
         logger.debug(
             "oslc_get",

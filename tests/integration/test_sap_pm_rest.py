@@ -774,6 +774,24 @@ class TestReadMaintenanceHistory:
         assert [wo.id for wo in step_result.output] == ["4000010"]
 
     @pytest.mark.asyncio
+    async def test_numeric_asset_id_is_sent_as_its_digits(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Tool arguments parsed from model JSON can carry an equipment number as a number."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'")},
+            ),
+            json={"d": {"results": [{"MaintenanceOrder": "4000010"}]}},
+        )
+        history = await connector.read_maintenance_history(10000001)  # type: ignore[arg-type]
+        assert [wo.id for wo in history] == ["4000010"]
+
+    @pytest.mark.asyncio
     async def test_read_maintenance_history_pages_keep_the_filter(
         self, httpx_mock, connector: SapPmConnector
     ) -> None:

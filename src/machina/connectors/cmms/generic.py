@@ -446,10 +446,12 @@ class GenericCmmsConnector:
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
+        # Asset IDs are stored as text; a numeric ID would match nothing.
+        wanted = str(asset_id)
         return [
             wo
             for wo in self._work_orders
-            if wo.asset_id == asset_id and wo.status.value in ("completed", "closed")
+            if wo.asset_id == wanted and wo.status.value in ("completed", "closed")
         ]
 
     # ------------------------------------------------------------------

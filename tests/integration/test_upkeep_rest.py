@@ -836,6 +836,20 @@ class TestReadMaintenanceHistory:
         assert len(httpx_mock.get_requests()) == 1  # the connect check only
 
     @pytest.mark.asyncio
+    async def test_numeric_asset_id_keeps_the_asset_filter(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """``0`` is an ID, not "no asset": ``read_work_orders`` drops a falsy filter."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=0&status=complete",
+            json={"results": [{"id": "wo-h0", "status": "complete", "assetId": "0"}]},
+        )
+        history = await connector.read_maintenance_history(0)  # type: ignore[arg-type]
+        assert [wo.id for wo in history] == ["wo-h0"]
+
+    @pytest.mark.asyncio
     async def test_read_maintenance_history_pages_keep_the_filter(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:

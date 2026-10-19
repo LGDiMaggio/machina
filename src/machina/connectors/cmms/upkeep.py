@@ -383,7 +383,9 @@ class UpKeepConnector:
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
-        return await self.read_work_orders(asset_id=asset_id, status="complete")
+        # As text: a numeric ID such as 0 is falsy, and read_work_orders would
+        # drop the filter for it.
+        return await self.read_work_orders(asset_id=str(asset_id), status="complete")
 
     # ------------------------------------------------------------------
     # Internal helpers
