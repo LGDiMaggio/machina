@@ -38,7 +38,12 @@ from machina.connectors.cmms.mappers.sap_pm import (
 from machina.connectors.cmms.mappers.sap_pm import (
     reverse_status as _reverse_status,
 )
-from machina.connectors.cmms.sap_pm import SapPmConnector, _require_httpx
+from machina.connectors.cmms.sap_pm import (
+    SapPmConnector,
+    _odata_key,
+    _odata_string,
+    _require_httpx,
+)
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -315,6 +320,68 @@ class TestReverseMapping:
         assert _reverse_status(WorkOrderStatus.COMPLETED) == "CNF"
         assert _reverse_status(WorkOrderStatus.CLOSED) == "TECO"
         assert _reverse_status(WorkOrderStatus.CANCELLED) == "DLFL"
+
+
+# ---------------------------------------------------------------------------
+# OData string literals and keys
+# ---------------------------------------------------------------------------
+
+
+class TestODataString:
+    """Caller values reach ``$filter`` only through ``_odata_string``."""
+
+    def test_value_is_single_quoted(self) -> None:
+        assert _odata_string("10000001") == "'10000001'"
+
+    def test_int_is_quoted_like_its_digits(self) -> None:
+        # Tool arguments parsed from model JSON can carry an equipment number as a number.
+        assert _odata_string(10000001) == "'10000001'"
+
+    @pytest.mark.parametrize(
+        ("value", "literal"),
+        [
+            ("O'Neil", "'O''Neil'"),
+            ("'", "''''"),
+            ("x' or 1 eq 1 or Equipment eq 'y", "'x'' or 1 eq 1 or Equipment eq ''y'"),
+        ],
+    )
+    def test_embedded_single_quote_is_doubled(self, value: str, literal: str) -> None:
+        assert _odata_string(value) == literal
+
+    def test_empty_value_is_an_empty_literal(self) -> None:
+        assert _odata_string("") == "''"
+
+    def test_other_characters_pass_through_verbatim(self) -> None:
+        # Inside an OData string literal only the single quote is syntax.
+        # Percent-encoding the query string is httpx's job, not the literal's.
+        value = 'A%B*C"D\\E,F(G)H&I#J'
+        assert _odata_string(value) == f"'{value}'"
+
+
+class TestODataKey:
+    """The ``MaintenanceOrder(...)`` key of a PATCH stays one URL path segment."""
+
+    @pytest.mark.parametrize("value", ["4000001", 4000001])
+    def test_ordinary_key_is_a_quoted_literal(self, value: object) -> None:
+        assert _odata_key(value) == "'4000001'"
+
+    def test_path_and_key_syntax_is_percent_encoded(self) -> None:
+        assert _odata_key("a/b?c#d%e(f)") == "'a%2Fb%3Fc%23d%25e%28f%29'"
+
+    def test_key_cannot_close_its_literal_or_leave_its_segment(self) -> None:
+        assert _odata_key("1')/API_EQUIPMENT/Equipment('10000001") == (
+            "'1''%29%2FAPI_EQUIPMENT%2FEquipment%28''10000001'"
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "..", "x/../y", "a//b", "1')/../../API_EQUIPMENT/Equipment('10000001"],
+    )
+    def test_key_with_an_empty_or_dot_part_is_refused(self, value: str) -> None:
+        # As for every ID in a URL path: a proxy that decodes %2F before
+        # normalizing would otherwise resolve the dot parts.
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            _odata_key(value)
 
 
 # ---------------------------------------------------------------------------
