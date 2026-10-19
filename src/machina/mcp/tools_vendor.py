@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.connectors.base import set_sandbox_mode
-from machina.exceptions import SandboxViolationError
+from machina.connectors.cmms.maximo import _oslc_resource_path
+from machina.exceptions import ConnectorError, SandboxViolationError
 
 # See machina.mcp.tools: FastMCP injects the request context only into a
 # parameter annotated with its bare ``Context`` class (opaque to mypy).
@@ -122,11 +123,21 @@ async def maximo_raw_attribute_update(
 
     Args:
         resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
-            letters, digits and underscores only.
-        resource_id: Resource identifier, sent as one URL path segment.
+            ASCII letters, digits and underscores only.
+        resource_id: Rest ID of the resource, the last segment of its OSLC
+            href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
     """
     from machina.connectors.base import get_sandbox_mode
+
+    # Both values go into the PATCH URL. A value that could address another
+    # endpoint is refused before anything else, in sandbox mode too, so a
+    # sandbox run answers as a live run would; the connector helper checks
+    # again before its request.
+    try:
+        _oslc_resource_path(resource_type, resource_id)
+    except ConnectorError as exc:
+        return {"error": str(exc)}
 
     # _runtime re-establishes the sandbox contextvar for this request task;
     # it must run before get_sandbox_mode() is read.

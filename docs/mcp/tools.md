@@ -88,10 +88,23 @@ capabilities, `read_failure_modes`, `receive_message`, `retrieve_section`,
 Two non-portable escape hatches reach vendor APIs directly. They are
 registered only with `enable_vendor_tools: true` under `mcp:` in the config;
 outside sandbox mode they answer with an error entry when the matching
-connector is not configured, and `maximo_raw_attribute_update` answers with
-one, before any request, when `resource_type` is not an object-structure name
-(letters, digits and `_`) or `resource_id` is empty, `.` or `..`. Any other
-`resource_id` is sent percent-encoded as one URL path segment.
+connector is not configured.
+
+`maximo_raw_attribute_update` patches one resource,
+`/maximo/oslc/os/{resource_type}/{resource_id}`, and nothing else:
+
+- `resource_type` must be an object-structure name: ASCII letters, digits and
+  `_` (`mxwo`, `MXASSET`, a site's own `ZZ_WO`).
+- `resource_id`, the rest ID that ends the resource's `href`, is sent
+  percent-encoded as one URL path segment. It follows the rule of the CMMS
+  connectors' other path IDs: it cannot be empty, and no part of it between
+  `/` or `\` separators can be empty, `.` or `..`, including before a `;`.
+  Maximo rest IDs use only unreserved URL characters, so they are sent
+  unchanged.
+
+A refused value comes back as an error entry before any request, in sandbox
+mode too, so a sandbox run answers as a live run would. The message names the
+rule, never the value.
 
 | Tool | Connector | Parameters |
 |------|-----------|------------|
@@ -120,13 +133,17 @@ also backs the agent runtime and workflows, and a direct Python call to a
 connector write method in sandbox mode raises the exception instead of
 returning a result. Reads still run: `machina_create_work_order` looks the
 asset up in the CMMS before the guard stops the write. The vendor tools check
-sandbox mode themselves before calling the vendor API.
+sandbox mode themselves before calling the vendor API, and each writes through
+a connector helper with its own `@sandbox_aware` guard (SAP PM's
+`_write_with_csrf`, Maximo's `_patch_resource`), so the tool's check is not
+the only gate.
 
 ## Error Handling
 
 Missing records and missing connectors come back as an `error` entry in the
 result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
 model can read them; so do an invalid `status` in `machina_update_work_order`,
+an invalid `resource_type` or `resource_id` in `maximo_raw_attribute_update`,
 an alarm source without `get_alarms()`, and connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
 `machina_send_message`. Any other connector failure — and

@@ -60,6 +60,31 @@ _AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
 _OBJECT_STRUCTURE_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
+def _oslc_resource_path(object_structure: object, resource_id: object) -> str:
+    """Build ``/maximo/oslc/os/{object_structure}/{resource_id}`` for one resource.
+
+    Both values reach this path from MCP-client input, and httpx removes dot
+    segments, so ``object_structure`` must be an object-structure name and
+    ``resource_id`` goes through :func:`~machina.connectors.cmms.paths.path_segment`:
+    neither can address another Maximo endpoint or the collection itself. The
+    check needs no connection or request, so the raw vendor tool also runs it
+    before its sandbox short-circuit.
+
+    Raises:
+        ConnectorError: If ``object_structure`` is not ASCII letters, digits
+            and ``_``, or ``resource_id`` could leave its path segment. Neither
+            message repeats the value: it reaches the MCP client.
+    """
+    if not isinstance(object_structure, str) or not _OBJECT_STRUCTURE_RE.fullmatch(
+        object_structure
+    ):
+        raise ConnectorError(
+            "Invalid Maximo object structure: expected an object structure name "
+            "such as 'mxwo' (ASCII letters, digits and underscores only)"
+        )
+    return f"/maximo/oslc/os/{object_structure}/{path_segment(resource_id)}"
+
+
 def _require_httpx() -> Any:
     """Import httpx lazily so the extra is truly optional."""
     try:
@@ -532,19 +557,16 @@ class MaximoConnector:
         """PATCH raw attributes onto one resource of an OSLC object structure.
 
         The write path of the ``maximo_raw_attribute_update`` MCP vendor tool.
-        Both values come from MCP-client input and httpx removes dot segments,
-        so ``object_structure`` must be an object-structure name and
-        ``resource_id`` is sent as one percent-encoded path segment: neither
-        can address another Maximo endpoint. The response is returned
-        unchecked, for the caller to report.
+        Both values come from MCP-client input; :func:`_oslc_resource_path`
+        keeps the PATCH on one resource of one object structure, and checks
+        them again here so a direct call is held to the same rule. The
+        response is returned unchecked, for the caller to report.
 
         Raises:
-            ConnectorError: If ``object_structure`` is not letters, digits and
-                ``_``, or ``resource_id`` is empty, ``.`` or ``..``.
+            ConnectorError: If ``object_structure`` or ``resource_id`` is
+                refused by :func:`_oslc_resource_path`, before any request.
         """
-        if not _OBJECT_STRUCTURE_RE.fullmatch(object_structure):
-            raise ConnectorError(f"Invalid Maximo object structure {object_structure!r}")
-        url = f"{self.url}/maximo/oslc/os/{object_structure}/{path_segment(resource_id)}"
+        url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
         httpx = _require_httpx()
         headers = {**self._headers(), "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30.0) as client:
