@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
+import structlog.testing
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, MutableMapping
 
 from machina.connectors.iot.opcua import (
     OpcUaConnector,
@@ -15,6 +21,26 @@ from machina.connectors.iot.opcua import (
 )
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+
+@pytest.fixture
+def opcua_events(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[MutableMapping[str, Any]]]:
+    """The events the connector logs during the test.
+
+    The module logger is replaced first: one cached by an earlier test would
+    bypass the capture.
+    """
+    monkeypatch.setattr(
+        "machina.connectors.iot.opcua.logger", structlog.get_logger("machina.connectors.iot.opcua")
+    )
+    with structlog.testing.capture_logs() as events:
+        yield events
+
+
+def _logged(events: list[MutableMapping[str, Any]], name: str) -> MutableMapping[str, Any]:
+    [event] = [e for e in events if e["event"] == name]
+    assert "exc_info" not in event
+    return event
 
 
 class TestOpcUaConnectorInit:
@@ -191,6 +217,29 @@ class TestOpcUaConnectorDisconnect:
 
         mock_opcua_sub.delete.assert_awaited_once()
         assert len(conn._subscriptions) == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_cleanup_is_logged_with_its_traceback(
+        self, opcua_events: list[MutableMapping[str, Any]]
+    ) -> None:
+        mock_client = AsyncMock()
+        mock_client.disconnect.side_effect = RuntimeError("server went away")
+        mock_opcua_sub = AsyncMock()
+        mock_opcua_sub.delete.side_effect = RuntimeError("subscription already gone")
+        conn = OpcUaConnector(endpoint="opc.tcp://localhost:4840")
+        conn._connected = True
+        conn._client = mock_client
+        sub = Subscription(_opcua_subscription=mock_opcua_sub)
+        conn._subscriptions[sub.id] = sub
+
+        await conn.disconnect()
+
+        assert conn._connected is False
+        deleted = _logged(opcua_events, "subscription_delete_error")
+        assert deleted["subscription_id"] == sub.id
+        assert deleted["exception"].endswith("RuntimeError: subscription already gone")
+        disconnected = _logged(opcua_events, "disconnect_error")
+        assert disconnected["exception"].endswith("RuntimeError: server went away")
 
 
 class TestOpcUaConnectorHealthCheck:
@@ -506,7 +555,9 @@ class TestDataChangeHandler:
         assert len(received) == 0
 
     @pytest.mark.asyncio
-    async def test_callback_error_does_not_propagate(self) -> None:
+    async def test_callback_error_does_not_propagate(
+        self, opcua_events: list[MutableMapping[str, Any]]
+    ) -> None:
         cfg = SubscriptionConfig(
             node_id="ns=2;s=Pump.Vib",
             threshold=6.0,
@@ -526,6 +577,9 @@ class TestDataChangeHandler:
 
         # Should not raise
         await handler._process_change(mock_node, 10.0)
+        event = _logged(opcua_events, "alarm_callback_error")
+        assert "bad_callback" in event["exception"]
+        assert event["exception"].endswith("RuntimeError: callback blew up")
 
     @pytest.mark.asyncio
     async def test_alarm_without_threshold_always_fires(self) -> None:

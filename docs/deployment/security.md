@@ -277,6 +277,47 @@ secret-like keys (`token`, `password`, `secret`, `api_key`, `client_secret`,
 - Rotate and archive traces periodically (the exporter starts a new file each
   UTC day).
 
+### Log Output
+
+**Trust level:** Internal diagnostic data.
+
+**Risk:** a traceback rendered with each frame's local variables exposes
+whatever those frames held, and a REST connector's frames hold its auth
+headers. structlog's console renderer prints frame locals by default when
+`rich` is installed (the `litellm` and `docs-rag` extras pull it in), and
+`structlog.processors.dict_tracebacks` includes them in JSON output by
+default.
+
+**What Machina logs:**
+
+- After `configure_logging()`, every traceback that reaches its handler, from
+  Machina, your application or a third-party library, is rendered as plain
+  text in an `exception` field, in console and JSON output. The text has the
+  exception type, message and chained causes, and each frame's file, line and
+  function, but no frame variables.
+- Machina's own exception logs write that text themselves
+  (`exception=traceback_text(exc)`), so they carry no frame variables under any
+  structlog configuration, including none at all.
+- Exception messages are logged verbatim, and the traceback shows each frame's
+  source line.
+- The Telegram bot token is kept out of log output:
+  - The Bot API carries the token in every URL. httpx logs request URLs at INFO, and python-telegram-bot logs its API URLs at DEBUG. `TelegramConnector` replaces its token with `<redacted>` in the records of those loggers. The redaction is in place from `connect()` until the process ends.
+  - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
+  - A startup error whose message names the token is withheld the same way.
+  - Not covered: a host renderer that prints frame locals on a python-telegram-bot frame, since `ExtBot`'s repr includes the token. Use `configure_logging()`.
+- Other credentials that a library puts into an exception message or a request URL are not scrubbed. Keep them out of URLs, and treat log output as sensitive.
+
+**Mitigations:**
+
+- Call `configure_logging()` at startup. An application that configures
+  structlog itself, or logs exceptions without calling `configure_logging()`,
+  gets structlog's defaults for its own `exc_info` logs, and those print frame
+  locals. Give `ConsoleRenderer` `exception_formatter=structlog.dev.plain_traceback`,
+  and put `structlog.processors.format_exc_info`, not `dict_tracebacks`,
+  before a JSON renderer.
+- A logging handler you add after `configure_logging()` formats third-party
+  records itself: give it `format_exc_info` too.
+
 ## Secrets Management
 
 ### Baseline: Environment Variables
@@ -377,6 +418,7 @@ trivy image machina:latest
 - [ ] Restrict `/etc/machina/machina.env` to `chmod 600`
 - [ ] Enable sandbox mode during initial deployment (`sandbox: true`, or `MACHINA_SANDBOX_MODE=true` with the shipped configs)
 - [ ] Keep exported trace files in the exporter's `0700` directory
+- [ ] Call `configure_logging()`, or configure structlog with a traceback formatter that omits frame locals ([Log Output](#log-output))
 - [ ] Review documents before ingesting into DocumentStore
 - [ ] Run `pip-audit` or equivalent in CI
 - [ ] Pin the Docker base image digest in production builds

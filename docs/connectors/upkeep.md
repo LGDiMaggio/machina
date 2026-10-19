@@ -152,6 +152,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
 - **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
+- **Record IDs in paths**: an asset or work-order ID is sent as one percent-encoded path segment (`/` becomes `%2F`). An empty ID, or one with an empty, `.` or `..` part between `/` or `\` separators, is refused with `ConnectorError` before any request.
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 - **Maintenance plans**: a PM template can schedule several assets, each with its own recurrence, so the connector returns one plan per schedule (soft-deleted templates are skipped). A meter-triggered schedule maps with an empty interval: the PM payload names the meter but not its unit. Legacy PM triggers (`/api/v2/preventive-maintenance`) are not read — their documented responses carry no asset, and PM templates reference them through `legacyPMId`.
 

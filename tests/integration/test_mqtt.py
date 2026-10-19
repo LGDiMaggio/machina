@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import sys
+import warnings
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
+import structlog.testing
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, MutableMapping
 
 from machina.connectors.iot.mqtt import (
     MqttConnector,
@@ -22,6 +31,26 @@ from machina.connectors.iot.mqtt import (
 )
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
+
+
+@pytest.fixture
+def mqtt_events(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[MutableMapping[str, Any]]]:
+    """The events the connector logs during the test.
+
+    The module logger is replaced first: one cached by an earlier test would
+    bypass the capture.
+    """
+    monkeypatch.setattr(
+        "machina.connectors.iot.mqtt.logger", structlog.get_logger("machina.connectors.iot.mqtt")
+    )
+    with structlog.testing.capture_logs() as events:
+        yield events
+
+
+def _logged(events: list[MutableMapping[str, Any]], name: str) -> MutableMapping[str, Any]:
+    [event] = [e for e in events if e["event"] == name]
+    assert "exc_info" not in event
+    return event
 
 
 class TestMqttConnectorInit:
@@ -149,6 +178,23 @@ class TestMqttConnectorDisconnect:
         assert conn._connected is False
         assert conn._client is None
         mock_cm.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_close_is_logged_with_its_traceback(
+        self, mqtt_events: list[MutableMapping[str, Any]]
+    ) -> None:
+        mock_cm = AsyncMock()
+        mock_cm.__aexit__.side_effect = RuntimeError("broker went away")
+        conn = MqttConnector(broker="localhost")
+        conn._connected = True
+        conn._client = MagicMock()
+        conn._client_cm = mock_cm
+
+        await conn.disconnect()
+
+        assert conn._connected is False
+        event = _logged(mqtt_events, "disconnect_error")
+        assert event["exception"].endswith("RuntimeError: broker went away")
 
     @pytest.mark.asyncio
     async def test_disconnect_when_not_connected(self) -> None:
@@ -688,7 +734,97 @@ class TestMqttDispatchMessage:
         assert len(received) == 0
 
     @pytest.mark.asyncio
-    async def test_dispatch_handles_callback_error(self) -> None:
+    async def test_a_payload_that_fails_to_parse_is_logged_by_error_type(
+        self, mqtt_events: list[MutableMapping[str, Any]]
+    ) -> None:
+        """A parse failure repeats for every message on the topic, so the event
+        names the error without formatting a traceback each time."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            received.append(alarm)
+
+        conn = MqttConnector(broker="localhost", topics=[])
+        entry = _SubscriptionEntry(
+            callback=callback,
+            topic_cfgs=[TopicConfig(topic="sensor/temp", payload_format="protobuf")],
+        )
+
+        await conn._dispatch_message("sensor/temp", b"\x08\x01", entry)
+
+        assert received == []
+        event = _logged(mqtt_events, "payload_parse_error")
+        assert event["topic"] == "sensor/temp"
+        assert event["error_type"] == "ValueError"
+        assert event["error"] == "'protobuf' is not a valid PayloadFormat"
+        assert "exception" not in event
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("warning_action", ["error", "always"])
+    @pytest.mark.parametrize("host_config", ["frame_locals_renderer", "structlog_defaults"])
+    async def test_a_failing_callback_keeps_the_reader_under_structlog_defaults(
+        self,
+        host_config: str,
+        warning_action: str,
+        frame_locals_renderer: structlog.dev.ConsoleRenderer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An application that never calls ``configure_logging()`` renders with
+        structlog's defaults (rich's console renderer when installed), or with a
+        console renderer of its own. Logging a failing alarm callback there must
+        not warn: with warnings as errors, a warning raised from the log call
+        would end the shared reader. Before structlog 26.1, any console renderer
+        whose exception formatter is not ``plain_traceback`` warned; the
+        ``frame_locals_renderer`` case reproduces that without ``rich``."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            if not received:
+                received.append(alarm)
+                raise RuntimeError("Handler crashed")
+            received.append(alarm)
+
+        payload = json.dumps({"value": 100.0}).encode()
+        messages = [SimpleNamespace(topic="sensor/temp", payload=payload)] * 2
+
+        async def _messages() -> Any:
+            for message in messages:
+                yield message
+
+        conn = MqttConnector(broker="localhost", topics=[])
+        conn._client = MagicMock(messages=_messages())
+        conn._sub_entries["sub"] = _SubscriptionEntry(
+            callback=callback, topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=0.0)]
+        )
+        stream = io.StringIO()
+        structlog.reset_defaults()
+        structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=stream))
+        if host_config == "frame_locals_renderer":
+            structlog.configure(processors=[frame_locals_renderer])
+        monkeypatch.setattr(
+            "machina.connectors.iot.mqtt.logger",
+            structlog.get_logger("machina.connectors.iot.mqtt"),
+        )
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter(warning_action)
+                await conn._reader_loop()
+        finally:
+            structlog.reset_defaults()
+
+        assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+        assert len(received) == 2  # the reader went on to the second message
+        assert "alarm_callback_error" in stream.getvalue()
+        assert "RuntimeError: Handler crashed" in stream.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_handles_callback_error(
+        self, mqtt_events: list[MutableMapping[str, Any]]
+    ) -> None:
         """dispatch_message logs callback errors but doesn't crash."""
         from machina.connectors.iot.mqtt import _SubscriptionEntry
 
@@ -705,6 +841,9 @@ class TestMqttDispatchMessage:
         # Should not raise
         payload = json.dumps({"value": 100.0}).encode()
         await conn._dispatch_message("sensor/temp", payload, entry)
+        event = _logged(mqtt_events, "alarm_callback_error")
+        assert "bad_callback" in event["exception"]
+        assert event["exception"].endswith("RuntimeError: Handler crashed")
 
     @pytest.mark.asyncio
     async def test_dispatch_sparkplug_payload(self) -> None:

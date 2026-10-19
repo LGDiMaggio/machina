@@ -484,23 +484,35 @@ class TestRestGetWorkOrder:
         await _connect_with_health(httpx_mock, conn)
         httpx_mock.add_response(
             method="GET",
-            url=f"{BASE_URL}/work_orders/..%2Fusers%2F1%3Frole%3Dadmin",
+            url=f"{BASE_URL}/work_orders/wo1%2Fusers%3Frole%3Dadmin",
             status_code=404,
         )
         httpx_mock.add_response(method="GET", url=f"{BASE_URL}/assets/a%2Fb%23c", status_code=404)
 
-        assert await conn.get_work_order("../users/1?role=admin") is None
+        assert await conn.get_work_order("wo1/users?role=admin") is None
         assert await conn.get_asset("a/b#c") is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("record_id", ["..", "../users/1"])
     async def test_dot_segment_ids_are_refused(
-        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector, record_id: str
     ) -> None:
+        """A proxy that decodes ``%2F`` would resolve ``../users/1`` into ``/users/1``."""
         conn = rest_connector_with_endpoints
         await _connect_with_health(httpx_mock, conn)
 
         with pytest.raises(ConnectorError, match="Invalid record ID"):
-            await conn.get_work_order("..")
+            await conn.get_work_order(record_id)
+
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_refused_not_listed(
+        self, httpx_mock, rest_connector: GenericCmmsConnector
+    ) -> None:
+        """An empty ID must not fall through to ``GET /assets`` and return its first row."""
+        await _connect_with_health(httpx_mock, rest_connector)
+
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await rest_connector.get_asset("")
 
 
 class TestRestUpdateWorkOrder:
@@ -542,6 +554,36 @@ class TestRestUpdateWorkOrder:
         body = json.loads(patch_req.content)
         assert body["status"] == "assigned"
         assert body["description"] == "Updated"
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_id_stays_one_path_segment(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector
+    ) -> None:
+        """Interpolated as-is, this ID would PATCH ``/work_orders/wo1/assets``."""
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE_URL}/work_orders/wo1%2Fassets", json={"ok": True}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE_URL}/work_orders/wo1%2Fassets",
+            json={"id": "wo1/assets", "asset_id": "P-201", "description": "x"},
+        )
+        updated = await conn.update_work_order("wo1/assets", description="x")
+        assert updated.id == "wo1/assets"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record_id", ["..", "../users/1"])
+    async def test_update_work_order_refuses_a_dot_segment_id_before_any_request(
+        self, httpx_mock, rest_connector_with_endpoints: GenericCmmsConnector, record_id: str
+    ) -> None:
+        conn = rest_connector_with_endpoints
+        await _connect_with_health(httpx_mock, conn)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn.update_work_order(record_id, description="x")
+        assert len(httpx_mock.get_requests()) == sent
 
     @pytest.mark.asyncio
     async def test_update_work_order_with_field_map(self, httpx_mock) -> None:

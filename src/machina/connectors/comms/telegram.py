@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any, ClassVar
 
 import structlog
@@ -15,7 +16,7 @@ import structlog
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import IncomingMessage, MessageHandler
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError
 
 logger = structlog.get_logger(__name__)
 
@@ -36,6 +37,63 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+class _RedactToken(logging.Filter):
+    """Replace one bot token in the log records a logger emits.
+
+    The Bot API puts the token in every request URL
+    (``https://api.telegram.org/bot<token>/getUpdates``). httpx logs each
+    request URL at INFO, so under ``configure_logging()`` every poll would
+    write the token to the log.
+    """
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # a malformed record is the logging module's to report
+            return True
+        if self._token in message:
+            record.msg = message.replace(self._token, "<redacted>")
+            record.args = ()
+        return True
+
+
+# The loggers that can print the bot token:
+# - httpx logs every request URL at INFO;
+# - python-telegram-bot logs its API URLs at DEBUG while the bot is built
+#   ("Set Bot API URL: ..."), and an error body that repeats the URL at ERROR.
+# A logger's filter does not apply to records from its child loggers, so each
+# logger is named.
+_TOKEN_LOGGERS = (
+    "httpx",
+    "telegram.Bot",
+    "telegram.ext.ExtBot",
+    "telegram.ext.Application",
+    "telegram.ext.Updater",
+    "telegram.request.BaseRequest",
+)
+_redacted_tokens: set[str] = set()
+
+
+def _redact_token_in_logs(token: str) -> None:
+    """Filter *token* out of every logger in ``_TOKEN_LOGGERS``, once per token.
+
+    The filters stay for the life of the process: python-telegram-bot keeps
+    polling when ``disconnect()`` is called while ``listen()`` runs
+    (``Application.shutdown()`` refuses then), and a filter that rewrites only
+    this exact token changes nothing else.
+    """
+    if token in _redacted_tokens:
+        return
+    _redacted_tokens.add(token)
+    redact = _RedactToken(token)
+    for name in _TOKEN_LOGGERS:
+        logging.getLogger(name).addFilter(redact)
+
+
 class TelegramConnector:
     """Connector for Telegram Bot API.
 
@@ -44,7 +102,9 @@ class TelegramConnector:
     through the agent's reasoning pipeline.
 
     Args:
-        bot_token: Telegram bot token from BotFather.
+        bot_token: Telegram bot token from BotFather. Surrounding whitespace
+            is stripped: the Bot API would reject it, and in a request URL
+            it is percent-encoded, which hides the token from log redaction.
         allowed_chat_ids: Optional whitelist of chat IDs that may interact.
 
     Example:
@@ -69,7 +129,7 @@ class TelegramConnector:
         bot_token: str = "",
         allowed_chat_ids: list[int] | None = None,
     ) -> None:
-        self._bot_token = bot_token
+        self._bot_token = bot_token.strip()
         self._allowed_chat_ids = set(allowed_chat_ids) if allowed_chat_ids else None
         self._connected = False
         self._application: Any = None
@@ -79,6 +139,8 @@ class TelegramConnector:
         if not self._bot_token:
             raise ConnectorError("bot_token is required for TelegramConnector")
 
+        # Before build(): building the bot already logs its API URLs.
+        _redact_token_in_logs(self._bot_token)
         try:
             from telegram.ext import (  # type: ignore[import-not-found,unused-ignore]
                 ApplicationBuilder,
@@ -193,7 +255,31 @@ class TelegramConnector:
         self._application.add_handler(TGMsgHandler(filters.TEXT & ~filters.COMMAND, _on_message))
 
         logger.info("listening", connector="TelegramConnector")
-        await self._application.initialize()
+        withheld: ConnectorError | None = None
+        try:
+            await self._application.initialize()
+        except Exception as exc:
+            from telegram.error import (  # type: ignore[import-not-found,unused-ignore]
+                InvalidToken,
+            )
+
+            # python-telegram-bot puts a rejected token in the message ("The
+            # token `<token>` was rejected by the server."), and an error body
+            # that repeats the request URL carries it too.
+            if isinstance(exc, InvalidToken):
+                withheld = ConnectorAuthError("Telegram rejected the bot token")
+            elif self._bot_token in str(exc):
+                withheld = ConnectorError(
+                    f"Telegram start-up failed with {type(exc).__name__}; "
+                    "its message named the bot token and is withheld"
+                )
+            else:
+                raise
+        if withheld is not None:
+            # Raised outside the except block, so the original exception is
+            # neither chained nor kept as __context__: no traceback, log line
+            # or code walking the exception chain reaches the token.
+            raise withheld
         await self._application.start()
         await self._application.updater.start_polling()
 
