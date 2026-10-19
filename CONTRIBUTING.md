@@ -72,6 +72,29 @@ New connectors are especially welcome! See the existing connectors in `src/machi
 4. Submit a PR against the `main` branch
 5. A maintainer will review your PR — we aim for <48h response time
 
+### Codecov and PRs that merge several branches
+
+Codecov picks a PR's comparison base itself. If the PR's history reaches an old branch point
+before it reaches the current tip of `main`, Codecov uses that old commit, finds no coverage
+report for it, and `codecov/patch` passes without measuring anything ("No report found to
+compare against"). A green `codecov/patch` is therefore only evidence once the base is checked.
+
+When a PR merges three or more existing branches:
+
+1. Build the history heads first: start at the branches' common fork point, merge each branch
+   with `git merge --no-ff`, merge `origin/main` last, then add fix commits on top. Starting at
+   `main` and merging the branches after it picks the wrong base from the third merge on, and a
+   later `git merge main` changes nothing because `main` is already an ancestor.
+2. Before each push, `python scripts/codecov_base_check.py predict --head HEAD` (after
+   `git fetch origin main`) must end with `OK, equals the GitHub base`.
+3. After CI finishes, `python scripts/codecov_base_check.py verify --pr <number>` must pass
+   every check (it uses the `gh` CLI and Codecov's public API; no token). It confirms the
+   comparison base is `main`'s tip with a processed report, `base_totals` is set, both coverage
+   uploads (`core`, `extras`) are in the head report, and `codecov/patch` holds a measurement and
+   succeeded.
+
+`codecov/patch` is not a required check yet. Treat it as evidence only when `verify` passes.
+
 ## Reporting Issues
 
 Use [GitHub Issues](https://github.com/LGDiMaggio/machina/issues) to report bugs or request features. Please include:
