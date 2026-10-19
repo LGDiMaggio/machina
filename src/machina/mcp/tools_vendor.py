@@ -19,7 +19,7 @@ import structlog
 
 from machina.connectors.base import set_sandbox_mode
 from machina.connectors.cmms.maximo import _oslc_resource_path
-from machina.exceptions import ConnectorError, SandboxViolationError
+from machina.exceptions import ConnectorError, MachinaError, SandboxViolationError
 
 # See machina.mcp.tools: FastMCP injects the request context only into a
 # parameter annotated with its bare ``Context`` class (opaque to mypy).
@@ -56,6 +56,45 @@ def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
         if type(conn).__name__.lower().startswith(type_prefix):
             return conn
     return None
+
+
+def _write_result(connector: str, operation: str, resp: Any) -> dict[str, Any]:
+    """Report a raw vendor write's response: its status, and its body if JSON.
+
+    A body that is not JSON (an empty success, a proxy's error page) is
+    reported as ``{}``, never as an error: the write may have been applied,
+    and the status code says what happened.
+    """
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = {}
+    logger.info(
+        "vendor_write_completed",
+        connector=connector,
+        operation=operation,
+        status_code=resp.status_code,
+    )
+    return {"status_code": resp.status_code, "body": body}
+
+
+def _write_failure(connector: str, operation: str, exc: Exception) -> dict[str, Any]:
+    """Report a raw vendor write that raised, without a foreign exception's text.
+
+    A Machina error's message is written to be shown. Any other exception's
+    text (httpx, h11) can carry the request URL or a header value, such as an
+    API key with a stray newline that h11 refuses to send, so only its type
+    is reported and logged.
+    """
+    logger.warning(
+        "vendor_write_failed",
+        connector=connector,
+        operation=operation,
+        error_type=type(exc).__name__,
+    )
+    if isinstance(exc, MachinaError):
+        return {"error": str(exc)}
+    return {"error": f"{operation} failed: {type(exc).__name__}"}
 
 
 async def sap_pm_raw_iw38_notification(
@@ -100,14 +139,14 @@ async def sap_pm_raw_iw38_notification(
             f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
             payload,
         )
-        return {"status_code": resp.status_code, "body": resp.json()}
     except SandboxViolationError:
         return {
             "description": f"[SANDBOX — no real write performed] {description}",
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _write_failure("SapPmConnector", "sap_pm_raw_iw38_notification", exc)
+    return _write_result("SapPmConnector", "sap_pm_raw_iw38_notification", resp)
 
 
 async def maximo_raw_attribute_update(
@@ -154,14 +193,14 @@ async def maximo_raw_attribute_update(
         return {"error": "No Maximo connector configured"}
     try:
         resp = await conn._patch_resource(resource_type, resource_id, attributes or {})
-        return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
     except SandboxViolationError:
         return {
             "description": "[SANDBOX — no real write performed] Attribute update logged.",
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _write_failure("MaximoConnector", "maximo_raw_attribute_update", exc)
+    return _write_result("MaximoConnector", "maximo_raw_attribute_update", resp)
 
 
 VENDOR_TOOLS: list[Callable[..., Any]] = [

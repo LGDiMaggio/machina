@@ -344,18 +344,34 @@ class TestOslcResourcePath:
 
     @pytest.mark.parametrize("resource_id", ["", "..", "../mxasset/A1", "a/..;/b"])
     def test_resource_id_that_could_leave_its_segment_is_refused(self, resource_id: str) -> None:
-        with pytest.raises(ConnectorError, match="^Invalid record ID: "):
+        with pytest.raises(ConnectorError, match=r"^Invalid record ID: "):
             _oslc_resource_path("mxwo", resource_id)
+
+    def test_resource_id_without_a_utf8_form_is_refused_without_the_codec_message(self) -> None:
+        with pytest.raises(ConnectorError) as exc_info:
+            _oslc_resource_path("mxwo", "WO-\ud800")
+        assert str(exc_info.value) == (
+            "Invalid record ID: an ID must be text that can be sent as UTF-8"
+        )
+        assert exc_info.value.__cause__ is None
 
 
 class TestPatchResource:
     """A direct call to the raw write helper is held to the tool's rule."""
 
-    def _conn(self) -> MaximoConnector:
-        return MaximoConnector(
+    def _conn(self, *, connected: bool = True) -> MaximoConnector:
+        conn = MaximoConnector(
             url="https://maximo.example.com",
             auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
         )
+        conn._connected = connected
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_not_connected_is_refused_before_any_request(self, httpx_mock) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await self._conn(connected=False)._patch_resource("mxwo", "WO-1", {"x": 1})
+        assert httpx_mock.get_requests() == []
 
     @pytest.mark.parametrize(
         ("object_structure", "resource_id"),

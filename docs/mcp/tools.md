@@ -106,6 +106,15 @@ A refused value comes back as an error entry before any request, in sandbox
 mode too, so a sandbox run answers as a live run would. The message names the
 rule, never the value.
 
+Outside sandbox mode, both tools refuse a connector that is not connected
+(one whose `connect()` failed at startup), as the domain write tools do. A
+write that reaches the vendor returns its `status_code` and its JSON `body`;
+a body that is not JSON is reported as `{}`, because the write may have been
+applied. A write that fails returns an error entry: a Machina error keeps its
+message, and any other exception, such as an httpx transport error, is
+reported by its type only (`maximo_raw_attribute_update failed: ConnectError`),
+because its text can carry the request URL or a header value.
+
 | Tool | Connector | Parameters |
 |------|-----------|------------|
 | `sap_pm_raw_iw38_notification` | SAP PM | `equipment_id`, `notification_type="M2"`, `description=""` |

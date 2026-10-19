@@ -30,17 +30,17 @@ def _ctx(runtime: MachinaRuntime) -> MagicMock:
     return ctx
 
 
-def _maximo_ctx(*, sandbox_mode: bool = False) -> MagicMock:
-    """The context of a server with one connected Maximo connector."""
+def _maximo_ctx(*, sandbox_mode: bool = False, connected: bool = True) -> MagicMock:
+    """The context of a server with one Maximo connector, connected by default."""
     conn = MaximoConnector(url=_MAXIMO_URL, auth=ApiKeyHeaderAuth(header_name="apikey", value="k"))
-    conn._connected = True
+    conn._connected = connected
     return _ctx(MachinaRuntime(connectors={"maximo": conn}, sandbox_mode=sandbox_mode))
 
 
-def _sap_ctx(*, sandbox_mode: bool = False) -> MagicMock:
-    """The context of a server with one connected SAP PM connector."""
+def _sap_ctx(*, sandbox_mode: bool = False, connected: bool = True) -> MagicMock:
+    """The context of a server with one SAP PM connector, connected by default."""
     conn = SapPmConnector(url=_SAP_URL, auth=BasicAuth(username="u", password="p"))
-    conn._connected = True
+    conn._connected = connected
     return _ctx(MachinaRuntime(connectors={"sap_pm": conn}, sandbox_mode=sandbox_mode))
 
 
@@ -225,6 +225,21 @@ class TestMaximoRawUpdateStaysOnOneResource:
         assert result == {"error": _RECORD_ID_REFUSAL}
         assert httpx_mock.get_requests() == []
 
+    @pytest.mark.asyncio
+    async def test_id_with_a_lone_surrogate_refused_before_any_request(self, httpx_mock) -> None:
+        """JSON "\\ud800" survives the Streamable HTTP transport's ``json.loads``;
+        the UTF-8 codec's own error would quote the character back."""
+        result = await maximo_raw_attribute_update(
+            _maximo_ctx(),
+            resource_type="mxwo",
+            resource_id="WO-\ud800",
+            attributes={"status": "COMP"},
+        )
+        assert result == {
+            "error": "Invalid record ID: an ID must be text that can be sent as UTF-8"
+        }
+        assert httpx_mock.get_requests() == []
+
     @pytest.mark.parametrize(
         ("resource_type", "resource_id", "refusal"),
         [
@@ -354,8 +369,17 @@ class TestMaximoRawUpdateHttpFailures:
     async def test_network_error_is_an_error_entry_without_a_replay(self, httpx_mock) -> None:
         httpx_mock.add_exception(httpx.ConnectError("connection refused"), url=self._URL)
         result = await self._update()
-        assert set(result) == {"error"}
+        assert result == {"error": "maximo_raw_attribute_update failed: ConnectError"}
         assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_json_body_keeps_the_status(self, httpx_mock) -> None:
+        """A proxy's error page is not an error entry: the PATCH may have applied."""
+        httpx_mock.add_response(
+            method="PATCH", url=self._URL, status_code=502, text="<html>Bad Gateway</html>"
+        )
+        result = await self._update()
+        assert result == {"status_code": 502, "body": {}}
 
     @pytest.mark.asyncio
     async def test_503_is_reported_without_a_replay(self, httpx_mock) -> None:
@@ -413,4 +437,81 @@ class TestVendorWritesGuardedPastTheToolCheck:
         finally:
             set_sandbox_mode(False)
         assert result["metadata"]["sandbox"] is True
+        assert httpx_mock.get_requests() == []
+
+
+_SAP_NOTIFICATION_URL = f"{_SAP_URL}/API_MAINTENANCENOTIFICATION/MaintenanceNotification"
+
+
+async def _sap_notify(**ctx_kwargs: bool) -> dict[str, object]:
+    return await sap_pm_raw_iw38_notification(
+        _sap_ctx(**ctx_kwargs), equipment_id="EQ-1", description="Seal leak"
+    )
+
+
+async def _maximo_patch(**ctx_kwargs: bool) -> dict[str, object]:
+    return await maximo_raw_attribute_update(
+        _maximo_ctx(**ctx_kwargs), resource_type="mxwo", resource_id="WO-1", attributes={"x": 1}
+    )
+
+
+class TestVendorWriteOutcomes:
+    """What a raw vendor write reports back to the MCP client."""
+
+    @pytest.mark.asyncio
+    async def test_sap_notification_is_posted_with_the_session_token(self, httpx_mock) -> None:
+        httpx_mock.add_response(method="GET", headers={"x-csrf-token": "TOK1"})
+        httpx_mock.add_response(
+            method="POST", url=_SAP_NOTIFICATION_URL, status_code=201, json={"d": {"N": "1"}}
+        )
+        result = await _sap_notify()
+        assert result == {"status_code": 201, "body": {"d": {"N": "1"}}}
+        fetch, post = httpx_mock.get_requests()
+        assert fetch.method == "GET"
+        assert post.headers["X-CSRF-Token"] == "TOK1"
+        assert json.loads(post.content) == {
+            "NotificationType": "M2",
+            "Equipment": "EQ-1",
+            "NotificationText": "Seal leak",
+        }
+
+    @pytest.mark.asyncio
+    async def test_sap_non_json_body_keeps_the_status(self, httpx_mock) -> None:
+        httpx_mock.add_response(method="GET", headers={"x-csrf-token": "TOK1"})
+        httpx_mock.add_response(method="POST", url=_SAP_NOTIFICATION_URL, status_code=201)
+        assert await _sap_notify() == {"status_code": 201, "body": {}}
+
+    @pytest.mark.asyncio
+    async def test_machina_error_keeps_its_message(self, httpx_mock) -> None:
+        httpx_mock.add_response(method="GET", status_code=401)
+        result = await _sap_notify()
+        assert result == {"error": "SAP PM authentication failed during CSRF token fetch"}
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.parametrize(
+        ("write", "operation"),
+        [
+            (_maximo_patch, "maximo_raw_attribute_update"),
+            (_sap_notify, "sap_pm_raw_iw38_notification"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_foreign_exception_text_never_reaches_the_client(
+        self, httpx_mock, write, operation: str
+    ) -> None:
+        """h11 refuses an API key with a stray newline and quotes it back."""
+        httpx_mock.add_exception(httpx.LocalProtocolError("Illegal header value b'TOPSECRET\n'"))
+        result = await write()
+        assert result == {"error": f"{operation} failed: LocalProtocolError"}
+        assert "TOPSECRET" not in str(result)
+
+    @pytest.mark.parametrize("write", [_maximo_patch, _sap_notify])
+    @pytest.mark.asyncio
+    async def test_disconnected_connector_is_refused_before_any_request(
+        self, httpx_mock, write
+    ) -> None:
+        """A connector whose connect() failed at startup stays registered; the
+        raw writes refuse it, as the domain writes do."""
+        result = await write(connected=False)
+        assert result == {"error": "Not connected — call connect() first"}
         assert httpx_mock.get_requests() == []

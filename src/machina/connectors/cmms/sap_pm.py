@@ -574,8 +574,12 @@ class SapPmConnector:
 
         Raises:
             ConnectorAuthError: If the CSRF fetch returns 401.
-            ConnectorError: If the CSRF fetch fails or returns no token.
+            ConnectorError: If the connector is not connected, or the CSRF
+                fetch fails or returns no token.
         """
+        # The domain writes check this themselves; the raw IW38 vendor tool
+        # relies on this check, as it does on the sandbox guard.
+        self._ensure_connected()
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=30.0) as client:
             token = await self._fetch_csrf_token(client)

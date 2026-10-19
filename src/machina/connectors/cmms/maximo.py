@@ -82,7 +82,15 @@ def _oslc_resource_path(object_structure: object, resource_id: object) -> str:
             "Invalid Maximo object structure: expected an object structure name "
             "such as 'mxwo' (ASCII letters, digits and underscores only)"
         )
-    return f"/maximo/oslc/os/{object_structure}/{path_segment(resource_id)}"
+    try:
+        segment = path_segment(resource_id)
+    except UnicodeEncodeError:
+        # A lone surrogate ("\ud800" in JSON survives some MCP transports) has
+        # no UTF-8 form; the codec's own message would quote the character.
+        raise ConnectorError(
+            "Invalid record ID: an ID must be text that can be sent as UTF-8"
+        ) from None
+    return f"/maximo/oslc/os/{object_structure}/{segment}"
 
 
 def _require_httpx() -> Any:
@@ -559,13 +567,27 @@ class MaximoConnector:
         The write path of the ``maximo_raw_attribute_update`` MCP vendor tool.
         Both values come from MCP-client input; :func:`_oslc_resource_path`
         keeps the PATCH on one resource of one object structure, and checks
-        them again here so a direct call is held to the same rule. The
-        response is returned unchecked, for the caller to report.
+        them again here so a direct call is held to the same rule. Like the
+        connector's other writes, it needs a connected connector, retries a
+        429 and never replays the PATCH after a network error or a 503.
+
+        Args:
+            object_structure: OSLC object-structure name, such as ``mxwo``.
+            resource_id: Rest ID of the resource, the last segment of its href.
+            attributes: Attribute names and new values, sent as the JSON body.
+
+        Returns:
+            The final httpx response, unchecked, for the caller to report.
 
         Raises:
-            ConnectorError: If ``object_structure`` or ``resource_id`` is
-                refused by :func:`_oslc_resource_path`, before any request.
+            SandboxViolationError: In sandbox mode, before anything else.
+            ConnectorError: If the connector is not connected, or
+                ``object_structure`` or ``resource_id`` is refused by
+                :func:`_oslc_resource_path`; both before any request.
+            httpx.HTTPError: A transport error from the PATCH, re-raised
+                without a retry.
         """
+        self._ensure_connected()
         url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
         httpx = _require_httpx()
         headers = {**self._headers(), "Content-Type": "application/json"}
