@@ -583,6 +583,186 @@ class TestUpdateWorkOrder:
         payload = json.loads(patch_req.content)
         assert payload["status"] == "CLOSE"
 
+    @pytest.mark.asyncio
+    async def test_update_work_order_id_stays_one_path_segment(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Interpolated as-is, this ID would PATCH ``/os/mxwo/WO-1/mxasset``."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{OSLC}/os/mxwo/WO-1%2Fmxasset", status_code=404
+        )
+        with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order("WO-1/mxasset", description="x")
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_refuses_a_dot_segment_id_before_patching(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Behind a proxy that decodes ``%2F``, this ID would PATCH ``/os/mxasset/PUMP-201``."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await connector.update_work_order("../mxasset/PUMP-201", description="x")
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied values stay inside their oslc.where literal
+# ---------------------------------------------------------------------------
+
+# Closes the string literal and appends a term every row satisfies:
+# interpolated as-is, ``itemnum="<value>"`` becomes an unbounded read.
+_BREAKOUT = 'X" or itemnum!="'
+
+
+class TestWhereValuesStayLiteral:
+    """IDs, SKUs and raw statuses reach oslc.where from LLM and MCP tool input.
+
+    Maximo documents no escape inside a where literal, so a value that could
+    leave it or widen the match is refused before any request: nothing is
+    mocked here, and a request would fail the test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid assetnum"):
+            await connector.get_asset(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("argument", "attribute"), [("asset_id", "assetnum"), ("status", "status")]
+    )
+    async def test_read_work_orders(
+        self, httpx_mock, connector: MaximoConnector, argument: str, attribute: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match=f"Invalid {attribute}"):
+            await connector.read_work_orders(**{argument: _BREAKOUT})
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid wonum"):
+            await connector.get_work_order(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    async def test_update_work_order_refuses_before_patching(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """An ID the read-back after the PATCH could not express is refused up front."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid wonum"):
+            await connector.update_work_order("A,B", description="x")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid assetnum"):
+            await connector.read_maintenance_history(_BREAKOUT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sku",
+        [
+            pytest.param(_BREAKOUT, id="quote"),
+            pytest.param("X\\", id="backslash-escaping-the-closing-quote"),
+            pytest.param("%", id="like-wildcard"),
+            pytest.param("*", id="not-null"),
+            pytest.param("BRG-6205,BRG-6206", id="qbe-alternatives"),
+            pytest.param("!=BRG-6205", id="qbe-operator"),
+            pytest.param("~null~", id="qbe-null"),
+            pytest.param("\x01BRG-6205", id="control-character"),
+            pytest.param("  ", id="blank"),
+        ],
+    )
+    async def test_read_spare_parts_refuses(
+        self, httpx_mock, connector: MaximoConnector, sku: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="Invalid itemnum"):
+            await connector.read_spare_parts(sku=sku)
+
+    @pytest.mark.asyncio
+    async def test_ordinary_punctuation_is_sent_unchanged(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **{"oslc.where": 'itemnum="6205-2RS/C3_A.1"'}),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.read_spare_parts(sku="6205-2RS/C3_A.1") == []
+
+
+# Every method that puts a caller-supplied value into oslc.where, called with it.
+_FILTERED_CALLS = [
+    pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
+    pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
+    pytest.param(lambda c, v: c.read_work_orders(asset_id=v), id="read_work_orders-asset_id"),
+    pytest.param(lambda c, v: c.read_work_orders(status=v), id="read_work_orders-status"),
+    pytest.param(lambda c, v: c.read_spare_parts(sku=v), id="read_spare_parts-sku"),
+    pytest.param(lambda c, v: c.read_maintenance_history(v), id="read_maintenance_history"),
+    # Re-fetches by wonum after the PATCH, so the value must be refused before it.
+    pytest.param(lambda c, v: c.update_work_order(v, description="x"), id="update_work_order"),
+]
+
+# Values that would rewrite or widen the query if they reached oslc.where.
+_HOSTILE_VALUES = [
+    pytest.param('PUMP-201" or assetnum="%', id="quote-breakout"),
+    pytest.param("%", id="like-wildcard"),
+    pytest.param("*", id="not-null-test"),
+    pytest.param("PUMP-201,COMP-301", id="qbe-value-list"),
+    pytest.param("!=PUMP-201", id="qbe-operator"),
+    pytest.param("null", id="qbe-null-keyword"),
+    pytest.param("   ", id="blank"),
+]
+
+
+class TestOslcWhereValues:
+    """Each hostile value against every method that builds an oslc.where clause."""
+
+    @pytest.mark.asyncio
+    async def test_identifier_punctuation_reaches_the_clause_verbatim(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(
+                "mxasset",
+                **{"oslc.pageSize": "1", "oslc.where": 'assetnum="BR300/P_201 O\'NEIL"'},
+            ),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.get_asset("BR300/P_201 O'NEIL") is None
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_is_quoted_like_its_string(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Tool arguments parsed from model JSON can carry an asset number as a number."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="11430"'}),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.get_asset(11430) is None  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", _HOSTILE_VALUES)
+    @pytest.mark.parametrize("call", _FILTERED_CALLS)
+    async def test_hostile_value_is_refused_before_any_request(
+        self, httpx_mock, connector: MaximoConnector, call, value: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="for a Maximo query"):
+            await call(connector, value)
+        # Only the whoami handshake went out: no OSLC query, no PATCH.
+        assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]
+
 
 class TestAssetTypeMap:
     @pytest.mark.asyncio

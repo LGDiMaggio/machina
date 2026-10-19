@@ -32,9 +32,10 @@ The connector calls fixed paths under `url`:
 
 List responses are a JSON array, unless a pagination strategy says otherwise
 (its `items_path` unwraps `{"data": [...]}`-style bodies). An ID is sent as one
-percent-encoded path segment (a `/` in it becomes `%2F`); an empty ID, `.` or
-`..` is refused. A 404 on a single-record `GET` means the record does not
-exist: `get_asset()` and `get_work_order()` return `None`. A create sends the
+percent-encoded path segment (a `/` in it becomes `%2F`); an empty ID, or one
+with an empty, `.` or `..` part between `/` or `\` separators, is refused with
+`ConnectorError` before any request. A 404 on a single-record `GET` means the
+record does not exist: `get_asset()` and `get_work_order()` return `None`. A create sends the
 work order with Machina's work-order ID; with a `yaml_mapping` that has
 `reverse_fields`, only the mapped fields are sent, so map `id` there to keep
 it. Three more

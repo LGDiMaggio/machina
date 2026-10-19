@@ -199,6 +199,8 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
 - **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
+- **Filter values**: asset and work-order numbers, SKUs and statuses are matched exactly through `oslc.where`. Maximo documents no escape inside its string literals, and its QBE framework reads wildcards (`%`, `*`, `?`), value lists (`,`, `[ ]`) and operators (`=`, `!`, `<`, `>`, `~`) inside them as query syntax. A value that contains any of `" \ % * ? , [ ] = ! < > ~` or a non-printable character, is blank, or is the keyword `null` is therefore refused with `ConnectorError` before any request, including the PATCH of `update_work_order`. The message names the offending characters, not the value. A number is matched as its digits.
+- **Work-order IDs in paths**: `update_work_order` sends the ID as one percent-encoded path segment (`/` becomes `%2F`). An empty ID, or one with an empty, `.` or `..` part between `/` or `\` separators, is refused with `ConnectorError`, so a proxy that decodes `%2F` cannot resolve it into another resource.
 - **Pagination**: Uses Maximo's OSLC `responseInfo.nextPage` link-following. Very large result sets may benefit from server-side `oslc.where` filtering.
 
 ## API Reference

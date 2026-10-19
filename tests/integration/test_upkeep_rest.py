@@ -719,6 +719,68 @@ class TestGetAsset:
 
 
 # ---------------------------------------------------------------------------
+# Caller-supplied IDs stay one URL path segment
+# ---------------------------------------------------------------------------
+
+
+class TestIdsStayOnePathSegment:
+    """IDs reach these paths from LLM and MCP tool input.
+
+    Each response is mocked only at the encoded URL, so an ID that leaves its
+    segment finds no match. An ID with a ``.`` or ``..`` part is refused
+    before any request: a proxy that decodes ``%2F`` before normalizing the
+    path would resolve it into another resource.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_asset(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/assets/a1%2Fwork-orders", status_code=404
+        )
+        assert await connector.get_asset("a1/work-orders") is None
+
+    @pytest.mark.asyncio
+    async def test_get_work_order(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1%3Fstatus%3Dopen%23x", status_code=404
+        )
+        assert await connector.get_work_order("wo1?status=open#x") is None
+
+    @pytest.mark.asyncio
+    async def test_update_work_order(self, httpx_mock, connector: UpKeepConnector) -> None:
+        """Interpolated as-is, this ID would PATCH ``/api/v2/work-orders/wo1/assets``."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1%2Fassets", status_code=404
+        )
+        with pytest.raises(ConnectorError, match="HTTP 404"):
+            await connector.update_work_order("wo1/assets", description="x")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record_id", ["..", "../assets/a1", "wo1/../../assets/a1"])
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
+            pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
+            pytest.param(
+                lambda c, v: c.update_work_order(v, description="x"), id="update_work_order"
+            ),
+        ],
+    )
+    async def test_dot_segment_id_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector, call, record_id: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await call(connector, record_id)
+        assert len(httpx_mock.get_requests()) == sent
+
+
+# ---------------------------------------------------------------------------
 # Read maintenance history
 # ---------------------------------------------------------------------------
 
