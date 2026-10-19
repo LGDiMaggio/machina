@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.connectors.base import set_sandbox_mode
-from machina.exceptions import SandboxViolationError
+from machina.connectors.cmms.maximo import _oslc_resource_path
+from machina.exceptions import ConnectorError, MachinaError, SandboxViolationError
 
 # See machina.mcp.tools: FastMCP injects the request context only into a
 # parameter annotated with its bare ``Context`` class (opaque to mypy).
@@ -39,10 +40,10 @@ def _runtime(ctx: Any) -> Any:
     Identical to ``mcp.tools._runtime``: each MCP tool call runs in its own
     request task that does not inherit the ``_sandbox_mode`` contextvar set
     once at lifespan startup. The sandbox short-circuit in every vendor tool
-    reads ``get_sandbox_mode()``, so it MUST be funnelled through here first —
-    otherwise a server started in sandbox mode reports sandbox as off and the
-    raw vendor write (e.g. the Maximo httpx PATCH, which has no
-    ``@sandbox_aware`` backstop) executes live.
+    reads ``get_sandbox_mode()``, and the ``@sandbox_aware`` connector helper
+    each tool writes through reads the same contextvar, so it MUST be
+    funnelled through here first — otherwise a server started in sandbox mode
+    reports sandbox as off and the raw vendor write executes live.
     """
     runtime = ctx.request_context.lifespan_context["runtime"]
     set_sandbox_mode(runtime.sandbox_mode)
@@ -55,6 +56,45 @@ def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
         if type(conn).__name__.lower().startswith(type_prefix):
             return conn
     return None
+
+
+def _write_result(connector: str, operation: str, resp: Any) -> dict[str, Any]:
+    """Report a raw vendor write's response: its status, and its body if JSON.
+
+    A body that is not JSON (an empty success, a proxy's error page) is
+    reported as ``{}``, never as an error: the write may have been applied,
+    and the status code says what happened.
+    """
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = {}
+    logger.info(
+        "vendor_write_completed",
+        connector=connector,
+        operation=operation,
+        status_code=resp.status_code,
+    )
+    return {"status_code": resp.status_code, "body": body}
+
+
+def _write_failure(connector: str, operation: str, exc: Exception) -> dict[str, Any]:
+    """Report a raw vendor write that raised, without a foreign exception's text.
+
+    A Machina error's message is written to be shown. Any other exception's
+    text (httpx, h11) can carry the request URL or a header value, such as an
+    API key with a stray newline that h11 refuses to send, so only its type
+    is reported and logged.
+    """
+    logger.warning(
+        "vendor_write_failed",
+        connector=connector,
+        operation=operation,
+        error_type=type(exc).__name__,
+    )
+    if isinstance(exc, MachinaError):
+        return {"error": str(exc)}
+    return {"error": f"{operation} failed: {type(exc).__name__}"}
 
 
 async def sap_pm_raw_iw38_notification(
@@ -99,14 +139,14 @@ async def sap_pm_raw_iw38_notification(
             f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
             payload,
         )
-        return {"status_code": resp.status_code, "body": resp.json()}
     except SandboxViolationError:
         return {
             "description": f"[SANDBOX — no real write performed] {description}",
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _write_failure("SapPmConnector", "sap_pm_raw_iw38_notification", exc)
+    return _write_result("SapPmConnector", "sap_pm_raw_iw38_notification", resp)
 
 
 async def maximo_raw_attribute_update(
@@ -121,15 +161,25 @@ async def maximo_raw_attribute_update(
     attributes.  Use only when the domain-level tools are insufficient.
 
     Args:
-        resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset').
-        resource_id: Resource identifier.
+        resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
+            ASCII letters, digits and underscores only.
+        resource_id: Rest ID of the resource, the last segment of its OSLC
+            href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
     """
     from machina.connectors.base import get_sandbox_mode
 
+    # Both values go into the PATCH URL. A value that could address another
+    # endpoint is refused before anything else, in sandbox mode too, so a
+    # sandbox run answers as a live run would; the connector helper checks
+    # again before its request.
+    try:
+        _oslc_resource_path(resource_type, resource_id)
+    except ConnectorError as exc:
+        return {"error": str(exc)}
+
     # _runtime re-establishes the sandbox contextvar for this request task;
-    # it must run before get_sandbox_mode() is read. The raw httpx PATCH below
-    # has no @sandbox_aware backstop, so this check is the only sandbox gate.
+    # it must run before get_sandbox_mode() is read.
     runtime = _runtime(ctx)
     if get_sandbox_mode():
         logger.info("sandbox_write_blocked", operation="maximo_raw_attribute_update")
@@ -141,26 +191,16 @@ async def maximo_raw_attribute_update(
     conn = _find_connector_by_type(runtime, "maximo")
     if conn is None:
         return {"error": "No Maximo connector configured"}
-    attributes = attributes or {}
     try:
-        import importlib
-
-        httpx = importlib.import_module("httpx")
-        headers = {**conn._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.patch(
-                f"{conn.url}/maximo/oslc/os/{resource_type}/{resource_id}",
-                headers=headers,
-                json=attributes,
-            )
-        return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+        resp = await conn._patch_resource(resource_type, resource_id, attributes or {})
     except SandboxViolationError:
         return {
             "description": "[SANDBOX — no real write performed] Attribute update logged.",
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _write_failure("MaximoConnector", "maximo_raw_attribute_update", exc)
+    return _write_result("MaximoConnector", "maximo_raw_attribute_update", resp)
 
 
 VENDOR_TOOLS: list[Callable[..., Any]] = [

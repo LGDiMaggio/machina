@@ -27,6 +27,7 @@ See also:
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import structlog
@@ -52,6 +53,44 @@ logger = structlog.get_logger(__name__)
 _AuthUnion = ApiKeyHeaderAuth | BasicAuth | BearerAuth
 # The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
 _AuthSetting = Annotated[_AuthUnion, Field(discriminator="type")]
+
+# Object-structure names (``mxwo``, ``MXASSET``, a site's own ``ZZ_WO``) are
+# letters, digits and ``_``; a name that matches cannot add path segments, dot
+# segments or a query to the URL it is placed in.
+_OBJECT_STRUCTURE_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _oslc_resource_path(object_structure: object, resource_id: object) -> str:
+    """Build ``/maximo/oslc/os/{object_structure}/{resource_id}`` for one resource.
+
+    Both values reach this path from MCP-client input, and httpx removes dot
+    segments, so ``object_structure`` must be an object-structure name and
+    ``resource_id`` goes through :func:`~machina.connectors.cmms.paths.path_segment`:
+    neither can address another Maximo endpoint or the collection itself. The
+    check needs no connection or request, so the raw vendor tool also runs it
+    before its sandbox short-circuit.
+
+    Raises:
+        ConnectorError: If ``object_structure`` is not ASCII letters, digits
+            and ``_``, or ``resource_id`` could leave its path segment. Neither
+            message repeats the value: it reaches the MCP client.
+    """
+    if not isinstance(object_structure, str) or not _OBJECT_STRUCTURE_RE.fullmatch(
+        object_structure
+    ):
+        raise ConnectorError(
+            "Invalid Maximo object structure: expected an object structure name "
+            "such as 'mxwo' (ASCII letters, digits and underscores only)"
+        )
+    try:
+        segment = path_segment(resource_id)
+    except UnicodeEncodeError:
+        # A lone surrogate ("\ud800" in JSON survives some MCP transports) has
+        # no UTF-8 form; the codec's own message would quote the character.
+        raise ConnectorError(
+            "Invalid record ID: an ID must be text that can be sent as UTF-8"
+        ) from None
+    return f"/maximo/oslc/os/{object_structure}/{segment}"
 
 
 def _require_httpx() -> Any:
@@ -518,3 +557,39 @@ class MaximoConnector:
             total=len(all_items),
         )
         return all_items
+
+    @sandbox_aware
+    async def _patch_resource(
+        self, object_structure: str, resource_id: str, attributes: dict[str, Any]
+    ) -> Any:
+        """PATCH raw attributes onto one resource of an OSLC object structure.
+
+        The write path of the ``maximo_raw_attribute_update`` MCP vendor tool.
+        Both values come from MCP-client input; :func:`_oslc_resource_path`
+        keeps the PATCH on one resource of one object structure, and checks
+        them again here so a direct call is held to the same rule. Like the
+        connector's other writes, it needs a connected connector, retries a
+        429 and never replays the PATCH after a network error or a 503.
+
+        Args:
+            object_structure: OSLC object-structure name, such as ``mxwo``.
+            resource_id: Rest ID of the resource, the last segment of its href.
+            attributes: Attribute names and new values, sent as the JSON body.
+
+        Returns:
+            The final httpx response, unchecked, for the caller to report.
+
+        Raises:
+            SandboxViolationError: In sandbox mode, before anything else.
+            ConnectorError: If the connector is not connected, or
+                ``object_structure`` or ``resource_id`` is refused by
+                :func:`_oslc_resource_path`; both before any request.
+            httpx.HTTPError: A transport error from the PATCH, re-raised
+                without a retry.
+        """
+        self._ensure_connected()
+        url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
+        httpx = _require_httpx()
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await request_with_retry(client, "PATCH", url, headers=headers, json=attributes)
