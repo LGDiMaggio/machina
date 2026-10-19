@@ -204,6 +204,7 @@ class MaximoConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 

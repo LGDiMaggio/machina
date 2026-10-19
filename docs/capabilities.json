@@ -263,6 +263,11 @@
           "configurable": false
         },
         {
+          "capability": "read_maintenance_history",
+          "method": "read_maintenance_history",
+          "configurable": false
+        },
+        {
           "capability": "read_maintenance_plans",
           "method": "read_maintenance_plans",
           "configurable": false
@@ -358,6 +363,11 @@
         {
           "capability": "read_assets",
           "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_history",
+          "method": "read_maintenance_history",
           "configurable": false
         },
         {
@@ -477,6 +487,11 @@
         {
           "capability": "read_assets",
           "method": "read_assets",
+          "configurable": false
+        },
+        {
+          "capability": "read_maintenance_history",
+          "method": "read_maintenance_history",
           "configurable": false
         },
         {
@@ -656,7 +671,10 @@
       "value": "read_maintenance_history",
       "method": "read_maintenance_history",
       "provided_by": [
-        "generic_cmms"
+        "generic_cmms",
+        "maximo",
+        "sap_pm",
+        "upkeep"
       ],
       "configurable_in": [],
       "orphaned": false,

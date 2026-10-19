@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.sap_pm import SapPmConnector
 from machina.domain.asset import Asset
@@ -15,6 +16,9 @@ from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
+from machina.workflows.engine import WorkflowEngine
+from machina.workflows.models import Workflow
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
 
@@ -718,6 +722,56 @@ class TestReadMaintenanceHistory:
         assert len(history) == 2
         assert all(isinstance(wo, WorkOrder) for wo in history)
         assert history[0].id == "4000010"
+
+    @pytest.mark.asyncio
+    async def test_alarm_workflow_history_step_reaches_sap_pm(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The built-in workflow's history step must run against SAP PM.
+
+        The engine finds the step's connector by capability. With
+        ``read_maintenance_history`` undeclared it found none, and the step's
+        SKIP policy hid the miss.
+        """
+        await _connect(httpx_mock, connector)
+        expected_filter = (
+            "Equipment eq '10000001' and "
+            "(MaintenanceOrderSystemStatus eq 'CNF' or "
+            "MaintenanceOrderSystemStatus eq 'TECO' or "
+            "MaintenanceOrderSystemStatus eq 'CLSD')"
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": expected_filter},
+            ),
+            json={
+                "d": {
+                    "results": [
+                        {
+                            "MaintenanceOrder": "4000010",
+                            "MaintenanceOrderDesc": "Past repair",
+                            "MaintenanceOrderSystemStatus": "CNF",
+                            "Equipment": "10000001",
+                        },
+                    ],
+                },
+            },
+        )
+        registry = ConnectorRegistry()
+        registry.register("sap_pm", connector)
+        history_step = next(s for s in alarm_to_workorder.steps if s.name == "check_history")
+
+        result = await WorkflowEngine(registry=registry).execute(
+            Workflow(name="history only", steps=[history_step]),
+            {"asset_id": "10000001"},
+        )
+
+        (step_result,) = result.step_results
+        assert not step_result.skipped
+        assert [wo.id for wo in step_result.output] == ["4000010"]
 
 
 # ---------------------------------------------------------------------------
