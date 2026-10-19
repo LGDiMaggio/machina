@@ -107,6 +107,8 @@ def _require_httpx() -> Any:
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# httpx refuses a longer URL with its own exception (``httpx.InvalidURL``).
+_MAX_URL_LENGTH = 65_536
 
 
 def _origin(url: str) -> tuple[str, str | None, int | None]:
@@ -117,7 +119,8 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     """
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
-    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(scheme)
+    port = parts.port
+    return scheme, parts.hostname, port if port is not None else _DEFAULT_PORTS.get(scheme)
 
 
 def _next_page_url(next_page: object, current_url: str) -> str | None:
@@ -129,31 +132,53 @@ def _next_page_url(next_page: object, current_url: str) -> str | None:
     relative link is resolved against ``current_url``.
 
     Every page is requested with the connector's credentials, so the link must
-    keep the scheme, host and port of ``current_url``. Maximo builds its links
-    from its own configured address, which behind a proxy can be an internal
-    host or plain HTTP. Any other value is refused rather than read as the last
-    page, which would return the pages read so far as the whole result.
+    keep the scheme, host and port of ``current_url`` and carry no user info
+    (httpx would send it in place of the connector's credentials). Maximo
+    builds its links from its own configured address, which behind a proxy can
+    be an internal host or plain HTTP. Any other value is refused rather than
+    read as the last page, which would return the pages read so far as the
+    whole result.
 
     Raises:
-        ConnectorError: If ``nextPage`` carries no URL, or its URL has another
-            scheme, host or port. Neither message repeats the URL, which can
-            name an internal host.
+        ConnectorError: If ``nextPage`` carries no usable URL (none, blank, a
+            control character, longer than httpx accepts), or its URL has
+            another scheme, host or port or carries user info. Neither message
+            repeats the URL, which can name an internal host.
     """
     if next_page is None:
         return None
     if isinstance(next_page, dict):
         next_page = next_page.get("href")
-    if not isinstance(next_page, str) or not next_page.strip():
-        raise ConnectorError("Maximo returned a nextPage link without an href URL")
+    href = next_page.strip() if isinstance(next_page, str) else ""
+    if not href or not href.isprintable() or len(href) > _MAX_URL_LENGTH:
+        raise ConnectorError("Maximo returned a nextPage link without a usable URL")
+    link_scheme: str | None = None
+    link_host: str | None = None
     try:
-        url = urljoin(current_url, next_page.strip())
-        same_origin = _origin(url) == _origin(current_url)
+        url = urljoin(current_url, href)
+        target = urlsplit(url)
+        link_scheme, link_host = target.scheme, target.hostname
+        same_origin = (
+            target.username is None
+            and target.password is None
+            and _origin(url) == _origin(current_url)
+        )
     except ValueError:
         same_origin = False
     if not same_origin:
+        # For the operator: the scheme and host the link named (no path,
+        # query or user info). The error itself names neither.
+        logger.warning(
+            "maximo_next_page_refused",
+            connector="MaximoConnector",
+            operation="oslc_get",
+            link_scheme=link_scheme,
+            link_host=link_host,
+        )
         raise ConnectorError(
             "Maximo returned a nextPage link to another scheme, host or port than "
-            "the connector URL; refusing to send the connector's credentials there"
+            "the connector URL, or with user info in it; refusing to follow it "
+            "with the connector's credentials"
         )
     return url
 
@@ -582,8 +607,9 @@ class MaximoConnector:
 
         Raises:
             ConnectorError: On an HTTP error, a next-page link that cannot be
-                followed or repeats an earlier one, or more than
-                :attr:`_MAX_OSLC_ROWS` rows.
+                followed or repeats an earlier one, more than
+                :attr:`_MAX_OSLC_ROWS` rows, or more pages than that many rows
+                fill.
         """
         httpx = _require_httpx()
         size = page_size or self._PAGE_SIZE
@@ -598,6 +624,7 @@ class MaximoConnector:
             initial_params["oslc.select"] = oslc_select
         params: dict[str, str] | None = initial_params
         followed: set[str] = set()
+        max_pages = self._MAX_OSLC_ROWS // size + 1
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while url is not None:
@@ -625,13 +652,20 @@ class MaximoConnector:
                     )
                 # Follow the OSLC next-page link. It repeats the query, so the
                 # first request's params are not sent again.
-                url = _next_page_url(body.get("responseInfo", {}).get("nextPage"), url)
-                if url in followed:
-                    raise ConnectorError(
-                        f"Maximo GET {object_structure} returned a nextPage link it had "
-                        "already returned — refusing to read the same page again"
-                    )
+                url = _next_page_url((body.get("responseInfo") or {}).get("nextPage"), url)
                 if url is not None:
+                    if url in followed:
+                        raise ConnectorError(
+                            f"Maximo GET {object_structure} returned a nextPage link it had "
+                            "already returned — refusing to read the same page again"
+                        )
+                    # Pages that keep linking on without adding rows never
+                    # reach the row cap, so the page count is capped too.
+                    if len(followed) + 1 >= max_pages:
+                        raise ConnectorError(
+                            f"Maximo GET {object_structure} exceeded the {max_pages}-page "
+                            "safety cap — refusing to keep paging"
+                        )
                     followed.add(url)
                 params = None
         logger.debug(

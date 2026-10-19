@@ -489,6 +489,16 @@ class TestGetMaintenanceHistory:
         assert [entry["id"] for entry in result] == ["WO-001"]
         conn.read_work_orders.assert_called_once_with(asset_id="P-001")
 
+    @pytest.mark.asyncio
+    async def test_fallback_passes_a_numeric_asset_id_as_text(self) -> None:
+        """``read_work_orders(asset_id=0)`` would read ``0`` as no filter."""
+        from machina.mcp.tools import machina_get_maintenance_history
+
+        conn = _WorkOrdersOnlyCmms()
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        await machina_get_maintenance_history(_make_ctx(runtime), 0)  # type: ignore[arg-type]
+        conn.read_work_orders.assert_called_once_with(asset_id="0")
+
 
 class TestSearchManuals:
     @pytest.mark.asyncio
