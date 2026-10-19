@@ -26,6 +26,7 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 from machina.domain.alarm import Alarm, Severity
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.observability.logging import traceback_text
 
 logger = structlog.get_logger(__name__)
 
@@ -250,8 +251,10 @@ class MqttConnector:
         if self._client_cm is not None:
             try:
                 await self._client_cm.__aexit__(None, None, None)
-            except Exception:
-                logger.debug("disconnect_error", connector="MqttConnector", exc_info=True)
+            except Exception as exc:
+                logger.debug(
+                    "disconnect_error", connector="MqttConnector", exception=traceback_text(exc)
+                )
         self._client = None
         self._client_cm = None
         self._connected = False
@@ -414,12 +417,15 @@ class MqttConnector:
 
         try:
             value = self._parse_payload(payload, cfg)
-        except Exception:
+        except Exception as exc:
+            # No traceback: a parse failure recurs for every message on the
+            # topic, and formatting one costs more than parsing the payload.
             logger.debug(
                 "payload_parse_error",
                 connector="MqttConnector",
                 topic=topic,
-                exc_info=True,
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
             return
 
@@ -454,12 +460,12 @@ class MqttConnector:
 
         try:
             await entry.callback(alarm)
-        except Exception:
+        except Exception as exc:
             logger.error(
                 "alarm_callback_error",
                 connector="MqttConnector",
                 alarm_id=alarm.id,
-                exc_info=True,
+                exception=traceback_text(exc),
             )
 
     @staticmethod

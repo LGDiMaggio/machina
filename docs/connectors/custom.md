@@ -343,7 +343,10 @@ REST mocking or VCR for recorded responses.
   call would block the event loop.
 - **Structured logging.** Use `structlog` and include `connector=`,
   `asset_id=`, and `operation=` in every log line so operators can trace
-  issues.
+  issues. Log a caught exception's traceback as
+  `exception=traceback_text(exc)` (from `machina.observability.logging`),
+  not `exc_info=True`, which can print your frames' local variables, auth
+  headers included (see [Log Output](../deployment/security.md#log-output)).
 - **Graceful degradation.** Declare only the capabilities you actually
   support. If your CMMS doesn't expose spare parts, omit
   `Capability.READ_SPARE_PARTS` from the frozenset — the agent will simply

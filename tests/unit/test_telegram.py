@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import sys
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from machina.connectors.comms.cli import CliChannel
-from machina.connectors.comms.telegram import IncomingMessage, TelegramConnector
+from machina.connectors.comms.telegram import (
+    _TOKEN_LOGGERS,
+    IncomingMessage,
+    TelegramConnector,
+    _RedactToken,
+)
 from machina.connectors.comms.types import (
     SupportsConfirmation,
     supports_sync_confirmation,
 )
-from machina.exceptions import ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.observability.logging import configure_logging, traceback_text
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class TestIncomingMessage:
@@ -423,3 +437,218 @@ class TestTelegramListen:
         mock_update.message.chat_id = 999
         await captured_on_message(mock_update, MagicMock())
         handler.assert_not_awaited()
+
+
+_TOKEN = "123456789:AAFakeTokenValue_ShouldNeverBeLogged0"
+
+
+class _InvalidToken(Exception):  # noqa: N818 — mirrors the library's class name
+    """Stands in for ``telegram.error.InvalidToken``."""
+
+
+def _telegram_modules() -> dict[str, Any]:
+    error_module = ModuleType("telegram.error")
+    error_module.InvalidToken = _InvalidToken  # type: ignore[attr-defined]
+    return {"telegram": MagicMock(), "telegram.ext": MagicMock(), "telegram.error": error_module}
+
+
+def _rejecting_app(error: Exception) -> MagicMock:
+    app = MagicMock()
+    app.initialize = AsyncMock(side_effect=error)
+    return app
+
+
+async def _no_reply(msg: IncomingMessage) -> str:
+    return ""
+
+
+class TestBotTokenStaysOutOfLogs:
+    """The bot token never reaches an exception message or a log line."""
+
+    @pytest.mark.asyncio
+    async def test_rejected_token_raises_without_the_token(self) -> None:
+        """python-telegram-bot's own message names the token; ours does not."""
+        conn = TelegramConnector(bot_token=_TOKEN)
+        conn._connected = True
+        conn._application = _rejecting_app(
+            _InvalidToken(f"The token `{_TOKEN}` was rejected by the server.")
+        )
+
+        with (
+            patch.dict(sys.modules, _telegram_modules()),
+            pytest.raises(ConnectorAuthError, match="rejected the bot token") as exc_info,
+        ):
+            await conn.listen(_no_reply)
+
+        assert _TOKEN not in str(exc_info.value)
+        assert _TOKEN not in traceback_text(exc_info.value)
+        # Nothing on the exception chain still holds the original.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    @pytest.mark.asyncio
+    async def test_startup_error_naming_the_token_is_withheld(self) -> None:
+        """An error body that repeats the request URL carries the token too."""
+        conn = TelegramConnector(bot_token=_TOKEN)
+        conn._connected = True
+        conn._application = _rejecting_app(
+            RuntimeError(f"<html>blocked: https://api.telegram.org/bot{_TOKEN}/getMe</html>")
+        )
+
+        with (
+            patch.dict(sys.modules, _telegram_modules()),
+            pytest.raises(ConnectorError, match="RuntimeError") as exc_info,
+        ):
+            await conn.listen(_no_reply)
+
+        assert _TOKEN not in traceback_text(exc_info.value)
+        assert exc_info.value.__context__ is None
+
+    def test_surrounding_whitespace_is_stripped_from_the_token(self) -> None:
+        """In a request URL it would be percent-encoded, out of the filter's reach."""
+        assert TelegramConnector(bot_token=f" {_TOKEN}\n")._bot_token == _TOKEN
+
+    @pytest.mark.asyncio
+    async def test_other_startup_failures_propagate_unchanged(self) -> None:
+        conn = TelegramConnector(bot_token=_TOKEN)
+        conn._connected = True
+        failure = RuntimeError("network unreachable")
+        conn._application = _rejecting_app(failure)
+
+        with patch.dict(sys.modules, _telegram_modules()), pytest.raises(RuntimeError) as exc_info:
+            await conn.listen(_no_reply)
+
+        assert exc_info.value is failure
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _TOKEN_LOGGERS)
+    async def test_token_loggers_redact_the_token(self, name: str) -> None:
+        """Each logger that can print the token, during and after the connection.
+
+        httpx logs every request URL at INFO and python-telegram-bot logs its
+        API URLs at DEBUG; both URLs hold the token. Polling can outlive
+        ``disconnect()``, so the redaction does too.
+        """
+        conn = TelegramConnector(bot_token=_TOKEN)
+        with _captured_token_loggers() as records:
+            with patch.dict(sys.modules, {"telegram.ext": MagicMock()}):
+                await conn.connect()
+            logging.getLogger(name).info(
+                'HTTP Request: %s %s "%s"', "POST", f"https://api.telegram.org/bot{_TOKEN}/x", "OK"
+            )
+            await conn.disconnect()
+            logging.getLogger(name).info("after disconnect %s", _TOKEN)
+
+        during, after = (r.getMessage() for r in records)
+        assert during == 'HTTP Request: POST https://api.telegram.org/bot<redacted>/x "OK"'
+        assert after == "after disconnect <redacted>"
+
+    @pytest.mark.asyncio
+    async def test_redaction_is_in_place_before_the_bot_is_built(self) -> None:
+        """Building the bot already logs its API URL ("Set Bot API URL: ...")."""
+
+        def _build() -> MagicMock:
+            logging.getLogger("telegram.ext.ExtBot").debug(
+                "Set Bot API URL: %s", f"https://api.telegram.org/bot{_TOKEN}"
+            )
+            return MagicMock()
+
+        ext = MagicMock()
+        ext.ApplicationBuilder.return_value.token.return_value.build.side_effect = _build
+        with _captured_token_loggers() as records, patch.dict(sys.modules, {"telegram.ext": ext}):
+            await TelegramConnector(bot_token=_TOKEN).connect()
+
+        assert [r.getMessage() for r in records] == [
+            "Set Bot API URL: https://api.telegram.org/bot<redacted>"
+        ]
+
+    def test_a_malformed_record_passes_through(self) -> None:
+        record = logging.LogRecord("httpx", logging.INFO, __file__, 1, "%s %s", ("one",), None)
+
+        assert _RedactToken(_TOKEN).filter(record) is True
+
+    @pytest.mark.asyncio
+    async def test_rejected_token_reaches_no_log_line_with_the_real_library(self) -> None:
+        """End to end: python-telegram-bot, httpx and ``configure_logging(level="DEBUG")``.
+
+        Every Bot API call answers 401, as for a revoked token. The token must
+        appear in none of: python-telegram-bot's DEBUG URL lines, httpx's
+        request line, or the exception a host logs when ``agent.run()`` fails.
+        """
+        pytest.importorskip("telegram")
+        import httpx
+        import structlog
+
+        async def _unauthorized(self: Any, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401, json={"ok": False, "error_code": 401, "description": "Unauthorized"}
+            )
+
+        root = logging.getLogger()
+        handlers, level = root.handlers[:], root.level
+        out = io.StringIO()
+        try:
+            with _open_token_loggers():
+                configure_logging(level="DEBUG", json_output=True)
+                root.handlers[0].stream = out  # type: ignore[attr-defined]
+                with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", _unauthorized):
+                    conn = TelegramConnector(bot_token=_TOKEN)
+                    await conn.connect()
+                    with pytest.raises(ConnectorAuthError) as exc_info:
+                        await conn.listen(_no_reply)
+                    logging.getLogger("host").error("agent_failed", exc_info=exc_info.value)
+                    await conn.disconnect()
+        finally:
+            structlog.reset_defaults()
+            root.handlers[:] = handlers
+            root.setLevel(level)
+
+        logged = out.getvalue()
+        # Each line that used to carry the token was logged, without it.
+        assert "Set Bot API URL: https://api.telegram.org/bot<redacted>" in logged
+        assert "https://api.telegram.org/bot<redacted>/getMe" in logged
+        assert "ConnectorAuthError" in logged
+        assert _TOKEN not in logged
+
+
+@contextlib.contextmanager
+def _open_token_loggers() -> Iterator[None]:
+    """Pin the token loggers open, whatever an earlier test left behind.
+
+    A ``logging.config.dictConfig`` call elsewhere in the suite disables
+    existing loggers, and a level set on one would silence it: either makes a
+    "no token in the log" assertion pass vacuously.
+    """
+    loggers = [logging.getLogger(name) for name in _TOKEN_LOGGERS]
+    saved = [(lg.disabled, lg.level, lg.propagate) for lg in loggers]
+    for lg in loggers:
+        lg.disabled, lg.propagate = False, True
+        lg.setLevel(logging.NOTSET)
+    try:
+        yield
+    finally:
+        for lg, (disabled, level, propagate) in zip(loggers, saved, strict=True):
+            lg.disabled, lg.propagate = disabled, propagate
+            lg.setLevel(level)
+
+
+@contextlib.contextmanager
+def _captured_token_loggers() -> Iterator[list[logging.LogRecord]]:
+    """Collect every record the token loggers emit at DEBUG and above."""
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    loggers = [logging.getLogger(name) for name in _TOKEN_LOGGERS]
+    with _open_token_loggers():
+        for lg in loggers:
+            lg.setLevel(logging.DEBUG)
+            lg.addHandler(handler)
+        try:
+            yield records
+        finally:
+            for lg in loggers:
+                lg.removeHandler(handler)
