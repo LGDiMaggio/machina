@@ -436,8 +436,16 @@ class GenericCmmsConnector:
         self,
         asset_id: str,
     ) -> list[WorkOrder]:
-        """Return completed work orders for an asset (maintenance history)."""
+        """Return completed work orders for an asset (maintenance history).
+
+        Raises:
+            ConnectorError: If ``asset_id`` is missing or blank, as on the
+                vendor connectors: an empty history would read as "never
+                repaired".
+        """
         self._ensure_connected()
+        if asset_id is None or not str(asset_id).strip():
+            raise ConnectorError("read_maintenance_history requires an asset_id")
         return [
             wo
             for wo in self._work_orders

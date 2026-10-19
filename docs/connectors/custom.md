@@ -42,7 +42,7 @@ runtime discovers at startup:
 | `read_work_orders` | Returns work orders, optionally filtered by `asset_id` / `status` |
 | `create_work_order` | POSTs a new work order to the CMMS |
 | `read_spare_parts` | Returns spare parts, optionally filtered by `asset_id` / `sku` |
-| `read_maintenance_history` | Returns completed work orders for a given asset |
+| `read_maintenance_history` | Returns completed work orders for a given asset; a missing or blank `asset_id` raises `ConnectorError` |
 
 ### Authentication strategies
 

@@ -404,6 +404,10 @@ async def machina_get_maintenance_history(
     """
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
+    if not str(asset_id).strip():
+        # The read_work_orders fallback reads "" as "no filter", so it would
+        # return every work order as this asset's history.
+        return [{"error": "read_maintenance_history requires an asset_id"}]
     try:
         if hasattr(cmms, "read_maintenance_history"):
             history = await cmms.read_maintenance_history(asset_id=asset_id)

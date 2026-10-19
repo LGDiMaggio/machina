@@ -140,7 +140,13 @@ class TestReadAssets:
 
     @pytest.mark.asyncio
     async def test_read_assets_pagination(self, httpx_mock, connector: MaximoConnector) -> None:
-        """OSLC pagination via responseInfo.nextPage."""
+        """OSLC pagination via ``responseInfo.nextPage.href``.
+
+        The shape IBM's REST clients read (``ResourceSet.nextPage()`` in IBM's
+        ``maximorestclient``). This fixture used to give ``nextPage`` as a bare
+        URL, the shape the connector expected, so it passed while every real
+        multi-page read failed.
+        """
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
@@ -148,7 +154,7 @@ class TestReadAssets:
             json={
                 "member": [{"assetnum": "A1", "description": "Asset 1"}],
                 "responseInfo": {
-                    "nextPage": f"{OSLC}/os/mxasset?pageno=2&oslc.pageSize=100",
+                    "nextPage": {"href": f"{OSLC}/os/mxasset?pageno=2&oslc.pageSize=100"},
                 },
             },
         )
@@ -163,6 +169,26 @@ class TestReadAssets:
         assets = await connector.read_assets()
         assert len(assets) == 2
         assert assets[1].id == "A2"
+
+    @pytest.mark.asyncio
+    async def test_read_assets_follows_a_bare_next_page_url(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A ``nextPage`` given as the URL itself is followed too."""
+        await _connect(httpx_mock, connector)
+        next_url = f"{OSLC}/os/mxasset?pageno=2&oslc.pageSize=100"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxasset"),
+            json={"member": [{"assetnum": "A1"}], "responseInfo": {"nextPage": next_url}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_url,
+            json={"member": [{"assetnum": "A2"}], "responseInfo": {}},
+        )
+        assets = await connector.read_assets()
+        assert [a.id for a in assets] == ["A1", "A2"]
 
     @pytest.mark.asyncio
     async def test_get_asset(self, httpx_mock, connector: MaximoConnector) -> None:
@@ -531,6 +557,111 @@ class TestReadMaintenanceHistory:
         assert not step_result.skipped
         assert [wo.id for wo in step_result.output] == ["WO-H1"]
 
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_follows_the_next_page_href(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Regression: a second history page was never read.
+
+        Maximo gives the link as ``responseInfo.nextPage.href`` (IBM's own REST
+        clients read that field). The connector used ``nextPage`` itself as the
+        URL, so the object reached httpx and the read failed on its second
+        request. The link already carries the query, so nothing is appended.
+        """
+        await _connect(httpx_mock, connector)
+        next_href = str(_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE, "pageno": "2"}))
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {
+                    "href": str(_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE})),
+                    "nextPage": {"href": next_href},
+                    "pagenum": 1,
+                },
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_href,
+            json={
+                "member": [{"wonum": "WO-H2", "status": "CLOSE"}],
+                "responseInfo": {"pagenum": 2},
+            },
+        )
+        history = await connector.read_maintenance_history("PUMP-201")
+        assert [wo.id for wo in history] == ["WO-H1", "WO-H2"]
+        assert httpx_mock.get_requests()[-1].url == httpx.URL(next_href)
+
+    @pytest.mark.parametrize(
+        "next_page",
+        [{}, {"href": ""}, {"href": None}, {"href": 7}, "", 7, []],
+        ids=["no-href", "empty-href", "null-href", "number-href", "empty", "number", "list"],
+    )
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_next_page_without_a_url(
+        self, httpx_mock, connector: MaximoConnector, next_page: object
+    ) -> None:
+        """A next page that cannot be followed is an error, not the last page.
+
+        Stopping there would return the first page as the asset's whole history.
+        """
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": _HISTORY_WHERE}),
+            json={
+                "member": [{"wonum": "WO-H1", "status": "COMP"}],
+                "responseInfo": {"nextPage": next_page},
+            },
+        )
+        with pytest.raises(ConnectorError, match=r"^Maximo returned a nextPage link without"):
+            await connector.read_maintenance_history("PUMP-201")
+        assert len(httpx_mock.get_requests()) == 2  # connect + the first page
+
+    @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "unresolved"])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: MaximoConnector, asset_id: str | None
+    ) -> None:
+        """A missing ID is an error: ``None`` would be matched as ``"None"``."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(
+            ConnectorError, match=r"^read_maintenance_history requires an asset_id$"
+        ):
+            await connector.read_maintenance_history(asset_id)  # type: ignore[arg-type]
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="authentication failed"):
+            await connector.read_maintenance_history("PUMP-201")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A failed read raises; it is not reported as an empty history."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="HTTP 500"):
+            await connector.read_maintenance_history("PUMP-201")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: MaximoConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("PUMP-201")
+
+
+_HISTORY_WHERE = 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle state transitions
@@ -806,7 +937,9 @@ class TestOslcWhereValues:
         self, httpx_mock, connector: MaximoConnector, call, value: str
     ) -> None:
         await _connect(httpx_mock, connector)
-        with pytest.raises(ConnectorError, match="for a Maximo query"):
+        # read_maintenance_history refuses a blank asset ID with its own
+        # missing-ID message before the value reaches _oslc_eq.
+        with pytest.raises(ConnectorError, match=r"for a Maximo query|requires an asset_id"):
             await call(connector, value)
         # Only the whoami handshake went out: no OSLC query, no PATCH.
         assert [r.url.path for r in httpx_mock.get_requests()] == ["/maximo/oslc/whoami"]

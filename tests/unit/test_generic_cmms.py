@@ -436,6 +436,19 @@ class TestGenericCmmsConnectorLocal:
         history = await conn.read_maintenance_history("P-201")
         assert len(history) == 0
 
+    @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "unresolved"])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, sample_data_dir: Path, asset_id: str | None
+    ) -> None:
+        """No asset ID is an error, as on the vendor connectors, not "no history"."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        with pytest.raises(
+            ConnectorError, match=r"^read_maintenance_history requires an asset_id$"
+        ):
+            await conn.read_maintenance_history(asset_id)  # type: ignore[arg-type]
+
     @pytest.mark.asyncio
     async def test_read_maintenance_history_with_completed(self, sample_data_dir: Path) -> None:
         """Add a completed WO and verify it shows in maintenance history."""

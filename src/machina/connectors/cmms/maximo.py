@@ -105,6 +105,27 @@ def _require_httpx() -> Any:
     return httpx
 
 
+def _next_page_url(next_page: object) -> str | None:
+    """Return the URL of the next OSLC page, or ``None`` after the last page.
+
+    Maximo's JSON API gives the link as ``responseInfo.nextPage`` =
+    ``{"href": "<url>"}``, the field IBM's own REST clients follow, and leaves
+    ``nextPage`` out on the last page. A bare URL string is followed too. Any
+    other value is refused rather than read as the last page, which would
+    return the pages read so far as the whole result.
+
+    Raises:
+        ConnectorError: If ``nextPage`` is present but carries no URL.
+    """
+    if next_page is None:
+        return None
+    if isinstance(next_page, dict):
+        next_page = next_page.get("href")
+    if isinstance(next_page, str) and next_page:
+        return next_page
+    raise ConnectorError("Maximo returned a nextPage link without an href URL")
+
+
 # Characters an oslc.where string value cannot carry. IBM documents no escape
 # syntax inside the quotes, and Maximo maps the clause onto its QBE framework,
 # which reads these as query syntax: the literal's own quote and the OSLC escape
@@ -474,8 +495,15 @@ class MaximoConnector:
         return [maximo_mapper.parse_maintenance_plan(item) for item in raw]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
-        """Return completed/closed work orders for an asset."""
+        """Return completed/closed work orders for an asset.
+
+        Raises:
+            ConnectorError: If ``asset_id`` is missing or blank. A missing ID
+                would otherwise be matched as the text ``"None"``.
+        """
         self._ensure_connected()
+        if asset_id is None or not str(asset_id).strip():
+            raise ConnectorError("read_maintenance_history requires an asset_id")
         # oslc.where has no ``or`` and no grouping parentheses (``and`` is its
         # only boolean operator), so the two statuses are listed through ``in``.
         where = f'{_oslc_eq("assetnum", asset_id)} and status in ["COMP","CLOSE"]'
@@ -548,10 +576,9 @@ class MaximoConnector:
                 body = resp.json()
                 members = body.get("member", [])
                 all_items.extend(members)
-                # Follow OSLC pagination link
-                response_info = body.get("responseInfo", {})
-                url = response_info.get("nextPage")
-                # After the first request, params are embedded in nextPage URL
+                # Follow the OSLC next-page link. It repeats the query, so the
+                # first request's params are not sent again.
+                url = _next_page_url(body.get("responseInfo", {}).get("nextPage"))
                 params = None
         logger.debug(
             "oslc_get",

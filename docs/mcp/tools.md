@@ -153,7 +153,8 @@ Missing records and missing connectors come back as an `error` entry in the
 result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
 model can read them; so do an invalid `status` in `machina_update_work_order`,
 an invalid `resource_type` or `resource_id` in `maximo_raw_attribute_update`,
-an alarm source without `get_alarms()`, and connector failures in
+an empty `asset_id` in `machina_get_maintenance_history` (never an empty
+history), an alarm source without `get_alarms()`, and connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
 `machina_send_message`. Any other connector failure — and
 `machina_create_work_order` on an unknown asset — raises: the client receives

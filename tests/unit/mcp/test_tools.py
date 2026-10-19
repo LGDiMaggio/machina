@@ -437,6 +437,55 @@ class TestGetMaintenancePlan:
         assert result[0]["interval_days"] == 90
 
 
+class _WorkOrdersOnlyCmms:
+    """A primary CMMS without ``read_maintenance_history`` (SQL, Excel)."""
+
+    capabilities = frozenset({Capability.READ_ASSETS, Capability.READ_WORK_ORDERS})
+
+    def __init__(self) -> None:
+        self.read_work_orders = AsyncMock(return_value=[SAMPLE_WO])
+
+
+class TestGetMaintenanceHistory:
+    @pytest.mark.parametrize("asset_id", ["", "  "], ids=["empty", "blank"])
+    @pytest.mark.asyncio
+    async def test_missing_asset_id_is_an_error_not_an_empty_history(
+        self, httpx_mock, asset_id: str
+    ) -> None:
+        """An MCP client sees the refusal; ``[]`` would read as "never repaired"."""
+        from machina.connectors.cmms.upkeep import UpKeepConnector
+        from machina.mcp.tools import machina_get_maintenance_history
+
+        conn = UpKeepConnector(api_key="k")
+        conn._connected = True
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        result = await machina_get_maintenance_history(_make_ctx(runtime), asset_id)
+        assert result == [{"error": "read_maintenance_history requires an asset_id"}]
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.asyncio
+    async def test_missing_asset_id_never_reaches_the_work_order_fallback(self) -> None:
+        """Without a history method the tool reads work orders by asset, and
+        ``read_work_orders(asset_id="")`` means every work order."""
+        from machina.mcp.tools import machina_get_maintenance_history
+
+        conn = _WorkOrdersOnlyCmms()
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        result = await machina_get_maintenance_history(_make_ctx(runtime), "")
+        assert result == [{"error": "read_maintenance_history requires an asset_id"}]
+        conn.read_work_orders.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fallback_reads_the_asset_work_orders(self) -> None:
+        from machina.mcp.tools import machina_get_maintenance_history
+
+        conn = _WorkOrdersOnlyCmms()
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        result = await machina_get_maintenance_history(_make_ctx(runtime), "P-001")
+        assert [entry["id"] for entry in result] == ["WO-001"]
+        conn.read_work_orders.assert_called_once_with(asset_id="P-001")
+
+
 class TestSearchManuals:
     @pytest.mark.asyncio
     async def test_no_doc_store(self) -> None:
