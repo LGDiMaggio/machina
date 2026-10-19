@@ -359,7 +359,18 @@ _REDACTED_PATH_PLACEHOLDER = "<path>"
 #
 # URI schemes that address a file share. Other URIs (mqtt://broker/topic,
 # opc.tcp://plc:4840/...) name a service endpoint, not a filesystem path.
-_SHARE_SCHEMES: tuple[str, ...] = ("file", "smb", "cifs", "nfs", "sftp", "scp", "afp")
+_SHARE_SCHEMES: tuple[str, ...] = (
+    "file",
+    "smb",
+    "cifs",
+    "nfs",
+    "sftp",
+    "scp",
+    "ssh",
+    "afp",
+    "dav",
+    "davs",
+)
 
 # A path-segment word excludes whitespace, separators and the characters
 # Windows forbids in file names (``: * ? " < > |``). It also never starts a
@@ -381,18 +392,18 @@ _UNC_HOST_WORD = r"""(?:(?!""" + _PATH_BREAK + r""")[^\s\\/:*?"<>|'`])"""
 # make a quoted path followed by a backslash run quadratic.
 _DRIVE_SEP = r"(?:\\++|/)"
 # Where a POSIX path may start: not inside a word, a relative path
-# (``Settings/Users/Roles``) or a URL path (``mqtt://broker/x/home/state``),
-# except right after a command-line option letter (``-I/home/...``) or a
-# leading ``..`` (``../../home/...``). Every character a POSIX head scans
-# through freely is in the excluded set too, so no path start lies inside a
-# span already scanned, which keeps matching linear.
-_POSIX_START = (
-    r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<=^\.\.)|(?<=[\s\"'`(=]\.\.)"
-    r"|(?<![\w.~@+%#/-]))"
-)
+# (``Settings/Users/Roles``, ``../home/index.html``) or a URL path
+# (``mqtt://broker/x/home/state``), except right after a command-line option
+# letter (``-I/home/...``). Every character a POSIX head scans through freely
+# is in the excluded set too, so no path start lies inside a span already
+# scanned, which keeps matching linear.
+_POSIX_START = r"(?:(?<=\s-[A-Za-z])|(?<=^-[A-Za-z])|(?<![\w.~@+%#/-]))"
 # A URI with an empty authority in front of an absolute path:
-# ``file:///home/...``, ``sqlite:////home/...``.
-_EMPTY_AUTHORITY_URI = r"(?<![\w+.-])[A-Za-z][\w+.-]*://(?:localhost)?/?(?=/)"
+# ``file:///home/...``, ``file://localhost/home/...`` and, for other schemes,
+# the four-slash form (``sqlite:////home/...``). ``sqlite:///home/x.db`` is
+# relative, and a service on localhost (``mqtt://localhost/home/...``) names
+# a topic, not a file.
+_EMPTY_AUTHORITY_URI = r"(?<![\w+.-])(?:file://(?:localhost)?|[A-Za-z][\w+.-]*:///)(?=/)"
 
 # A path head runs up to and including the separator after the component that
 # names a person or a machine: the ``Users`` / ``home`` directory, or the host.
@@ -400,21 +411,22 @@ _EMPTY_AUTHORITY_URI = r"(?<![\w+.-])[A-Za-z][\w+.-]*://(?:localhost)?/?(?=/)"
 _HEAD_DRIVE = (
     r"(?:file:(?://localhost)?/*)?"  # file:///C:/...
     r"(?:(?:\\{2}|\\{4}|//)[?.]" + _DRIVE_SEP + r")?"  # \\?\C:\, \\.\C:\, //?/C:/
-    r"[A-Za-z]:" + _DRIVE_SEP + r"Users" + _DRIVE_SEP
+    r"[A-Za-z]:" + _DRIVE_SEP + r"(?:Users|Documents and Settings)" + _DRIVE_SEP
 )
 # A Windows profile seen from WSL (/mnt/c/Users), Cygwin or Git Bash (/c/Users).
 _HEAD_WINDOWS_MOUNT = (
     r"(?:" + _EMPTY_AUTHORITY_URI + "|" + _POSIX_START + r")"
     r"/(?:mnt/|cygdrive/)?[A-Za-z]/(?-i:Users)/"
 )
-# /home/<user> and /Users/<user>, a macOS volume's /Volumes/<name>/Users/<user>,
-# and /home/<user> below other folders of an absolute path
-# (/srv/backup/home/<user>). Case-sensitive, and /Users only at the root, so
-# /api/users/42 and /api/Users/42 are REST paths. The atomic group stops a
-# failed match from re-entering the folder loop.
+# /home/<user> and /Users/<user>, the same below a macOS volume
+# (/Volumes/<name>/Users/<user>, /System/Volumes/Data/Users/<user>) or a mount
+# point (/mnt/<disk>/Users/<user>), and /home/<user> below other folders of an
+# absolute path (/srv/backup/home/<user>). Case-sensitive, and /Users only
+# under those prefixes, so /api/users/42 and /api/Users/42 are REST paths. The
+# atomic group stops a failed match from re-entering the folder loop.
 _HEAD_POSIX = (
     r"(?:" + _EMPTY_AUTHORITY_URI + "|" + _POSIX_START + r")"
-    r"(?>/(?:Volumes/[^/\\\n\"'<>|]{1,255}+/)?"
+    r"(?>/(?:Volumes/[^/\\\n\"'<>|]{1,255}+/|System/Volumes/Data/|mnt/[\w.~@+%#-]++/)?"
     r"(?:(?:[\w.~@+%#-]++/+)+?(?-i:home)|(?-i:home|Users))/)"
 )
 
@@ -427,11 +439,19 @@ def _unc_head_and_sep(width: int) -> tuple[str, str]:
     holds doubled backslashes (``C:\\\\Windows``, ``..\\\\data\\\\x.csv``, a
     regex such as ``\\\\d+``) is not taken for a share. ``\\\\?\\`` and
     ``\\\\.\\`` device paths are not shares unless they continue ``UNC\\``.
+    Plain text may also separate with a slash (``\\\\host/share``, which
+    Win32 accepts); there the head never follows a drive (``C:\\\\tools/bin``
+    is escaped text, not a share).
     """
     backslashes = r"\\" * width
     sep = backslashes + r"(?!\\)"
+    start = ""
+    if width == 1:
+        sep = r"(?:" + sep + "|/)"
+        start = r"(?<!\b[A-Za-z]:)"
     head = (
-        backslashes * 2
+        start
+        + backslashes * 2
         + r"(?:[?.]"
         + backslashes
         + "UNC"
@@ -448,43 +468,58 @@ _UNC_FORMS = tuple(_unc_head_and_sep(width) for width in (4, 2, 1))
 
 # A share URI's authority, ``[user[:password]@]host[:port]``, with or without
 # a path; ``file:////host/share`` is how ``pathname2url`` writes a UNC path.
+# The host may be a bracketed IPv6 address (``smb://[fe80::1]/share``).
 _HEAD_SHARE_URI = (
     r"(?<![\w+.-])(?:file:/{4,5}|(?:"
     + "|".join(_SHARE_SCHEMES)
-    + r")://(?:[^\s/@\\\"<>|]*+@)?)"
+    + r")://(?:[^\s/@\\\"<>|]*+@)?)(?:\[[\w.:%-]++\]|"
     + _HOST_WORD
-    + r"++(?::\d++)?/?"
+    + r"++)(?::\d++)?/?"
 )
-# A bare ``//host/`` share, only after a boundary so that URLs and floor
-# division (``total//count/2``) are not taken for one.
-_HEAD_SLASH_UNC = r"(?<![\w)\]}.:/\\~-])//(?:[?.]/UNC/)?(?![?.]/)" + _UNC_HOST_WORD + "+/"
+# A bare ``//host/`` share (or ``//host\\share``, which Win32 accepts), only
+# after a boundary so that URLs and floor division (``total//count/2``) are
+# not taken for one.
+_SLASH_UNC_SEP = r"[\\/]"
+_HEAD_SLASH_UNC = (
+    r"(?<![\w)\]}.:/\\~-])//(?:[?.]/UNC/)?(?![?.]/)" + _UNC_HOST_WORD + "+" + _SLASH_UNC_SEP
+)
 
 # A capital letter or digit: Latin, Latin Extended, Greek and Cyrillic capitals.
 _CAPITAL = r"(?-i:[A-Z0-9\u00c0-\u00d6\u00d8-\u00de\u0100-\u024f\u0391-\u03a9\u0400-\u042f])"
+
+# A folder that holds user accounts (see _ACCOUNT_DIRS), as the share itself
+# or a folder on it (``\\\\NAS01\\homes\\...``, ``\\\\PC01\\C$\\Users\\...``).
+_ACCOUNTS_FOLDER = r"(?:users|homes?|profiles)\$?"
 
 
 def _spaced_tail(sep: str) -> str:
     """Path tail whose inner segments may contain spaces (Windows forms).
 
     The first segment, the user or share name, may hold up to four words of
-    any case (``Maria de la Cruz``). A deeper folder may hold up to four
-    words when its first word is capitalised and has no dot (``New folder``,
-    ``Documenti tecnici``), or else when its later words start with a
-    capital letter or a digit (``x64 Release``); a ``OneDrive -`` folder may
-    hold eight more of any case. Each counts only when a separator follows,
-    so prose after a file name is kept (``vib.csv, 7.1 mm/s``). The last
-    segment never extends across a space: the text after the cut is the rest
-    of the file name. The atomic groups keep the scan linear.
+    any case (``Maria de la Cruz``), and so may the segment after an
+    accounts folder (``\\\\PC01\\C$\\Users\\john smith``). A deeper folder
+    may hold up to four words when its first word is capitalised and has no
+    dot (``New folder``, ``Documenti tecnici``), or else when its later
+    words start with a capital letter or a digit (``x64 Release``); a
+    ``OneDrive -`` folder may hold eight more of any case. Each counts only
+    when a separator follows, so prose after a file name is kept
+    (``vib.csv, 7.1 mm/s``). The last segment never extends across a space:
+    the text after the cut is the rest of the file name. The atomic groups
+    keep the scan linear.
     """
     word = r"[ ]+" + _PATH_WORD + "+"
     capitalised_word = r"[ ]+" + _CAPITAL + _PATH_WORD + "*"
     titled_first_word = _CAPITAL + r"(?:(?!\.)" + _PATH_WORD + ")*"
     onedrive = r"OneDrive[ ]+-(?:" + word + r"){1,8}"
-    account = r"(?>" + onedrive + "|" + _PATH_WORD + r"+(?:" + word + r"){0,3})" + sep
+    name = _PATH_WORD + r"+(?:" + word + r"){0,3}"
+    in_accounts = _ACCOUNTS_FOLDER + sep + name + sep
     # The separator sits inside each alternative, so a form that stops short
     # of one (``Report`` in ``Report.v2``) gives way to the next form.
+    account = r"(?>" + onedrive + sep + "|" + in_accounts + "|" + name + sep + ")"
     folder = (
         r"(?>"
+        + in_accounts
+        + "|"
         + onedrive
         + sep
         + "|"
@@ -515,14 +550,26 @@ def _plain_tail(sep: str) -> str:
     return r"(?:" + _PATH_WORD + r"+(?:" + sep + _PATH_WORD + r"+)*" + sep + r"?)"
 
 
+def _share_tail(sep: str) -> str:
+    """Path tail of a ``//host`` share or a share URI.
+
+    As :func:`_plain_tail`, except that the segment after an accounts folder
+    may hold up to four words when a separator follows it: the share may
+    hold Windows profiles (``smb://nas01/homes/john smith/x.pdf``).
+    """
+    name = _PATH_WORD + r"+(?:[ ]+" + _PATH_WORD + r"+){0,3}"
+    segment = r"(?>" + _ACCOUNTS_FOLDER + sep + name + r"(?=" + sep + r")|" + _PATH_WORD + r"+)"
+    return r"(?:" + segment + r"(?:" + sep + segment + r")*" + sep + r"?)"
+
+
 # Every unquoted path form as (head, tail), in matching order. The quoted
 # forms below and the head re-match in _split_after_head derive from it.
 _PATH_FORMS: tuple[tuple[str, str], ...] = (
     (_HEAD_DRIVE, _spaced_tail(_DRIVE_SEP)),
     (_HEAD_WINDOWS_MOUNT, _spaced_tail("/")),
     *((head, _spaced_tail(sep)) for head, sep in _UNC_FORMS),
-    (_HEAD_SHARE_URI, _plain_tail("/") + "?"),
-    (_HEAD_SLASH_UNC, _plain_tail("/")),
+    (_HEAD_SHARE_URI, _share_tail("/") + "?"),
+    (_HEAD_SLASH_UNC, _share_tail(_SLASH_UNC_SEP)),
     (_HEAD_POSIX, _plain_tail("/")),
 )
 _PATH_HEADS = tuple(head for head, _ in _PATH_FORMS)
@@ -544,9 +591,10 @@ def _quoted_path(quote: str) -> str:
     """A path that starts right after *quote* and runs to the same quote.
 
     Quoted paths (``repr()``, JSON, ``str(OSError)``, Markdown code) have
-    known ends, so the user or share name, a ``OneDrive - ...`` folder and
-    the file name may hold any number of spaces, and another folder may hold
-    capitalised words (``My Documents``). A quoted command or sentence that
+    known ends, so the user or share name (also right after an accounts
+    folder), a ``OneDrive - ...`` folder and the file name may hold any
+    number of spaces, and another folder may hold capitalised words
+    (``My Documents``). A quoted command or sentence that
     merely starts with a path (``'/home/me/venv/bin/python run.py --out x'``)
     falls back to the unquoted forms and keeps its words. Inside single
     quotes an apostrophe followed by a letter (``D'Amico``) belongs to the
@@ -562,12 +610,15 @@ def _quoted_path(quote: str) -> str:
         char_no_space = "(?:" + char_no_space + apostrophe + ")"
         close = r"'(?![^\W\d_])"
     sep = r"[\\/]++"
+    in_accounts = _ACCOUNTS_FOLDER + sep + char + "++"
     # One space after the dash, then ``char`` (which holds spaces) does the
     # rest: a single parse, where ``[ ]+`` before it backtracked exponentially.
-    # The other two forms are told apart by their first character, and the
+    # The last two forms are told apart by their first character, and the
     # atomic group keeps a folder loop from retrying them.
     folder = (
-        r"(?>OneDrive[ ]+-[ ]"
+        r"(?>"
+        + in_accounts
+        + r"|OneDrive[ ]+-[ ]"
         + char
         + "++|"
         + _CAPITAL
@@ -581,7 +632,8 @@ def _quoted_path(quote: str) -> str:
         + char_no_space
         + r"*+){0,3}+)"
     )
-    body = "(?:" + char + "++(?:" + sep + folder + ")*(?:" + sep + char + "++)?)?(?:" + sep + ")?"
+    first = "(?>" + in_accounts + "|" + char + "++)"
+    body = "(?:" + first + "(?:" + sep + folder + ")*(?:" + sep + char + "++)?)?(?:" + sep + ")?"
     return "(?<=" + quote + ")(?:" + "|".join(_PATH_HEADS) + ")" + body + "(?=" + close + ")"
 
 
@@ -635,19 +687,38 @@ def _names_only_an_account(head: str, parts: list[str]) -> bool:
     return _ACCOUNT_HEAD_RE.fullmatch(head) is None or "." not in parts[-1]
 
 
+_CLOSING_BRACKETS = {")": "(", "]": "[", "}": "{"}
+
+
+def _split_trailing(matched: str) -> tuple[str, str]:
+    """Split sentence punctuation and unbalanced closing brackets off a match.
+
+    ``see /home/me/notes.md.`` keeps its period and ``(C:\\Users\\me)`` its
+    bracket; a bracket the path opened (``report (1)``) stays in the path.
+    """
+    unbalanced = {
+        close: matched.count(close) - matched.count(open_)
+        for close, open_ in _CLOSING_BRACKETS.items()
+    }
+    end = len(matched)
+    while end > 1 and ((char := matched[end - 1]) in ".,;:!?" or unbalanced.get(char, 0) > 0):
+        if char in unbalanced:
+            unbalanced[char] -= 1
+        end -= 1
+    return matched[:end], matched[end:]
+
+
 def _scrub_path(match: re.Match[str]) -> str:
     """Reduce a matched path to its file name, or to a placeholder.
 
     A path whose last component names an account (see
     :func:`_names_only_an_account`) becomes :data:`_REDACTED_PATH_PLACEHOLDER`.
-    Trailing sentence punctuation captured by the match is re-appended so
-    ``see /home/me/notes.md.`` keeps its period.
+    Trailing punctuation captured by the match is re-appended (see
+    :func:`_split_trailing`).
     """
     if match.group("url") is not None:
         return match.group(0)
-    matched = match.group(0)
-    core = matched.rstrip(".,;:!?")
-    trailing = matched[len(core) :]
+    core, trailing = _split_trailing(match.group(0))
     split = _split_after_head(core)
     if split is None or _names_only_an_account(*split):
         return _REDACTED_PATH_PLACEHOLDER + trailing

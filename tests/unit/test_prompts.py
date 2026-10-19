@@ -318,10 +318,15 @@ class TestRenderForLlm:
 
     @pytest.mark.parametrize(
         "value",
-        ["ns=2;s=Line1/P201/Vibration", "SCADA/Line1/P201", "manuals/pump.md"],
+        [
+            "ns=2;s=Line1/P201/Vibration",
+            "SCADA/Line1/P201",
+            "manuals/pump.md",
+            "mqtt://localhost/home/boiler/temp",
+        ],
     )
     def test_a_source_that_is_not_an_absolute_path_keeps_its_context(self, value: str) -> None:
-        """An OPC-UA node id, a tag path or a relative path names no user or host."""
+        """An OPC-UA node id, a tag path, a topic or a relative path names no user or host."""
         assert render_for_llm(value, key="source") == value
         assert render_for_llm({"source": value}) == repr({"source": value})
 
@@ -332,10 +337,12 @@ class TestRenderForLlm:
             (r"C:\Users\luigi di maggio x y\x.pdf", "x.pdf"),
             # A whole value that starts with a bare home is taken as one path.
             ("/home/luigi has 2 GB free", "<path>"),
+            (r"\\PC01\C$\Users\john smith", "<path>"),
+            (PureWindowsPath(r"\\PC01\C$\Users\john smith\Documents\x.pdf"), "x.pdf"),
         ],
     )
     def test_a_whole_value_led_by_a_path_is_scanned_as_one_path(
-        self, value: str, expected: str
+        self, value: object, expected: str
     ) -> None:
         assert render_for_llm(value) == expected
 
@@ -377,6 +384,7 @@ class TestRenderForLlm:
             pytest.param("{'source': '" + "\\\\" * 75_000, id="escaped-source-value"),
             pytest.param("C:\\Users\\" + "a b" * 100_000, id="long-whole-value"),
             pytest.param({"source": "/srv/" + "a/" * 100_000}, id="deep-source-path"),
+            pytest.param("\\\\h\\s\\Users\\" + "a b" * 100_000, id="whole-value-spaced-account"),
         ],
     )
     def test_rendering_stays_linear_on_adversarial_input(self, value: object) -> None:
@@ -551,6 +559,8 @@ class TestSafeSource:
             "file://FILESRV01/share",
             "smb://FILESRV01/mrossi$",
             r"\\PC01\C$\Users\mrossi",
+            "smb://nas01/homes/john smith",
+            "ssh://git@gitsrv/home/mrossi",
         ],
     )
     def test_a_bare_home_or_share_returns_placeholder(self, source: str) -> None:
@@ -564,6 +574,8 @@ class TestSafeSource:
             r"\\?\C:\Users\Mario Rossi\x.pdf",
             "//FILESRV01/share/x.pdf",
             r"C:\Users\Mario Rossi\OneDrive - ACME S.p.A\x.pdf",
+            "ssh://git@gitsrv/home/mrossi/x.pdf",
+            "davs://FILESRV01/share/x.pdf",
         ],
     )
     def test_long_path_and_forward_slash_shares_reduce_to_file_name(self, source: str) -> None:
@@ -706,6 +718,11 @@ class TestSafeText:
             # A home folder reached through a share: the account is still last.
             (r"Access denied: \\PC01\C$\Users\mrossi", "Access denied: <path>"),
             (r"\\wsl.localhost\Ubuntu\home\luigi", "<path>"),
+            # A closing bracket the path did not open stays in the prose.
+            (r"(C:\Users\mrossi)", "(<path>)"),
+            ("[/home/mrossi], {/home/luigi}.", "[<path>], {<path>}."),
+            ("/System/Volumes/Data/Users/mrossi", "<path>"),
+            (r"C:\Documents and Settings\mrossi", "<path>"),
         ],
     )
     def test_a_bare_home_directory_becomes_a_placeholder(self, text: str, expected: str) -> None:
@@ -753,6 +770,16 @@ class TestSafeText:
             "sqlite:////home/luigi/a.pdf",
             "/Volumes/Macintosh HD/Users/mrossi/a.pdf",
             "/cygdrive/c/Users/luigi/a.pdf",
+            "/System/Volumes/Data/Users/mrossi/a.pdf",
+            "/mnt/windows/Users/mrossi/Documents/a.pdf",
+            r"C:\Documents and Settings\mrossi\a.pdf",
+            # Win32 accepts a slash after a UNC host, and a backslash after //host.
+            r"\\FILESRV01/share/a.pdf",
+            r"//FILESRV01\share\a.pdf",
+            "dav://FILESRV01/share/a.pdf",
+            "davs://FILESRV01/share/a.pdf",
+            "ssh://git@FILESRV01/home/luigi/a.pdf",
+            "smb://[fe80::1%eth0]:445/share/a.pdf",
         ],
     )
     def test_unc_and_uri_variants_lose_their_host(self, text: str) -> None:
@@ -795,6 +822,16 @@ class TestSafeText:
             "GET /api/users/42 returned 404",
             "GET /api/Users/42 and /v/users/42 returned 404",
             "mqtt://broker01/site/c/Users/state",
+            "/mnt/data/export.csv",
+            'See folder ../home/docs/manual.md or <a href="../home/index.html">',
+            # A service on localhost names a topic; three slashes make a
+            # SQLAlchemy URL relative.
+            "mqtt://localhost/home/sensors/temp and ws://localhost/home/feed",
+            "opc.tcp://localhost/home/line1",
+            "sqlite:///home/data.db and jdbc:sqlite:///home/data.db",
+            # Escaped text with a slash after a drive, and an escaped regex.
+            r'"bin": "C:\\tools/bin/x.exe"',
+            r'"re": "^\\w+/\\d+$"',
             # A scheme named in Markdown, and escaped newlines in notebook JSON.
             "Use ``smb://`` or ``file://`` URIs for shares.",
             r'"source": ["import os\n", "os.getcwd()\n"]',
@@ -821,6 +858,8 @@ class TestSafeText:
             ),
             (r"See C:\Users\mrossi\x.csv and/or the backup", "See x.csv and/or the backup"),
             (r"Log \\FILESRV01\share\log.txt on P-201\P-202", r"Log log.txt on P-201\P-202"),
+            (r"(see C:\Users\me\report(1).pdf).", "(see report(1).pdf)."),
+            (r"Saved as C:\Users\me\report(1)", "Saved as report(1)"),
         ],
     )
     def test_prose_after_a_path_is_kept(self, text: str, expected: str) -> None:
@@ -918,10 +957,20 @@ class TestSafeText:
             ),
             (repr(r"\\FS01\share\Dati tecnici\mrossi\x.pdf"), "'x.pdf'"),
             (r"C:\Users\mrossi\Report.v2\x.pdf", "x.pdf"),
-            # Empty components, '#' in a folder, and a relative path into a home.
+            # Empty components and '#' in a folder.
             ("/mnt//home/luigi/x.pdf", "x.pdf"),
             ("/mnt/nas#1/home/luigi/x.pdf", "x.pdf"),
-            ("cat ../../home/luigi/notes.txt", "cat ..notes.txt"),
+            # A user right under a share's accounts folder may hold lowercase words.
+            (r"\\PC01\C$\Users\john smith\Documents\x.pdf", "x.pdf"),
+            (r"\\NAS01\homes\maria rossi\Documenti\x.pdf", "x.pdf"),
+            (r'"\\NAS01\profiles\anna maria\Desktop\x.pdf"', '"x.pdf"'),
+            (str([r"\\PC01\C$\Users\john smith\Documents\x.pdf"]), "['x.pdf']"),
+            ("//PC01/C$/Users/john smith/Documents/x.pdf", "x.pdf"),
+            ("smb://nas01/homes/john smith/x.pdf", "x.pdf"),
+            (r"C:\Users\me\backup\Users\john smith\x.pdf", "x.pdf"),
+            # A bracketed IPv6 share host.
+            ("smb://[fe80::1]/mrossi$/x.pdf", "x.pdf"),
+            ("smb://[fe80::1]/mrossi$", "<path>"),
         ],
     )
     def test_more_home_and_share_layouts(self, text: str, expected: str) -> None:
@@ -973,6 +1022,13 @@ class TestSafeText:
             pytest.param(" ../a" * 50_000, id="dotdot-starts"),
             pytest.param("/#" * 100_000, id="posix-hash-segments"),
             pytest.param("/a//" * 75_000, id="posix-empty-components"),
+            pytest.param("\\\\h\\s\\Users\\" + "a b " * 75_000, id="spaced-account-no-separator"),
+            pytest.param("//h/users/a b/" * 20_000, id="share-accounts-folders"),
+            pytest.param('"\\\\h\\homes\\a b' * 20_000, id="quoted-accounts-folders"),
+            pytest.param("\\\\h/" * 75_000, id="unc-slash-separators"),
+            pytest.param("smb://[" + "a" * 300_000, id="unclosed-ipv6-host"),
+            pytest.param("C:\\Users\\a" + ")" * 300_000, id="closing-brackets"),
+            pytest.param("/mnt/a" * 50_000, id="mount-prefixes"),
         ],
     )
     def test_matching_stays_linear_on_adversarial_input(self, text: str) -> None:
