@@ -132,3 +132,40 @@ class TestCliChannelStillWorksInSandbox:
         finally:
             set_sandbox_mode(False)
         assert "hello from sandbox" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("_sandbox_on")
+class TestVendorWriteHelpersBlockedInSandbox:
+    """The raw MCP vendor tools write through connector helpers (SAP PM's
+    ``_write_with_csrf``, Maximo's ``_patch_resource``), not through the
+    decorated create/update methods, so each helper carries its own guard. It
+    fires before any request: SAP's CSRF token fetch is a GET, but it is the
+    first half of the write."""
+
+    @pytest.mark.asyncio
+    async def test_sap_write_with_csrf_sends_nothing(self, httpx_mock) -> None:
+        from machina.connectors.cmms.auth import BasicAuth
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+        with pytest.raises(SandboxViolationError):
+            await conn._write_with_csrf(
+                "POST", f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification", {}
+            )
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.asyncio
+    async def test_maximo_patch_resource_sends_nothing(self, httpx_mock) -> None:
+        from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+        from machina.connectors.cmms.maximo import MaximoConnector
+
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+        with pytest.raises(SandboxViolationError):
+            await conn._patch_resource("mxwo", "WO-1", {"status": "COMP"})
+        assert httpx_mock.get_requests() == []
