@@ -222,12 +222,6 @@ default.
   before a JSON renderer.
 - A logging handler you add after `configure_logging()` formats third-party
   records itself: give it `format_exc_info` too.
-- With structlog older than 26.1 and `rich` installed, an application that
-  never calls `configure_logging()` gets a `UserWarning` ("Remove
-  `format_exc_info` from your processor chain...") from Machina's exception
-  logs. If warnings are turned into errors, the warning is raised from the
-  logging call; a failing MQTT alarm callback then also ends the connector's
-  message reader. Call `configure_logging()` or use structlog 26.1 or later.
 
 ## Secrets Management
 

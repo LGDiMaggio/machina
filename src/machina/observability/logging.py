@@ -89,9 +89,8 @@ def configure_logging(
     if json_output:
         renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
     else:
-        # The exception reaches the renderer already rendered. Without
-        # ``plain_traceback``, structlog < 26.1 warns about that whenever rich
-        # is installed.
+        # The exception reaches the renderer already rendered; ``plain_traceback``
+        # keeps the renderer free of frame locals even if ``exc_info`` got here.
         renderer = structlog.dev.ConsoleRenderer(exception_formatter=structlog.dev.plain_traceback)
 
     structlog.configure(

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import sys
+import warnings
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -757,6 +760,56 @@ class TestMqttDispatchMessage:
         assert event["error_type"] == "ValueError"
         assert event["error"] == "'protobuf' is not a valid PayloadFormat"
         assert "exception" not in event
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("warning_action", ["error", "always"])
+    async def test_a_failing_callback_keeps_the_reader_under_structlog_defaults(
+        self, warning_action: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An application that never calls ``configure_logging()`` renders with
+        structlog's defaults (rich's console renderer when installed). Logging a
+        failing alarm callback there must not warn: with warnings as errors, a
+        warning raised from the log call would end the shared reader."""
+        from machina.connectors.iot.mqtt import _SubscriptionEntry
+
+        received: list[Alarm] = []
+
+        async def callback(alarm: Alarm) -> None:
+            if not received:
+                received.append(alarm)
+                raise RuntimeError("Handler crashed")
+            received.append(alarm)
+
+        payload = json.dumps({"value": 100.0}).encode()
+        messages = [SimpleNamespace(topic="sensor/temp", payload=payload)] * 2
+
+        async def _messages() -> Any:
+            for message in messages:
+                yield message
+
+        conn = MqttConnector(broker="localhost", topics=[])
+        conn._client = MagicMock(messages=_messages())
+        conn._sub_entries["sub"] = _SubscriptionEntry(
+            callback=callback, topic_cfgs=[TopicConfig(topic="sensor/temp", threshold=0.0)]
+        )
+        stream = io.StringIO()
+        structlog.reset_defaults()
+        structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=stream))
+        monkeypatch.setattr(
+            "machina.connectors.iot.mqtt.logger",
+            structlog.get_logger("machina.connectors.iot.mqtt"),
+        )
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter(warning_action)
+                await conn._reader_loop()
+        finally:
+            structlog.reset_defaults()
+
+        assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+        assert len(received) == 2  # the reader went on to the second message
+        assert "alarm_callback_error" in stream.getvalue()
+        assert "RuntimeError: Handler crashed" in stream.getvalue()
 
     @pytest.mark.asyncio
     async def test_dispatch_handles_callback_error(
