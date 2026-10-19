@@ -763,13 +763,21 @@ class TestMqttDispatchMessage:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("warning_action", ["error", "always"])
+    @pytest.mark.parametrize("host_config", ["frame_locals_renderer", "structlog_defaults"])
     async def test_a_failing_callback_keeps_the_reader_under_structlog_defaults(
-        self, warning_action: str, monkeypatch: pytest.MonkeyPatch
+        self,
+        host_config: str,
+        warning_action: str,
+        frame_locals_renderer: structlog.dev.ConsoleRenderer,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An application that never calls ``configure_logging()`` renders with
-        structlog's defaults (rich's console renderer when installed). Logging a
-        failing alarm callback there must not warn: with warnings as errors, a
-        warning raised from the log call would end the shared reader."""
+        structlog's defaults (rich's console renderer when installed), or with a
+        console renderer of its own. Logging a failing alarm callback there must
+        not warn: with warnings as errors, a warning raised from the log call
+        would end the shared reader. Before structlog 26.1, any console renderer
+        whose exception formatter is not ``plain_traceback`` warned; the
+        ``frame_locals_renderer`` case reproduces that without ``rich``."""
         from machina.connectors.iot.mqtt import _SubscriptionEntry
 
         received: list[Alarm] = []
@@ -795,6 +803,8 @@ class TestMqttDispatchMessage:
         stream = io.StringIO()
         structlog.reset_defaults()
         structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=stream))
+        if host_config == "frame_locals_renderer":
+            structlog.configure(processors=[frame_locals_renderer])
         monkeypatch.setattr(
             "machina.connectors.iot.mqtt.logger",
             structlog.get_logger("machina.connectors.iot.mqtt"),
