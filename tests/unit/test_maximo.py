@@ -33,7 +33,12 @@ from machina.connectors.cmms.mappers.maximo import (
 from machina.connectors.cmms.mappers.maximo import (
     reverse_worktype as _reverse_worktype,
 )
-from machina.connectors.cmms.maximo import MaximoConnector, _oslc_eq, _require_httpx
+from machina.connectors.cmms.maximo import (
+    MaximoConnector,
+    _oslc_eq,
+    _oslc_resource_path,
+    _require_httpx,
+)
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -303,6 +308,75 @@ class TestOslcEq:
         assert "contains '\"', '%', '='" in message
         assert "PUMP-201" not in message
         assert "or assetnum" not in message
+
+
+_OBJECT_STRUCTURE_REFUSAL = (
+    "Invalid Maximo object structure: expected an object structure name "
+    "such as 'mxwo' (ASCII letters, digits and underscores only)"
+)
+
+
+class TestOslcResourcePath:
+    """The raw vendor write reaches one resource of one object structure.
+
+    Both values come from MCP-client input. The tool-level cases (sandbox,
+    refusal before any request) are in ``tests/unit/mcp/test_tools_vendor.py``.
+    """
+
+    @pytest.mark.parametrize(
+        ("object_structure", "resource_id", "path"),
+        [
+            ("mxwo", "_QkVERk9SRC9XQzY-", "/maximo/oslc/os/mxwo/_QkVERk9SRC9XQzY-"),
+            ("ZZ_WO", "BEDFORD/WC6", "/maximo/oslc/os/ZZ_WO/BEDFORD%2FWC6"),
+            ("MXASSET", 11430, "/maximo/oslc/os/MXASSET/11430"),
+        ],
+    )
+    def test_path_names_one_resource(
+        self, object_structure: str, resource_id: object, path: str
+    ) -> None:
+        assert _oslc_resource_path(object_structure, resource_id) == path
+
+    @pytest.mark.parametrize("object_structure", ["", "mxwo/..", "../api", "mxwo\n", 7, None])
+    def test_object_structure_other_than_a_name_is_refused(self, object_structure: object) -> None:
+        with pytest.raises(ConnectorError) as exc_info:
+            _oslc_resource_path(object_structure, "WO-1")
+        assert str(exc_info.value) == _OBJECT_STRUCTURE_REFUSAL
+
+    @pytest.mark.parametrize("resource_id", ["", "..", "../mxasset/A1", "a/..;/b"])
+    def test_resource_id_that_could_leave_its_segment_is_refused(self, resource_id: str) -> None:
+        with pytest.raises(ConnectorError, match="^Invalid record ID: "):
+            _oslc_resource_path("mxwo", resource_id)
+
+
+class TestPatchResource:
+    """A direct call to the raw write helper is held to the tool's rule."""
+
+    def _conn(self) -> MaximoConnector:
+        return MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+
+    @pytest.mark.parametrize(
+        ("object_structure", "resource_id"),
+        [("../../script", "X"), ("mxwo", "../../script/X"), ("mxwo", "")],
+    )
+    @pytest.mark.asyncio
+    async def test_refused_before_any_request(
+        self, httpx_mock, object_structure: str, resource_id: str
+    ) -> None:
+        with pytest.raises(ConnectorError):
+            await self._conn()._patch_resource(object_structure, resource_id, {"x": 1})
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.asyncio
+    async def test_patches_the_one_resource(self, httpx_mock) -> None:
+        url = "https://maximo.example.com/maximo/oslc/os/mxwo/WO%3F1"
+        httpx_mock.add_response(method="PATCH", url=url, status_code=204)
+        resp = await self._conn()._patch_resource("mxwo", "WO?1", {"x": 1})
+        assert resp.status_code == 204
+        [request] = httpx_mock.get_requests()
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/WO%3F1"
 
 
 # ---------------------------------------------------------------------------
