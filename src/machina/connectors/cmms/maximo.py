@@ -107,8 +107,7 @@ def _require_httpx() -> Any:
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
-# httpx refuses a longer URL with its own exception (``httpx.InvalidURL``).
-_MAX_URL_LENGTH = 65_536
+_NO_USABLE_URL = "Maximo returned a nextPage link without a usable URL"
 
 
 def _origin(url: str) -> tuple[str, str | None, int | None]:
@@ -141,29 +140,35 @@ def _next_page_url(next_page: object, current_url: str) -> str | None:
 
     Raises:
         ConnectorError: If ``nextPage`` carries no usable URL (none, blank, a
-            control character, longer than httpx accepts), or its URL has
-            another scheme, host or port or carries user info. Neither message
-            repeats the URL, which can name an internal host.
+            control character, or a URL that urllib or httpx cannot parse), or
+            its URL has another scheme, host or port or carries user info.
+            Neither message repeats the URL, which can name an internal host.
     """
     if next_page is None:
         return None
     if isinstance(next_page, dict):
         next_page = next_page.get("href")
     href = next_page.strip() if isinstance(next_page, str) else ""
-    if not href or not href.isprintable() or len(href) > _MAX_URL_LENGTH:
-        raise ConnectorError("Maximo returned a nextPage link without a usable URL")
-    link_scheme: str | None = None
-    link_host: str | None = None
+    # isprintable() also keeps line breaks out of the refusal log below.
+    if not href or not href.isprintable():
+        raise ConnectorError(_NO_USABLE_URL)
+    httpx = _require_httpx()
     try:
         url = urljoin(current_url, href)
+        # httpx sends the request, so a URL it refuses (too long, an invalid
+        # host or port) is refused here as a ConnectorError, not as its own
+        # exception.
+        httpx.URL(url)
         target = urlsplit(url)
-        link_scheme, link_host = target.scheme, target.hostname
+    except (ValueError, httpx.InvalidURL):
+        raise ConnectorError(_NO_USABLE_URL) from None
+    try:
         same_origin = (
             target.username is None
             and target.password is None
             and _origin(url) == _origin(current_url)
         )
-    except ValueError:
+    except ValueError:  # a port urllib rejects and httpx accepts, such as 99999
         same_origin = False
     if not same_origin:
         # For the operator: the scheme and host the link named (no path,
@@ -172,8 +177,8 @@ def _next_page_url(next_page: object, current_url: str) -> str | None:
             "maximo_next_page_refused",
             connector="MaximoConnector",
             operation="oslc_get",
-            link_scheme=link_scheme,
-            link_host=link_host,
+            link_scheme=target.scheme,
+            link_host=target.hostname,
         )
         raise ConnectorError(
             "Maximo returned a nextPage link to another scheme, host or port than "
@@ -372,6 +377,7 @@ class MaximoConnector:
             "mxasset",
             oslc_where=_oslc_eq("assetnum", asset_id),
             page_size=1,
+            first_page_only=True,
         )
         return maximo_mapper.parse_asset(raw[0], self._asset_type_map) if raw else None
 
@@ -411,6 +417,7 @@ class MaximoConnector:
             "mxwo",
             oslc_where=_oslc_eq("wonum", work_order_id),
             page_size=1,
+            first_page_only=True,
         )
         return maximo_mapper.parse_work_order(raw[0]) if raw else None
 
@@ -590,6 +597,7 @@ class MaximoConnector:
         oslc_where: str = "",
         oslc_select: str = "",
         page_size: int | None = None,
+        first_page_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch all pages from a Maximo OSLC object structure.
 
@@ -601,6 +609,8 @@ class MaximoConnector:
             oslc_where: Optional OSLC where clause for server-side filtering.
             oslc_select: Optional comma-separated field list.
             page_size: Results per page (default :attr:`_PAGE_SIZE`).
+            first_page_only: Stop after the first page, for a lookup that
+                uses only the first match.
 
         Returns:
             Flat list of all result dicts across all pages.
@@ -650,6 +660,8 @@ class MaximoConnector:
                         f"{self._MAX_OSLC_ROWS}-row safety cap — refusing to load an "
                         "unbounded result set into memory. Narrow the query with oslc.where."
                     )
+                if first_page_only:
+                    break
                 # Follow the OSLC next-page link. It repeats the query, so the
                 # first request's params are not sent again.
                 url = _next_page_url((body.get("responseInfo") or {}).get("nextPage"), url)

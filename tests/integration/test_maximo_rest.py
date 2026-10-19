@@ -191,6 +191,45 @@ class TestReadAssets:
         assets = await connector.read_assets()
         assert [a.id for a in assets] == ["A1", "A2"]
 
+    @pytest.mark.parametrize(
+        ("lookup", "object_structure", "where", "record"),
+        [
+            pytest.param(
+                lambda c: c.get_asset("PUMP-201"),
+                "mxasset",
+                'assetnum="PUMP-201"',
+                {"assetnum": "PUMP-201", "siteid": "S1"},
+                id="get_asset",
+            ),
+            pytest.param(
+                lambda c: c.get_work_order("WO-1"),
+                "mxwo",
+                'wonum="WO-1"',
+                {"wonum": "WO-1", "siteid": "S1"},
+                id="get_work_order",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_lookups_read_only_the_first_page(
+        self, httpx_mock, connector: MaximoConnector, lookup, object_structure, where, record
+    ) -> None:
+        """A key that exists on several sites pages one match at a time; a lookup
+        uses the first, so it does not follow the link."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **{"oslc.pageSize": "1", "oslc.where": where}),
+            json={
+                "member": [record],
+                "responseInfo": {
+                    "nextPage": {"href": f"{OSLC}/os/{object_structure}?pageno=2"},
+                },
+            },
+        )
+        assert await lookup(connector) is not None
+        assert len(httpx_mock.get_requests()) == 2  # connect + the first page
+
     @pytest.mark.asyncio
     async def test_get_asset(self, httpx_mock, connector: MaximoConnector) -> None:
         await _connect(httpx_mock, connector)
@@ -608,6 +647,8 @@ class TestReadMaintenanceHistory:
             [],
             {"href": f"{OSLC}/os/mxwo?pageno=2\x00"},
             {"href": f"{OSLC}/os/mxwo?pageno=2&pad=" + "a" * 65_536},
+            # 65,514 characters: under httpx's limit as given, over it once resolved.
+            {"href": "?pageno=2&pad=" + "a" * 65_500},
         ],
         ids=[
             "no-href",
@@ -620,6 +661,7 @@ class TestReadMaintenanceHistory:
             "list",
             "control-character",
             "too-long",
+            "too-long-once-resolved",
         ],
     )
     @pytest.mark.asyncio
