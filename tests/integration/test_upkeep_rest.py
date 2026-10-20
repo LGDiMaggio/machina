@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import pytest
 
+from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
+from machina.workflows.engine import WorkflowEngine
+from machina.workflows.models import Workflow
 
 BASE = "https://api.onupkeep.com"
 
@@ -810,6 +814,146 @@ class TestReadMaintenanceHistory:
         history = await connector.read_maintenance_history("a1")
         assert len(history) == 1
         assert history[0].id == "wo-h1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "unresolved"])
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: UpKeepConnector, asset_id: str | None
+    ) -> None:
+        """No asset ID is an error, neither the whole account nor "no history".
+
+        ``read_work_orders`` treats an empty ``asset_id`` as "no filter", so
+        passing one through returned every completed work order as one asset's
+        history; returning ``[]`` instead would read as "never repaired". MCP
+        can send ``""``; a workflow trigger without ``asset_id`` resolves to
+        ``None``.
+        """
+        await _connect(httpx_mock, connector)
+        with pytest.raises(
+            ConnectorError, match=r"^read_maintenance_history requires an asset_id$"
+        ):
+            await connector.read_maintenance_history(asset_id)  # type: ignore[arg-type]
+        assert len(httpx_mock.get_requests()) == 1  # the connect check only
+
+    @pytest.mark.asyncio
+    async def test_numeric_asset_id_keeps_the_asset_filter(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """``0`` is an ID, not "no asset": ``read_work_orders`` drops a falsy filter."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=0&status=complete",
+            json={"results": [{"id": "wo-h0", "status": "complete", "assetId": "0"}]},
+        )
+        history = await connector.read_maintenance_history(0)  # type: ignore[arg-type]
+        assert [wo.id for wo in history] == ["wo-h0"]
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_pages_keep_the_filter(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A full page triggers the next offset with asset + status kept."""
+        await _connect(httpx_mock, connector)
+        page1 = [{"id": f"wo{i}", "status": "complete", "assetId": "a1"} for i in range(100)]
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=a1&status=complete",
+            json={"results": page1},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=100&asset=a1&status=complete",
+            json={"results": [{"id": "wo100", "status": "complete", "assetId": "a1"}]},
+        )
+        history = await connector.read_maintenance_history("a1")
+        assert len(history) == 101
+        assert history[-1].id == "wo100"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="invalid"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A failed read raises; it is not reported as an empty history."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="GET /api/v2/work-orders failed"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: UpKeepConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("a1")
+
+    @pytest.mark.asyncio
+    async def test_alarm_without_asset_fails_the_history_step(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """An alarm with no ``asset_id`` skips the history step with its error.
+
+        The step's SKIP policy keeps the workflow going, but the step records
+        why it has no output instead of passing on an empty history.
+        """
+        await _connect(httpx_mock, connector)
+        registry = ConnectorRegistry()
+        registry.register("upkeep", connector)
+        history_step = next(s for s in alarm_to_workorder.steps if s.name == "check_history")
+
+        result = await WorkflowEngine(registry=registry).execute(
+            Workflow(name="history only", steps=[history_step]),
+            {"alarm_id": "AL-1"},
+        )
+
+        (step_result,) = result.step_results
+        assert step_result.skipped
+        assert step_result.output is None
+        assert step_result.error is not None
+        assert "read_maintenance_history requires an asset_id" in step_result.error
+        assert len(httpx_mock.get_requests()) == 1  # the connect check only
+
+    @pytest.mark.asyncio
+    async def test_alarm_workflow_history_step_reaches_upkeep(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """The built-in workflow's history step must run against UpKeep.
+
+        The engine finds the step's connector by capability. With
+        ``read_maintenance_history`` undeclared it found none, and the step's
+        SKIP policy hid the miss.
+        """
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=a1&status=complete",
+            json={
+                "results": [
+                    {"id": "wo-h1", "title": "Past fix", "status": "complete", "asset": "a1"},
+                ],
+            },
+        )
+        registry = ConnectorRegistry()
+        registry.register("upkeep", connector)
+        history_step = next(s for s in alarm_to_workorder.steps if s.name == "check_history")
+
+        result = await WorkflowEngine(registry=registry).execute(
+            Workflow(name="history only", steps=[history_step]),
+            {"asset_id": "a1"},
+        )
+
+        (step_result,) = result.step_results
+        assert not step_result.skipped
+        assert [wo.id for wo in step_result.output] == ["wo-h1"]
 
 
 # ---------------------------------------------------------------------------

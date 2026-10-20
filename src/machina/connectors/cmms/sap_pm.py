@@ -177,6 +177,7 @@ class SapPmConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -522,8 +523,16 @@ class SapPmConnector:
         return [sap_mapper.parse_maintenance_plan(item) for item in raw]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
-        """Return completed/closed maintenance orders for an asset."""
+        """Return completed/closed maintenance orders for an asset.
+
+        Raises:
+            ConnectorError: If ``asset_id`` is missing or blank.
+                ``Equipment eq ''`` would match every order that has no
+                equipment, and a missing ID would be matched as ``'None'``.
+        """
         self._ensure_connected()
+        if asset_id is None or not str(asset_id).strip():
+            raise ConnectorError("read_maintenance_history requires an asset_id")
         odata_filter = (
             f"Equipment eq {_odata_string(asset_id)} and "
             "(MaintenanceOrderSystemStatus eq 'CNF' or "

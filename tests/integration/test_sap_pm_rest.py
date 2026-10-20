@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.sap_pm import SapPmConnector
 from machina.domain.asset import Asset
@@ -15,6 +16,9 @@ from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
+from machina.workflows.engine import WorkflowEngine
+from machina.workflows.models import Workflow
 
 BASE = "https://sap.example.com/sap/opu/odata/sap"
 
@@ -718,6 +722,156 @@ class TestReadMaintenanceHistory:
         assert len(history) == 2
         assert all(isinstance(wo, WorkOrder) for wo in history)
         assert history[0].id == "4000010"
+
+    @pytest.mark.asyncio
+    async def test_alarm_workflow_history_step_reaches_sap_pm(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The built-in workflow's history step must run against SAP PM.
+
+        The engine finds the step's connector by capability. With
+        ``read_maintenance_history`` undeclared it found none, and the step's
+        SKIP policy hid the miss.
+        """
+        await _connect(httpx_mock, connector)
+        expected_filter = (
+            "Equipment eq '10000001' and "
+            "(MaintenanceOrderSystemStatus eq 'CNF' or "
+            "MaintenanceOrderSystemStatus eq 'TECO' or "
+            "MaintenanceOrderSystemStatus eq 'CLSD')"
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": expected_filter},
+            ),
+            json={
+                "d": {
+                    "results": [
+                        {
+                            "MaintenanceOrder": "4000010",
+                            "MaintenanceOrderDesc": "Past repair",
+                            "MaintenanceOrderSystemStatus": "CNF",
+                            "Equipment": "10000001",
+                        },
+                    ],
+                },
+            },
+        )
+        registry = ConnectorRegistry()
+        registry.register("sap_pm", connector)
+        history_step = next(s for s in alarm_to_workorder.steps if s.name == "check_history")
+
+        result = await WorkflowEngine(registry=registry).execute(
+            Workflow(name="history only", steps=[history_step]),
+            {"asset_id": "10000001"},
+        )
+
+        (step_result,) = result.step_results
+        assert not step_result.skipped
+        assert [wo.id for wo in step_result.output] == ["4000010"]
+
+    @pytest.mark.asyncio
+    async def test_numeric_asset_id_is_sent_as_its_digits(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Tool arguments parsed from model JSON can carry an equipment number as a number."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'")},
+            ),
+            json={"d": {"results": [{"MaintenanceOrder": "4000010"}]}},
+        )
+        history = await connector.read_maintenance_history(10000001)  # type: ignore[arg-type]
+        assert [wo.id for wo in history] == ["4000010"]
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_pages_keep_the_filter(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A full page triggers a ``$skip`` request that keeps the history filter."""
+        await _connect(httpx_mock, connector)
+        page1 = [
+            {"MaintenanceOrder": f"40{i:05d}", "MaintenanceOrderSystemStatus": "CNF"}
+            for i in range(100)
+        ]
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'")},
+            ),
+            json={"d": {"results": page1}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$filter": _history_filter("'10000001'"), "$skip": "100"},
+            ),
+            json={"d": {"results": [{"MaintenanceOrder": "4100000"}]}},
+        )
+        history = await connector.read_maintenance_history("10000001")
+        assert len(history) == 101
+        assert history[-1].id == "4100000"
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_auth_failure(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=401)
+        with pytest.raises(ConnectorAuthError, match="authentication failed"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_server_error(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A failed read raises; it is not reported as an empty history."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", status_code=500)
+        with pytest.raises(ConnectorError, match="HTTP 500"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_requires_connect(
+        self, connector: SapPmConnector
+    ) -> None:
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await connector.read_maintenance_history("10000001")
+
+    @pytest.mark.parametrize("asset_id", ["", "  ", None], ids=["empty", "blank", "unresolved"])
+    @pytest.mark.asyncio
+    async def test_read_maintenance_history_refuses_a_missing_asset_id(
+        self, httpx_mock, connector: SapPmConnector, asset_id: str | None
+    ) -> None:
+        """``Equipment eq ''`` would match every order that has no equipment,
+        and ``None`` would be sent as ``Equipment eq 'None'``."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(
+            ConnectorError, match=r"^read_maintenance_history requires an asset_id$"
+        ):
+            await connector.read_maintenance_history(asset_id)  # type: ignore[arg-type]
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
+
+
+def _history_filter(equipment_literal: str) -> str:
+    """The history ``$filter`` for an already-quoted Equipment literal."""
+    return (
+        f"Equipment eq {equipment_literal} and "
+        "(MaintenanceOrderSystemStatus eq 'CNF' or "
+        "MaintenanceOrderSystemStatus eq 'TECO' or "
+        "MaintenanceOrderSystemStatus eq 'CLSD')"
+    )
 
 
 # ---------------------------------------------------------------------------

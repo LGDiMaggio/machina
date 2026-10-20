@@ -83,6 +83,7 @@ class UpKeepConnector:
             Capability.UPDATE_WORK_ORDER,
             Capability.READ_SPARE_PARTS,
             Capability.READ_MAINTENANCE_PLANS,
+            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -371,9 +372,20 @@ class UpKeepConnector:
         ]
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
-        """Return completed work orders for an asset."""
-        wos = await self.read_work_orders(asset_id=asset_id, status="complete")
-        return wos
+        """Return completed work orders for an asset.
+
+        Raises:
+            ConnectorError: If ``asset_id`` is missing or blank.
+                ``read_work_orders`` reads an empty ``asset_id`` as "no
+                filter", so the read would return every completed work order
+                in the account as this asset's history.
+        """
+        self._ensure_connected()
+        if asset_id is None or not str(asset_id).strip():
+            raise ConnectorError("read_maintenance_history requires an asset_id")
+        # As text: a numeric ID such as 0 is falsy, and read_work_orders would
+        # drop the filter for it.
+        return await self.read_work_orders(asset_id=str(asset_id), status="complete")
 
     # ------------------------------------------------------------------
     # Internal helpers
