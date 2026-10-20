@@ -35,7 +35,7 @@ See also:
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar
 from urllib.parse import unquote, urljoin, urlsplit
 
 import structlog
@@ -52,11 +52,75 @@ from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import ConnectorAuthError, ConnectorError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.domain.asset import Asset, AssetType
     from machina.domain.maintenance_plan import MaintenancePlan
     from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
+
+_Entity = TypeVar("_Entity")
+
+# The attribute that identifies a record of each object structure read here.
+_IDENTITY = {"mxasset": "assetnum", "mxwo": "wonum", "mxinventory": "itemnum", "mxpm": "pmnum"}
+
+
+def _map_members(
+    members: list[dict[str, Any]],
+    object_structure: str,
+    parse: Callable[[dict[str, Any]], _Entity],
+) -> list[_Entity]:
+    """Map the members of an OSLC read to domain entities, all or none.
+
+    A member without its identity attribute is refused: Maximo returns only
+    each member's ``href`` when ``oslc.select`` is missing or not applied
+    (for example by a next-page link that drops it), and such a member must
+    not become an entity with an empty ID or a default status. A member the
+    mapper cannot read (a field of an unexpected type, a value the domain
+    model rejects) is refused too. Either refusal ends the read: returning
+    the other members would present part of the result as all of it.
+
+    Raises:
+        ConnectorError: On the first member refused. The message and the
+            ``maximo_member_refused`` warning name the object structure,
+            the attribute or the error type, never a value from Maximo.
+    """
+    identity = _IDENTITY[object_structure]
+    entities: list[_Entity] = []
+    for member in members:
+        value = member.get(identity) if isinstance(member, dict) else None
+        if value is None or not str(value).strip():
+            reason = "missing_identity"
+            message = (
+                f"Maximo returned a {object_structure} record without its '{identity}' "
+                "attribute; a record that carries only its href means the query's "
+                "oslc.select was not applied"
+            )
+        else:
+            try:
+                entities.append(parse(member))
+                continue
+            except (
+                ValueError,
+                TypeError,
+                AttributeError,
+            ) as exc:  # pydantic errors are ValueErrors
+                reason = f"unmappable_{type(exc).__name__}"
+                message = (
+                    f"Maximo returned a {object_structure} record that cannot be mapped "
+                    f"({type(exc).__name__})"
+                )
+        logger.warning(
+            "maximo_member_refused",
+            connector="MaximoConnector",
+            operation="oslc_read",
+            object_structure=object_structure,
+            reason=reason,
+        )
+        raise ConnectorError(f"{message} — refusing to return a partial result")
+    return entities
+
 
 _AuthUnion = ApiKeyHeaderAuth | BasicAuth | BearerAuth
 # The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
@@ -402,21 +466,28 @@ class MaximoConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Return all assets from Maximo (MXASSET object structure)."""
+        """Return all assets from Maximo (MXASSET object structure).
+
+        Raises:
+            ConnectorError: On an HTTP or paging error (see :meth:`_oslc_get`),
+                or if a record lacks its ``assetnum`` or cannot be mapped (see
+                :func:`_map_members`).
+        """
         self._ensure_connected()
-        raw = await self._oslc_get("mxasset")
-        return [maximo_mapper.parse_asset(item, self._asset_type_map) for item in raw]
+        raw = await self._oslc_get("mxasset", oslc_select=maximo_mapper.ASSET_SELECT)
+        return _map_members(raw, "mxasset", self._parse_asset)
 
     async def get_asset(self, asset_id: str) -> Asset | None:
-        """Look up a single asset by asset number."""
+        """Look up a single asset by asset number (the first match)."""
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxasset",
             oslc_where=_oslc_eq("assetnum", asset_id),
+            oslc_select=maximo_mapper.ASSET_SELECT,
             page_size=1,
             first_page_only=True,
         )
-        return maximo_mapper.parse_asset(raw[0], self._asset_type_map) if raw else None
+        return _map_members(raw[:1], "mxasset", self._parse_asset)[0] if raw else None
 
     async def read_work_orders(
         self,
@@ -444,19 +515,22 @@ class MaximoConnector:
             )
             clauses.append(_oslc_eq("status", maximo_status))
         where = " and ".join(clauses) if clauses else ""
-        raw = await self._oslc_get("mxwo", oslc_where=where)
-        return [maximo_mapper.parse_work_order(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxwo", oslc_where=where, oslc_select=maximo_mapper.WORK_ORDER_SELECT
+        )
+        return _map_members(raw, "mxwo", maximo_mapper.parse_work_order)
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
-        """Look up a single work order by work order number."""
+        """Look up a single work order by work order number (the first match)."""
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxwo",
             oslc_where=_oslc_eq("wonum", work_order_id),
+            oslc_select=maximo_mapper.WORK_ORDER_SELECT,
             page_size=1,
             first_page_only=True,
         )
-        return maximo_mapper.parse_work_order(raw[0]) if raw else None
+        return _map_members(raw[:1], "mxwo", maximo_mapper.parse_work_order)[0] if raw else None
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -613,14 +687,16 @@ class MaximoConnector:
         """
         self._ensure_connected()
         where = _oslc_eq("itemnum", sku) if sku else ""
-        raw = await self._oslc_get("mxinventory", oslc_where=where)
-        return [maximo_mapper.parse_spare_part(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxinventory", oslc_where=where, oslc_select=maximo_mapper.INVENTORY_SELECT
+        )
+        return _map_members(raw, "mxinventory", maximo_mapper.parse_spare_part)
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-        """Read preventive-maintenance triggers from Maximo."""
+        """Read preventive-maintenance plans (PMs) from Maximo."""
         self._ensure_connected()
-        raw = await self._oslc_get("mxpm")
-        return [maximo_mapper.parse_maintenance_plan(item) for item in raw]
+        raw = await self._oslc_get("mxpm", oslc_select=maximo_mapper.PM_SELECT)
+        return _map_members(raw, "mxpm", maximo_mapper.parse_maintenance_plan)
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset.
@@ -635,12 +711,18 @@ class MaximoConnector:
         # oslc.where has no ``or`` and no grouping parentheses (``and`` is its
         # only boolean operator), so the two statuses are listed through ``in``.
         where = f'{_oslc_eq("assetnum", asset_id)} and status in ["COMP","CLOSE"]'
-        raw = await self._oslc_get("mxwo", oslc_where=where)
-        return [maximo_mapper.parse_work_order(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxwo", oslc_where=where, oslc_select=maximo_mapper.WORK_ORDER_SELECT
+        )
+        return _map_members(raw, "mxwo", maximo_mapper.parse_work_order)
 
     # ------------------------------------------------------------------
     # Internal: OSLC REST helpers
     # ------------------------------------------------------------------
+
+    def _parse_asset(self, data: dict[str, Any]) -> Asset:
+        """Map one MXASSET record with this connector's ``asset_type_map``."""
+        return maximo_mapper.parse_asset(data, self._asset_type_map)
 
     def _headers(self) -> dict[str, str]:
         """Build base HTTP headers."""

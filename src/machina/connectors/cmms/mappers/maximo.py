@@ -3,6 +3,16 @@
 Extracted from :mod:`machina.connectors.cmms.maximo` so the mapping
 logic is testable on raw ``dict`` inputs — no HTTP mocks, no connector
 state.
+
+A Maximo collection query returns only each member's ``href`` unless it
+names the attributes it wants in ``oslc.select`` (IBM's REST API guide,
+"Selecting"). The ``*_SELECT`` constants below are those names, one per
+object structure: the attributes each ``parse_*`` function reads, plus
+``siteid``, which with the identity attribute forms the record's key. Only
+attributes documented on the object structure's main object, its child
+objects (``name{...}``) or a related object (``relation.attribute``) are
+named, because Maximo may refuse a query that names an attribute the
+object does not have.
 """
 
 from __future__ import annotations
@@ -21,10 +31,14 @@ from machina.domain.work_order import (
 )
 
 __all__ = [
+    "ASSET_SELECT",
+    "INVENTORY_SELECT",
     "MAXIMO_PRIORITY_MAP",
     "MAXIMO_STATUS_MAP",
     "MAXIMO_WORKTYPE_MAP",
+    "PM_SELECT",
     "REVERSE_MAXIMO_STATUS",
+    "WORK_ORDER_SELECT",
     "parse_asset",
     "parse_datetime",
     "parse_maintenance_plan",
@@ -72,6 +86,47 @@ REVERSE_MAXIMO_STATUS: dict[WorkOrderStatus, str] = {
     WorkOrderStatus.CLOSED: "CLOSE",
     WorkOrderStatus.CANCELLED: "CAN",
 }
+
+# ---------------------------------------------------------------------------
+# oslc.select per object structure (see the module docstring)
+# ---------------------------------------------------------------------------
+
+# ASSET has no model-number attribute, so Asset.model is not selected.
+ASSET_SELECT = (
+    "assetnum,siteid,description,location,manufacturer,serialnum,priority,parent,"
+    "classstructureid,assettype"
+)
+# The failure remark is a separate FAILUREREMARK object, not a WORKORDER
+# attribute; WorkOrder.failure_cause comes from problemcode.
+WORK_ORDER_SELECT = (
+    "wonum,siteid,description,status,wopriority,worktype,assetnum,lead,assignedownergroup,"
+    "failurecode,problemcode,reportdate,changedate"
+)
+# INVENTORY holds the reorder point (minlevel) but not the item's
+# description (on the related ITEM), the balances (child INVBALANCES, one
+# row per bin or lot) or the costs (child INVCOST, one row per condition
+# code).
+INVENTORY_SELECT = (
+    "itemnum,siteid,location,minlevel,item.description,invbalances{curbal},"
+    "invcost{avgcost,lastcost}"
+)
+PM_SELECT = "pmnum,siteid,assetnum,description,frequency,frequnit,status"
+
+# Keys OSLC adds to every member that describe the transport, not the
+# record: its URI (``href``, ``localref``, and ``<child>_collectionref``
+# links, all on the host Maximo sees itself on, often an internal name) and
+# the optimistic-locking token ``_rowstamp``. They stay out of ``metadata``,
+# which reaches the LLM and MCP clients.
+_TRANSPORT_KEYS = frozenset({"href", "localref", "_rowstamp"})
+
+
+def _metadata(data: dict[str, Any], mapped: set[str]) -> dict[str, Any]:
+    """Return the member's attributes that no domain field took, minus OSLC transport keys."""
+    return {
+        k: v
+        for k, v in data.items()
+        if k not in mapped and k not in _TRANSPORT_KEYS and not k.endswith("_collectionref")
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +176,9 @@ def parse_asset(
         serial_number=str(data.get("serialnum", "")),
         criticality=_maximo_criticality(data.get("priority", 0)),
         parent=data.get("parent") or None,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
+        metadata=_metadata(
+            data,
+            {
                 "assetnum",
                 "description",
                 "location",
@@ -134,8 +187,8 @@ def parse_asset(
                 "serialnum",
                 "priority",
                 "parent",
-            }
-        },
+            },
+        ),
     )
 
 
@@ -170,11 +223,9 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
         failure_cause=data.get("failureremark") or data.get("problemcode") or None,
         created_at=parse_datetime(created) if created else now,
         updated_at=parse_datetime(updated) if updated else now,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
+        metadata=_metadata(
+            data,
+            {
                 "wonum",
                 "wopriority",
                 "status",
@@ -188,46 +239,79 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
                 "problemcode",
                 "reportdate",
                 "changedate",
-            }
-        },
+            },
+        ),
     )
 
 
 def parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Convert a Maximo MXINVENTORY JSON object to a :class:`SparePart`."""
+    """Convert a Maximo MXINVENTORY JSON object to a :class:`SparePart`.
+
+    The fields come from :data:`INVENTORY_SELECT`: the name from the related
+    item's description, the stock from the sum of the ``invbalances`` rows
+    (one per bin or lot), the reorder point from ``minlevel`` and the unit
+    cost from the first ``invcost`` row (average cost, else last cost). A
+    payload in the older flat shape (``description``, ``curbal``,
+    ``avgcost``/``lastcost`` on the record itself) is still read. ``reorder``
+    is Maximo's yes/no reorder flag, not a quantity, so it stays in
+    ``metadata``.
+    """
+    item = data.get("item")
+    name = item.get("description") if isinstance(item, dict) else None
+    balances = data.get("invbalances")
+    if isinstance(balances, list):
+        stock = sum(float(row.get("curbal", 0)) for row in balances)
+    else:
+        stock = float(data.get("curbal", 0))
+    costs = data.get("invcost")
+    cost_row = costs[0] if isinstance(costs, list) and costs else data
     return SparePart(
         sku=str(data.get("itemnum", "")),
-        name=str(data.get("description", data.get("item", {}).get("description", ""))),
-        stock_quantity=int(data.get("curbal", 0)),
-        reorder_point=int(data.get("reorder", 0)),
-        unit_cost=float(data.get("avgcost", data.get("lastcost", 0.0))),
+        name=str(name if name is not None else data.get("description", "")),
+        stock_quantity=int(stock),
+        reorder_point=int(data.get("minlevel", 0)),
+        unit_cost=float(cost_row.get("avgcost", cost_row.get("lastcost", 0.0))),
         warehouse_location=str(data.get("location", "")),
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
+        metadata=_metadata(
+            data,
+            {
                 "itemnum",
                 "description",
                 "item",
+                "invbalances",
                 "curbal",
-                "reorder",
+                "minlevel",
+                "invcost",
                 "avgcost",
                 "lastcost",
                 "location",
-            }
-        },
+            },
+        ),
     )
 
 
 def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
-    """Convert a Maximo MXPM JSON object to a :class:`MaintenancePlan`."""
-    freq_days = int(data.get("frequency", 0))
+    """Convert a Maximo MXPM JSON object to a :class:`MaintenancePlan`.
+
+    ``frequency`` counts ``frequnit`` units: days, weeks, months or years
+    (a year is twelve months). A plan with no ``frequnit`` keeps the
+    historical reading of ``frequency`` as days. A unit outside those four
+    (a site-defined synonym, say) gives an empty interval, so the plan is
+    reported as having no calendar due date rather than a wrong one.
+    """
+    frequency = int(data.get("frequency", 0))
+    unit = str(data.get("frequnit", "DAYS")).strip().upper()
+    interval = {
+        "DAYS": Interval(days=frequency),
+        "WEEKS": Interval(weeks=frequency),
+        "MONTHS": Interval(months=frequency),
+        "YEARS": Interval(months=frequency * 12),
+    }.get(unit, Interval())
     return MaintenancePlan(
         id=str(data.get("pmnum", "")),
         asset_id=str(data.get("assetnum", "")),
         name=str(data.get("description", "")),
-        interval=Interval(days=freq_days),
+        interval=interval,
         active=str(data.get("status", "")).upper() == "ACTIVE",
     )
 

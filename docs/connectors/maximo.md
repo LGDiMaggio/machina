@@ -147,6 +147,43 @@ updated = await connector.update_work_order(
 await connector.close_work_order("WO-001")
 ```
 
+## How reads select attributes
+
+Maximo answers a collection query with each member's `href` and nothing else unless the
+query names the attributes it wants in `oslc.select`. Each read therefore selects the
+attributes its mapping uses, plus `siteid`, which together with the record's number forms
+its key:
+
+| Read | Object structure | `oslc.select` |
+|---|---|---|
+| `read_assets`, `get_asset` | `mxasset` | `assetnum,siteid,description,location,manufacturer,serialnum,priority,parent,classstructureid,assettype` |
+| `read_work_orders`, `get_work_order`, `read_maintenance_history` | `mxwo` | `wonum,siteid,description,status,wopriority,worktype,assetnum,lead,assignedownergroup,failurecode,problemcode,reportdate,changedate` |
+| `read_spare_parts` | `mxinventory` | `itemnum,siteid,location,minlevel,item.description,invbalances{curbal},invcost{avgcost,lastcost}` |
+| `read_maintenance_plans` | `mxpm` | `pmnum,siteid,assetnum,description,frequency,frequnit,status` |
+
+- **Only documented attributes are named.** Each name is documented on the object
+  structure's main object, a child object (`invbalances{…}`) or a related object
+  (`item.description`), because Maximo may refuse a query that names an attribute the
+  object does not have. ASSET has no model number, and the failure remark is a separate
+  object, so `Asset.model` stays empty and `WorkOrder.failure_cause` comes from
+  `problemcode`.
+- **Null attributes are left out.** Maximo omits null attributes from its answer, so a
+  missing attribute reads as the field's default: an empty string, no parent, zero stock.
+- **Incomplete records end the read.** This covers a record without its number
+  (`assetnum`, `wonum`, `itemnum` or `pmnum`) and a record the mapping cannot read. A member
+  that carries only its `href`, as on a page that lost the selection, is such a record.
+  The read raises `ConnectorError` and logs a `maximo_member_refused` warning with the
+  object structure and the reason; no partial list is returned.
+- **Next pages use Maximo's link.** Each next page is requested at the link Maximo
+  returns, which repeats the query; the selection is not added again.
+- **`metadata` holds the rest.** It keeps the selected attributes that no field takes,
+  such as `siteid`, but not OSLC's own keys: `href`, `localref` and `*_collectionref`
+  name the host Maximo sees itself on, and `_rowstamp` is a locking token.
+
+The selections follow IBM's REST API guide
+([Selecting](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/query/selecting))
+and Maximo's data dictionary. They have not been checked against a live Maximo.
+
 ## How updates are sent
 
 Maximo does not address a record by its `wonum`. Each record has a URI whose last
@@ -227,18 +264,33 @@ Unmapped values fall back to `ROTATING_EQUIPMENT`.
 | `assetnum` | `Asset.id` |
 | `description` | `Asset.name` |
 | `location` | `Asset.location` |
+| `manufacturer` | `Asset.manufacturer` |
+| `serialnum` | `Asset.serial_number` |
 | `priority` (1-3) | `Asset.criticality` (A/B/C) |
-| `classstructureid` | `Asset.type` (via `asset_type_map`) |
+| `parent` | `Asset.parent` |
+| `classstructureid` (else `assettype`) | `Asset.type` (via `asset_type_map`) |
 | `wonum` | `WorkOrder.id` |
 | `worktype` | `WorkOrder.type` (CM→Corrective, PM→Preventive, CP→Predictive, EV→Improvement) |
 | `wopriority` | `WorkOrder.priority` (1→Emergency, 2→High, 3→Medium, 4→Low) |
 | `status` | `WorkOrder.status` (WAPPR→Created, APPR→Assigned, INPRG→InProgress, COMP→Completed, CLOSE→Closed, CAN→Cancelled) |
+| `assetnum` | `WorkOrder.asset_id` |
+| `lead` (else `assignedownergroup`) | `WorkOrder.assigned_to` |
 | `failurecode` | `WorkOrder.failure_mode` |
-| `failureremark` / `problemcode` | `WorkOrder.failure_cause` |
+| `problemcode` | `WorkOrder.failure_cause` |
+| `reportdate` / `changedate` | `WorkOrder.created_at` / `WorkOrder.updated_at` |
 | `itemnum` | `SparePart.sku` |
-| `curbal` | `SparePart.stock_quantity` |
+| `item.description` | `SparePart.name` |
+| sum of `invbalances.curbal` (one row per bin or lot) | `SparePart.stock_quantity` |
+| `minlevel` | `SparePart.reorder_point` |
+| `invcost.avgcost` (else `lastcost`), first row | `SparePart.unit_cost` |
+| `location` (the storeroom) | `SparePart.warehouse_location` |
 | `pmnum` | `MaintenancePlan.id` |
-| `frequency` | `MaintenancePlan.interval.days` |
+| `assetnum` | `MaintenancePlan.asset_id` |
+| `frequency` × `frequnit` | `MaintenancePlan.interval` (DAYS, WEEKS, MONTHS; YEARS as twelve months) |
+| `status` (`ACTIVE`) | `MaintenancePlan.active` |
+| `siteid` | `metadata["siteid"]` (assets, work orders, spare parts) |
+
+Selected attributes that no field takes stay in `metadata`. A spare part's `reorder` flag (yes/no, not a quantity) is one of them when Maximo sends it.
 
 ## Resilience
 
@@ -252,7 +304,8 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Filter values**: asset and work-order numbers, SKUs and statuses are matched exactly through `oslc.where`. Maximo documents no escape inside its string literals, and its QBE framework reads wildcards (`%`, `*`, `?`), value lists (`,`, `[ ]`) and operators (`=`, `!`, `<`, `>`, `~`) inside them as query syntax. A value that contains any of `" \ % * ? , [ ] = ! < > ~` or a non-printable character, is blank, or is the keyword `null` is therefore refused with `ConnectorError` before any request, including the lookup `update_work_order` sends before writing. The message names the offending characters, not the value. A number is matched as its digits.
 - **Work-order numbers never reach a URL path**: `update_work_order` matches the `wonum` in `oslc.where` and sends the update to the rest id Maximo returns (see [How updates are sent](#how-updates-are-sent)). That rest id is sent as one percent-encoded path segment (`/` becomes `%2F`), and one with an empty, `.` or `..` part between `/` or `\` separators is refused with `ConnectorError`, so a proxy that decodes `%2F` cannot resolve it into another resource.
 - **The same `wonum` in several sites**: there is no site setting yet. An update refuses such a `wonum`; `get_work_order` returns the first match.
-- **Attributes in collection reads**: the collection queries behind `read_assets`, `read_work_orders`, `get_work_order` and the other reads send no `oslc.select`. IBM's REST API guide shows such a query returning only each member's `href`; this has not been checked against a live Maximo. An update reads its order back from the order's own URI, which returns the record's attributes.
+- **Not validated against a live Maximo**: the attribute selections (see [How reads select attributes](#how-reads-select-attributes)) and the response shapes the tests use follow IBM's REST API guide and Maximo's data dictionary. IBM does not document what Maximo does with a selected attribute that an object structure lacks (a customised one, say). If it refuses the query, the read fails with `ConnectorError` and the HTTP status.
+- **Custom frequency units**: a PM whose `frequnit` is not DAYS, WEEKS, MONTHS or YEARS (a site-defined synonym, say) gets an empty interval, so it is reported as having no calendar due date.
 - **Status changes**: a status update is sent as the plain `status` attribute. IBM's REST API guide shows status changes only through actions that call `changeStatus` and does not say whether `mxwo` applies the attribute directly; this has not been checked against a live Maximo. A rejected update raises `ConnectorError` with the HTTP status.
 - **Pagination**: Follows the OSLC `responseInfo.nextPage.href` link of each page (a bare URL or a relative link is followed too). Each page is requested with the connector's credentials, so a link to another scheme, host or port than the configured `url`, or one with user info in it, raises `ConnectorError` and logs `maximo_next_page_refused` with the link's scheme and host: Maximo builds its links from its own configured address, so behind a proxy check that it returns the address Machina uses. A `nextPage` with no usable URL, a link the server already returned, more than 50,000 rows in one read, or more pages than those rows fill also raise `ConnectorError` instead of ending the read early or growing without bound. `get_asset` and `get_work_order` read only the first page: they use the first match. Very large result sets may benefit from server-side `oslc.where` filtering.
 
