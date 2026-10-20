@@ -6,6 +6,8 @@ lifecycle without network calls.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
@@ -386,13 +388,70 @@ class TestPatchResource:
         assert httpx_mock.get_requests() == []
 
     @pytest.mark.asyncio
-    async def test_patches_the_one_resource(self, httpx_mock) -> None:
-        url = "https://maximo.example.com/maximo/oslc/os/mxwo/WO%3F1"
-        httpx_mock.add_response(method="PATCH", url=url, status_code=204)
+    async def test_posts_a_merge_update_to_the_one_resource(self, httpx_mock) -> None:
+        """IBM documents an update as a POST with ``x-method-override: PATCH``;
+        without ``patchtype: MERGE`` Maximo deletes unlisted child objects."""
+        url = "https://maximo.example.com/maximo/oslc/os/mxwo/WO%3F1?lean=1"
+        httpx_mock.add_response(method="POST", url=url, status_code=204)
         resp = await self._conn()._patch_resource("mxwo", "WO?1", {"x": 1})
         assert resp.status_code == 204
         [request] = httpx_mock.get_requests()
-        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/WO%3F1"
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/WO%3F1?lean=1"
+        assert request.headers["x-method-override"] == "PATCH"
+        assert request.headers["patchtype"] == "MERGE"
+        assert request.headers["content-type"] == "application/json"
+        assert request.headers["apikey"] == "k"
+        assert json.loads(request.content) == {"x": 1}
+
+    @pytest.mark.asyncio
+    async def test_lean_off_sends_no_lean_parameter(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+            lean=False,
+        )
+        conn._connected = True
+        httpx_mock.add_response(method="POST", status_code=204)
+        await conn._patch_resource("mxwo", "_A", {"x": 1})
+        [request] = httpx_mock.get_requests()
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/_A"
+
+
+class TestReadResource:
+    """The update's read-back: a GET on the resource URI returns its attributes."""
+
+    @pytest.mark.parametrize(("lean", "query"), [(True, b"?lean=1"), (False, b"")])
+    @pytest.mark.asyncio
+    async def test_reads_the_one_resource(self, httpx_mock, lean: bool, query: bytes) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+            lean=lean,
+        )
+        httpx_mock.add_response(method="GET", json={"wonum": "WO-1"})
+        assert await conn._read_resource("mxwo", "_A/B") == {"wonum": "WO-1"}
+        [request] = httpx_mock.get_requests()
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/_A%2FB" + query
+        assert request.headers["apikey"] == "k"
+
+    @pytest.mark.asyncio
+    async def test_missing_resource_is_none(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+        httpx_mock.add_response(method="GET", status_code=404)
+        assert await conn._read_resource("mxwo", "_A") is None
+
+    @pytest.mark.asyncio
+    async def test_rest_id_that_could_leave_its_segment_is_refused(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn._read_resource("mxwo", "../mxasset/A1")
+        assert httpx_mock.get_requests() == []
 
 
 # ---------------------------------------------------------------------------

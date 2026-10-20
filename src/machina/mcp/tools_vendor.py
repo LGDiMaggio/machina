@@ -64,12 +64,19 @@ def _write_result(connector: str, operation: str, resp: Any) -> dict[str, Any]:
     A body that is not JSON (an empty success, a proxy's error page) is
     reported as ``{}``, never as an error: the write may have been applied,
     and the status code says what happened.
+
+    The response is logged at INFO for a 2xx status and at WARNING for any
+    other (a vendor refusal, a gateway error, a redirect to a login page),
+    since the write was most likely not applied. The log names the connector,
+    the operation and the status only: the body and the request can carry
+    record values and credentials.
     """
     try:
         body = resp.json() if resp.content else {}
     except ValueError:
         body = {}
-    logger.info(
+    log = logger.info if 200 <= resp.status_code < 300 else logger.warning
+    log(
         "vendor_write_completed",
         connector=connector,
         operation=operation,
@@ -159,6 +166,9 @@ async def maximo_raw_attribute_update(
 
     This bypasses the domain model and patches arbitrary Maximo
     attributes.  Use only when the domain-level tools are insufficient.
+    The update is merged: child objects the attributes do not list are kept,
+    and a listed child row without its key is added, so repeating such a
+    call adds it again.
 
     Args:
         resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
@@ -166,10 +176,16 @@ async def maximo_raw_attribute_update(
         resource_id: Rest ID of the resource, the last segment of its OSLC
             href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
+
+    Returns:
+        ``status_code`` and the JSON ``body`` of Maximo's answer. Only a 2xx
+        status confirms the update (a 204 has an empty body). A 4xx or a
+        redirect means it was not applied; after a 5xx it may or may not
+        have been, so read the resource before trying again.
     """
     from machina.connectors.base import get_sandbox_mode
 
-    # Both values go into the PATCH URL. A value that could address another
+    # Both values go into the update URL. A value that could address another
     # endpoint is refused before anything else, in sandbox mode too, so a
     # sandbox run answers as a live run would; the connector helper checks
     # again before its request.

@@ -237,8 +237,11 @@ stdout and must keep working in sandbox so the agent can still reply.
 the domain (`mcp.tools._runtime`) and vendor (`mcp.tools_vendor._runtime`)
 helpers re-establish it on every request, and the vendor tools read
 `get_sandbox_mode()` only *after* that — otherwise a raw vendor write (e.g. the
-Maximo OData PATCH, which has no decorator backstop) would execute live in
-sandbox mode.
+Maximo attribute update) would get past the tool's own check in sandbox mode.
+Each vendor tool also writes through a connector helper with its own
+`@sandbox_aware` guard (SAP PM's `_write_with_csrf`, Maximo's
+`_patch_resource`, which `update_work_order` also uses), so that check is not
+the only gate.
 
 **Companion invariant — write integrity:** the write paths also guard
 against duplicates. Auto-generated work-order IDs are a deterministic content
