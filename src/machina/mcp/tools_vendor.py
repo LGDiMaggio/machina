@@ -175,6 +175,8 @@ async def maximo_raw_attribute_update(
             ASCII letters, digits and underscores only.
         resource_id: Rest ID of the resource, the last segment of its OSLC
             href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
+            A Maximo asset, work order or spare part read through Machina
+            carries it as ``metadata['rest_id']``.
         attributes: Dictionary of attribute names to new values.
 
     Returns:

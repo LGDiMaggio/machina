@@ -231,6 +231,7 @@ class TestParseMaintenancePlan:
             "description": "Monthly inspection",
             "assetnum": "PUMP-201",
             "frequency": 30,
+            "frequnit": "DAYS",
             "status": "ACTIVE",
         }
         plan = _parse_maintenance_plan(raw)

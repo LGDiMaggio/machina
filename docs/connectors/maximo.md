@@ -168,20 +168,38 @@ its key:
   object, so `Asset.model` stays empty and `WorkOrder.failure_cause` comes from
   `problemcode`.
 - **Null attributes are left out.** Maximo omits null attributes from its answer, so a
-  missing attribute reads as the field's default: an empty string, no parent, zero stock.
+  missing attribute reads as the field's default: an empty string, no parent, zero
+  stock, criticality C. A PM with no frequency unit gets no calendar interval rather
+  than its frequency read as days.
 - **Incomplete records end the read.** This covers a record without its number
-  (`assetnum`, `wonum`, `itemnum` or `pmnum`) and a record the mapping cannot read. A member
-  that carries only its `href`, as on a page that lost the selection, is such a record.
-  The read raises `ConnectorError` and logs a `maximo_member_refused` warning with the
-  object structure and the reason; no partial list is returned.
+  (`assetnum`, `wonum`, `itemnum` or `pmnum`), one whose number is not text or a whole
+  number, and a record the mapping cannot read. A member that carries only its `href`, as
+  on a page that lost the selection, is such a record. The read raises
+  `ConnectorSchemaError` (a `ConnectorError`); no partial list is returned. A
+  `maximo_member_refused` warning names the read, the object structure, the record's
+  position in the read, the reason and, where they apply, the asset the read is for and
+  the fields the domain model rejected. Neither the error nor the warning repeats a value
+  from Maximo.
+- **Negative balances are no stock.** A Maximo organization can allow negative current
+  balances. A spare part whose bin balances add up to less than zero is reported with no
+  stock, and one with a negative cost with no cost; Maximo's own figure is kept in
+  `metadata` (`negative_balance`, `negative_unit_cost`). Quantities are whole units:
+  fractions are dropped.
 - **Next pages use Maximo's link.** Each next page is requested at the link Maximo
   returns, which repeats the query; the selection is not added again.
 - **`metadata` holds the rest.** It keeps the selected attributes that no field takes,
-  such as `siteid`, but not OSLC's own keys: `href`, `localref` and `*_collectionref`
-  name the host Maximo sees itself on, and `_rowstamp` is a locking token.
+  such as `siteid`, and the record's rest id as `rest_id`: the last segment of its URI,
+  which `maximo_raw_attribute_update` takes as `resource_id`. It leaves out OSLC's own
+  keys (`href`, `localref`, `_imagelibref` and `*_collectionref` name the host Maximo
+  sees itself on, and `_rowstamp` is a locking token) and nested objects or lists, which
+  no selection asks for and which, in a full resource read, are links.
+- **Spare-part reads cost Maximo the most.** IBM's
+  [Performance Tips](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/performance/)
+  note that a related attribute in dot notation, such as `item.description`, adds a
+  database query for each record returned. On a large inventory, pass `sku` where you can.
 
 The selections follow IBM's REST API guide
-([Selecting](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/query/selecting))
+([Selecting](https://ibm-maximo-dev.github.io/maximo-restapi-documentation/query/selecting/))
 and Maximo's data dictionary. They have not been checked against a live Maximo.
 
 ## How updates are sent
@@ -266,7 +284,7 @@ Unmapped values fall back to `ROTATING_EQUIPMENT`.
 | `location` | `Asset.location` |
 | `manufacturer` | `Asset.manufacturer` |
 | `serialnum` | `Asset.serial_number` |
-| `priority` (1-3) | `Asset.criticality` (A/B/C) |
+| `priority` (1-3) | `Asset.criticality` (A/B/C; no priority is C) |
 | `parent` | `Asset.parent` |
 | `classstructureid` (else `assettype`) | `Asset.type` (via `asset_type_map`) |
 | `wonum` | `WorkOrder.id` |
@@ -280,15 +298,16 @@ Unmapped values fall back to `ROTATING_EQUIPMENT`.
 | `reportdate` / `changedate` | `WorkOrder.created_at` / `WorkOrder.updated_at` |
 | `itemnum` | `SparePart.sku` |
 | `item.description` | `SparePart.name` |
-| sum of `invbalances.curbal` (one row per bin or lot) | `SparePart.stock_quantity` |
+| sum of `invbalances.curbal` (one row per bin or lot) | `SparePart.stock_quantity` (whole units; below zero is 0) |
 | `minlevel` | `SparePart.reorder_point` |
-| `invcost.avgcost` (else `lastcost`), first row | `SparePart.unit_cost` |
+| `invcost.avgcost` (else `lastcost`), first row | `SparePart.unit_cost` (below zero is 0) |
 | `location` (the storeroom) | `SparePart.warehouse_location` |
 | `pmnum` | `MaintenancePlan.id` |
 | `assetnum` | `MaintenancePlan.asset_id` |
-| `frequency` × `frequnit` | `MaintenancePlan.interval` (DAYS, WEEKS, MONTHS; YEARS as twelve months) |
+| `frequency` × `frequnit` | `MaintenancePlan.interval` (DAYS, WEEKS, MONTHS; YEARS as twelve months; no unit or another unit gives no interval) |
 | `status` (`ACTIVE`) | `MaintenancePlan.active` |
 | `siteid` | `metadata["siteid"]` (assets, work orders, spare parts) |
+| last segment of `href` | `metadata["rest_id"]` (assets, work orders, spare parts) |
 
 Selected attributes that no field takes stay in `metadata`. A spare part's `reorder` flag (yes/no, not a quantity) is one of them when Maximo sends it.
 
@@ -305,7 +324,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Work-order numbers never reach a URL path**: `update_work_order` matches the `wonum` in `oslc.where` and sends the update to the rest id Maximo returns (see [How updates are sent](#how-updates-are-sent)). That rest id is sent as one percent-encoded path segment (`/` becomes `%2F`), and one with an empty, `.` or `..` part between `/` or `\` separators is refused with `ConnectorError`, so a proxy that decodes `%2F` cannot resolve it into another resource.
 - **The same `wonum` in several sites**: there is no site setting yet. An update refuses such a `wonum`; `get_work_order` returns the first match.
 - **Not validated against a live Maximo**: the attribute selections (see [How reads select attributes](#how-reads-select-attributes)) and the response shapes the tests use follow IBM's REST API guide and Maximo's data dictionary. IBM does not document what Maximo does with a selected attribute that an object structure lacks (a customised one, say). If it refuses the query, the read fails with `ConnectorError` and the HTTP status.
-- **Custom frequency units**: a PM whose `frequnit` is not DAYS, WEEKS, MONTHS or YEARS (a site-defined synonym, say) gets an empty interval, so it is reported as having no calendar due date.
+- **Custom frequency units**: a PM with no `frequnit`, or one that is not DAYS, WEEKS, MONTHS or YEARS (a site-defined synonym, say), gets an empty interval, so it is reported as having no calendar due date. A month counts as 30 days in `Interval.total_days`, so a yearly PM's interval is 360 days.
 - **Status changes**: a status update is sent as the plain `status` attribute. IBM's REST API guide shows status changes only through actions that call `changeStatus` and does not say whether `mxwo` applies the attribute directly; this has not been checked against a live Maximo. A rejected update raises `ConnectorError` with the HTTP status.
 - **Pagination**: Follows the OSLC `responseInfo.nextPage.href` link of each page (a bare URL or a relative link is followed too). Each page is requested with the connector's credentials, so a link to another scheme, host or port than the configured `url`, or one with user info in it, raises `ConnectorError` and logs `maximo_next_page_refused` with the link's scheme and host: Maximo builds its links from its own configured address, so behind a proxy check that it returns the address Machina uses. A `nextPage` with no usable URL, a link the server already returned, more than 50,000 rows in one read, or more pages than those rows fill also raise `ConnectorError` instead of ending the read early or growing without bound. `get_asset` and `get_work_order` read only the first page: they use the first match. Very large result sets may benefit from server-side `oslc.where` filtering.
 

@@ -7,18 +7,24 @@ state.
 A Maximo collection query returns only each member's ``href`` unless it
 names the attributes it wants in ``oslc.select`` (IBM's REST API guide,
 "Selecting"). The ``*_SELECT`` constants below are those names, one per
-object structure: the attributes each ``parse_*`` function reads, plus
-``siteid``, which with the identity attribute forms the record's key. Only
-attributes documented on the object structure's main object, its child
-objects (``name{...}``) or a related object (``relation.attribute``) are
-named, because Maximo may refuse a query that names an attribute the
-object does not have.
+object structure: the attributes each ``parse_*`` function takes from a
+member, plus ``siteid``, which with the identity attribute
+(:data:`IDENTITY_ATTRIBUTE`) forms the record's key. Only attributes
+documented on the object structure's main object, its child objects
+(``name{...}``) or a related object (``relation.attribute``) are named,
+because Maximo may refuse a query that names an attribute the object does
+not have. The parsers also read a few attributes that are not selected, for
+records from other sources: ``modelnum``, ``failureremark``, and the older
+flat inventory shape (``description``, ``curbal``, ``avgcost``,
+``lastcost`` on the record itself).
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -32,6 +38,7 @@ from machina.domain.work_order import (
 
 __all__ = [
     "ASSET_SELECT",
+    "IDENTITY_ATTRIBUTE",
     "INVENTORY_SELECT",
     "MAXIMO_PRIORITY_MAP",
     "MAXIMO_STATUS_MAP",
@@ -112,21 +119,65 @@ INVENTORY_SELECT = (
 )
 PM_SELECT = "pmnum,siteid,assetnum,description,frequency,frequnit,status"
 
-# Keys OSLC adds to every member that describe the transport, not the
-# record: its URI (``href``, ``localref``, and ``<child>_collectionref``
-# links, all on the host Maximo sees itself on, often an internal name) and
-# the optimistic-locking token ``_rowstamp``. They stay out of ``metadata``,
+# The attribute that identifies a record of each object structure read here;
+# a member without it is not a record (see the module docstring).
+IDENTITY_ATTRIBUTE: dict[str, str] = {
+    "mxasset": "assetnum",
+    "mxwo": "wonum",
+    "mxinventory": "itemnum",
+    "mxpm": "pmnum",
+}
+
+# Keys OSLC adds to a member that describe the transport, not the record:
+# URIs on the host Maximo sees itself on, often an internal name (``href``,
+# ``localref``, ``_imagelibref``, ``<child>_collectionref``), and the
+# optimistic-locking token ``_rowstamp``. They stay out of ``metadata``,
 # which reaches the LLM and MCP clients.
-_TRANSPORT_KEYS = frozenset({"href", "localref", "_rowstamp"})
+_TRANSPORT_KEYS = frozenset({"href", "localref", "_imagelibref", "_rowstamp"})
+
+# The separators a server or proxy may read in a decoded path segment.
+_PATH_SEPARATORS = re.compile(r"[/\\]")
+
+
+def _rest_id(href: object) -> str | None:
+    """Return the rest id that ends a member's ``href``, or ``None``.
+
+    Maximo addresses a record by this last segment of its URI. It is kept,
+    decoded, without the URI's host; one that is not valid UTF-8 once
+    decoded, or that could leave its path segment, is not kept.
+    """
+    if not isinstance(href, str):
+        return None
+    try:
+        rest_id = unquote(urlsplit(href).path.rpartition("/")[2], errors="strict")
+    except ValueError:  # an unparseable href ("http://[x") or a non-UTF-8 escape
+        return None
+    if rest_id.split(";", 1)[0] in ("", ".", "..") or _PATH_SEPARATORS.search(rest_id):
+        return None
+    return rest_id
 
 
 def _metadata(data: dict[str, Any], mapped: set[str]) -> dict[str, Any]:
-    """Return the member's attributes that no domain field took, minus OSLC transport keys."""
-    return {
+    """Return the member's other attributes, for ``metadata``.
+
+    Kept: the attributes no domain field took whose value is a plain value
+    (text, number, boolean). Dropped: OSLC transport keys and nested
+    objects or lists, which no selection asks for and which, in a full
+    resource read, are links (``doclinks: {href: ...}``). The record's rest
+    id is kept as ``rest_id``.
+    """
+    metadata = {
         k: v
         for k, v in data.items()
-        if k not in mapped and k not in _TRANSPORT_KEYS and not k.endswith("_collectionref")
+        if k not in mapped
+        and k not in _TRANSPORT_KEYS
+        and not k.endswith("_collectionref")
+        and not isinstance(v, dict | list)
     }
+    rest_id = _rest_id(data.get("href"))
+    if rest_id is not None:
+        metadata["rest_id"] = rest_id
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +225,7 @@ def parse_asset(
         manufacturer=str(data.get("manufacturer", "")),
         model=str(data.get("modelnum", "")),
         serial_number=str(data.get("serialnum", "")),
-        criticality=_maximo_criticality(data.get("priority", 0)),
+        criticality=_maximo_criticality(data.get("priority")),
         parent=data.get("parent") or None,
         metadata=_metadata(
             data,
@@ -255,6 +306,12 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     ``avgcost``/``lastcost`` on the record itself) is still read. ``reorder``
     is Maximo's yes/no reorder flag, not a quantity, so it stays in
     ``metadata``.
+
+    Quantities are whole units: fractions are dropped. A Maximo organization
+    can allow negative balances, which a :class:`SparePart` cannot hold, so
+    a total below zero is reported as no stock, and a cost below zero as no
+    cost, with Maximo's own figure in ``metadata`` (``negative_balance``,
+    ``negative_unit_cost``).
     """
     item = data.get("item")
     name = item.get("description") if isinstance(item, dict) else None
@@ -265,28 +322,34 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
         stock = float(data.get("curbal", 0))
     costs = data.get("invcost")
     cost_row = costs[0] if isinstance(costs, list) and costs else data
+    cost = float(cost_row.get("avgcost", cost_row.get("lastcost", 0.0)))
+    metadata = _metadata(
+        data,
+        {
+            "itemnum",
+            "description",
+            "item",
+            "invbalances",
+            "curbal",
+            "minlevel",
+            "invcost",
+            "avgcost",
+            "lastcost",
+            "location",
+        },
+    )
+    if stock < 0:
+        metadata["negative_balance"] = stock
+    if cost < 0:
+        metadata["negative_unit_cost"] = cost
     return SparePart(
         sku=str(data.get("itemnum", "")),
         name=str(name if name is not None else data.get("description", "")),
-        stock_quantity=int(stock),
-        reorder_point=int(data.get("minlevel", 0)),
-        unit_cost=float(cost_row.get("avgcost", cost_row.get("lastcost", 0.0))),
+        stock_quantity=max(int(stock), 0),
+        reorder_point=int(float(data.get("minlevel", 0))),
+        unit_cost=max(cost, 0.0),
         warehouse_location=str(data.get("location", "")),
-        metadata=_metadata(
-            data,
-            {
-                "itemnum",
-                "description",
-                "item",
-                "invbalances",
-                "curbal",
-                "minlevel",
-                "invcost",
-                "avgcost",
-                "lastcost",
-                "location",
-            },
-        ),
+        metadata=metadata,
     )
 
 
@@ -294,13 +357,13 @@ def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """Convert a Maximo MXPM JSON object to a :class:`MaintenancePlan`.
 
     ``frequency`` counts ``frequnit`` units: days, weeks, months or years
-    (a year is twelve months). A plan with no ``frequnit`` keeps the
-    historical reading of ``frequency`` as days. A unit outside those four
-    (a site-defined synonym, say) gives an empty interval, so the plan is
-    reported as having no calendar due date rather than a wrong one.
+    (a year is twelve months). A plan with no ``frequnit`` (Maximo leaves a
+    null one out of its answer) or with a unit outside those four
+    (a site-defined synonym, say) gets an empty interval, so it is reported
+    as having no calendar due date rather than a wrong one.
     """
     frequency = int(data.get("frequency", 0))
-    unit = str(data.get("frequnit", "DAYS")).strip().upper()
+    unit = str(data.get("frequnit") or "").strip().upper()
     interval = {
         "DAYS": Interval(days=frequency),
         "WEEKS": Interval(weeks=frequency),
@@ -360,7 +423,7 @@ def reverse_status(status: WorkOrderStatus) -> str:
 
 
 def _maximo_criticality(priority_val: Any) -> Criticality:
-    """Map Maximo numeric priority (1-3 → A/B/C)."""
+    """Map Maximo numeric priority (1-3 → A/B/C); no priority is C."""
     try:
         val = int(priority_val)
     except (TypeError, ValueError):
