@@ -1226,13 +1226,29 @@ class TestUpdateWorkOrder:
         _add_lookup(
             httpx_mock,
             "1001",
-            {"wonum": "1001", "href": f"{OSLC}/os/mxwo/_A"},
-            {"wonum": "2002", "href": f"{OSLC}/os/mxwo/_B"},
+            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_A"},
+            {"siteid": "BEDFORD", "href": f"{OSLC}/os/mxwo/_B"},
             next_page=f"{OSLC}/os/mxwo?pageno=2",
         )
         with pytest.raises(ConnectorError, match="more than one site"):
             await connector.update_work_order("1001", description="x")
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no page 2
+
+    @pytest.mark.asyncio
+    async def test_rows_for_other_orders_are_not_reported_as_sites(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Rows for other wonums mean the filter was not applied, not two sites."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(
+            httpx_mock,
+            "1001",
+            {"wonum": "1001", "href": f"{OSLC}/os/mxwo/_A"},
+            {"wonum": "2002", "href": f"{OSLC}/os/mxwo/_B"},
+        )
+        with pytest.raises(ConnectorError, match="does not name that work order"):
+            await connector.update_work_order("1001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
 
     @pytest.mark.parametrize(
         "returned_wonum",
@@ -1254,16 +1270,23 @@ class TestUpdateWorkOrder:
         )
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
 
+    @pytest.mark.parametrize(
+        ("wonum", "returned"),
+        [
+            # A wonum of None is matched as the text "None".
+            pytest.param(None, None, id="missing-for-None"),
+            pytest.param("True", True, id="boolean-for-True"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_a_missing_wonum_is_not_a_match_for_none(
-        self, httpx_mock, connector: MaximoConnector
+    async def test_a_non_text_wonum_is_not_a_match_for_its_text(
+        self, httpx_mock, connector: MaximoConnector, wonum: object, returned: object
     ) -> None:
-        """A wonum of None is matched as the text "None": a member without a
-        wonum must not pass for it."""
+        """A row without a wonum, or with a JSON boolean, names no work order."""
         await _connect(httpx_mock, connector)
-        _add_lookup(httpx_mock, "None", {"wonum": None, "href": _INTERNAL_URI})
+        _add_lookup(httpx_mock, str(wonum), {"wonum": returned, "href": _INTERNAL_URI})
         with pytest.raises(ConnectorError, match="does not name that work order"):
-            await connector.update_work_order(None, description="x")  # type: ignore[arg-type]
+            await connector.update_work_order(wonum, description="x")  # type: ignore[arg-type]
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
 
     @pytest.mark.parametrize("returned", ["1001", 1001])

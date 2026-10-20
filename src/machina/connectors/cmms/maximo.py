@@ -119,6 +119,18 @@ def _update_refused(work_order_id: str, reason: str, message: str) -> ConnectorE
     return ConnectorError(message)
 
 
+def _names_wonum(value: object, wonum: object) -> bool:
+    """Whether ``value``, a lookup row's ``wonum``, names the work order ``wonum``.
+
+    ``wonum`` is an upper-case field, so case and edge spaces are ignored. A
+    missing or non-scalar value names nothing, even for a ``wonum`` of
+    ``None``, which :func:`_oslc_eq` matches as the text ``"None"``.
+    """
+    if not isinstance(value, str | int) or isinstance(value, bool):
+        return False
+    return str(value).strip().casefold() == str(wonum).strip().casefold()
+
+
 def _require_httpx() -> Any:
     """Import httpx lazily so the extra is truly optional."""
     try:
@@ -649,7 +661,7 @@ class MaximoConnector:
         first_page_only: bool = False,
         max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch all pages from a Maximo OSLC object structure.
+        """Fetch the pages of a Maximo OSLC object structure.
 
         Maximo paginates OSLC results via a ``responseInfo.nextPage``
         link in each page (see :func:`_next_page_url`).
@@ -665,7 +677,8 @@ class MaximoConnector:
                 that only needs to tell one match from several.
 
         Returns:
-            Flat list of all result dicts across all pages.
+            Flat list of the result dicts read: from every page, unless
+            ``first_page_only`` or ``max_rows`` stops the read early.
 
         Raises:
             ConnectorError: On an HTTP error, a next-page link that cannot be
@@ -781,6 +794,16 @@ class MaximoConnector:
             raise _update_refused(
                 work_order_id, "not_found", f"Work order {work_order_id} not found"
             )
+        # The URI identifies the record that will be written: every row must
+        # be the order asked for (a server or proxy that dropped the filter
+        # would answer with others), before two rows can mean two sites.
+        if not all(_names_wonum(row.get("wonum"), work_order_id) for row in members):
+            raise _update_refused(
+                work_order_id,
+                "other_work_order",
+                f"Maximo's answer to the lookup of work order {work_order_id} does not "
+                "name that work order — refusing to update it",
+            )
         if len(members) > 1:
             raise _update_refused(
                 work_order_id,
@@ -789,22 +812,6 @@ class MaximoConnector:
                 "guess which one to update",
             )
         [member] = members
-        # The URI identifies the record that will be written: check the match
-        # is the order asked for (a server or proxy that dropped the filter
-        # would answer with another one). wonum is an upper-case field; a
-        # missing one is not a match, even for a wonum of "None".
-        returned = member.get("wonum")
-        if (
-            not isinstance(returned, str | int)
-            or isinstance(returned, bool)
-            or str(returned).strip().casefold() != str(work_order_id).strip().casefold()
-        ):
-            raise _update_refused(
-                work_order_id,
-                "other_work_order",
-                f"Maximo's answer to the lookup of work order {work_order_id} does not "
-                "name that work order — refusing to update it",
-            )
         href = member.get("href")
         try:
             path = urlsplit(href).path if isinstance(href, str) else ""

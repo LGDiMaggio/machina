@@ -156,7 +156,7 @@ with an `x-method-override: PATCH` header. So `update_work_order`, and
 `close_work_order` / `cancel_work_order`, which go through it:
 
 1. look the order up by `wonum`
-   (`GET /maximo/oslc/os/mxwo?oslc.where=wonum="WO-001"&oslc.select=wonum,siteid&oslc.pageSize=2`),
+   (`GET /maximo/oslc/os/mxwo?oslc.where=wonum="WO-001"&oslc.select=wonum,siteid&oslc.pageSize=2&lean=1`),
    following the answer's next pages until it holds two rows;
 2. refuse, before writing anything, a `wonum` that matches no work order, matches
    work orders in more than one site (a `wonum` is unique only within a site), or
