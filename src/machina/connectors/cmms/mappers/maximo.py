@@ -21,6 +21,7 @@ flat inventory shape (``description``, ``curbal``, ``avgcost``,
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -85,6 +86,15 @@ MAXIMO_WORKTYPE_MAP: dict[str, WorkOrderType] = {
     "EV": WorkOrderType.IMPROVEMENT,
 }
 
+# Maximo's PM frequency units (FREQUNIT): the Interval field each one counts
+# and how many of that field one unit is. A year is twelve months.
+_FREQUENCY_UNITS: dict[str, tuple[str, int]] = {
+    "DAYS": ("days", 1),
+    "WEEKS": ("weeks", 1),
+    "MONTHS": ("months", 1),
+    "YEARS": ("months", 12),
+}
+
 REVERSE_MAXIMO_STATUS: dict[WorkOrderStatus, str] = {
     WorkOrderStatus.CREATED: "WAPPR",
     WorkOrderStatus.ASSIGNED: "APPR",
@@ -137,22 +147,33 @@ _TRANSPORT_KEYS = frozenset({"href", "localref", "_imagelibref", "_rowstamp"})
 
 # The separators a server or proxy may read in a decoded path segment.
 _PATH_SEPARATORS = re.compile(r"[/\\]")
+# The path a record's URI has before its rest id: ``.../os/<object structure>``.
+_RESOURCE_COLLECTION = re.compile(r"/os/[A-Za-z0-9_]+\Z")
 
 
 def _rest_id(href: object) -> str | None:
     """Return the rest id that ends a member's ``href``, or ``None``.
 
     Maximo addresses a record by this last segment of its URI. It is kept,
-    decoded, without the URI's host; one that is not valid UTF-8 once
-    decoded, or that could leave its path segment, is not kept.
+    decoded, without the URI's host. It is not kept when the ``href`` is not
+    a record's URI (``.../os/<object structure>/<rest id>``), when the
+    segment has no UTF-8 form (a non-UTF-8 escape, or a lone surrogate from
+    a JSON escape), or when it could leave its path segment: an empty,
+    ``.`` or ``..`` value, also before a ``;``, or one with ``/`` or ``\\``.
     """
     if not isinstance(href, str):
         return None
     try:
-        rest_id = unquote(urlsplit(href).path.rpartition("/")[2], errors="strict")
-    except ValueError:  # an unparseable href ("http://[x") or a non-UTF-8 escape
+        collection, _, segment = urlsplit(href).path.rpartition("/")
+        rest_id = unquote(segment, errors="strict")
+        rest_id.encode("utf-8")
+    except ValueError:  # an unparseable href ("http://[x"), or no UTF-8 form
         return None
-    if rest_id.split(";", 1)[0] in ("", ".", "..") or _PATH_SEPARATORS.search(rest_id):
+    if (
+        not _RESOURCE_COLLECTION.search(collection)
+        or rest_id.split(";", 1)[0] in ("", ".", "..")
+        or _PATH_SEPARATORS.search(rest_id)
+    ):
         return None
     return rest_id
 
@@ -311,7 +332,8 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     can allow negative balances, which a :class:`SparePart` cannot hold, so
     a total below zero is reported as no stock, and a cost below zero as no
     cost, with Maximo's own figure in ``metadata`` (``negative_balance``,
-    ``negative_unit_cost``).
+    ``negative_unit_cost``). A balance or cost that is not a finite number
+    is refused (``OverflowError``, ``ValueError``).
     """
     item = data.get("item")
     name = item.get("description") if isinstance(item, dict) else None
@@ -323,6 +345,8 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     costs = data.get("invcost")
     cost_row = costs[0] if isinstance(costs, list) and costs else data
     cost = float(cost_row.get("avgcost", cost_row.get("lastcost", 0.0)))
+    if not math.isfinite(cost):  # an infinite balance fails int() the same way
+        raise ValueError("the unit cost is not a finite number")
     metadata = _metadata(
         data,
         {
@@ -364,12 +388,8 @@ def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """
     frequency = int(data.get("frequency", 0))
     unit = str(data.get("frequnit") or "").strip().upper()
-    interval = {
-        "DAYS": Interval(days=frequency),
-        "WEEKS": Interval(weeks=frequency),
-        "MONTHS": Interval(months=frequency),
-        "YEARS": Interval(months=frequency * 12),
-    }.get(unit, Interval())
+    field, per_unit = _FREQUENCY_UNITS.get(unit, ("", 0))
+    interval = Interval(**{field: frequency * per_unit}) if field else Interval()
     return MaintenancePlan(
         id=str(data.get("pmnum", "")),
         asset_id=str(data.get("assetnum", "")),

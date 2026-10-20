@@ -375,6 +375,17 @@ class TestOslcKeysStayOutOfMetadata:
         asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_QkVERk9SRC8xMDAw"})
         assert asset.metadata["rest_id"] == "_QkVERk9SRC8xMDAw"
 
+    @pytest.mark.parametrize(
+        "href",
+        [
+            pytest.param("/maximo/oslc/os/mxasset/_QkVERk9SRC8xMDAw", id="relative"),
+            pytest.param(f"{_INTERNAL}/os/mxasset/_QkVERk9SRC8xMDAw?lean=1#x", id="query"),
+            pytest.param(f"{_INTERNAL}/os/MXASSET/_QkVERk9SRC8xMDAw", id="upper-case"),
+        ],
+    )
+    def test_the_rest_id_of_any_record_uri(self, href: str) -> None:
+        assert parse_asset({**_ASSET, "href": href}).metadata["rest_id"] == "_QkVERk9SRC8xMDAw"
+
     def test_an_escaped_rest_id_is_decoded(self) -> None:
         asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_QkVE%2DRk9S"})
         assert asset.metadata["rest_id"] == "_QkVE-Rk9S"
@@ -384,13 +395,21 @@ class TestOslcKeysStayOutOfMetadata:
         [
             pytest.param(f"{_INTERNAL}/os/mxasset/", id="no-last-segment"),
             pytest.param(f"{_INTERNAL}/os/mxasset/..", id="dot-segment"),
+            pytest.param(f"{_INTERNAL}/os/mxasset/..;x", id="dot-segment-before-param"),
             pytest.param(f"{_INTERNAL}/os/mxasset/a%2Fb", id="escaped-separator"),
+            pytest.param(f"{_INTERNAL}/os/mxasset/a%5Cb", id="escaped-backslash"),
             pytest.param(f"{_INTERNAL}/os/mxasset/%FF", id="not-utf8"),
+            pytest.param(f"{_INTERNAL}/os/mxasset/_A\ud800", id="lone-surrogate"),
+            pytest.param(f"{_INTERNAL}/os/mxasset", id="the-collection"),
+            pytest.param(f"{_INTERNAL}/os/mxwo/{_REST_ID}/doclinks", id="a-child-collection"),
+            pytest.param(f"{_INTERNAL}/script/X", id="not-an-object-structure"),
+            pytest.param("_QkVERk9SRC8xMDAw", id="no-path"),
             pytest.param("http://[x", id="unparseable"),
             pytest.param(42, id="not-text"),
         ],
     )
-    def test_no_rest_id_that_could_leave_its_segment(self, href: object) -> None:
+    def test_no_rest_id_unless_the_href_is_a_record_uri(self, href: object) -> None:
+        """The rules B4.3 applies before it writes to a rest id."""
         asset = parse_asset({**_ASSET, "href": href})
         assert "rest_id" not in asset.metadata
 
@@ -462,10 +481,22 @@ class TestParseSparePartOslcShape:
         assert part.needs_reorder
         assert part.metadata["negative_balance"] == -3.0
 
+    def test_negative_fraction_is_no_stock(self) -> None:
+        """-0.5 truncates to 0, but it is still below zero."""
+        part = parse_spare_part({**_INVENTORY, "invbalances": [{"curbal": -0.5}]})
+        assert part.stock_quantity == 0
+        assert part.metadata["negative_balance"] == -0.5
+
     def test_negative_cost_is_no_cost(self) -> None:
         part = parse_spare_part({**_INVENTORY, "invcost": [{"avgcost": -0.5}]})
         assert part.unit_cost == 0.0
         assert part.metadata["negative_unit_cost"] == -0.5
+
+    @pytest.mark.parametrize("cost", [float("inf"), float("-inf"), "inf"])
+    def test_a_cost_that_is_not_finite_is_refused(self, cost: object) -> None:
+        """As an infinite balance is: int() of it raises OverflowError."""
+        with pytest.raises(ValueError, match="not a finite number"):
+            parse_spare_part({**_INVENTORY, "invcost": [{"avgcost": cost}]})
 
     def test_no_negative_figures_no_extra_metadata(self) -> None:
         part = parse_spare_part(_INVENTORY)
@@ -507,6 +538,11 @@ class TestParseMaintenancePlanFrequencyUnit:
         plan = parse_maintenance_plan({**_PM, "frequnit": "FORTNIGHT"})
         assert plan.interval == Interval()
         assert plan.interval.total_days == 0
+
+    def test_an_unknown_unit_ignores_the_frequency(self) -> None:
+        """Only the interval for the plan's unit is built and validated."""
+        plan = parse_maintenance_plan({**_PM, "frequnit": "SHIFTS", "frequency": -1})
+        assert plan.interval == Interval()
 
     def test_status(self) -> None:
         assert parse_maintenance_plan(_PM).active is True

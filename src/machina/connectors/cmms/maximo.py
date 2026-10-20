@@ -128,11 +128,13 @@ def _map_members(
                     f"({type(exc).__name__})"
                 )
                 if isinstance(exc, ValidationError):
-                    # A model-level check has an empty location.
+                    # The field names only: a deeper location can name a key
+                    # from Maximo (metadata.<key>), and a model-level check
+                    # has none.
                     errors = exc.errors(
                         include_url=False, include_context=False, include_input=False
                     )
-                    fields = sorted({".".join(map(str, e["loc"])) for e in errors} - {""})
+                    fields = sorted({str(e["loc"][0]) for e in errors if e["loc"]})
         context: dict[str, Any] = {"asset_id": asset_id} if asset_id else {}
         if fields:
             context["fields"] = fields

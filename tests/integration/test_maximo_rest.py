@@ -2285,6 +2285,15 @@ class TestReadsSelectAttributes:
                 id="spare_part-infinite",
             ),
             pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invcost": [{"avgcost": "1e999"}]},
+                "ValueError",
+                {"operation": "read_spare_parts"},
+                None,
+                id="spare_part-infinite-cost",
+            ),
+            pytest.param(
                 lambda c: c.read_maintenance_plans(),
                 "mxpm",
                 {"frequency": "quarterly"},
@@ -2388,6 +2397,33 @@ class TestReadsSelectAttributes:
         [event] = _refusals(logs)
         assert event == _refusal(object_structure, event["reason"], 0, **log)
         assert event["reason"].startswith("unmappable_")
+
+    @pytest.mark.asyncio
+    async def test_refusal_log_names_fields_not_keys_from_maximo(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """An attribute name text cannot hold fails metadata's key check; the log
+        names the field, metadata, not the location below it, which is the name."""
+        await _connect(httpx_mock, connector)
+        bad = _member("mxwo", {**_RECORDS["mxwo"], "SECRET-NAME\ud800": "x"})
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            # pytest-httpx cannot write a lone surrogate; json.dumps escapes it.
+            content=json.dumps({"member": [bad], "responseInfo": {}}).encode(),
+        )
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorSchemaError):
+            await connector.read_work_orders()
+        assert _refusals(logs) == [
+            _refusal(
+                "mxwo",
+                "unmappable_ValidationError",
+                0,
+                operation="read_work_orders",
+                fields=["metadata"],
+            )
+        ]
+        assert "SECRET" not in str(logs)
 
     @pytest.mark.parametrize(
         ("lookup", "object_structure", "params"),
