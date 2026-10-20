@@ -93,8 +93,9 @@ connector is not configured.
 `maximo_raw_attribute_update` updates one resource,
 `/maximo/oslc/os/{resource_type}/{resource_id}`, and nothing else. It sends
 the update form IBM documents, a `POST` with `x-method-override: PATCH` and
-`patchtype: MERGE` (child objects the attributes do not list are kept),
-through the connector helper `update_work_order` also uses (see
+`patchtype: MERGE` (child objects the attributes do not list are kept; a
+listed child row without its key is added, so repeating such a call adds it
+again), through the connector helper `update_work_order` also uses (see
 [How updates are sent](../connectors/maximo.md#how-updates-are-sent)):
 
 - `resource_type` must be an object-structure name: ASCII letters, digits and
@@ -114,7 +115,9 @@ Outside sandbox mode, both tools refuse a connector that is not connected
 (one whose `connect()` failed at startup), as the domain write tools do. A
 write that reaches the vendor returns its `status_code` and its JSON `body`;
 a body that is not JSON is reported as `{}`, because the write may have been
-applied. A write that fails returns an error entry: a Machina error keeps its
+applied. Only a 2xx status confirms the write; a 4xx or a redirect means it
+was not applied, and after a 5xx it may or may not have been, so read the
+resource before trying again. A write that fails returns an error entry: a Machina error keeps its
 message, and any other exception, such as an httpx transport error, is
 reported by its type only (`maximo_raw_attribute_update failed: ConnectError`),
 because its text can carry the request URL or a header value.

@@ -166,7 +166,9 @@ async def maximo_raw_attribute_update(
 
     This bypasses the domain model and patches arbitrary Maximo
     attributes.  Use only when the domain-level tools are insufficient.
-    The update is merged: child objects the attributes do not list are kept.
+    The update is merged: child objects the attributes do not list are kept,
+    and a listed child row without its key is added, so repeating such a
+    call adds it again.
 
     Args:
         resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
@@ -174,10 +176,16 @@ async def maximo_raw_attribute_update(
         resource_id: Rest ID of the resource, the last segment of its OSLC
             href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
         attributes: Dictionary of attribute names to new values.
+
+    Returns:
+        ``status_code`` and the JSON ``body`` of Maximo's answer. Only a 2xx
+        status confirms the update (a 204 has an empty body). A 4xx or a
+        redirect means it was not applied; after a 5xx it may or may not
+        have been, so read the resource before trying again.
     """
     from machina.connectors.base import get_sandbox_mode
 
-    # Both values go into the PATCH URL. A value that could address another
+    # Both values go into the update URL. A value that could address another
     # endpoint is refused before anything else, in sandbox mode too, so a
     # sandbox run answers as a live run would; the connector helper checks
     # again before its request.

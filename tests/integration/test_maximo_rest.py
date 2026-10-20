@@ -994,7 +994,7 @@ class TestGetWorkOrder:
 
 
 # ---------------------------------------------------------------------------
-# Updates: look the order up by wonum, POST to its URI
+# Updates: look the order up by wonum, POST to its URI, read it back from there
 # ---------------------------------------------------------------------------
 
 # Maximo addresses a record by a rest id derived from its primary key: here "_"
@@ -1003,42 +1003,53 @@ _REST_ID = "_V08tMDAxL0JFREZPUkQ-"
 # Maximo reports a URI on the host it sees itself on, often an internal name.
 _INTERNAL_URI = f"http://maximo-internal:9080/maximo/oslc/os/mxwo/{_REST_ID}"
 _UPDATE_URL = httpx.URL(f"{OSLC}/os/mxwo/{_REST_ID}", params={"lean": "1"})
+_APPLIED_NOT_READ_BACK = (
+    "Maximo applied the update to work order WO-001, but reading it back failed — "
+    "do not repeat the update; read the work order to check it"
+)
 
 
 def _lookup_url(wonum: str) -> httpx.URL:
     """The URI lookup an update sends before writing."""
     return _oslc_url(
         "mxwo",
-        **{"oslc.pageSize": "2", "oslc.select": "siteid", "oslc.where": f'wonum="{wonum}"'},
+        **{"oslc.pageSize": "2", "oslc.select": "wonum,siteid", "oslc.where": f'wonum="{wonum}"'},
     )
 
 
-def _add_lookup(httpx_mock, wonum: str, *members: dict[str, object]) -> None:
-    """Register the answer to the URI lookup an update sends before writing."""
-    httpx_mock.add_response(
-        method="GET", url=_lookup_url(wonum), json={"member": list(members), "responseInfo": {}}
-    )
+def _add_lookup(
+    httpx_mock, wonum: str, *members: dict[str, object], next_page: str | None = None
+) -> None:
+    """Register the answer to the URI lookup an update sends before writing.
 
-
-def _add_reread(httpx_mock, status: str, wonum: str = "WO-001") -> None:
-    """Register the read-back by ``wonum`` that follows a successful update."""
+    Each member names ``wonum``, as Maximo's answer to ``oslc.select=wonum,siteid``
+    does, unless the test gives it another value.
+    """
     httpx_mock.add_response(
         method="GET",
-        url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": f'wonum="{wonum}"'}),
+        url=_lookup_url(wonum),
         json={
-            "member": [
-                {
-                    "wonum": wonum,
-                    "description": "Fix leak",
-                    "wopriority": 2,
-                    "status": status,
-                    "worktype": "CM",
-                    "assetnum": "P1",
-                    "reportdate": "2025-06-01T10:00:00Z",
-                    "changedate": "2025-07-01T10:00:00Z",
-                },
-            ],
-            "responseInfo": {},
+            "member": [{"wonum": wonum, **member} for member in members],
+            "responseInfo": {"nextPage": {"href": next_page}} if next_page else {},
+        },
+    )
+
+
+def _add_reread(httpx_mock, status: str, wonum: str = "WO-001", rest_id: str = _REST_ID) -> None:
+    """Register the read-back of the updated order from its URI, as Maximo answers it."""
+    httpx_mock.add_response(
+        method="GET",
+        url=httpx.URL(f"{OSLC}/os/mxwo/{rest_id}", params={"lean": "1"}),
+        json={
+            "wonum": wonum,
+            "description": "Fix leak",
+            "wopriority": 2,
+            "status": status,
+            "worktype": "CM",
+            "assetnum": "P1",
+            "reportdate": "2025-06-01T10:00:00Z",
+            "changedate": "2025-07-01T10:00:00Z",
+            "href": f"http://maximo-internal:9080/maximo/oslc/os/mxwo/{rest_id}",
         },
     )
 
@@ -1047,7 +1058,8 @@ class TestUpdateWorkOrder:
     """IBM's REST API guide: an update is a POST to the URI Maximo returned for
     the record, with ``x-method-override: PATCH``; ``patchtype: MERGE`` keeps the
     child objects the payload does not list. The URI's last segment is a rest id
-    derived from ``wonum`` and ``siteid``, so it is looked up, never built."""
+    derived from ``wonum`` and ``siteid``, so it is looked up, never built, and
+    the order is read back from the same URI."""
 
     @pytest.mark.parametrize("post_status", [204, 200])
     @pytest.mark.asyncio
@@ -1064,7 +1076,7 @@ class TestUpdateWorkOrder:
         requests = httpx_mock.get_requests()
         # connect, URI lookup, update, read-back: never the bare PATCH verb
         assert [r.method for r in requests] == ["GET", "GET", "POST", "GET"]
-        post = requests[2]
+        post, reread = requests[2], requests[3]
         # Sent to the configured URL, not to the internal host in Maximo's URI.
         assert post.url.host == "maximo.example.com"
         assert post.headers["x-method-override"] == "PATCH"
@@ -1072,6 +1084,9 @@ class TestUpdateWorkOrder:
         assert post.headers["content-type"] == "application/json"
         assert post.headers["apikey"] == "test-key"
         assert json.loads(post.content) == {"status": "CLOSE"}
+        # The read-back reads the resource just written, not the first match by wonum.
+        assert reread.url.host == "maximo.example.com"
+        assert reread.url.raw_path == f"/maximo/oslc/os/mxwo/{_REST_ID}?lean=1".encode()
 
     @pytest.mark.asyncio
     async def test_every_given_field_is_sent(self, httpx_mock, connector: MaximoConnector) -> None:
@@ -1114,6 +1129,23 @@ class TestUpdateWorkOrder:
         assert post.headers["patchtype"] == "MERGE"
         assert json.loads(post.content) == {"status": maximo_status}
 
+    @pytest.mark.parametrize(
+        "write",
+        [
+            pytest.param(lambda c: c.update_work_order("WO-001", description="x"), id="update"),
+            pytest.param(lambda c: c.close_work_order("WO-001"), id="close"),
+            pytest.param(lambda c: c.cancel_work_order("WO-001"), id="cancel"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_never_connected_connector_sends_nothing(
+        self, httpx_mock, connector: MaximoConnector, write
+    ) -> None:
+        """The lookup is an authenticated request too: it waits for connect()."""
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await write(connector)
+        assert httpx_mock.get_requests() == []
+
     @pytest.mark.asyncio
     async def test_no_field_is_refused_before_any_request(
         self, httpx_mock, connector: MaximoConnector
@@ -1152,6 +1184,121 @@ class TestUpdateWorkOrder:
         )
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
 
+    @pytest.mark.asyncio
+    async def test_a_second_site_on_a_later_page_is_found(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A server that serves one row per page despite oslc.pageSize=2 still
+        links to the next page: reading only the first would see one site."""
+        await _connect(httpx_mock, connector)
+        page_2 = f"{OSLC}/os/mxwo?pageno=2"
+        _add_lookup(
+            httpx_mock,
+            "1001",
+            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_MTAwMS9URVhBUw--"},
+            next_page=page_2,
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=page_2,
+            json={
+                "member": [
+                    {
+                        "wonum": "1001",
+                        "siteid": "BEDFORD",
+                        "href": f"{OSLC}/os/mxwo/_MTAwMS9CRURGT1JE",
+                    }
+                ],
+                "responseInfo": {},
+            },
+        )
+        with pytest.raises(ConnectorError, match="more than one site"):
+            await connector.update_work_order("1001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "GET"]  # no POST
+
+    @pytest.mark.parametrize(
+        "returned_wonum",
+        [pytest.param("WO-002", id="another-wonum"), pytest.param(None, id="no-wonum")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_lookup_answer_naming_another_order_writes_nothing(
+        self, httpx_mock, connector: MaximoConnector, returned_wonum: object
+    ) -> None:
+        """A server or proxy that dropped the oslc.where filter answers with
+        whatever comes first; its URI would address another order."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"wonum": returned_wonum, "href": _INTERNAL_URI})
+        with pytest.raises(ConnectorError) as exc_info:
+            await connector.update_work_order("WO-001", description="x")
+        assert str(exc_info.value) == (
+            "Maximo's answer to the lookup of work order WO-001 does not name that "
+            "work order — refusing to update it"
+        )
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
+
+    @pytest.mark.asyncio
+    async def test_the_wonum_match_ignores_case(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """wonum is an upper-case field: Maximo answers "WO-001" to "wo-001"."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "wo-001", {"wonum": "WO-001", "href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "WAPPR")
+        updated = await connector.update_work_order("wo-001", description="x")
+        assert updated.id == "WO-001"
+
+    @pytest.mark.parametrize(
+        ("wonum", "members", "reason"),
+        [
+            pytest.param("MISS", [], "not_found", id="not-found"),
+            pytest.param(
+                "1001",
+                [{"href": f"{OSLC}/os/mxwo/_A"}, {"href": f"{OSLC}/os/mxwo/_B"}],
+                "several_sites",
+                id="several-sites",
+            ),
+            pytest.param(
+                "WO-001",
+                [{"wonum": "WO-002", "href": _INTERNAL_URI}],
+                "other_work_order",
+                id="other-work-order",
+            ),
+            pytest.param(
+                "WO-001",
+                [{"href": f"http://maximo-internal:9080/maximo/oslc/os/mxasset/{_REST_ID}"}],
+                "no_work_order_uri",
+                id="no-work-order-uri",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_refusal_is_logged_for_the_operator(
+        self,
+        httpx_mock,
+        connector: MaximoConnector,
+        wonum: str,
+        members: list[dict[str, object]],
+        reason: str,
+    ) -> None:
+        """A proxy or response-shape problem must look different from an
+        unknown wonum; the log never carries what Maximo returned."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, wonum, *members)
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError):
+            await connector.update_work_order(wonum, description="x")
+        assert [e for e in logs if e["event"] == "maximo_update_refused"] == [
+            {
+                "event": "maximo_update_refused",
+                "connector": "MaximoConnector",
+                "operation": "update_work_order",
+                "work_order_id": wonum,
+                "reason": reason,
+                "log_level": "warning",
+            }
+        ]
+        assert "maximo-internal" not in str(logs)
+
     @pytest.mark.parametrize(
         ("post_status", "error", "match"),
         [
@@ -1176,28 +1323,52 @@ class TestUpdateWorkOrder:
             await connector.update_work_order("WO-001", description="x")
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "POST"]
 
+    @pytest.mark.parametrize(
+        ("read_back", "error_type"),
+        [
+            # A collection query without oslc.select returns only each member's
+            # href; a read-back that parsed such a row could not build the order.
+            pytest.param({"json": {"href": _INTERNAL_URI}}, "ValidationError", id="href-only"),
+            pytest.param({"status_code": 404}, "ConnectorError", id="not-found"),
+            pytest.param({"status_code": 500}, "ConnectorError", id="server-error"),
+            pytest.param({"status_code": 401}, "ConnectorAuthError", id="auth"),
+            pytest.param({"text": "<html>Sign in</html>"}, "JSONDecodeError", id="not-json"),
+            pytest.param({"json": [{"wonum": "WO-001"}]}, "ConnectorError", id="not-an-object"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_order_missing_on_the_read_back_raises(
-        self, httpx_mock, connector: MaximoConnector
+    async def test_failed_read_back_says_the_update_was_applied(
+        self, httpx_mock, connector: MaximoConnector, read_back: dict[str, object], error_type: str
     ) -> None:
+        """Once Maximo accepted the update, a failed read-back must not look like
+        a failed update: a caller that sees an error would send the update again."""
         await _connect(httpx_mock, connector)
         _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
         httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
-        httpx_mock.add_response(
-            method="GET",
-            url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-001"'}),
-            json={"member": [], "responseInfo": {}},
-        )
-        with pytest.raises(ConnectorError, match="not found after update"):
+        httpx_mock.add_response(method="GET", url=_UPDATE_URL, **read_back)
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as exc_info:
             await connector.update_work_order("WO-001", description="x")
+        assert str(exc_info.value) == _APPLIED_NOT_READ_BACK
+        assert exc_info.value.__cause__ is None
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "POST", "GET"]
+        assert [e for e in logs if e["event"] == "work_order_update_not_read_back"] == [
+            {
+                "event": "work_order_update_not_read_back",
+                "connector": "MaximoConnector",
+                "operation": "update_work_order",
+                "work_order_id": "WO-001",
+                "error_type": error_type,
+                "log_level": "warning",
+            }
+        ]
 
 
 class TestUpdateRetrySafety:
     """The update POST follows POST's retry policy: a 429 is retried, because
     Maximo refused it unprocessed, but a network error or a 503 is not replayed,
-    because the first POST may already have been applied. The lookup before it
-    is a GET and is retried like any read. pytest-httpx answers each registered
-    response once, so a replay would find no response."""
+    because the first POST may already have been applied. The lookup and the
+    read-back are GETs and are retried like any read. pytest-httpx answers each
+    registered response once, so a replay would find no response."""
 
     @pytest.fixture(autouse=True)
     def _no_backoff_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1252,11 +1423,30 @@ class TestUpdateRetrySafety:
         methods = [r.method for r in httpx_mock.get_requests()]
         assert methods == ["GET", "GET", "GET", "POST", "GET"]
 
+    @pytest.mark.asyncio
+    async def test_read_back_network_error_says_the_update_was_applied(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """The read-back is retried as a read; when it still fails, the POST is
+        not sent again and the error says it was applied."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        httpx_mock.add_exception(
+            httpx.ConnectError("refused"), method="GET", url=_UPDATE_URL, is_reusable=True
+        )
+        with pytest.raises(ConnectorError) as exc_info:
+            await connector.update_work_order("WO-001", description="x")
+        assert str(exc_info.value) == _APPLIED_NOT_READ_BACK
+        methods = [r.method for r in httpx_mock.get_requests()]
+        assert methods.count("POST") == 1
+        assert methods[3:] == ["GET"] * 4  # the read-back and its three retries
+
 
 class TestUpdateResourceIdentity:
     """An update never puts the ``wonum`` in a URL path: the ``wonum`` is a
-    quoted oslc.where value in the lookup, and the POST URL takes the rest id
-    from the URI Maximo returns, which must stay one path segment."""
+    quoted oslc.where value in the lookup, and the POST and read-back URLs take
+    the rest id from the URI Maximo returns, which must stay one path segment."""
 
     @pytest.mark.parametrize(
         "wonum",
@@ -1299,11 +1489,12 @@ class TestUpdateResourceIdentity:
         await _connect(httpx_mock, connector)
         _add_lookup(httpx_mock, "WO-001", {"href": href})
         httpx_mock.add_response(method="POST", status_code=204)
-        _add_reread(httpx_mock, "WAPPR")
+        _add_reread(httpx_mock, "WAPPR", rest_id=segment)
         await connector.update_work_order("WO-001", description="x")
-        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
-        assert post.url.host == "maximo.example.com"
-        assert post.url.raw_path == f"/maximo/oslc/os/mxwo/{segment}?lean=1".encode()
+        expected = f"/maximo/oslc/os/mxwo/{segment}?lean=1".encode()
+        post, reread = httpx_mock.get_requests()[2:]
+        assert post.url.host == reread.url.host == "maximo.example.com"
+        assert post.url.raw_path == reread.url.raw_path == expected
 
     @pytest.mark.parametrize(
         ("member", "reason"),
@@ -1317,6 +1508,10 @@ class TestUpdateResourceIdentity:
             ),
             pytest.param(
                 {"href": f"{OSLC}/os/mxwo/{_REST_ID}/"}, "no work-order URI", id="trailing-slash"
+            ),
+            # Decoded with replacement, %FF would become another rest id.
+            pytest.param(
+                {"href": f"{OSLC}/os/mxwo/_A%FF"}, "no work-order URI", id="non-utf8-escape"
             ),
             pytest.param({"href": f"{OSLC}/os/mxwo/"}, "Invalid record ID", id="empty-rest-id"),
             pytest.param({"href": f"{OSLC}/os/mxwo/.."}, "Invalid record ID", id="dot-segment"),
@@ -1354,7 +1549,7 @@ class TestUpdateResourceIdentity:
         httpx_mock.add_response(
             method="GET",
             url=_lookup_url("WO-001"),
-            content=b'{"member": [{"href": "/maximo/oslc/os/mxwo/_A\\ud800"}]}',
+            content=b'{"member": [{"wonum": "WO-001", "href": "/maximo/oslc/os/mxwo/_A\\ud800"}]}',
             headers={"Content-Type": "application/json"},
         )
         with pytest.raises(ConnectorError) as exc_info:
@@ -1363,36 +1558,6 @@ class TestUpdateResourceIdentity:
             "Invalid record ID: an ID must be text that can be sent as UTF-8"
         )
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
-
-    @pytest.mark.asyncio
-    async def test_lean_off_sends_no_lean_parameter(self, httpx_mock) -> None:
-        conn = MaximoConnector(
-            url=BASE, auth=ApiKeyHeaderAuth(header_name="apikey", value="test-key"), lean=False
-        )
-        await _connect(httpx_mock, conn)
-        httpx_mock.add_response(
-            method="GET",
-            url=httpx.URL(
-                f"{OSLC}/os/mxwo",
-                params={
-                    "oslc.pageSize": "2",
-                    "oslc.where": 'wonum="WO-001"',
-                    "oslc.select": "siteid",
-                },
-            ),
-            json={"member": [{"href": _INTERNAL_URI}], "responseInfo": {}},
-        )
-        httpx_mock.add_response(method="POST", url=f"{OSLC}/os/mxwo/{_REST_ID}", status_code=204)
-        httpx_mock.add_response(
-            method="GET",
-            url=httpx.URL(
-                f"{OSLC}/os/mxwo", params={"oslc.pageSize": "1", "oslc.where": 'wonum="WO-001"'}
-            ),
-            json={"member": [{"wonum": "WO-001"}], "responseInfo": {}},
-        )
-        await conn.update_work_order("WO-001", description="x")
-        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
-        assert post.url.raw_path == f"/maximo/oslc/os/mxwo/{_REST_ID}".encode()
 
 
 # ---------------------------------------------------------------------------

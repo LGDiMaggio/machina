@@ -101,6 +101,24 @@ def _oslc_resource_path(object_structure: object, resource_id: object) -> str:
     return f"/maximo/oslc/os/{object_structure}/{segment}"
 
 
+def _update_refused(work_order_id: str, reason: str, message: str) -> ConnectorError:
+    """Log a work-order update refused before anything was written; return its error.
+
+    The operator sees why updates stop (a proxy or response-shape problem
+    looks different from an unknown ``wonum``); the log names the ``wonum``,
+    already checked by :func:`_oslc_eq`, and a reason code, never a value
+    Maximo returned.
+    """
+    logger.warning(
+        "maximo_update_refused",
+        connector="MaximoConnector",
+        operation="update_work_order",
+        work_order_id=work_order_id,
+        reason=reason,
+    )
+    return ConnectorError(message)
+
+
 def _require_httpx() -> Any:
     """Import httpx lazily so the extra is truly optional."""
     try:
@@ -482,10 +500,11 @@ class MaximoConnector:
         """Update an existing work order in Maximo.
 
         Maximo addresses a record by the URI it returns for it, not by
-        ``wonum``, so the order is first looked up by ``wonum`` and the update
-        is sent to its URI through :meth:`_patch_resource`. Only non-``None``
-        fields are sent. ``close_work_order`` and ``cancel_work_order`` go
-        through this method.
+        ``wonum``, so the order is first looked up by ``wonum``
+        (:meth:`_work_order_rest_id`), the update is sent to its URI through
+        :meth:`_patch_resource`, and the order is read back from the same URI.
+        Only non-``None`` fields are sent. ``close_work_order`` and
+        ``cancel_work_order`` go through this method.
 
         Args:
             work_order_id: Maximo work order number (``wonum``).
@@ -494,17 +513,22 @@ class MaximoConnector:
             description: New work order description.
 
         Returns:
-            The updated work order, read back by ``wonum``.
+            The updated work order, read back from its URI.
 
         Raises:
-            ConnectorError: If no field is given; if the ``wonum`` is refused
-                by :func:`_oslc_eq`, matches no work order, matches work
-                orders in more than one site, or Maximo returns no usable URI
-                for it (all before anything is written); or if Maximo rejects
-                the update.
-            ConnectorAuthError: If Maximo answers the update with 401.
+            ConnectorError: If no field is given; if the lookup refuses the
+                ``wonum`` (see :meth:`_work_order_rest_id`), before anything is
+                written; if Maximo rejects the update; or if Maximo accepted
+                the update but the order could not be read back, in which case
+                the message says the update was applied and must not be
+                repeated.
+            ConnectorAuthError: If Maximo answers the lookup or the update
+                with 401.
+            httpx.HTTPError: A transport error from the lookup (after its
+                retries) or from the update, which is not retried.
         """
         self._ensure_connected()
+        httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = maximo_mapper.reverse_status(status)
@@ -526,10 +550,26 @@ class MaximoConnector:
             operation="update_work_order",
             work_order_id=work_order_id,
         )
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
-            raise ConnectorError(f"Work order {work_order_id} not found after update")
-        return updated
+        # Read back the resource just written, not the first match by wonum.
+        # The update has been applied by now: a failed read-back must not look
+        # like a failed update, or a caller would send it again.
+        try:
+            body = await self._read_resource("mxwo", rest_id)
+            if body is None:
+                raise ConnectorError("the work order was not found at its URI")
+            return maximo_mapper.parse_work_order(body)
+        except (ConnectorError, ValueError, httpx.HTTPError) as exc:
+            logger.warning(
+                "work_order_update_not_read_back",
+                connector="MaximoConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
+            )
+            raise ConnectorError(
+                f"Maximo applied the update to work order {work_order_id}, but reading it "
+                "back failed — do not repeat the update; read the work order to check it"
+            ) from None
 
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
@@ -710,36 +750,97 @@ class MaximoConnector:
 
         Raises:
             ConnectorError: If the ``wonum`` is refused by :func:`_oslc_eq`
-                (before any request), matches no work order, matches work
-                orders in more than one site, or the matching member carries
-                no work-order URI. No message repeats a value Maximo returned.
+                (before any request); or, logged as ``maximo_update_refused``,
+                if it matches no work order, matches work orders in more than
+                one site, the one match does not name that ``wonum``, or it
+                carries no work-order URI. No message repeats a value Maximo
+                returned.
         """
-        # Two rows are enough to tell one match from several.
+        # Two rows per page tell one match from several. Every page is read,
+        # so a server that serves fewer rows than asked cannot hide a second
+        # site behind its nextPage link.
         members = await self._oslc_get(
             "mxwo",
             oslc_where=_oslc_eq("wonum", work_order_id),
-            oslc_select="siteid",
+            oslc_select="wonum,siteid",
             page_size=2,
-            first_page_only=True,
         )
         if not members:
-            raise ConnectorError(f"Work order {work_order_id} not found")
-        if len(members) > 1:
-            raise ConnectorError(
-                f"Work order {work_order_id} exists in more than one site — refusing to "
-                "guess which one to update"
+            raise _update_refused(
+                work_order_id, "not_found", f"Work order {work_order_id} not found"
             )
-        href = members[0].get("href")
+        if len(members) > 1:
+            raise _update_refused(
+                work_order_id,
+                "several_sites",
+                f"Work order {work_order_id} exists in more than one site — refusing to "
+                "guess which one to update",
+            )
+        [member] = members
+        # The URI identifies the record that will be written: check the match
+        # is the order asked for (a server or proxy that dropped the filter
+        # would answer with another one). wonum is an upper-case field.
+        if str(member.get("wonum")).strip().casefold() != str(work_order_id).strip().casefold():
+            raise _update_refused(
+                work_order_id,
+                "other_work_order",
+                f"Maximo's answer to the lookup of work order {work_order_id} does not "
+                "name that work order — refusing to update it",
+            )
+        href = member.get("href")
         try:
             path = urlsplit(href).path if isinstance(href, str) else ""
-        except ValueError:  # an unparseable href, such as "http://[x"
-            path = ""
-        collection, _, rest_id = path.rpartition("/")
+            collection, _, rest_id = path.rpartition("/")
+            # An escape that is not UTF-8 would be decoded into another id.
+            rest_id = unquote(rest_id, errors="strict")
+        except ValueError:  # an unparseable href ("http://[x") or a non-UTF-8 escape
+            collection = rest_id = ""
         if not collection.lower().endswith("/os/mxwo"):
-            raise ConnectorError(
-                f"Maximo returned no work-order URI for work order {work_order_id}"
+            raise _update_refused(
+                work_order_id,
+                "no_work_order_uri",
+                f"Maximo returned no work-order URI for work order {work_order_id}",
             )
-        return unquote(rest_id)
+        return rest_id
+
+    async def _read_resource(self, object_structure: str, resource_id: str) -> Any:
+        """Read one resource of an OSLC object structure by its rest id.
+
+        A ``GET`` on the resource URI returns the record's attributes; a
+        collection query without ``oslc.select`` would return only its href.
+
+        Returns:
+            The decoded JSON body, or ``None`` if Maximo answers 404.
+
+        Raises:
+            ConnectorError: If the rest id is refused by
+                :func:`_oslc_resource_path`, on any status other than 200 or
+                404, or if the body is not a JSON object.
+            ConnectorAuthError: On 401.
+            ValueError: If the body is not JSON.
+        """
+        url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
+        httpx = _require_httpx()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client,
+                "GET",
+                url,
+                headers=self._headers(),
+                params={"lean": "1"} if self._lean else None,
+            )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("Maximo authentication failed")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise ConnectorError(
+                f"Maximo GET {object_structure} resource failed: HTTP {resp.status_code}"
+            )
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ConnectorError(f"Maximo GET {object_structure} resource returned no JSON object")
+        return body
 
     @sandbox_aware
     async def _patch_resource(

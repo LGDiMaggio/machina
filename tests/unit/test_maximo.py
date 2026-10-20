@@ -403,6 +403,56 @@ class TestPatchResource:
         assert request.headers["apikey"] == "k"
         assert json.loads(request.content) == {"x": 1}
 
+    @pytest.mark.asyncio
+    async def test_lean_off_sends_no_lean_parameter(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+            lean=False,
+        )
+        conn._connected = True
+        httpx_mock.add_response(method="POST", status_code=204)
+        await conn._patch_resource("mxwo", "_A", {"x": 1})
+        [request] = httpx_mock.get_requests()
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/_A"
+
+
+class TestReadResource:
+    """The update's read-back: a GET on the resource URI returns its attributes."""
+
+    @pytest.mark.parametrize(("lean", "query"), [(True, b"?lean=1"), (False, b"")])
+    @pytest.mark.asyncio
+    async def test_reads_the_one_resource(self, httpx_mock, lean: bool, query: bytes) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+            lean=lean,
+        )
+        httpx_mock.add_response(method="GET", json={"wonum": "WO-1"})
+        assert await conn._read_resource("mxwo", "_A/B") == {"wonum": "WO-1"}
+        [request] = httpx_mock.get_requests()
+        assert request.url.raw_path == b"/maximo/oslc/os/mxwo/_A%2FB" + query
+        assert request.headers["apikey"] == "k"
+
+    @pytest.mark.asyncio
+    async def test_missing_resource_is_none(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+        httpx_mock.add_response(method="GET", status_code=404)
+        assert await conn._read_resource("mxwo", "_A") is None
+
+    @pytest.mark.asyncio
+    async def test_rest_id_that_could_leave_its_segment_is_refused(self, httpx_mock) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
+        )
+        with pytest.raises(ConnectorError, match="Invalid record ID"):
+            await conn._read_resource("mxwo", "../mxasset/A1")
+        assert httpx_mock.get_requests() == []
+
 
 # ---------------------------------------------------------------------------
 # Connector lifecycle (no HTTP)
