@@ -157,7 +157,7 @@ with an `x-method-override: PATCH` header. So `update_work_order`, and
 
 1. look the order up by `wonum`
    (`GET /maximo/oslc/os/mxwo?oslc.where=wonum="WO-001"&oslc.select=wonum,siteid&oslc.pageSize=2`),
-   reading every page of the answer;
+   following the answer's next pages until it holds two rows;
 2. refuse, before writing anything, a `wonum` that matches no work order, matches
    work orders in more than one site (a `wonum` is unique only within a site), or
    whose one match does not name that `wonum` (compared without regard to case), as
@@ -167,8 +167,8 @@ with an `x-method-override: PATCH` header. So `update_work_order`, and
    `lean=False`), and accept `204 No Content` or `200 OK`. Without
    `patchtype: MERGE`, Maximo deletes the child objects of a listed child collection
    that the request does not repeat;
-4. read the order back from the same URI (`GET /maximo/oslc/os/mxwo/{rest id}`) and
-   return it.
+4. read the order back from the same URI (`GET /maximo/oslc/os/mxwo/{rest id}`, with
+   `lean=1` like the update) and return it.
 
 Only the rest id is taken from the URI Maximo returns. Its host is the one Maximo sees
 itself on (an internal name behind a proxy), so the update and the read-back go to the
@@ -178,7 +178,7 @@ UTF-8, or one that is empty or has an empty, `.` or `..` part between `/` or `\`
 separators once decoded, is refused with `ConnectorError` before anything is written.
 No error repeats the URI. Each refusal after the lookup is logged at WARNING as
 `maximo_update_refused`, with the `wonum` and a `reason` (`not_found`,
-`several_sites`, `other_work_order` or `no_work_order_uri`).
+`several_sites`, `other_work_order`, `no_work_order_uri` or `invalid_rest_id`).
 
 The update `POST` is retried on `429` only. After a network error, a timeout or a
 `503` it is not sent again, because the first request may have been applied. The

@@ -1216,6 +1216,24 @@ class TestUpdateWorkOrder:
             await connector.update_work_order("1001", description="x")
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "GET"]  # no POST
 
+    @pytest.mark.asyncio
+    async def test_lookup_stops_reading_at_two_rows(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Two rows already decide the refusal. A server or proxy that ignores the
+        filter would otherwise page through every work order, two at a time."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(
+            httpx_mock,
+            "1001",
+            {"wonum": "1001", "href": f"{OSLC}/os/mxwo/_A"},
+            {"wonum": "2002", "href": f"{OSLC}/os/mxwo/_B"},
+            next_page=f"{OSLC}/os/mxwo?pageno=2",
+        )
+        with pytest.raises(ConnectorError, match="more than one site"):
+            await connector.update_work_order("1001", description="x")
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no page 2
+
     @pytest.mark.parametrize(
         "returned_wonum",
         [pytest.param("WO-002", id="another-wonum"), pytest.param(None, id="no-wonum")],
@@ -1235,6 +1253,31 @@ class TestUpdateWorkOrder:
             "work order — refusing to update it"
         )
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
+
+    @pytest.mark.asyncio
+    async def test_a_missing_wonum_is_not_a_match_for_none(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A wonum of None is matched as the text "None": a member without a
+        wonum must not pass for it."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "None", {"wonum": None, "href": _INTERNAL_URI})
+        with pytest.raises(ConnectorError, match="does not name that work order"):
+            await connector.update_work_order(None, description="x")  # type: ignore[arg-type]
+        assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET"]  # no POST
+
+    @pytest.mark.parametrize("returned", ["1001", 1001])
+    @pytest.mark.asyncio
+    async def test_a_numeric_wonum_matches_its_digits(
+        self, httpx_mock, connector: MaximoConnector, returned: object
+    ) -> None:
+        """A wonum can arrive as a number from model JSON, and Maximo can answer one."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "1001", {"wonum": returned, "href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "WAPPR", wonum="1001")
+        updated = await connector.update_work_order(1001, description="x")  # type: ignore[arg-type]
+        assert updated.id == "1001"
 
     @pytest.mark.asyncio
     async def test_the_wonum_match_ignores_case(
@@ -1269,6 +1312,12 @@ class TestUpdateWorkOrder:
                 [{"href": f"http://maximo-internal:9080/maximo/oslc/os/mxasset/{_REST_ID}"}],
                 "no_work_order_uri",
                 id="no-work-order-uri",
+            ),
+            pytest.param(
+                "WO-001",
+                [{"href": f"{OSLC}/os/mxwo/.."}],
+                "invalid_rest_id",
+                id="invalid-rest-id",
             ),
         ],
     )
@@ -1334,6 +1383,12 @@ class TestUpdateWorkOrder:
             pytest.param({"status_code": 401}, "ConnectorAuthError", id="auth"),
             pytest.param({"text": "<html>Sign in</html>"}, "JSONDecodeError", id="not-json"),
             pytest.param({"json": [{"wonum": "WO-001"}]}, "ConnectorError", id="not-an-object"),
+            # parse_datetime expects text; a number raises AttributeError.
+            pytest.param(
+                {"json": {"wonum": "WO-001", "changedate": 1729000000000}},
+                "AttributeError",
+                id="unparseable-field",
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -1349,7 +1404,9 @@ class TestUpdateWorkOrder:
         with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as exc_info:
             await connector.update_work_order("WO-001", description="x")
         assert str(exc_info.value) == _APPLIED_NOT_READ_BACK
+        # Neither chained nor shown as context: the library error's text stays out.
         assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "POST", "GET"]
         assert [e for e in logs if e["event"] == "work_order_update_not_read_back"] == [
             {

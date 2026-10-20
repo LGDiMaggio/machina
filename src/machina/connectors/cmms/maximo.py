@@ -528,7 +528,6 @@ class MaximoConnector:
                 retries) or from the update, which is not retried.
         """
         self._ensure_connected()
-        httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = maximo_mapper.reverse_status(status)
@@ -551,14 +550,16 @@ class MaximoConnector:
             work_order_id=work_order_id,
         )
         # Read back the resource just written, not the first match by wonum.
-        # The update has been applied by now: a failed read-back must not look
-        # like a failed update, or a caller would send it again.
+        # The update has been applied by now: whatever goes wrong next (an
+        # HTTP or transport error, a body the mapper cannot parse) must not
+        # look like a failed update, or a caller would send it again. The
+        # type is logged; the message is the same for every cause.
         try:
             body = await self._read_resource("mxwo", rest_id)
             if body is None:
                 raise ConnectorError("the work order was not found at its URI")
             return maximo_mapper.parse_work_order(body)
-        except (ConnectorError, ValueError, httpx.HTTPError) as exc:
+        except Exception as exc:
             logger.warning(
                 "work_order_update_not_read_back",
                 connector="MaximoConnector",
@@ -646,6 +647,7 @@ class MaximoConnector:
         oslc_select: str = "",
         page_size: int | None = None,
         first_page_only: bool = False,
+        max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch all pages from a Maximo OSLC object structure.
 
@@ -659,6 +661,8 @@ class MaximoConnector:
             page_size: Results per page (default :attr:`_PAGE_SIZE`).
             first_page_only: Stop after the first page, for a lookup that
                 uses only the first match.
+            max_rows: Stop once this many rows have been read, for a lookup
+                that only needs to tell one match from several.
 
         Returns:
             Flat list of all result dicts across all pages.
@@ -708,7 +712,7 @@ class MaximoConnector:
                         f"{self._MAX_OSLC_ROWS}-row safety cap — refusing to load an "
                         "unbounded result set into memory. Narrow the query with oslc.where."
                     )
-                if first_page_only:
+                if first_page_only or (max_rows is not None and len(all_items) >= max_rows):
                     break
                 # Follow the OSLC next-page link. It repeats the query, so the
                 # first request's params are not sent again.
@@ -750,20 +754,28 @@ class MaximoConnector:
 
         Raises:
             ConnectorError: If the ``wonum`` is refused by :func:`_oslc_eq`
-                (before any request); or, logged as ``maximo_update_refused``,
-                if it matches no work order, matches work orders in more than
-                one site, the one match does not name that ``wonum``, or it
-                carries no work-order URI. No message repeats a value Maximo
-                returned.
+                (before any request); if the lookup fails as any
+                :meth:`_oslc_get` read can (an HTTP error status, a next-page
+                link that cannot be followed); or, logged as
+                ``maximo_update_refused``, if it matches no work order, matches
+                work orders in more than one site, the one match does not name
+                that ``wonum``, or it carries no work-order URI or a rest id
+                that could leave its path segment. No message repeats a value
+                Maximo returned.
+            ConnectorAuthError: If Maximo answers the lookup with 401.
+            httpx.HTTPError: A transport error that outlasts the lookup's
+                retries.
         """
-        # Two rows per page tell one match from several. Every page is read,
-        # so a server that serves fewer rows than asked cannot hide a second
-        # site behind its nextPage link.
+        # Two rows tell one match from several, so the read stops there. It
+        # follows nextPage until then: a server that serves fewer rows per
+        # page than asked cannot hide a second site, and one that ignores the
+        # filter cannot make the lookup page through every work order.
         members = await self._oslc_get(
             "mxwo",
             oslc_where=_oslc_eq("wonum", work_order_id),
             oslc_select="wonum,siteid",
             page_size=2,
+            max_rows=2,
         )
         if not members:
             raise _update_refused(
@@ -779,8 +791,14 @@ class MaximoConnector:
         [member] = members
         # The URI identifies the record that will be written: check the match
         # is the order asked for (a server or proxy that dropped the filter
-        # would answer with another one). wonum is an upper-case field.
-        if str(member.get("wonum")).strip().casefold() != str(work_order_id).strip().casefold():
+        # would answer with another one). wonum is an upper-case field; a
+        # missing one is not a match, even for a wonum of "None".
+        returned = member.get("wonum")
+        if (
+            not isinstance(returned, str | int)
+            or isinstance(returned, bool)
+            or str(returned).strip().casefold() != str(work_order_id).strip().casefold()
+        ):
             raise _update_refused(
                 work_order_id,
                 "other_work_order",
@@ -801,6 +819,10 @@ class MaximoConnector:
                 "no_work_order_uri",
                 f"Maximo returned no work-order URI for work order {work_order_id}",
             )
+        try:
+            _oslc_resource_path("mxwo", rest_id)
+        except ConnectorError as exc:
+            raise _update_refused(work_order_id, "invalid_rest_id", str(exc)) from None
         return rest_id
 
     async def _read_resource(self, object_structure: str, resource_id: str) -> Any:
@@ -818,6 +840,7 @@ class MaximoConnector:
                 404, or if the body is not a JSON object.
             ConnectorAuthError: On 401.
             ValueError: If the body is not JSON.
+            httpx.HTTPError: A transport error that outlasts the GET's retries.
         """
         url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
         httpx = _require_httpx()
