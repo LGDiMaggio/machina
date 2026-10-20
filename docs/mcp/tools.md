@@ -90,8 +90,12 @@ registered only with `enable_vendor_tools: true` under `mcp:` in the config;
 outside sandbox mode they answer with an error entry when the matching
 connector is not configured.
 
-`maximo_raw_attribute_update` patches one resource,
-`/maximo/oslc/os/{resource_type}/{resource_id}`, and nothing else:
+`maximo_raw_attribute_update` updates one resource,
+`/maximo/oslc/os/{resource_type}/{resource_id}`, and nothing else. It sends
+the update form IBM documents, a `POST` with `x-method-override: PATCH` and
+`patchtype: MERGE` (child objects the attributes do not list are kept),
+through the connector helper `update_work_order` also uses (see
+[How updates are sent](../connectors/maximo.md#how-updates-are-sent)):
 
 - `resource_type` must be an object-structure name: ASCII letters, digits and
   `_` (`mxwo`, `MXASSET`, a site's own `ZZ_WO`).
@@ -114,6 +118,13 @@ applied. A write that fails returns an error entry: a Machina error keeps its
 message, and any other exception, such as an httpx transport error, is
 reported by its type only (`maximo_raw_attribute_update failed: ConnectError`),
 because its text can carry the request URL or a header value.
+
+Each write that reaches the vendor is logged as `vendor_write_completed` with
+the connector, the operation and the status code only, never the body or the
+request: at INFO for a 2xx status, at WARNING for any other (a vendor refusal,
+a gateway error, a redirect to a login page), since the write was then most
+likely not applied. A write that raises is logged as `vendor_write_failed`
+(WARNING) with the exception type.
 
 | Tool | Connector | Parameters |
 |------|-----------|------------|

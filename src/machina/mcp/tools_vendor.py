@@ -64,12 +64,19 @@ def _write_result(connector: str, operation: str, resp: Any) -> dict[str, Any]:
     A body that is not JSON (an empty success, a proxy's error page) is
     reported as ``{}``, never as an error: the write may have been applied,
     and the status code says what happened.
+
+    The response is logged at INFO for a 2xx status and at WARNING for any
+    other (a vendor refusal, a gateway error, a redirect to a login page),
+    since the write was most likely not applied. The log names the connector,
+    the operation and the status only: the body and the request can carry
+    record values and credentials.
     """
     try:
         body = resp.json() if resp.content else {}
     except ValueError:
         body = {}
-    logger.info(
+    log = logger.info if 200 <= resp.status_code < 300 else logger.warning
+    log(
         "vendor_write_completed",
         connector=connector,
         operation=operation,
@@ -159,6 +166,7 @@ async def maximo_raw_attribute_update(
 
     This bypasses the domain model and patches arbitrary Maximo
     attributes.  Use only when the domain-level tools are insufficient.
+    The update is merged: child objects the attributes do not list are kept.
 
     Args:
         resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):

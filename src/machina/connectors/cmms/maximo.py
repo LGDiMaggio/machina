@@ -21,15 +21,22 @@ Caller-supplied filter values (asset, work order and item numbers, status
 codes) reach an ``oslc.where`` clause only through :func:`_oslc_eq`, which
 refuses any value Maximo's query syntax would read as more than a literal.
 
+Maximo addresses a record by the URI it returns for it, whose last segment
+is a *rest id* derived from the record's primary key, not by a business key
+such as ``wonum``. Every update goes through
+:meth:`MaximoConnector._patch_resource`, a ``POST`` to that URI with
+``x-method-override: PATCH``, the form IBM documents.
+
 See also:
     https://developer.ibm.com/apis/catalog/maximo--maximo-manage-rest-api/Introduction
+    https://ibm-maximo-dev.github.io/maximo-restapi-documentation/crud/create_and_update
 """
 
 from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import structlog
 from pydantic import Field
@@ -472,9 +479,13 @@ class MaximoConnector:
         assigned_to: str | None = None,
         description: str | None = None,
     ) -> WorkOrder:
-        """Update an existing work order in Maximo via PATCH.
+        """Update an existing work order in Maximo.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        Maximo addresses a record by the URI it returns for it, not by
+        ``wonum``, so the order is first looked up by ``wonum`` and the update
+        is sent to its URI through :meth:`_patch_resource`. Only non-``None``
+        fields are sent. ``close_work_order`` and ``cancel_work_order`` go
+        through this method.
 
         Args:
             work_order_id: Maximo work order number (``wonum``).
@@ -483,10 +494,17 @@ class MaximoConnector:
             description: New work order description.
 
         Returns:
-            The updated work order.
+            The updated work order, read back by ``wonum``.
+
+        Raises:
+            ConnectorError: If no field is given; if the ``wonum`` is refused
+                by :func:`_oslc_eq`, matches no work order, matches work
+                orders in more than one site, or Maximo returns no usable URI
+                for it (all before anything is written); or if Maximo rejects
+                the update.
+            ConnectorAuthError: If Maximo answers the update with 401.
         """
         self._ensure_connected()
-        httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = maximo_mapper.reverse_status(status)
@@ -496,18 +514,8 @@ class MaximoConnector:
             payload["description"] = description
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
-        # The read-back after the PATCH looks the order up through oslc.where:
-        # refuse an ID it could not express before writing, not after.
-        _oslc_eq("wonum", work_order_id)
-        headers = {**self._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "PATCH",
-                f"{self.url}/maximo/oslc/os/mxwo/{path_segment(work_order_id)}",
-                headers=headers,
-                json=payload,
-            )
+        rest_id = await self._work_order_rest_id(work_order_id)
+        resp = await self._patch_resource("mxwo", rest_id, payload)
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code not in (200, 204):
@@ -688,18 +696,71 @@ class MaximoConnector:
         )
         return all_items
 
+    async def _work_order_rest_id(self, work_order_id: str) -> str:
+        """Look up the rest id of the work order whose ``wonum`` is ``work_order_id``.
+
+        A ``wonum`` is unique only within a site, and the rest id that ends a
+        work order's URI is derived from ``wonum`` and ``siteid``, so it is
+        read from the ``href`` Maximo returns, never built. Only the rest id is
+        kept: the URI's host is the one Maximo sees itself on (an internal
+        name behind a proxy), so the update goes to the configured URL like
+        every other request. It is returned decoded; :meth:`_patch_resource`
+        encodes it again as one path segment and refuses one that could leave
+        it.
+
+        Raises:
+            ConnectorError: If the ``wonum`` is refused by :func:`_oslc_eq`
+                (before any request), matches no work order, matches work
+                orders in more than one site, or the matching member carries
+                no work-order URI. No message repeats a value Maximo returned.
+        """
+        # Two rows are enough to tell one match from several.
+        members = await self._oslc_get(
+            "mxwo",
+            oslc_where=_oslc_eq("wonum", work_order_id),
+            oslc_select="siteid",
+            page_size=2,
+            first_page_only=True,
+        )
+        if not members:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        if len(members) > 1:
+            raise ConnectorError(
+                f"Work order {work_order_id} exists in more than one site — refusing to "
+                "guess which one to update"
+            )
+        href = members[0].get("href")
+        try:
+            path = urlsplit(href).path if isinstance(href, str) else ""
+        except ValueError:  # an unparseable href, such as "http://[x"
+            path = ""
+        collection, _, rest_id = path.rpartition("/")
+        if not collection.lower().endswith("/os/mxwo"):
+            raise ConnectorError(
+                f"Maximo returned no work-order URI for work order {work_order_id}"
+            )
+        return unquote(rest_id)
+
     @sandbox_aware
     async def _patch_resource(
         self, object_structure: str, resource_id: str, attributes: dict[str, Any]
     ) -> Any:
-        """PATCH raw attributes onto one resource of an OSLC object structure.
+        """Update attributes of one resource of an OSLC object structure.
 
-        The write path of the ``maximo_raw_attribute_update`` MCP vendor tool.
-        Both values come from MCP-client input; :func:`_oslc_resource_path`
-        keeps the PATCH on one resource of one object structure, and checks
-        them again here so a direct call is held to the same rule. Like the
+        The one Maximo update helper: ``update_work_order`` (and through it
+        ``close_work_order`` and ``cancel_work_order``) and the
+        ``maximo_raw_attribute_update`` MCP vendor tool write through it. It
+        sends the form IBM's REST API guide documents for an update: a
+        ``POST`` to the resource URI with ``x-method-override: PATCH``. It
+        also sends ``patchtype: MERGE``: without it, Maximo deletes the child
+        objects (meters, labour lines, …) of a listed child collection that
+        the body does not repeat.
+
+        The values can come from MCP-client input; :func:`_oslc_resource_path`
+        keeps the write on one resource of one object structure, and checks
+        them here so every caller is held to the same rule. Like the
         connector's other writes, it needs a connected connector, retries a
-        429 and never replays the PATCH after a network error or a 503.
+        429 and never replays the write after a network error or a 503.
 
         Args:
             object_structure: OSLC object-structure name, such as ``mxwo``.
@@ -714,12 +775,24 @@ class MaximoConnector:
             ConnectorError: If the connector is not connected, or
                 ``object_structure`` or ``resource_id`` is refused by
                 :func:`_oslc_resource_path`; both before any request.
-            httpx.HTTPError: A transport error from the PATCH, re-raised
+            httpx.HTTPError: A transport error from the write, re-raised
                 without a retry.
         """
         self._ensure_connected()
         url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
         httpx = _require_httpx()
-        headers = {**self._headers(), "Content-Type": "application/json"}
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "x-method-override": "PATCH",
+            "patchtype": "MERGE",
+        }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            return await request_with_retry(client, "PATCH", url, headers=headers, json=attributes)
+            return await request_with_retry(
+                client,
+                "POST",
+                url,
+                headers=headers,
+                params={"lean": "1"} if self._lean else None,
+                json=attributes,
+            )

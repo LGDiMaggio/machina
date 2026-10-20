@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+import structlog.testing
 
 from machina.connectors.base import set_sandbox_mode
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
@@ -279,8 +280,8 @@ class TestMaximoRawUpdateStaysOnOneResource:
     async def test_id_is_sent_as_one_path_segment(
         self, httpx_mock, resource_id: str, segment: str
     ) -> None:
-        path = f"/maximo/oslc/os/mxwo/{segment}"
-        httpx_mock.add_response(method="PATCH", url=f"{_MAXIMO_URL}{path}", status_code=204)
+        path = f"/maximo/oslc/os/mxwo/{segment}?lean=1"
+        httpx_mock.add_response(method="POST", url=f"{_MAXIMO_URL}{path}", status_code=204)
         result = await maximo_raw_attribute_update(
             _maximo_ctx(),
             resource_type="mxwo",
@@ -302,8 +303,8 @@ class TestMaximoRawUpdateStaysOnOneResource:
     @pytest.mark.asyncio
     async def test_rest_id_is_sent_unchanged(self, httpx_mock, resource_id: str) -> None:
         """Maximo rest IDs use only unreserved URL characters."""
-        path = f"/maximo/oslc/os/mxwo/{resource_id}"
-        httpx_mock.add_response(method="PATCH", url=f"{_MAXIMO_URL}{path}", status_code=204)
+        path = f"/maximo/oslc/os/mxwo/{resource_id}?lean=1"
+        httpx_mock.add_response(method="POST", url=f"{_MAXIMO_URL}{path}", status_code=204)
         result = await maximo_raw_attribute_update(
             _maximo_ctx(), resource_type="mxwo", resource_id=resource_id, attributes={"x": 1}
         )
@@ -318,7 +319,9 @@ class TestMaximoRawUpdateStaysOnOneResource:
     ) -> None:
         """Product and site-defined object structures alike."""
         httpx_mock.add_response(
-            method="PATCH", url=f"{_MAXIMO_URL}/maximo/oslc/os/{resource_type}/R1", status_code=204
+            method="POST",
+            url=f"{_MAXIMO_URL}/maximo/oslc/os/{resource_type}/R1?lean=1",
+            status_code=204,
         )
         result = await maximo_raw_attribute_update(
             _maximo_ctx(), resource_type=resource_type, resource_id="R1", attributes={"x": 1}
@@ -326,10 +329,12 @@ class TestMaximoRawUpdateStaysOnOneResource:
         assert result == {"status_code": 204, "body": {}}
 
     @pytest.mark.asyncio
-    async def test_attributes_patched_with_connector_auth(self, httpx_mock) -> None:
+    async def test_attributes_sent_as_a_merge_update_with_connector_auth(self, httpx_mock) -> None:
+        """The update form IBM documents: POST with ``x-method-override: PATCH``.
+        ``patchtype: MERGE`` keeps the child objects the attributes do not list."""
         httpx_mock.add_response(
-            method="PATCH",
-            url=f"{_MAXIMO_URL}/maximo/oslc/os/MXASSET/PUMP_201",
+            method="POST",
+            url=f"{_MAXIMO_URL}/maximo/oslc/os/MXASSET/PUMP_201?lean=1",
             json={"description": "Pump"},
         )
         result = await maximo_raw_attribute_update(
@@ -342,16 +347,18 @@ class TestMaximoRawUpdateStaysOnOneResource:
         [request] = httpx_mock.get_requests()
         assert request.headers["apikey"] == "k"
         assert request.headers["Content-Type"] == "application/json"
+        assert request.headers["x-method-override"] == "PATCH"
+        assert request.headers["patchtype"] == "MERGE"
         assert json.loads(request.content) == {"description": "Pump"}
 
 
 class TestMaximoRawUpdateHttpFailures:
-    """The raw PATCH follows PATCH's retry policy: a 429 is retried, because
-    Maximo refused it, but a network error or a 503 is not replayed, because
-    the first PATCH may already have been applied. pytest-httpx answers each
+    """The raw update is a POST and follows POST's retry policy: a 429 is
+    retried, because Maximo refused it, but a network error or a 503 is not
+    replayed, because the first POST may already have been applied. pytest-httpx answers each
     registered response once, so a replay would find no response."""
 
-    _URL = f"{_MAXIMO_URL}/maximo/oslc/os/mxwo/WO-1"
+    _URL = f"{_MAXIMO_URL}/maximo/oslc/os/mxwo/WO-1?lean=1"
 
     @pytest.fixture(autouse=True)
     def _no_backoff_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -374,24 +381,24 @@ class TestMaximoRawUpdateHttpFailures:
 
     @pytest.mark.asyncio
     async def test_non_json_body_keeps_the_status(self, httpx_mock) -> None:
-        """A proxy's error page is not an error entry: the PATCH may have applied."""
+        """A proxy's error page is not an error entry: the write may have applied."""
         httpx_mock.add_response(
-            method="PATCH", url=self._URL, status_code=502, text="<html>Bad Gateway</html>"
+            method="POST", url=self._URL, status_code=502, text="<html>Bad Gateway</html>"
         )
         result = await self._update()
         assert result == {"status_code": 502, "body": {}}
 
     @pytest.mark.asyncio
     async def test_503_is_reported_without_a_replay(self, httpx_mock) -> None:
-        httpx_mock.add_response(method="PATCH", url=self._URL, status_code=503)
+        httpx_mock.add_response(method="POST", url=self._URL, status_code=503)
         result = await self._update()
         assert result == {"status_code": 503, "body": {}}
         assert len(httpx_mock.get_requests()) == 1
 
     @pytest.mark.asyncio
     async def test_429_is_retried(self, httpx_mock) -> None:
-        httpx_mock.add_response(method="PATCH", url=self._URL, status_code=429)
-        httpx_mock.add_response(method="PATCH", url=self._URL, status_code=204)
+        httpx_mock.add_response(method="POST", url=self._URL, status_code=429)
+        httpx_mock.add_response(method="POST", url=self._URL, status_code=204)
         result = await self._update()
         assert result == {"status_code": 204, "body": {}}
         assert len(httpx_mock.get_requests()) == 2
@@ -399,7 +406,7 @@ class TestMaximoRawUpdateHttpFailures:
     @pytest.mark.asyncio
     async def test_vendor_error_is_returned_as_sent(self, httpx_mock) -> None:
         body = {"Error": {"reasonCode": "BMXAA4214E", "statusCode": "400"}}
-        httpx_mock.add_response(method="PATCH", url=self._URL, status_code=400, json=body)
+        httpx_mock.add_response(method="POST", url=self._URL, status_code=400, json=body)
         result = await self._update()
         assert result == {"status_code": 400, "body": body}
         assert len(httpx_mock.get_requests()) == 1
@@ -515,3 +522,65 @@ class TestVendorWriteOutcomes:
         result = await write(connected=False)
         assert result == {"error": "Not connected — call connect() first"}
         assert httpx_mock.get_requests() == []
+
+    @pytest.mark.parametrize(
+        ("status_code", "level"),
+        [
+            (200, "info"),
+            (204, "info"),
+            pytest.param(302, "warning", id="302-redirect-to-a-login-page"),
+            (400, "warning"),
+            (503, "warning"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_maximo_write_is_logged_by_its_status_only(
+        self, httpx_mock, status_code: int, level: str
+    ) -> None:
+        """A write Maximo did not accept is logged at WARNING. The log names the
+        connector, the operation and the status: never the body, which can
+        repeat record values, nor the request and its credentials."""
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{_MAXIMO_URL}/maximo/oslc/os/mxwo/WO-1?lean=1",
+            status_code=status_code,
+            json={"Error": {"message": "BMXAA4214E WO-1 SECRET-VALUE"}},
+        )
+        with structlog.testing.capture_logs() as logs:
+            result = await _maximo_patch()
+        assert result["status_code"] == status_code
+        assert [e for e in logs if e["event"] == "vendor_write_completed"] == [
+            {
+                "event": "vendor_write_completed",
+                "connector": "MaximoConnector",
+                "operation": "maximo_raw_attribute_update",
+                "status_code": status_code,
+                "log_level": level,
+            }
+        ]
+        assert "SECRET-VALUE" not in str(logs)
+
+    @pytest.mark.parametrize(("status_code", "level"), [(201, "info"), (403, "warning")])
+    @pytest.mark.asyncio
+    async def test_sap_write_is_logged_by_its_status_only(
+        self, httpx_mock, status_code: int, level: str
+    ) -> None:
+        httpx_mock.add_response(method="GET", headers={"x-csrf-token": "TOK1"})
+        httpx_mock.add_response(
+            method="POST",
+            url=_SAP_NOTIFICATION_URL,
+            status_code=status_code,
+            json={"error": {"message": "SECRET-VALUE"}},
+        )
+        with structlog.testing.capture_logs() as logs:
+            await _sap_notify()
+        [completed] = [e for e in logs if e["event"] == "vendor_write_completed"]
+        assert completed == {
+            "event": "vendor_write_completed",
+            "connector": "SapPmConnector",
+            "operation": "sap_pm_raw_iw38_notification",
+            "status_code": status_code,
+            "log_level": level,
+        }
+        assert "SECRET-VALUE" not in str(logs)
+        assert "TOK1" not in str(logs)
