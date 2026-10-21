@@ -243,7 +243,11 @@ def format_alarms_context(alarms: list[Alarm]) -> str:
 
 
 def format_spare_parts_context(parts: list[SparePart]) -> str:
-    """Format spare parts availability for the prompt.
+    """Format the spare parts a successful lookup returned for the asset.
+
+    An empty list is a lookup that found no part, worded apart from a lookup
+    that never ran or failed (see ``spare_parts_unchecked`` in
+    :func:`build_context_message`).
 
     Args:
         parts: List of spare parts.
@@ -252,13 +256,24 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
         A formatted spare parts summary.
     """
     if not parts:
-        return "No spare parts data available."
+        return "**Spare Parts:** none listed for this asset."
 
     lines = [f"**Spare Parts ({len(parts)}):**"]
     for part in parts:
         status = "✅ In stock" if part.stock_quantity > 0 else "❌ Out of stock"
         lines.append(f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}")
     return "\n".join(lines)
+
+
+# The line shown in place of the spare-parts section when the prefetch has no
+# result, keyed by the runtime's ``spare_parts_unchecked`` reason.
+_SPARE_PARTS_UNCHECKED: dict[str, str] = {
+    "unsupported": (
+        "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts by "
+        "asset. A specific part can be checked by its SKU with the check_spare_parts tool."
+    ),
+    "failed": "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
+}
 
 
 def format_resolved_entities(
@@ -1072,6 +1087,7 @@ def build_context_message(
     work_orders: list[WorkOrder] | None = None,
     alarms: list[Alarm] | None = None,
     spare_parts: list[SparePart] | None = None,
+    spare_parts_unchecked: str | None = None,
     document_results: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a context injection message from all available data.
@@ -1088,7 +1104,13 @@ def build_context_message(
         asset: The asset the runtime committed to, if any.
         work_orders: Work orders prefetched for the asset.
         alarms: Active alarms prefetched for the asset.
-        spare_parts: Spare parts prefetched for the asset.
+        spare_parts: Spare parts prefetched for the asset; ``[]`` when the
+            lookup found none.
+        spare_parts_unchecked: Why the spare-parts prefetch has no result:
+            ``"unsupported"`` (the connector cannot filter spare parts by
+            asset) or ``"failed"`` (the lookup raised). Rendered as one "not
+            checked" line, only when ``spare_parts`` is ``None``, so the model
+            never reads an unchecked lookup as "no spare parts".
         document_results: RAG retrieval results.
 
     Returns:
@@ -1110,6 +1132,8 @@ def build_context_message(
 
     if spare_parts is not None:
         sections.append(format_spare_parts_context(spare_parts))
+    elif spare_parts_unchecked in _SPARE_PARTS_UNCHECKED:
+        sections.append(_SPARE_PARTS_UNCHECKED[spare_parts_unchecked])
 
     if document_results is not None:
         sections.append(format_document_results(document_results))

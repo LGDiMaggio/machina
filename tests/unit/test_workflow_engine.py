@@ -873,8 +873,9 @@ class TestErrorPolicies:
 class _SkuOnlySparePartsConnector:
     """CMMS whose ``read_spare_parts`` takes ``sku`` only.
 
-    A step passing ``asset_id`` makes the call raise ``TypeError``, as
-    the Maximo and UpKeep connectors did under the alarm workflow.
+    A step passing ``asset_id`` makes the call raise ``TypeError``: any
+    connector whose method signature does not accept a step's inputs fails
+    this way, whatever the method.
     """
 
     capabilities: ClassVar[list[str]] = ["read_spare_parts"]

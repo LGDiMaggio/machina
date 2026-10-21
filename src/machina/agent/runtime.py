@@ -49,7 +49,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorUnsupportedFilterError, LLMError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -1678,13 +1678,30 @@ class Agent:
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for name, result in zip(task_names, results, strict=False):
-                if isinstance(result, BaseException):
+                if name == "spare_parts" and isinstance(result, ConnectorUnsupportedFilterError):
+                    # A CMMS that cannot filter spare parts by asset refuses on
+                    # every turn that resolves an asset: expected, so INFO. No
+                    # unfiltered fallback (the inventory is not this asset's
+                    # parts); the prompt says availability was not checked
+                    # instead of implying there are none.
+                    logger.info(
+                        "context_gather_skipped",
+                        agent=self.name,
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        reason="unsupported_filter",
+                    )
+                    context["spare_parts_unchecked"] = "unsupported"
+                elif isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",
                         agent=self.name,
                         source=name,
                         error=str(result),
                     )
+                    if name == "spare_parts":
+                        context["spare_parts_unchecked"] = "failed"
                 else:
                     context[name] = result
 
@@ -2130,6 +2147,7 @@ class Agent:
             work_orders=context_data.get("work_orders"),
             alarms=context_data.get("alarms"),
             spare_parts=context_data.get("spare_parts"),
+            spare_parts_unchecked=context_data.get("spare_parts_unchecked"),
             document_results=context_data.get("document_results"),
         )
         if context_str:
@@ -3094,10 +3112,12 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
-                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    sku=args.get("sku", ""),
-                )
+                # Only the filters the model gave: an empty value is no filter.
+                # A provider refuses a filter it cannot apply by raising
+                # ConnectorUnsupportedFilterError, which _execute_tool returns
+                # to the model as a tool error.
+                filters = {key: args[key] for key in ("asset_id", "sku") if args.get(key)}
+                parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
                 return [p.model_dump(mode="json") for p in parts]
             return {"error": "No spare parts connector available"}
 

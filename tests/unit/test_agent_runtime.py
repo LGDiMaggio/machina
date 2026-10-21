@@ -9,7 +9,7 @@ import sys
 import time
 from types import ModuleType, SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, create_autospec, patch
 
 import httpx
 import pytest
@@ -38,6 +38,7 @@ from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
     ConnectorTimeoutError,
+    ConnectorUnsupportedFilterError,
     LLMError,
 )
 from machina.llm.provider import LLMProvider
@@ -404,9 +405,89 @@ class _RaisingReadConnector:
 
 
 class _SkuOnlySparePartsConnector(_FakeSparePartsConnector):
-    """``read_spare_parts`` with the Maximo/UpKeep signature: no ``asset_id``."""
+    """An off-contract ``read_spare_parts`` that takes no ``asset_id``.
+
+    Stands in for a custom connector whose signature does not match the
+    contract's ``(*, asset_id="", sku="")``: a call with ``asset_id`` raises
+    ``TypeError``.
+    """
 
     async def read_spare_parts(self, *, sku: str = "") -> list[SparePart]:
+        return []
+
+
+_ASSET_FILTER_REFUSAL = "This CMMS cannot filter spare parts by asset_id"
+
+_NO_ASSET_RELATION_INVENTORY = [
+    SparePart(sku="SKF-6310", name="Deep Groove Ball Bearing", stock_quantity=4),
+    SparePart(sku="FLT-GA55", name="Oil Filter", stock_quantity=2),
+]
+
+
+class _NoAssetRelationSparePartsConnector:
+    """Spare-parts provider on the contract whose inventory has no asset relation.
+
+    ``read_spare_parts`` has the contract's exact signature, autospecced so a
+    test can read back the filters each call was given (inside the method an
+    omitted filter and an explicit ``""`` look alike). An ``asset_id`` filter
+    is refused with ``ConnectorUnsupportedFilterError`` before any read.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    def __init__(self) -> None:
+        self.read_spare_parts = create_autospec(
+            self._read_spare_parts, side_effect=self._read_spare_parts
+        )
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def _read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        if asset_id:
+            raise ConnectorUnsupportedFilterError(_ASSET_FILTER_REFUSAL)
+        return [p for p in _NO_ASSET_RELATION_INVENTORY if not sku or p.sku == sku]
+
+
+class _FakeSparePartsOutageConnector:
+    """Spare-parts provider whose backend fails: a real error, not a refusal."""
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        raise ConnectorError("Spare-parts backend unavailable: HTTP 503")
+
+
+class _NoPartsForAssetConnector:
+    """Spare-parts provider that applies the asset filter and finds no part."""
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
         return []
 
 
@@ -1046,6 +1127,44 @@ class TestExecuteTool:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_check_spare_parts_sends_only_the_given_filters(self) -> None:
+        """An empty ``asset_id`` / ``sku`` is no filter, so it is not sent."""
+        conn = _NoAssetRelationSparePartsConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+
+        unfiltered = await agent._execute_tool("check_spare_parts", {})
+        by_sku = await agent._execute_tool(
+            "check_spare_parts", {"asset_id": "", "sku": "SKF-6310"}
+        )
+
+        assert [p["sku"] for p in unfiltered] == ["SKF-6310", "FLT-GA55"]
+        assert [p["sku"] for p in by_sku] == ["SKF-6310"]
+        assert conn.read_spare_parts.await_args_list == [call(), call(sku="SKF-6310")]
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_refused_asset_filter_is_a_tool_error(self) -> None:
+        """The refusal reaches the model through the read-tool guard, logged at INFO:
+        a CMMS that cannot filter by asset refuses on every such call, which is
+        expected, not a failure."""
+        from structlog.testing import capture_logs
+
+        conn = _NoAssetRelationSparePartsConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+
+        with capture_logs() as logs:
+            result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
+
+        assert result == {"error": _ASSET_FILTER_REFUSAL}
+        assert conn.read_spare_parts.await_args_list == [call(asset_id="P-201")]
+        [refusal] = [e for e in logs if e["event"] == "read_tool_failed"]
+        assert refusal["log_level"] == "info"
+        assert refusal["tool"] == "check_spare_parts"
+        assert refusal["error_type"] == "ConnectorUnsupportedFilterError"
+        assert not [e for e in logs if e["log_level"] == "warning"]
+
+    @pytest.mark.asyncio
     async def test_diagnose_failure_tool(self) -> None:
         plant = _make_plant()
         agent = Agent(plant=plant)
@@ -1166,11 +1285,11 @@ class TestReadToolFailureDegrades:
         assert result == {"error": error}
 
     @pytest.mark.asyncio
-    async def test_known_signature_mismatch_still_degrades(self) -> None:
-        """Safety net, not endorsement: Maximo/UpKeep ``read_spare_parts`` take no
-        ``asset_id`` (a known mismatch, tracked separately), so
-        ``check_spare_parts`` raises TypeError against them. Until that is fixed
-        the failure must reach the model instead of ending the turn."""
+    async def test_off_contract_signature_still_degrades(self) -> None:
+        """Safety net, not endorsement: a custom connector whose
+        ``read_spare_parts`` takes no ``asset_id`` is off the contract, and the
+        call raises TypeError. The failure reaches the model instead of ending
+        the turn."""
         agent = Agent(connectors=[_SkuOnlySparePartsConnector()])
 
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
@@ -3066,6 +3185,93 @@ class TestGatherContext:
         context = await agent._gather_context("spare parts for P-201", resolved)
         assert "spare_parts" in context
         assert len(context["spare_parts"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_refused_asset_filter_is_skipped_without_a_warning(self) -> None:
+        """A CMMS that cannot filter spare parts by asset refuses on every turn
+        that resolves an asset: expected, so INFO, not the warning a failure
+        gets. Nothing is prefetched in its place (no unfiltered fallback), and
+        the context records that availability was not checked."""
+        from structlog.testing import capture_logs
+
+        parts_conn = _NoAssetRelationSparePartsConnector()
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector(), parts_conn])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+
+        with capture_logs() as logs:
+            context = await agent._gather_context("spare parts for P-201", resolved)
+
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "unsupported"
+        assert parts_conn.read_spare_parts.await_args_list == [call(asset_id="P-201")]
+        assert "work_orders" in context  # the other sources are still gathered
+        [skipped] = [e for e in logs if e["event"] == "context_gather_skipped"]
+        assert skipped["log_level"] == "info"
+        assert skipped["agent"] == agent.name
+        assert skipped["source"] == "spare_parts"
+        assert skipped["asset_id"] == "P-201"
+        assert skipped["operation"] == "gather_context"
+        assert skipped["reason"] == "unsupported_filter"
+        assert not [e for e in logs if e["log_level"] == "warning"]
+
+    @pytest.mark.asyncio
+    async def test_spare_parts_backend_failure_still_warns(self) -> None:
+        """Only a refusal is quiet: any other error stays a warning."""
+        from structlog.testing import capture_logs
+
+        agent = Agent(plant=_make_plant(), connectors=[_FakeSparePartsOutageConnector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+
+        with capture_logs() as logs:
+            context = await agent._gather_context("spare parts for P-201", resolved)
+
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "failed"
+        assert not [e for e in logs if e["event"] == "context_gather_skipped"]
+        [error] = [e for e in logs if e["event"] == "context_gather_error"]
+        assert error["log_level"] == "warning"
+        assert error["source"] == "spare_parts"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("connector", "shown", "not_shown"),
+        [
+            (
+                _NoAssetRelationSparePartsConnector,
+                "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts "
+                "by asset. A specific part can be checked by its SKU with the "
+                "check_spare_parts tool.",
+                "none listed",
+            ),
+            (
+                _FakeSparePartsOutageConnector,
+                "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
+                "none listed",
+            ),
+            (
+                _NoPartsForAssetConnector,
+                "**Spare Parts:** none listed for this asset.",
+                "not checked",
+            ),
+        ],
+        ids=["unsupported", "failed", "empty"],
+    )
+    async def test_the_prompt_tells_unchecked_from_none_listed(
+        self, connector: type, shown: str, not_shown: str
+    ) -> None:
+        """The model must not read "could not check" as "no spare parts"."""
+        agent = Agent(plant=_make_plant(), connectors=[connector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        context = await agent._gather_context("spare parts for P-201", resolved)
+
+        messages = agent._build_messages("spare parts for P-201", "chat1", context)
+
+        [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
+        assert shown in retrieved.splitlines()
+        assert not_shown not in retrieved
 
     @pytest.mark.asyncio
     async def test_with_documents(self) -> None:

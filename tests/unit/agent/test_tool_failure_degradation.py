@@ -7,7 +7,8 @@ were ported from PR #114 (an alternative implementation of the same guard),
 keeping the scenarios that suite does not cover:
 
 - a transient read failure recovers on the model's retry;
-- a failed read is logged with the agent, tool and argument names;
+- a failed read is logged with the agent, tool and argument names, at WARNING,
+  except a refused filter (``ConnectorUnsupportedFilterError``), at INFO;
 - a failed read whose retry is spent is replayed with a note saying it failed;
 - a raising write still aborts the turn, so it is never executed twice, on the
   direct path and on the two-turn confirmation path.
@@ -36,7 +37,13 @@ from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.plant import Plant
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import ConnectorError, DomainValidationError, LLMError, MachinaError
+from machina.exceptions import (
+    ConnectorError,
+    ConnectorUnsupportedFilterError,
+    DomainValidationError,
+    LLMError,
+    MachinaError,
+)
 
 _ANSWER = "The maintenance system did not answer, so I could not look that up."
 
@@ -225,6 +232,43 @@ class TestReadFailureDegradesToToolError:
         # Argument names, not values: values can carry the user's free text.
         assert event["arg_keys"] == ["asset_id", "status"]
         assert "args" not in event
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "level"),
+        [
+            (ConnectorUnsupportedFilterError("This CMMS cannot filter by asset_id"), "info"),
+            (ConnectorError("CMMS answered HTTP 500"), "warning"),
+        ],
+        ids=["unsupported_filter", "connector_error"],
+    )
+    async def test_only_an_unsupported_filter_is_logged_below_warning(
+        self, error: ConnectorError, level: str
+    ) -> None:
+        """A CMMS refusing a filter it cannot apply is an expected outcome; any
+        other failure is degraded functionality. The model sees both alike."""
+        conn = _FailingConnector(Capability.READ_WORK_ORDERS, error)
+        agent = Agent(plant=_plant(), connectors=[conn])
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        def _capture(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+            events.append((method, dict(event_dict)))
+            return event_dict
+
+        structlog.configure(processors=[_capture, structlog.processors.JSONRenderer()])
+        try:
+            result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
+        finally:
+            structlog.reset_defaults()
+
+        assert result == {"error": str(error)}
+        [(method, event)] = [(m, e) for m, e in events if e.get("event") == "read_tool_failed"]
+        assert method == level
+        assert event["tool"] == "read_work_orders"
+        assert event["asset_id"] == "P-201"
+        assert event["operation"] == "execute_tool"
+        assert event["error_type"] == type(error).__name__
+        assert event["error"] == str(error)
 
 
 _FILTER_REFUSAL = "asset_id contains '%', which a Maximo oslc.where value cannot carry"

@@ -14,7 +14,7 @@ from typing import Any
 import structlog
 
 from machina.agent.prompts import safe_text
-from machina.exceptions import MachinaError
+from machina.exceptions import ConnectorUnsupportedFilterError, MachinaError
 from machina.observability.logging import traceback_text
 
 logger = structlog.get_logger(__name__)
@@ -28,6 +28,11 @@ def read_tool_error(exc: Exception, event: str, **context: Any) -> dict[str, str
     user-home / UNC paths (:func:`~machina.agent.prompts.safe_text`) before it
     reaches the LLM; an exception without a message (httpx timeouts often have
     none) is reported by its type name.
+
+    The failure is logged at WARNING, except a
+    :class:`~machina.exceptions.ConnectorUnsupportedFilterError`: a connector
+    refusing a filter it cannot apply is an expected outcome (it recurs on
+    every such call), so it is logged at INFO, with the same fields.
 
     Args:
         exc: The exception the read raised.
@@ -54,5 +59,6 @@ def read_tool_error(exc: Exception, event: str, **context: Any) -> dict[str, str
     # (``traceback_text`` says why not as ``exc_info``).
     if not isinstance(exc, MachinaError):
         context["exception"] = traceback_text(exc)
-    logger.warning(event, **context, error_type=type(exc).__name__, error=str(exc))
+    log = logger.info if isinstance(exc, ConnectorUnsupportedFilterError) else logger.warning
+    log(event, **context, error_type=type(exc).__name__, error=str(exc))
     return {"error": safe_text(str(exc) or type(exc).__name__)}

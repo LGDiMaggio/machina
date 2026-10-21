@@ -143,7 +143,19 @@ class TestFormatSpareParts:
     """Test spare parts context formatting."""
 
     def test_empty(self) -> None:
-        assert "No spare parts" in format_spare_parts_context([])
+        """A successful lookup that found nothing, distinct from "not checked"."""
+        assert format_spare_parts_context([]) == "**Spare Parts:** none listed for this asset."
+
+    def test_parts_render_one_line_each(self) -> None:
+        parts = [
+            SparePart(sku="SKF-6310", name="Bearing 6310", stock_quantity=4),
+            SparePart(sku="BELT-001", name="Belt", stock_quantity=0),
+        ]
+        assert format_spare_parts_context(parts) == (
+            "**Spare Parts (2):**\n"
+            "  - Bearing 6310 (SKU: SKF-6310) — Qty: 4 | ✅ In stock\n"
+            "  - Belt (SKU: BELT-001) — Qty: 0 | ❌ Out of stock"
+        )
 
     def test_in_stock(self) -> None:
         parts = [
@@ -442,6 +454,31 @@ class TestBuildContextMessage:
         )
         assert "P-201" in text
         assert "No work orders" in text
+
+    @pytest.mark.parametrize(
+        ("unchecked", "line"),
+        [
+            (
+                "unsupported",
+                "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts "
+                "by asset. A specific part can be checked by its SKU with the "
+                "check_spare_parts tool.",
+            ),
+            (
+                "failed",
+                "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
+            ),
+        ],
+    )
+    def test_unchecked_spare_parts_render_one_line(self, unchecked: str, line: str) -> None:
+        assert build_context_message(spare_parts_unchecked=unchecked) == line
+
+    def test_no_unchecked_line_when_parts_were_read(self) -> None:
+        parts = [SparePart(sku="SKF-6310", name="Bearing 6310", stock_quantity=4)]
+        text = build_context_message(spare_parts=parts, spare_parts_unchecked="failed")
+        assert text == (
+            "**Spare Parts (1):**\n  - Bearing 6310 (SKU: SKF-6310) — Qty: 4 | ✅ In stock"
+        )
 
     def test_with_alarms(self) -> None:
         alarms = [
