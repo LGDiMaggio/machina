@@ -26,8 +26,10 @@ __all__ = [
     "UPKEEP_PRIORITY_MAP",
     "UPKEEP_STATUS_MAP",
     "parse_asset",
+    "parse_asset_part_ids",
     "parse_datetime",
     "parse_maintenance_plans",
+    "parse_part_record",
     "parse_spare_part",
     "parse_work_order",
     "reverse_priority",
@@ -197,6 +199,66 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     )
 
 
+def parse_asset_part_ids(body: Any, asset_id: str) -> list[str]:
+    """Return the IDs of the parts an UpKeep asset lists, each once, in list order.
+
+    ``GET /api/v2/assets/<ID>`` answers ``{"success": true, "result": {...}}``,
+    whose ``parts`` holds the IDs of the parts associated with the asset. A
+    missing or ``null`` ``parts`` lists none, but only in the requested
+    asset's own record. See
+    https://developers.onupkeep.com/#get-a-specific-asset.
+
+    Args:
+        body: The decoded response body. A body without ``result`` is read as
+            the asset record itself.
+        asset_id: The ID of the asset that was requested.
+
+    Raises:
+        TypeError: If the body or its ``result`` is not an object, ``parts``
+            is not a list, or an entry is not a string.
+        ValueError: If the record's ``id`` is not ``asset_id``, or an entry is
+            an empty string.
+    """
+    record = _unwrap_result(body)
+    if record.get("id") != asset_id:
+        raise ValueError("the response is not the requested asset's record")
+    parts = record.get("parts")
+    if parts is None:
+        return []
+    if not isinstance(parts, list):
+        raise TypeError("the asset's 'parts' is not a list")
+    for position, entry in enumerate(parts):
+        if not isinstance(entry, str):
+            raise TypeError(f"entry {position} of the asset's 'parts' is not a string")
+        if not entry:
+            raise ValueError(f"entry {position} of the asset's 'parts' is empty")
+    return list(dict.fromkeys(parts))
+
+
+def parse_part_record(body: Any) -> dict[str, Any]:
+    """Return the part record of a ``GET /api/v2/parts/<ID>`` response.
+
+    The response is ``{"success": true, "result": {...}}``. See
+    https://developers.onupkeep.com/#get-a-specific-part.
+
+    Args:
+        body: The decoded response body. A body without ``result`` is read as
+            the part record itself.
+
+    Raises:
+        TypeError: If the body or its ``result`` is not an object, or the
+            record's ``id`` is not a string.
+        ValueError: If the record has no ``id``, or an empty one.
+    """
+    record = _unwrap_result(body)
+    part_id = record.get("id")
+    if part_id is None or part_id == "":
+        raise ValueError("the part record has no 'id'")
+    if not isinstance(part_id, str):
+        raise TypeError("the part record's 'id' is not a string")
+    return record
+
+
 def parse_maintenance_plans(
     data: dict[str, Any],
     *,
@@ -271,6 +333,20 @@ def reverse_status(status: WorkOrderStatus) -> str:
 # ---------------------------------------------------------------------------
 # Module-private helpers (only used by parse_* / reverse_*)
 # ---------------------------------------------------------------------------
+
+
+def _unwrap_result(body: Any) -> dict[str, Any]:
+    """Return a single-record response's ``result``, or the body when it has none.
+
+    Raises:
+        TypeError: If the body or its ``result`` is not an object.
+    """
+    if not isinstance(body, dict):
+        raise TypeError("the response body is not an object")
+    record = body.get("result", body)
+    if not isinstance(record, dict):
+        raise TypeError("the response's 'result' is not an object")
+    return record
 
 
 def _schedule_interval(schedule: dict[str, Any]) -> Interval:

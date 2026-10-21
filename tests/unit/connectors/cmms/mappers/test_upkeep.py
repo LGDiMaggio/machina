@@ -10,8 +10,10 @@ import pytest
 from machina.connectors.cmms.mappers.upkeep import (
     REVERSE_UPKEEP_STATUS,
     parse_asset,
+    parse_asset_part_ids,
     parse_datetime,
     parse_maintenance_plans,
+    parse_part_record,
     parse_spare_part,
     parse_work_order,
     reverse_priority,
@@ -113,6 +115,165 @@ class TestParseSparePartSku:
     def test_falls_back_to_id_when_neither_provided(self) -> None:
         sp = parse_spare_part({"id": "internal"})
         assert sp.sku == "internal"
+
+
+def _docs_asset_body(**result: Any) -> dict[str, Any]:
+    """Response of "Get a Specific Asset", GET /api/v2/assets/<ID>.
+
+    Taken from https://developers.onupkeep.com/, without the file objects and
+    ``customFields``. ``parts`` holds the IDs of the parts the asset lists.
+    Keyword arguments replace fields of ``result``.
+    """
+    record: dict[str, Any] = {
+        "id": "fjQXLsOvG7",
+        "serialNumber": "SER-100",
+        "model": "Deluxe 5500",
+        "name": "The Ultra Power Generator",
+        "barcode": "S5614B09118",
+        "location": "OPkIOYYZ0F",
+        "status": "active",
+        "category": "Generators",
+        "parentAsset": "0lcpd45AKe",
+        "subAssets": ["z40xOYM9yd"],
+        "parts": ["ydOS2PdR3a"],
+        "files": ["sKrlT2f3mf", "Vgwf41LLg1"],
+        "formItems": ["Ia536KS4RZ"],
+        "updatedAt": "2017-11-16T15:01:01",
+        "createdAt": "2017-11-16T15:01:01",
+    }
+    record.update(result)
+    return {"success": True, "result": record}
+
+
+def _docs_part_body(**result: Any) -> dict[str, Any]:
+    """Response of "Get a Specific Part", GET /api/v2/parts/<ID>.
+
+    Taken from https://developers.onupkeep.com/, without the image object and
+    ``customFieldsPart``. Keyword arguments replace fields of ``result``.
+    """
+    record: dict[str, Any] = {
+        "id": "1YHUWGVgdC",
+        "name": "Flux Capacitor",
+        "description": "This is what makes time travel possible.",
+        "cost": "88.00",
+        "quantity": "5",
+        "minimumQuantity": "1",
+        "partId": "654a1b433dc9596ef9af2a1f",
+        "partName": "PT-1",
+        "serial": "40161502",
+        "area": "Center console",
+        "category": "Filter",
+        "location": "jmHFWGVgd1",
+        "createdByUser": "pCmWGVgfW",
+        "files": ["MUfUCa0JBo", "FGyvo6raqZ"],
+        "createdAt": "2017-10-23T23:51:58.097Z",
+        "updatedAt": "2017-10-23T23:51:58.097Z",
+    }
+    record.update(result)
+    return {"success": True, "result": record}
+
+
+_DOCS_ASSET_ID = "fjQXLsOvG7"
+
+
+class TestParseAssetPartIds:
+    """The asset's ``parts`` list holds the IDs of the parts UpKeep associates with it."""
+
+    def test_documented_asset(self) -> None:
+        assert parse_asset_part_ids(_docs_asset_body(), _DOCS_ASSET_ID) == ["ydOS2PdR3a"]
+
+    def test_record_outside_result(self) -> None:
+        """A body without ``result`` is read as the record, as the connector's reads do."""
+        record = _docs_asset_body()["result"]
+        assert parse_asset_part_ids(record, _DOCS_ASSET_ID) == ["ydOS2PdR3a"]
+
+    @pytest.mark.parametrize("parts", ["missing", None, []], ids=["missing", "null", "empty"])
+    def test_no_parts_listed_is_an_empty_association(self, parts: object) -> None:
+        body = _docs_asset_body(parts=parts)
+        if parts == "missing":
+            del body["result"]["parts"]
+        assert parse_asset_part_ids(body, _DOCS_ASSET_ID) == []
+
+    def test_duplicates_keep_their_first_position(self) -> None:
+        body = _docs_asset_body(parts=["b", "a", "b", "c", "a"])
+        assert parse_asset_part_ids(body, _DOCS_ASSET_ID) == ["b", "a", "c"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({}, id="empty-object"),
+            pytest.param({"success": True}, id="no-result"),
+            pytest.param(_docs_asset_body(id="Zq8RtW3mKe"), id="another-asset"),
+            pytest.param(_docs_asset_body(id=None), id="id-null"),
+        ],
+    )
+    def test_a_body_that_is_not_the_assets_record_raises_value_error(self, body: object) -> None:
+        """Only the requested asset's own record can say it lists no parts."""
+        with pytest.raises(ValueError):
+            parse_asset_part_ids(body, _DOCS_ASSET_ID)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(["ydOS2PdR3a"], id="body-array"),
+            pytest.param("ydOS2PdR3a", id="body-string"),
+            pytest.param(None, id="body-null"),
+            pytest.param({"success": True, "result": None}, id="result-null"),
+            pytest.param({"success": True, "result": ["ydOS2PdR3a"]}, id="result-array"),
+            pytest.param({"success": True, "result": "fjQXLsOvG7"}, id="result-string"),
+            pytest.param(_docs_asset_body(parts="ydOS2PdR3a"), id="parts-string"),
+            pytest.param(_docs_asset_body(parts={"id": "ydOS2PdR3a"}), id="parts-object"),
+            pytest.param(_docs_asset_body(parts=[12345]), id="entry-number"),
+            pytest.param(_docs_asset_body(parts=[None]), id="entry-null"),
+            pytest.param(_docs_asset_body(parts=[True]), id="entry-boolean"),
+            pytest.param(
+                _docs_asset_body(parts=[{"id": "ydOS2PdR3a", "name": "Flux Capacitor"}]),
+                id="entry-object",
+            ),
+        ],
+    )
+    def test_malformed_body_raises_type_error(self, body: object) -> None:
+        with pytest.raises(TypeError):
+            parse_asset_part_ids(body, _DOCS_ASSET_ID)
+
+    def test_empty_entry_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            parse_asset_part_ids(_docs_asset_body(parts=["ydOS2PdR3a", ""]), _DOCS_ASSET_ID)
+
+
+class TestParsePartRecord:
+    """The part record of a single-part read, checked for an ``id``."""
+
+    def test_documented_part(self) -> None:
+        record = parse_part_record(_docs_part_body())
+        assert record["id"] == "1YHUWGVgdC"
+        assert record["name"] == "Flux Capacitor"
+
+    def test_record_outside_result(self) -> None:
+        record = parse_part_record(_docs_part_body()["result"])
+        assert record["id"] == "1YHUWGVgdC"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(["1YHUWGVgdC"], id="body-array"),
+            pytest.param(None, id="body-null"),
+            pytest.param({"success": True, "result": None}, id="result-null"),
+            pytest.param({"success": True, "result": ["1YHUWGVgdC"]}, id="result-array"),
+            pytest.param(_docs_part_body(id=12345), id="id-number"),
+        ],
+    )
+    def test_malformed_body_raises_type_error(self, body: object) -> None:
+        with pytest.raises(TypeError):
+            parse_part_record(body)
+
+    @pytest.mark.parametrize("part_id", ["missing", None, ""], ids=["missing", "null", "empty"])
+    def test_record_without_id_raises_value_error(self, part_id: object) -> None:
+        body = _docs_part_body(id=part_id)
+        if part_id == "missing":
+            del body["result"]["id"]
+        with pytest.raises(ValueError):
+            parse_part_record(body)
 
 
 # Both documented schedules run from 2023-12-10 to 2024-10-09.

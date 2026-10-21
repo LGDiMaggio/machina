@@ -45,7 +45,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH |
-| `read_spare_parts` | Read parts inventory (`/api/v2/parts`) — prefers `partNumber` / `barcode` as SKU |
+| `read_spare_parts` | Read the parts inventory (`/api/v2/parts`), or with `asset_id` only the parts that asset lists (the asset, then each listed part); `sku` narrows either in memory — prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read PM templates with their schedules (`/api/v2/pm`) — one plan per PM schedule |
 | `read_maintenance_history` | Read an asset's completed work orders (`/api/v2/work-orders`, status `complete`) |
 
@@ -152,8 +152,12 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
 - **Work order types**: UpKeep uses `category` ("preventive" / "reactive"). The connector maps these to `PREVENTIVE` and `CORRECTIVE` respectively. Predictive and improvement types are not natively supported by UpKeep; for custom categories, subclass the connector.
-- **Spare part filtering by asset**: The connector fetches all parts and filters client-side, since UpKeep's parts API does not support asset-level filtering. Filtering by `sku` is supported in-memory.
-- **Record IDs in paths**: an asset or work-order ID is sent as one percent-encoded path segment (`/` becomes `%2F`). An empty ID, or one with an empty, `.` or `..` part between `/` or `\` separators, is refused with `ConnectorError` before any request.
+- **Spare parts by asset**: `/api/v2/parts` has no asset filter, so `read_spare_parts(asset_id=...)` reads the asset (`GET /api/v2/assets/<ID>`), whose `parts` list holds the IDs of its parts, then fetches each listed part (`GET /api/v2/parts/<ID>`). That is 1 + k requests for k listed parts; the inventory is not paged. A part listed twice is fetched and returned once. An asset that lists no parts returns an empty list after the one request.
+    - **Limit**: an asset listing more than 100 parts is refused with `ConnectorError` before any part request.
+    - **Refusals**: the read returns all of the asset's parts or none. It raises `ConnectorError` when UpKeep has no such asset, or cannot return a part the asset lists (HTTP 404). It raises `ConnectorSchemaError` when UpKeep's answer is not a well-formed record of that asset (a record with another `id`, a body without one, or a malformed `parts` list), when a part record is malformed, or when a part request returns a different part. Only the asset's own record can say it lists no parts.
+    - **SKU**: a `sku` narrows the asset's parts in memory, so both filters hold. Without `asset_id`, the connector pages `/api/v2/parts` and filters by `sku` in memory.
+    - **Not validated live**: this follows UpKeep's documented API reference and has not been validated against a live UpKeep instance.
+- **Record IDs in paths**: an asset, work-order or part ID is sent as one percent-encoded path segment (`/` becomes `%2F`). An empty ID, or one with an empty, `.` or `..` part between `/` or `\` separators, is refused before any request: with `ConnectorError` for an ID you pass, and with `ConnectorSchemaError`, refusing the whole read, for a part ID in an asset's `parts` list.
 - **Failure data**: UpKeep has no standard failure-mode fields. Failure-related data may be available in `WorkOrder.metadata` depending on your UpKeep configuration.
 - **Maintenance plans**: a PM template can schedule several assets, each with its own recurrence, so the connector returns one plan per schedule (soft-deleted templates are skipped). A meter-triggered schedule maps with an empty interval: the PM payload names the meter but not its unit. Legacy PM triggers (`/api/v2/preventive-maintenance`) are not read — their documented responses carry no asset, and PM templates reference them through `legacyPMId`.
 
