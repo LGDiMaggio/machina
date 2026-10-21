@@ -58,12 +58,12 @@ def _require_httpx() -> Any:
     return httpx
 
 
-def _raise_for_record_status(status_code: int, record: str) -> None:
+def _raise_for_record_status(status_code: int, kind: str) -> None:
     """Raise for a failed single-record GET, naming only the record kind and status."""
     if status_code == 401:
         raise ConnectorAuthError("UpKeep API key is invalid")
     if status_code != 200:
-        raise ConnectorError(f"UpKeep GET {record} failed: HTTP {status_code}")
+        raise ConnectorError(f"UpKeep GET {kind} failed: HTTP {status_code}")
 
 
 def _log_spare_parts_refused(asset_id: str, reason: str, **context: Any) -> None:
@@ -456,6 +456,9 @@ class UpKeepConnector:
         a partial list is never returned as the asset's complete one.
         """
         asset_path = f"/api/v2/assets/{path_segment(asset_id)}"
+        # path_segment sends a numeric ID as its digits, so the record's id is
+        # matched against the ID as text.
+        wanted_id = str(asset_id)
         httpx = _require_httpx()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await request_with_retry(
@@ -470,8 +473,7 @@ class UpKeepConnector:
                 # one path segment.
                 listed = [
                     (part_id, f"/api/v2/parts/{path_segment(part_id)}")
-                    # A numeric ID was sent as its digits, so it is matched as text.
-                    for part_id in upkeep_mapper.parse_asset_part_ids(resp.json(), str(asset_id))
+                    for part_id in upkeep_mapper.parse_asset_part_ids(resp.json(), wanted_id)
                 ]
             except (ValueError, TypeError, ConnectorError) as exc:
                 _log_spare_parts_refused(asset_id, "malformed_asset")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from machina.agent.citations import CITATION_PROMPT
 from machina.agent.entity_resolver import (
@@ -265,9 +265,9 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     return "\n".join(lines)
 
 
-# The line shown in place of the spare-parts section when the prefetch has no
-# result, keyed by the runtime's ``spare_parts_unchecked`` reason.
-_SPARE_PARTS_UNCHECKED: dict[str, str] = {
+SparePartsUnchecked = Literal["unsupported", "failed"]
+
+_SPARE_PARTS_UNCHECKED: dict[SparePartsUnchecked, str] = {
     "unsupported": (
         "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts by "
         "asset. A specific part can be checked by its SKU with the check_spare_parts tool."
@@ -1087,7 +1087,7 @@ def build_context_message(
     work_orders: list[WorkOrder] | None = None,
     alarms: list[Alarm] | None = None,
     spare_parts: list[SparePart] | None = None,
-    spare_parts_unchecked: str | None = None,
+    spare_parts_unchecked: SparePartsUnchecked | None = None,
     document_results: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a context injection message from all available data.
