@@ -75,9 +75,10 @@ def _map_members(
 
     A member without its identity attribute
     (:data:`~machina.connectors.cmms.mappers.maximo.IDENTITY_ATTRIBUTE`) is
-    refused: Maximo returns only each member's ``href`` when ``oslc.select``
+    refused. Maximo returns only each member's ``href`` when ``oslc.select``
     is missing or not applied (for example by a next-page link that drops
-    it), and such a member must not become an entity with an empty ID or a
+    it), and a site's object structure may not expose the attribute at all;
+    either way the member must not become an entity with an empty ID or a
     default status. So is one whose identity is not text or a whole number,
     and one the mapper cannot read (a field of an unexpected type, a value
     the domain model rejects). Any refusal ends the read: returning the
@@ -106,8 +107,8 @@ def _map_members(
             reason = "missing_identity"
             message = (
                 f"Maximo returned a {object_structure} record without its '{identity}' "
-                "attribute; a record that carries only its href means the query's "
-                "oslc.select was not applied"
+                "attribute: the query's oslc.select may not have been applied, or the "
+                "object structure may not expose that attribute"
             )
         elif isinstance(value, bool) or not isinstance(value, str | int):
             reason = "invalid_identity"

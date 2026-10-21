@@ -2278,7 +2278,8 @@ class TestReadsSelectAttributes:
     async def test_href_only_member_is_refused(
         self, httpx_mock, connector: MaximoConnector, read, object_structure: str, params, log
     ) -> None:
-        """What Maximo answers when the selection is missing or not applied."""
+        """What Maximo answers when the selection is missing or not applied, or
+        when the object structure does not expose the identity attribute."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
@@ -2292,9 +2293,9 @@ class TestReadsSelectAttributes:
             await read(connector)
         identity = _IDENTITY[object_structure]
         assert str(exc_info.value) == (
-            f"Maximo returned a {object_structure} record without its '{identity}' attribute; "
-            "a record that carries only its href means the query's oslc.select was not "
-            "applied — refusing to return a partial result"
+            f"Maximo returned a {object_structure} record without its '{identity}' attribute: "
+            "the query's oslc.select may not have been applied, or the object structure may "
+            "not expose that attribute — refusing to return a partial result"
         )
         assert _refusals(logs) == [_refusal(object_structure, "missing_identity", 0, **log)]
         # The member's href names Maximo's own host; neither carries it.
