@@ -347,6 +347,13 @@ REST mocking or VCR for recorded responses.
   `exception=traceback_text(exc)` (from `machina.observability.logging`),
   not `exc_info=True`, which can print your frames' local variables, auth
   headers included (see [Log Output](../deployment/security.md#log-output)).
+- **Accept the filters callers pass, and apply or refuse each one.**
+  - **Accept them.** The agent runtime, the workflow engine and the MCP tools call capability methods with keyword arguments. For example, the agent's context prefetch and the `alarm_to_workorder` workflow call `read_spare_parts(asset_id=...)` for the asset in play, and the agent tool also passes `sku=...`. So give the method every filter keyword in the table above, defaulting to `""` (no filter). A missing keyword fails every such call with `TypeError`.
+  - **Apply each one.** When both filters are given, both must hold.
+  - **Refuse what you cannot apply.** If your backend cannot apply a filter, raise `ConnectorUnsupportedFilterError` (a `ConnectorError`) before any request. Its message names the filter, never the caller's value.
+  - **Never drop it.** That passes the unfiltered result off as the filtered one: the whole inventory as one asset's parts.
+  - **Never answer `[]` for it.** That says nothing matches: "this asset has no spare parts".
+  - **What callers do with a refusal.** The agent relays it to the model, which can retry with a filter you support, such as `sku`. Its context prefetch reports the source as not checked, rather than empty.
 - **Graceful degradation.** Declare only the capabilities you actually
   support. If your CMMS doesn't expose spare parts, omit
   `Capability.READ_SPARE_PARTS` from the frozenset — the agent will simply
