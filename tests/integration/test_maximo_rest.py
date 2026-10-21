@@ -14,11 +14,11 @@ import structlog.testing
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
-from machina.domain.asset import Asset, AssetType
+from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import Workflow
@@ -29,10 +29,30 @@ OSLC = f"{BASE}/maximo/oslc"
 # Default query params that _oslc_get appends to every first request.
 _OSLC_PARAMS = {"lean": "1", "oslc.pageSize": "100"}
 
+# The attributes each read selects. Without oslc.select, Maximo answers a
+# collection query with each member's href only (IBM REST API guide,
+# "Selecting"). Written out here, not imported, so a change to a selection
+# fails these tests.
+_SELECT = {
+    "mxasset": (
+        "assetnum,siteid,description,location,manufacturer,serialnum,priority,parent,"
+        "classstructureid,assettype"
+    ),
+    "mxwo": (
+        "wonum,siteid,description,status,wopriority,worktype,assetnum,lead,"
+        "assignedownergroup,failurecode,problemcode,reportdate,changedate"
+    ),
+    "mxinventory": (
+        "itemnum,siteid,location,minlevel,item.description,invbalances{curbal},"
+        "invcost{avgcost,lastcost}"
+    ),
+    "mxpm": "pmnum,siteid,assetnum,description,frequency,frequnit,status",
+}
+
 
 def _oslc_url(object_structure: str, **extra: str) -> httpx.URL:
-    """Build a URL with the default OSLC query params."""
-    params = {**_OSLC_PARAMS, **extra}
+    """Build a URL with the default OSLC query params and the read's oslc.select."""
+    params = {**_OSLC_PARAMS, "oslc.select": _SELECT[object_structure], **extra}
     return httpx.URL(f"{OSLC}/os/{object_structure}", params=params)
 
 
@@ -507,6 +527,7 @@ class TestReadMaintenancePlans:
                         "description": "Monthly inspection",
                         "assetnum": "PUMP-201",
                         "frequency": 30,
+                        "frequnit": "DAYS",
                         "status": "ACTIVE",
                     },
                 ],
@@ -1879,3 +1900,857 @@ class TestRetryBehaviour:
         assets = await connector.read_assets()
         assert len(assets) == 1
         assert assets[0].id == "A1"
+
+
+# ---------------------------------------------------------------------------
+# Reads select the attributes the mappers read; members that cannot become
+# entities are refused
+# ---------------------------------------------------------------------------
+
+# Maximo reports a member's URI on the host it sees itself on; its last
+# segment is the record's rest id.
+_MEMBER_REST_ID = "_QkVERk9SRC9YMQ--"
+_MEMBER_HREF = "http://maximo-internal:9080/maximo/oslc/os/{os}/" + _MEMBER_REST_ID
+
+# One record per object structure as Maximo returns it for the read's
+# oslc.select with lean=1, after IBM's REST API guide, "Selecting"
+# (https://ibm-maximo-dev.github.io/maximo-restapi-documentation/query/selecting/):
+# the selected attributes that are not null (null ones are left out), a
+# related object's attributes as a nested object (item.description), a child
+# object as a list of rows (invbalances{curbal}), plus href and _rowstamp on
+# every member and the status_description Maximo adds next to a domain-bound
+# status. Not checked against a live Maximo.
+_RECORDS: dict[str, dict[str, object]] = {
+    "mxasset": {
+        "assetnum": "PUMP-201",
+        "siteid": "BEDFORD",
+        "description": "Centrifugal pump",
+        "location": "BR300",
+        "manufacturer": "GRUNDFOS",
+        "priority": 1,
+        "classstructureid": "1020",
+    },
+    "mxwo": {
+        "wonum": "WO-1",
+        "siteid": "BEDFORD",
+        "description": "Replace seal",
+        "status": "INPRG",
+        "status_description": "In Progress",
+        "wopriority": 2,
+        "worktype": "CM",
+        "assetnum": "PUMP-201",
+        "lead": "JSMITH",
+        "problemcode": "LEAK",
+        "reportdate": "2026-10-01T08:00:00+00:00",
+        "changedate": "2026-10-02T09:30:00+00:00",
+    },
+    "mxinventory": {
+        "itemnum": "BRG-6205",
+        "siteid": "BEDFORD",
+        "location": "CENTRAL",
+        "minlevel": 5,
+        "item": {"description": "Bearing SKF 6205"},
+        "invbalances": [{"curbal": 3}, {"curbal": 4}],
+        "invcost": [{"avgcost": 12.5, "lastcost": 13.0}],
+    },
+    "mxpm": {
+        "pmnum": "PM-1",
+        "siteid": "BEDFORD",
+        "assetnum": "PUMP-201",
+        "description": "Quarterly inspection",
+        "frequency": 3,
+        "frequnit": "MONTHS",
+        "status": "ACTIVE",
+    },
+}
+_IDENTITY = {"mxasset": "assetnum", "mxwo": "wonum", "mxinventory": "itemnum", "mxpm": "pmnum"}
+
+
+def _member(object_structure: str, record: dict[str, object] | None = None) -> dict[str, object]:
+    """A member as Maximo sends it: the record plus href and _rowstamp."""
+    base = _RECORDS[object_structure] if record is None else record
+    return {**base, "href": _MEMBER_HREF.format(os=object_structure), "_rowstamp": "3277171"}
+
+
+# Every public read: the call, its object structure, the query params it
+# adds to the defaults (oslc.select included by _oslc_url), and what its
+# maximo_member_refused warning names besides the object structure.
+_READS = [
+    pytest.param(
+        lambda c: c.read_assets(),
+        "mxasset",
+        {},
+        {"operation": "read_assets"},
+        id="read_assets",
+    ),
+    pytest.param(
+        lambda c: c.get_asset("PUMP-201"),
+        "mxasset",
+        {"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'},
+        {"operation": "get_asset", "asset_id": "PUMP-201"},
+        id="get_asset",
+    ),
+    pytest.param(
+        lambda c: c.read_work_orders(),
+        "mxwo",
+        {},
+        {"operation": "read_work_orders"},
+        id="read_work_orders",
+    ),
+    pytest.param(
+        lambda c: c.read_work_orders(asset_id="PUMP-201", status=WorkOrderStatus.IN_PROGRESS),
+        "mxwo",
+        {"oslc.where": 'assetnum="PUMP-201" and status="INPRG"'},
+        {"operation": "read_work_orders", "asset_id": "PUMP-201"},
+        id="read_work_orders-filtered",
+    ),
+    pytest.param(
+        lambda c: c.get_work_order("WO-1"),
+        "mxwo",
+        {"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'},
+        {"operation": "get_work_order"},
+        id="get_work_order",
+    ),
+    pytest.param(
+        lambda c: c.read_maintenance_history("PUMP-201"),
+        "mxwo",
+        {"oslc.where": 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'},
+        {"operation": "read_maintenance_history", "asset_id": "PUMP-201"},
+        id="read_maintenance_history",
+    ),
+    pytest.param(
+        lambda c: c.read_spare_parts(),
+        "mxinventory",
+        {},
+        {"operation": "read_spare_parts"},
+        id="read_spare_parts",
+    ),
+    pytest.param(
+        lambda c: c.read_spare_parts(sku="BRG-6205"),
+        "mxinventory",
+        {"oslc.where": 'itemnum="BRG-6205"'},
+        {"operation": "read_spare_parts"},
+        id="read_spare_parts-sku",
+    ),
+    pytest.param(
+        lambda c: c.read_maintenance_plans(),
+        "mxpm",
+        {},
+        {"operation": "read_maintenance_plans"},
+        id="read_maintenance_plans",
+    ),
+]
+
+
+def _entities(result: object) -> list[object]:
+    return result if isinstance(result, list) else [result]
+
+
+def _refusals(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [e for e in logs if e["event"] == "maximo_member_refused"]
+
+
+def _refusal(object_structure: str, reason: str, position: int, **context: object) -> dict:
+    """The whole maximo_member_refused event: names and codes, no Maximo value."""
+    return {
+        "event": "maximo_member_refused",
+        "connector": "MaximoConnector",
+        "object_structure": object_structure,
+        "reason": reason,
+        "position": position,
+        "log_level": "warning",
+        **context,
+    }
+
+
+class TestReadsSelectAttributes:
+    """IBM's REST API guide ("Selecting"): a collection query without
+    oslc.select returns each member's href and nothing else."""
+
+    @pytest.mark.parametrize(("read", "object_structure", "params", "log"), _READS)
+    @pytest.mark.asyncio
+    async def test_read_selects_and_maps_the_record(
+        self, httpx_mock, connector: MaximoConnector, read, object_structure: str, params, log
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={"member": [_member(object_structure)], "responseInfo": {}},
+        )
+        [entity] = _entities(await read(connector))
+        request = httpx_mock.get_requests()[-1]
+        assert request.url.params["oslc.select"] == _SELECT[object_structure]
+        # OSLC's own keys carry Maximo's host; they stay out of metadata, and
+        # the rest id is kept without it. (MaintenancePlan has no metadata.)
+        metadata = getattr(entity, "metadata", None)
+        if metadata is not None:
+            assert not {"href", "_rowstamp"} & set(metadata)
+            assert metadata["rest_id"] == _MEMBER_REST_ID
+        assert "maximo-internal" not in str(entity.model_dump())
+
+    @pytest.mark.asyncio
+    async def test_asset_fields(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxasset"),
+            json={"member": [_member("mxasset")], "responseInfo": {}},
+        )
+        [asset] = await connector.read_assets()
+        assert (asset.id, asset.name, asset.location, asset.manufacturer) == (
+            "PUMP-201",
+            "Centrifugal pump",
+            "BR300",
+            "GRUNDFOS",
+        )
+        assert asset.criticality == Criticality.A  # priority 1
+        # Null attributes are left out of the answer: serialnum and parent.
+        assert asset.serial_number == ""
+        assert asset.parent is None
+        assert asset.metadata == {
+            "siteid": "BEDFORD",
+            "classstructureid": "1020",
+            "rest_id": _MEMBER_REST_ID,
+        }
+
+    @pytest.mark.asyncio
+    async def test_asset_without_a_priority_is_not_critical(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A null priority is left out of the answer; it is not priority 0."""
+        await _connect(httpx_mock, connector)
+        record = {k: v for k, v in _RECORDS["mxasset"].items() if k != "priority"}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxasset"),
+            json={"member": [_member("mxasset", record)], "responseInfo": {}},
+        )
+        [asset] = await connector.read_assets()
+        assert asset.criticality == Criticality.C
+
+    @pytest.mark.asyncio
+    async def test_work_order_fields(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [_member("mxwo")], "responseInfo": {}},
+        )
+        [wo] = await connector.read_work_orders()
+        assert wo.id == "WO-1"
+        assert wo.status == WorkOrderStatus.IN_PROGRESS
+        assert wo.priority == Priority.HIGH
+        assert wo.asset_id == "PUMP-201"
+        assert wo.assigned_to == "JSMITH"
+        assert wo.failure_cause == "LEAK"
+        assert wo.created_at.isoformat() == "2026-10-01T08:00:00+00:00"
+        assert wo.metadata == {
+            "siteid": "BEDFORD",
+            "status_description": "In Progress",
+            "rest_id": _MEMBER_REST_ID,
+        }
+
+    @pytest.mark.asyncio
+    async def test_spare_part_fields(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory"),
+            json={"member": [_member("mxinventory")], "responseInfo": {}},
+        )
+        [part] = await connector.read_spare_parts()
+        assert (part.sku, part.name, part.warehouse_location) == (
+            "BRG-6205",
+            "Bearing SKF 6205",
+            "CENTRAL",
+        )
+        assert (part.stock_quantity, part.reorder_point, part.unit_cost) == (7, 5, 12.5)
+        assert part.metadata == {"siteid": "BEDFORD", "rest_id": _MEMBER_REST_ID}
+
+    @pytest.mark.parametrize(
+        ("change", "fields"),
+        [
+            pytest.param(
+                {"invbalances": [{"curbal": 2}, {"curbal": -5}]}, ["stock_quantity"], id="balance"
+            ),
+            pytest.param({"invcost": [{"avgcost": -0.5}]}, ["unit_cost"], id="cost"),
+            pytest.param(
+                {"invbalances": [{"curbal": -5}], "invcost": [{"avgcost": -0.5}]},
+                ["stock_quantity", "unit_cost"],
+                id="both",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_negative_balance_or_cost_ends_the_read(
+        self, httpx_mock, connector: MaximoConnector, change: dict[str, object], fields: list[str]
+    ) -> None:
+        """An organization that allows negative balances can issue past a bin's
+        balance. A SparePart holds no negative stock or cost, so the read says
+        which field it cannot represent instead of reporting a figure Maximo
+        does not hold."""
+        await _connect(httpx_mock, connector)
+        record = {**_RECORDS["mxinventory"], **change}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory"),
+            json={
+                "member": [_member("mxinventory"), _member("mxinventory", record)],
+                "responseInfo": {},
+            },
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_spare_parts()
+        assert str(exc_info.value) == (
+            "Maximo returned a mxinventory record that cannot be mapped "
+            f"(ValidationError: {', '.join(fields)}) — refusing to return a partial result"
+        )
+        assert _refusals(logs) == [
+            _refusal(
+                "mxinventory",
+                "unmappable_ValidationError",
+                1,
+                operation="read_spare_parts",
+                fields=fields,
+            )
+        ]
+        assert "-5" not in str(logs) + str(exc_info.value)
+        assert "-0.5" not in str(logs) + str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_mcp_spare_parts_tool_reports_the_refusal(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """What an MCP client gets, through a real MCP session: an error result
+        with the refusal, not a list of parts with a figure Maximo does not hold."""
+        # The MCP SDK is the [mcp] extra: the core CI jobs skip this test, and
+        # the optional-extras jobs, which install it, run it.
+        pytest.importorskip("mcp", reason="MCP SDK not installed (pip install machina-ai[mcp])")
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from mcp.server.fastmcp import FastMCP
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.mcp.tools import machina_list_spare_parts
+
+        await _connect(httpx_mock, connector)
+        record = {**_RECORDS["mxinventory"], "invbalances": [{"curbal": -5}]}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory"),
+            json={"member": [_member("mxinventory", record)], "responseInfo": {}},
+        )
+        runtime = MagicMock(sandbox_mode=False)
+        runtime.get_primary_cmms.return_value = connector
+
+        @asynccontextmanager
+        async def lifespan(_server):
+            yield {"runtime": runtime}
+
+        server = FastMCP("maximo-test", lifespan=lifespan)
+        server.add_tool(machina_list_spare_parts)
+        async with create_connected_server_and_client_session(server._mcp_server) as client:
+            result = await client.call_tool("machina_list_spare_parts", {})
+        assert result.isError
+        [content] = result.content
+        assert content.text == (
+            "Error executing tool machina_list_spare_parts: Maximo returned a mxinventory record "
+            "that cannot be mapped (ValidationError: stock_quantity) — refusing to return a "
+            "partial result"
+        )
+
+    @pytest.mark.asyncio
+    async def test_maintenance_plan_fields(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxpm"),
+            json={"member": [_member("mxpm")], "responseInfo": {}},
+        )
+        [plan] = await connector.read_maintenance_plans()
+        assert (plan.id, plan.asset_id, plan.active) == ("PM-1", "PUMP-201", True)
+        assert plan.interval.months == 3  # frequency 3, frequnit MONTHS
+
+    @pytest.mark.parametrize(("read", "object_structure", "params", "log"), _READS)
+    @pytest.mark.asyncio
+    async def test_href_only_member_is_refused(
+        self, httpx_mock, connector: MaximoConnector, read, object_structure: str, params, log
+    ) -> None:
+        """What Maximo answers when the selection is missing or not applied, or
+        when the object structure does not expose the identity attribute."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={"member": [_member(object_structure, {})], "responseInfo": {}},
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await read(connector)
+        identity = _IDENTITY[object_structure]
+        assert str(exc_info.value) == (
+            f"Maximo returned a {object_structure} record without its '{identity}' attribute: "
+            "the query's oslc.select may not have been applied, or the object structure may "
+            "not expose that attribute — refusing to return a partial result"
+        )
+        assert _refusals(logs) == [_refusal(object_structure, "missing_identity", 0, **log)]
+        # The member's href names Maximo's own host; neither carries it.
+        assert "maximo-internal" not in str(exc_info.value) + str(logs)
+
+    @pytest.mark.parametrize(("read", "object_structure", "params", "log"), _READS)
+    @pytest.mark.asyncio
+    async def test_member_with_only_its_identity_is_read(
+        self, httpx_mock, connector: MaximoConnector, read, object_structure: str, params, log
+    ) -> None:
+        """Only the identity attribute is required: every other attribute Maximo
+        leaves out (a null one) reads as the field's default."""
+        await _connect(httpx_mock, connector)
+        identity = _IDENTITY[object_structure]
+        record = {identity: _RECORDS[object_structure][identity]}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={"member": [_member(object_structure, record)], "responseInfo": {}},
+        )
+        with structlog.testing.capture_logs() as logs:
+            [entity] = _entities(await read(connector))
+        assert _refusals(logs) == []
+        entity_id = entity.sku if object_structure == "mxinventory" else entity.id
+        assert entity_id == record[identity]
+
+    @pytest.mark.asyncio
+    async def test_rest_id_from_a_read_is_written_through_the_configured_url(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """metadata["rest_id"] comes from Maximo's answer: a write to it goes to
+        the configured url, never to the host in href, as one checked path
+        segment."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'}),
+            json={"member": [_member("mxwo")], "responseInfo": {}},
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=httpx.URL(f"{OSLC}/os/mxwo/{_MEMBER_REST_ID}", params={"lean": "1"}),
+            status_code=204,
+        )
+        wo = await connector.get_work_order("WO-1")
+        assert wo is not None
+        await connector._patch_resource("mxwo", wo.metadata["rest_id"], {"description": "x"})
+        post = httpx_mock.get_requests()[-1]
+        assert (post.url.host, post.url.path) == (
+            "maximo.example.com",
+            f"/maximo/oslc/os/mxwo/{_MEMBER_REST_ID}",
+        )
+
+    @pytest.mark.parametrize(
+        ("read", "object_structure", "record", "error_type", "log", "leak"),
+        [
+            # Asset.parent is text; a list cannot be one.
+            pytest.param(
+                lambda c: c.read_assets(),
+                "mxasset",
+                {"parent": ["LINE-2"]},
+                "ValidationError",
+                {"operation": "read_assets", "fields": ["parent"]},
+                "LINE-2",
+                id="asset",
+            ),
+            # parse_datetime expects ISO text.
+            pytest.param(
+                lambda c: c.read_work_orders(),
+                "mxwo",
+                {"reportdate": 1729000000000},
+                "AttributeError",
+                {"operation": "read_work_orders"},
+                "1729000000000",
+                id="work_order",
+            ),
+            pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invbalances": [{"curbal": "many"}]},
+                "ValueError",
+                {"operation": "read_spare_parts"},
+                "many",
+                id="spare_part",
+            ),
+            pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invbalances": ["3"]},
+                "AttributeError",
+                {"operation": "read_spare_parts"},
+                None,
+                id="spare_part-row-not-an-object",
+            ),
+            # An explicit null, as with _dropnulls=0.
+            pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invbalances": [{"curbal": None}]},
+                "TypeError",
+                {"operation": "read_spare_parts"},
+                None,
+                id="spare_part-null",
+            ),
+            # A number too large for a float (1e999) reads as infinity.
+            pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invbalances": [{"curbal": "1e999"}]},
+                "OverflowError",
+                {"operation": "read_spare_parts"},
+                None,
+                id="spare_part-infinite",
+            ),
+            pytest.param(
+                lambda c: c.read_spare_parts(),
+                "mxinventory",
+                {"invcost": [{"avgcost": "1e999"}]},
+                "ValueError",
+                {"operation": "read_spare_parts"},
+                None,
+                id="spare_part-infinite-cost",
+            ),
+            pytest.param(
+                lambda c: c.read_maintenance_plans(),
+                "mxpm",
+                {"frequency": "quarterly"},
+                "ValueError",
+                {"operation": "read_maintenance_plans"},
+                "quarterly",
+                id="maintenance_plan",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unmappable_member_ends_the_read(
+        self,
+        httpx_mock,
+        connector: MaximoConnector,
+        read,
+        object_structure: str,
+        record: dict[str, object],
+        error_type: str,
+        log: dict[str, object],
+        leak: str | None,
+    ) -> None:
+        """One unreadable record would otherwise drop out, or crash the read with
+        the mapper's own error; the good record before it is not returned alone."""
+        await _connect(httpx_mock, connector)
+        bad = _member(object_structure, {**_RECORDS[object_structure], **record})
+        body = json.dumps({"member": [_member(object_structure), bad], "responseInfo": {}})
+        # json.dumps cannot write 1e999; Maximo's JSON can carry it.
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure),
+            content=body.replace('"1e999"', "1e999").encode(),
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await read(connector)
+        cause = error_type + (f": {', '.join(log['fields'])}" if "fields" in log else "")
+        assert str(exc_info.value) == (
+            f"Maximo returned a {object_structure} record that cannot be mapped ({cause}) "
+            "— refusing to return a partial result"
+        )
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+        assert _refusals(logs) == [
+            _refusal(object_structure, f"unmappable_{error_type}", 1, **log)
+        ]
+        assert "maximo-internal" not in str(exc_info.value) + str(logs)
+        if leak is not None:
+            assert leak not in str(logs)
+            assert leak not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("read", "object_structure", "params", "record", "log"),
+        [
+            pytest.param(
+                lambda c: c.get_asset("PUMP-201"),
+                "mxasset",
+                {"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'},
+                {"parent": ["LINE-2"]},
+                {"operation": "get_asset", "asset_id": "PUMP-201", "fields": ["parent"]},
+                id="get_asset",
+            ),
+            pytest.param(
+                lambda c: c.get_work_order("WO-1"),
+                "mxwo",
+                {"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'},
+                {"reportdate": 1729000000000},
+                {"operation": "get_work_order"},
+                id="get_work_order",
+            ),
+            pytest.param(
+                lambda c: c.read_maintenance_history("PUMP-201"),
+                "mxwo",
+                {"oslc.where": 'assetnum="PUMP-201" and status in ["COMP","CLOSE"]'},
+                {"reportdate": 1729000000000},
+                {"operation": "read_maintenance_history", "asset_id": "PUMP-201"},
+                id="read_maintenance_history",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unmappable_record_ends_a_lookup_or_history_read(
+        self,
+        httpx_mock,
+        connector: MaximoConnector,
+        read,
+        object_structure: str,
+        params,
+        record: dict[str, object],
+        log: dict[str, object],
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        bad = _member(object_structure, {**_RECORDS[object_structure], **record})
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={"member": [bad], "responseInfo": {}},
+        )
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorSchemaError):
+            await read(connector)
+        [event] = _refusals(logs)
+        assert event == _refusal(object_structure, event["reason"], 0, **log)
+        assert event["reason"].startswith("unmappable_")
+
+    @pytest.mark.asyncio
+    async def test_refusal_log_names_fields_not_keys_from_maximo(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """An attribute name text cannot hold fails metadata's key check; the log
+        names the field, metadata, not the location below it, which is the name."""
+        await _connect(httpx_mock, connector)
+        bad = _member("mxwo", {**_RECORDS["mxwo"], "SECRET-NAME\ud800": "x"})
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            # pytest-httpx cannot write a lone surrogate; json.dumps escapes it.
+            content=json.dumps({"member": [bad], "responseInfo": {}}).encode(),
+        )
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorSchemaError):
+            await connector.read_work_orders()
+        assert _refusals(logs) == [
+            _refusal(
+                "mxwo",
+                "unmappable_ValidationError",
+                0,
+                operation="read_work_orders",
+                fields=["metadata"],
+            )
+        ]
+        assert "SECRET" not in str(logs)
+
+    @pytest.mark.parametrize(
+        ("lookup", "object_structure", "params"),
+        [
+            pytest.param(
+                lambda c: c.get_asset("PUMP-201"),
+                "mxasset",
+                {"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'},
+                id="get_asset",
+            ),
+            pytest.param(
+                lambda c: c.get_work_order("WO-1"),
+                "mxwo",
+                {"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'},
+                id="get_work_order",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_lookup_maps_only_the_first_member(
+        self, httpx_mock, connector: MaximoConnector, lookup, object_structure: str, params
+    ) -> None:
+        """A server that ignores oslc.pageSize=1 sends more; only the first is used."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={
+                "member": [_member(object_structure), _member(object_structure, {})],
+                "responseInfo": {},
+            },
+        )
+        entity = await lookup(connector)
+        assert entity is not None
+        assert entity.id == _RECORDS[object_structure][_IDENTITY[object_structure]]
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            pytest.param({"wonum": "  ", "status": "INPRG"}, id="blank-identity"),
+            pytest.param({"wonum": None}, id="null-identity"),
+            pytest.param("WO-1", id="not-an-object"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_member_without_a_usable_identity_is_refused(
+        self, httpx_mock, connector: MaximoConnector, member: object
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [member], "responseInfo": {}},
+        )
+        with pytest.raises(ConnectorSchemaError, match="without its 'wonum' attribute"):
+            await connector.read_work_orders()
+
+    @pytest.mark.parametrize(
+        "identity",
+        [
+            pytest.param({"x": 1}, id="object"),
+            pytest.param(["WO-1"], id="list"),
+            pytest.param(True, id="boolean"),
+            pytest.param(1.5, id="fraction"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_identity_that_is_not_a_plain_value_is_refused(
+        self, httpx_mock, connector: MaximoConnector, identity: object
+    ) -> None:
+        """Such a value would otherwise become an ID like "{'x': 1}" or "True"."""
+        await _connect(httpx_mock, connector)
+        record = {**_RECORDS["mxwo"], "wonum": identity}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [_member("mxwo", record)], "responseInfo": {}},
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_work_orders()
+        assert str(exc_info.value) == (
+            "Maximo returned a mxwo record whose 'wonum' attribute is not text or a whole "
+            "number — refusing to return a partial result"
+        )
+        assert _refusals(logs) == [
+            _refusal("mxwo", "invalid_identity", 0, operation="read_work_orders")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_whole_number_identity_is_read_as_text(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        record = {**_RECORDS["mxwo"], "wonum": 1001}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [_member("mxwo", record)], "responseInfo": {}},
+        )
+        [wo] = await connector.read_work_orders()
+        assert wo.id == "1001"
+
+    @pytest.mark.asyncio
+    async def test_no_members_is_an_empty_read(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=_oslc_url("mxpm"), json={"member": [], "responseInfo": {}}
+        )
+        assert await connector.read_maintenance_plans() == []
+
+
+class TestPagesKeepTheSelection:
+    """Next pages are requested at the link Maximo returns, which repeats the
+    query; the selection is not re-added. A page whose members come back
+    without their attributes ends the read instead of shortening it."""
+
+    @pytest.mark.asyncio
+    async def test_next_page_link_carries_the_selection(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        next_href = str(_oslc_url("mxwo", pageno="2"))
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [_member("mxwo")], "responseInfo": {"nextPage": {"href": next_href}}},
+        )
+        second = {**_RECORDS["mxwo"], "wonum": "WO-2"}
+        httpx_mock.add_response(
+            method="GET",
+            url=next_href,
+            json={"member": [_member("mxwo", second)], "responseInfo": {}},
+        )
+        orders = await connector.read_work_orders()
+        assert [wo.id for wo in orders] == ["WO-1", "WO-2"]
+        page_two = httpx_mock.get_requests()[-1]
+        assert page_two.url.params["oslc.select"] == _SELECT["mxwo"]
+        assert page_two.url.params["pageno"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_page_without_the_selection_ends_the_read(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A next-page link that drops oslc.select brings back href-only members."""
+        await _connect(httpx_mock, connector)
+        next_href = f"{OSLC}/os/mxwo?pageno=2&lean=1"
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo"),
+            json={"member": [_member("mxwo")], "responseInfo": {"nextPage": {"href": next_href}}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_href,
+            json={"member": [_member("mxwo", {})], "responseInfo": {}},
+        )
+        with pytest.raises(ConnectorError, match="without its 'wonum' attribute"):
+            await connector.read_work_orders()
+        assert len(httpx_mock.get_requests()) == 3  # connect, page 1, page 2
+
+    @pytest.mark.parametrize(
+        ("lookup", "object_structure", "params"),
+        [
+            pytest.param(
+                lambda c: c.get_asset("PUMP-201"),
+                "mxasset",
+                {"oslc.pageSize": "1", "oslc.where": 'assetnum="PUMP-201"'},
+                id="get_asset",
+            ),
+            pytest.param(
+                lambda c: c.get_work_order("WO-1"),
+                "mxwo",
+                {"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'},
+                id="get_work_order",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_single_record_lookup_reads_one_selected_page(
+        self, httpx_mock, connector: MaximoConnector, lookup, object_structure: str, params
+    ) -> None:
+        """The first match only, as since B4.2: its next page is not followed."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={
+                "member": [_member(object_structure)],
+                "responseInfo": {"nextPage": {"href": f"{OSLC}/os/{object_structure}?pageno=2"}},
+            },
+        )
+        entity = await lookup(connector)
+        assert entity is not None
+        assert len(httpx_mock.get_requests()) == 2  # connect, the one page

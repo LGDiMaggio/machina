@@ -105,7 +105,10 @@ again), through the connector helper `update_work_order` also uses (see
   connectors' other path IDs: it cannot be empty, and no part of it between
   `/` or `\` separators can be empty, `.` or `..`, including before a `;`.
   Maximo rest IDs use only unreserved URL characters, so they are sent
-  unchanged.
+  unchanged. The `machina://v1/assets/{asset_id}` and
+  `machina://v1/work-orders/{wo_id}` resources of a Maximo record carry its
+  rest ID as `metadata["rest_id"]`, as do Maximo assets, work orders and
+  spare parts read through the Python API.
 
 A refused value comes back as an error entry before any request, in sandbox
 mode too, so a sandbox run answers as a live run would. The message names the

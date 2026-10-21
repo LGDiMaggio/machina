@@ -35,11 +35,11 @@ See also:
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar
 from urllib.parse import unquote, urljoin, urlsplit
 
 import structlog
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
@@ -49,14 +49,111 @@ from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.domain.asset import Asset, AssetType
     from machina.domain.maintenance_plan import MaintenancePlan
     from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
+
+_Entity = TypeVar("_Entity")
+
+
+def _map_members(
+    members: list[dict[str, Any]],
+    object_structure: str,
+    parse: Callable[[dict[str, Any]], _Entity],
+    *,
+    operation: str,
+    asset_id: str | None = None,
+) -> list[_Entity]:
+    """Map the members of an OSLC read to domain entities, all or none.
+
+    A member without its identity attribute
+    (:data:`~machina.connectors.cmms.mappers.maximo.IDENTITY_ATTRIBUTE`) is
+    refused. Maximo returns only each member's ``href`` when ``oslc.select``
+    is missing or not applied (for example by a next-page link that drops
+    it), and a site's object structure may not expose the attribute at all;
+    either way the member must not become an entity with an empty ID or a
+    default status. So is one whose identity is not text or a whole number,
+    and one the mapper cannot read (a field of an unexpected type, a value
+    the domain model rejects). Any refusal ends the read: returning the
+    other members would present part of the result as all of it.
+
+    Args:
+        members: The members the read returned.
+        object_structure: Their object structure (``mxasset``, ...).
+        parse: The mapper for one member.
+        operation: The public read, for the log.
+        asset_id: The asset the read is for, if any, for the log.
+
+    Raises:
+        ConnectorSchemaError: On the first member refused. The message names
+            the object structure and the attribute, or the error type and,
+            for a value the domain model rejects, the fields rejected. The
+            ``maximo_member_refused`` warning adds the read and the member's
+            position in it. Neither repeats a value from Maximo.
+    """
+    identity = maximo_mapper.IDENTITY_ATTRIBUTE[object_structure]
+    entities: list[_Entity] = []
+    for position, member in enumerate(members):
+        value = member.get(identity) if isinstance(member, dict) else None
+        fields: list[str] = []
+        if value is None or not str(value).strip():
+            reason = "missing_identity"
+            message = (
+                f"Maximo returned a {object_structure} record without its '{identity}' "
+                "attribute: the query's oslc.select may not have been applied, or the "
+                "object structure may not expose that attribute"
+            )
+        elif isinstance(value, bool) or not isinstance(value, str | int):
+            reason = "invalid_identity"
+            message = (
+                f"Maximo returned a {object_structure} record whose '{identity}' attribute "
+                "is not text or a whole number"
+            )
+        else:
+            try:
+                entities.append(parse(member))
+                continue
+            # pydantic's ValidationError is a ValueError; ArithmeticError
+            # covers int() or floor() of an infinite number and the decimal
+            # InvalidOperation of infinity minus infinity.
+            except (ValueError, TypeError, AttributeError, ArithmeticError) as exc:
+                reason = f"unmappable_{type(exc).__name__}"
+                if isinstance(exc, ValidationError):
+                    # The field names only: a deeper location can name a key
+                    # from Maximo (metadata.<key>), and a model-level check
+                    # has none.
+                    errors = exc.errors(
+                        include_url=False, include_context=False, include_input=False
+                    )
+                    fields = sorted({str(e["loc"][0]) for e in errors if e["loc"]})
+                cause = type(exc).__name__
+                if fields:
+                    cause += ": " + ", ".join(fields)
+                message = (
+                    f"Maximo returned a {object_structure} record that cannot be mapped ({cause})"
+                )
+        context: dict[str, Any] = {"asset_id": asset_id} if asset_id else {}
+        if fields:
+            context["fields"] = fields
+        logger.warning(
+            "maximo_member_refused",
+            connector="MaximoConnector",
+            operation=operation,
+            object_structure=object_structure,
+            reason=reason,
+            position=position,
+            **context,
+        )
+        raise ConnectorSchemaError(f"{message} — refusing to return a partial result")
+    return entities
+
 
 _AuthUnion = ApiKeyHeaderAuth | BasicAuth | BearerAuth
 # The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
@@ -402,21 +499,40 @@ class MaximoConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Return all assets from Maximo (MXASSET object structure)."""
+        """Return all assets from Maximo (MXASSET object structure).
+
+        Raises:
+            ConnectorSchemaError: If a record lacks its ``assetnum`` or cannot
+                be mapped; no partial list is returned.
+            ConnectorError: On an HTTP or paging error (see :meth:`_oslc_get`).
+        """
         self._ensure_connected()
-        raw = await self._oslc_get("mxasset")
-        return [maximo_mapper.parse_asset(item, self._asset_type_map) for item in raw]
+        raw = await self._oslc_get("mxasset", oslc_select=maximo_mapper.ASSET_SELECT)
+        return _map_members(raw, "mxasset", self._parse_asset, operation="read_assets")
 
     async def get_asset(self, asset_id: str) -> Asset | None:
-        """Look up a single asset by asset number."""
+        """Look up a single asset by asset number (the first match).
+
+        Raises:
+            ConnectorSchemaError: If the record lacks its ``assetnum`` or
+                cannot be mapped.
+            ConnectorError: If ``asset_id`` is refused by :func:`_oslc_eq`, or
+                on an HTTP error.
+        """
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxasset",
             oslc_where=_oslc_eq("assetnum", asset_id),
+            oslc_select=maximo_mapper.ASSET_SELECT,
             page_size=1,
             first_page_only=True,
         )
-        return maximo_mapper.parse_asset(raw[0], self._asset_type_map) if raw else None
+        if not raw:
+            return None
+        [asset] = _map_members(
+            raw[:1], "mxasset", self._parse_asset, operation="get_asset", asset_id=asset_id
+        )
+        return asset
 
     async def read_work_orders(
         self,
@@ -431,6 +547,12 @@ class MaximoConnector:
             status: Filter by status — accepts a :class:`WorkOrderStatus`
                 enum (reverse-mapped to Maximo code) or a raw Maximo
                 status string for backward compatibility.
+
+        Raises:
+            ConnectorSchemaError: If a record lacks its ``wonum`` or cannot be
+                mapped; no partial list is returned.
+            ConnectorError: If a filter value is refused by :func:`_oslc_eq`,
+                or on an HTTP or paging error (see :meth:`_oslc_get`).
         """
         self._ensure_connected()
         clauses: list[str] = []
@@ -444,19 +566,40 @@ class MaximoConnector:
             )
             clauses.append(_oslc_eq("status", maximo_status))
         where = " and ".join(clauses) if clauses else ""
-        raw = await self._oslc_get("mxwo", oslc_where=where)
-        return [maximo_mapper.parse_work_order(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxwo", oslc_where=where, oslc_select=maximo_mapper.WORK_ORDER_SELECT
+        )
+        return _map_members(
+            raw,
+            "mxwo",
+            maximo_mapper.parse_work_order,
+            operation="read_work_orders",
+            asset_id=asset_id or None,
+        )
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
-        """Look up a single work order by work order number."""
+        """Look up a single work order by work order number (the first match).
+
+        Raises:
+            ConnectorSchemaError: If the record lacks its ``wonum`` or cannot
+                be mapped.
+            ConnectorError: If ``work_order_id`` is refused by
+                :func:`_oslc_eq`, or on an HTTP error.
+        """
         self._ensure_connected()
         raw = await self._oslc_get(
             "mxwo",
             oslc_where=_oslc_eq("wonum", work_order_id),
+            oslc_select=maximo_mapper.WORK_ORDER_SELECT,
             page_size=1,
             first_page_only=True,
         )
-        return maximo_mapper.parse_work_order(raw[0]) if raw else None
+        if not raw:
+            return None
+        [work_order] = _map_members(
+            raw[:1], "mxwo", maximo_mapper.parse_work_order, operation="get_work_order"
+        )
+        return work_order
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -610,24 +753,46 @@ class MaximoConnector:
             direct asset-compatibility relation, so filtering by asset is
             not supported here. For asset-specific spare parts, consult
             the corresponding work-order job plan or ``mxpmpart``.
+
+        Raises:
+            ConnectorSchemaError: If a record lacks its ``itemnum`` or cannot
+                be mapped; no partial list is returned.
+            ConnectorError: If ``sku`` is refused by :func:`_oslc_eq`, or on
+                an HTTP or paging error (see :meth:`_oslc_get`).
         """
         self._ensure_connected()
         where = _oslc_eq("itemnum", sku) if sku else ""
-        raw = await self._oslc_get("mxinventory", oslc_where=where)
-        return [maximo_mapper.parse_spare_part(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxinventory", oslc_where=where, oslc_select=maximo_mapper.INVENTORY_SELECT
+        )
+        return _map_members(
+            raw, "mxinventory", maximo_mapper.parse_spare_part, operation="read_spare_parts"
+        )
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-        """Read preventive-maintenance triggers from Maximo."""
+        """Read preventive-maintenance plans (PMs) from Maximo.
+
+        Raises:
+            ConnectorSchemaError: If a record lacks its ``pmnum`` or cannot be
+                mapped; no partial list is returned.
+            ConnectorError: On an HTTP or paging error (see :meth:`_oslc_get`).
+        """
         self._ensure_connected()
-        raw = await self._oslc_get("mxpm")
-        return [maximo_mapper.parse_maintenance_plan(item) for item in raw]
+        raw = await self._oslc_get("mxpm", oslc_select=maximo_mapper.PM_SELECT)
+        return _map_members(
+            raw, "mxpm", maximo_mapper.parse_maintenance_plan, operation="read_maintenance_plans"
+        )
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed work orders for an asset.
 
         Raises:
-            ConnectorError: If ``asset_id`` is missing or blank. A missing ID
-                would otherwise be matched as the text ``"None"``.
+            ConnectorSchemaError: If a record lacks its ``wonum`` or cannot be
+                mapped; no partial list is returned.
+            ConnectorError: If ``asset_id`` is missing or blank (a missing ID
+                would otherwise be matched as the text ``"None"``) or refused
+                by :func:`_oslc_eq`, or on an HTTP or paging error (see
+                :meth:`_oslc_get`).
         """
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
@@ -635,12 +800,24 @@ class MaximoConnector:
         # oslc.where has no ``or`` and no grouping parentheses (``and`` is its
         # only boolean operator), so the two statuses are listed through ``in``.
         where = f'{_oslc_eq("assetnum", asset_id)} and status in ["COMP","CLOSE"]'
-        raw = await self._oslc_get("mxwo", oslc_where=where)
-        return [maximo_mapper.parse_work_order(item) for item in raw]
+        raw = await self._oslc_get(
+            "mxwo", oslc_where=where, oslc_select=maximo_mapper.WORK_ORDER_SELECT
+        )
+        return _map_members(
+            raw,
+            "mxwo",
+            maximo_mapper.parse_work_order,
+            operation="read_maintenance_history",
+            asset_id=asset_id,
+        )
 
     # ------------------------------------------------------------------
     # Internal: OSLC REST helpers
     # ------------------------------------------------------------------
+
+    def _parse_asset(self, data: dict[str, Any]) -> Asset:
+        """Map one MXASSET record with this connector's ``asset_type_map``."""
+        return maximo_mapper.parse_asset(data, self._asset_type_map)
 
     def _headers(self) -> dict[str, str]:
         """Build base HTTP headers."""
@@ -655,8 +832,8 @@ class MaximoConnector:
         self,
         object_structure: str,
         *,
+        oslc_select: str,
         oslc_where: str = "",
-        oslc_select: str = "",
         page_size: int | None = None,
         first_page_only: bool = False,
         max_rows: int | None = None,
@@ -668,8 +845,9 @@ class MaximoConnector:
 
         Args:
             object_structure: The Maximo OS name (e.g. ``mxasset``, ``mxwo``).
+            oslc_select: The comma-separated attributes to return. Required:
+                without it Maximo returns each member's ``href`` only.
             oslc_where: Optional OSLC where clause for server-side filtering.
-            oslc_select: Optional comma-separated field list.
             page_size: Results per page (default :attr:`_PAGE_SIZE`).
             first_page_only: Stop after the first page, for a lookup that
                 uses only the first match.
@@ -695,8 +873,7 @@ class MaximoConnector:
             initial_params["lean"] = "1"
         if oslc_where:
             initial_params["oslc.where"] = oslc_where
-        if oslc_select:
-            initial_params["oslc.select"] = oslc_select
+        initial_params["oslc.select"] = oslc_select
         params: dict[str, str] | None = initial_params
         followed: set[str] = set()
         max_pages = self._MAX_OSLC_ROWS // size + 1

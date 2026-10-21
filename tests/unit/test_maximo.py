@@ -175,11 +175,13 @@ class TestParseWorkOrder:
 
 class TestParseSparePart:
     def test_basic(self) -> None:
+        """The older flat shape: balance and cost on the record itself."""
         raw = {
             "itemnum": "BRG-6205",
             "description": "Bearing SKF 6205",
             "curbal": 50,
-            "reorder": 10,
+            "minlevel": 10,
+            "reorder": True,
             "avgcost": 35.0,
             "location": "WHSE-1",
         }
@@ -187,7 +189,9 @@ class TestParseSparePart:
         assert isinstance(sp, SparePart)
         assert sp.sku == "BRG-6205"
         assert sp.stock_quantity == 50
+        # minlevel is INVENTORY's reorder point; reorder is its yes/no flag.
         assert sp.reorder_point == 10
+        assert sp.metadata["reorder"] is True
         assert sp.unit_cost == 35.0
 
     def test_extra_fields_in_metadata(self) -> None:
@@ -227,6 +231,7 @@ class TestParseMaintenancePlan:
             "description": "Monthly inspection",
             "assetnum": "PUMP-201",
             "frequency": 30,
+            "frequnit": "DAYS",
             "status": "ACTIVE",
         }
         plan = _parse_maintenance_plan(raw)
