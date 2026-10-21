@@ -2227,6 +2227,9 @@ class TestReadsSelectAttributes:
     ) -> None:
         """What an MCP client gets, through a real MCP session: an error result
         with the refusal, not a list of parts with a figure Maximo does not hold."""
+        # The MCP SDK is the [mcp] extra: the core CI jobs skip this test, and
+        # the optional-extras jobs, which install it, run it.
+        pytest.importorskip("mcp", reason="MCP SDK not installed (pip install machina-ai[mcp])")
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
