@@ -92,10 +92,10 @@ def _map_members(
 
     Raises:
         ConnectorSchemaError: On the first member refused. The message names
-            the object structure and the attribute or the error type. The
-            ``maximo_member_refused`` warning adds the read, the member's
-            position in it and, for a value the domain model rejects, the
-            fields rejected. Neither repeats a value from Maximo.
+            the object structure and the attribute, or the error type and,
+            for a value the domain model rejects, the fields rejected. The
+            ``maximo_member_refused`` warning adds the read and the member's
+            position in it. Neither repeats a value from Maximo.
     """
     identity = maximo_mapper.IDENTITY_ATTRIBUTE[object_structure]
     entities: list[_Entity] = []
@@ -120,13 +120,10 @@ def _map_members(
                 entities.append(parse(member))
                 continue
             # pydantic's ValidationError is a ValueError; ArithmeticError
-            # covers int() of an infinite number.
+            # covers int() or floor() of an infinite number and the decimal
+            # InvalidOperation of infinity minus infinity.
             except (ValueError, TypeError, AttributeError, ArithmeticError) as exc:
                 reason = f"unmappable_{type(exc).__name__}"
-                message = (
-                    f"Maximo returned a {object_structure} record that cannot be mapped "
-                    f"({type(exc).__name__})"
-                )
                 if isinstance(exc, ValidationError):
                     # The field names only: a deeper location can name a key
                     # from Maximo (metadata.<key>), and a model-level check
@@ -135,6 +132,12 @@ def _map_members(
                         include_url=False, include_context=False, include_input=False
                     )
                     fields = sorted({str(e["loc"][0]) for e in errors if e["loc"]})
+                cause = type(exc).__name__
+                if fields:
+                    cause += ": " + ", ".join(fields)
+                message = (
+                    f"Maximo returned a {object_structure} record that cannot be mapped ({cause})"
+                )
         context: dict[str, Any] = {"asset_id": asset_id} if asset_id else {}
         if fields:
             context["fields"] = fields

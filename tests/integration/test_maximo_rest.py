@@ -2168,23 +2168,98 @@ class TestReadsSelectAttributes:
         assert (part.stock_quantity, part.reorder_point, part.unit_cost) == (7, 5, 12.5)
         assert part.metadata == {"siteid": "BEDFORD", "rest_id": _MEMBER_REST_ID}
 
+    @pytest.mark.parametrize(
+        ("change", "fields"),
+        [
+            pytest.param(
+                {"invbalances": [{"curbal": 2}, {"curbal": -5}]}, ["stock_quantity"], id="balance"
+            ),
+            pytest.param({"invcost": [{"avgcost": -0.5}]}, ["unit_cost"], id="cost"),
+            pytest.param(
+                {"invbalances": [{"curbal": -5}], "invcost": [{"avgcost": -0.5}]},
+                ["stock_quantity", "unit_cost"],
+                id="both",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_negative_balance_is_read_as_no_stock(
-        self, httpx_mock, connector: MaximoConnector
+    async def test_negative_balance_or_cost_ends_the_read(
+        self, httpx_mock, connector: MaximoConnector, change: dict[str, object], fields: list[str]
     ) -> None:
         """An organization that allows negative balances can issue past a bin's
-        balance; the item is out of stock, not unreadable."""
+        balance. A SparePart holds no negative stock or cost, so the read says
+        which field it cannot represent instead of reporting a figure Maximo
+        does not hold."""
         await _connect(httpx_mock, connector)
-        record = {**_RECORDS["mxinventory"], "invbalances": [{"curbal": 2}, {"curbal": -5}]}
+        record = {**_RECORDS["mxinventory"], **change}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory"),
+            json={
+                "member": [_member("mxinventory"), _member("mxinventory", record)],
+                "responseInfo": {},
+            },
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_spare_parts()
+        assert str(exc_info.value) == (
+            "Maximo returned a mxinventory record that cannot be mapped "
+            f"(ValidationError: {', '.join(fields)}) — refusing to return a partial result"
+        )
+        assert _refusals(logs) == [
+            _refusal(
+                "mxinventory",
+                "unmappable_ValidationError",
+                1,
+                operation="read_spare_parts",
+                fields=fields,
+            )
+        ]
+        assert "-5" not in str(logs) + str(exc_info.value)
+        assert "-0.5" not in str(logs) + str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_mcp_spare_parts_tool_reports_the_refusal(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """What an MCP client gets, through a real MCP session: an error result
+        with the refusal, not a list of parts with a figure Maximo does not hold."""
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from mcp.server.fastmcp import FastMCP
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.mcp.tools import machina_list_spare_parts
+
+        await _connect(httpx_mock, connector)
+        record = {**_RECORDS["mxinventory"], "invbalances": [{"curbal": -5}]}
         httpx_mock.add_response(
             method="GET",
             url=_oslc_url("mxinventory"),
             json={"member": [_member("mxinventory", record)], "responseInfo": {}},
         )
-        [part] = await connector.read_spare_parts()
-        assert part.stock_quantity == 0
-        assert part.needs_reorder
-        assert part.metadata["negative_balance"] == -3.0
+        runtime = MagicMock(sandbox_mode=False)
+        runtime.get_primary_cmms.return_value = connector
+
+        @asynccontextmanager
+        async def lifespan(_server):
+            yield {"runtime": runtime}
+
+        server = FastMCP("maximo-test", lifespan=lifespan)
+        server.add_tool(machina_list_spare_parts)
+        async with create_connected_server_and_client_session(server._mcp_server) as client:
+            result = await client.call_tool("machina_list_spare_parts", {})
+        assert result.isError
+        [content] = result.content
+        assert content.text == (
+            "Error executing tool machina_list_spare_parts: Maximo returned a mxinventory record "
+            "that cannot be mapped (ValidationError: stock_quantity) — refusing to return a "
+            "partial result"
+        )
 
     @pytest.mark.asyncio
     async def test_maintenance_plan_fields(self, httpx_mock, connector: MaximoConnector) -> None:
@@ -2222,6 +2297,56 @@ class TestReadsSelectAttributes:
             "applied — refusing to return a partial result"
         )
         assert _refusals(logs) == [_refusal(object_structure, "missing_identity", 0, **log)]
+        # The member's href names Maximo's own host; neither carries it.
+        assert "maximo-internal" not in str(exc_info.value) + str(logs)
+
+    @pytest.mark.parametrize(("read", "object_structure", "params", "log"), _READS)
+    @pytest.mark.asyncio
+    async def test_member_with_only_its_identity_is_read(
+        self, httpx_mock, connector: MaximoConnector, read, object_structure: str, params, log
+    ) -> None:
+        """Only the identity attribute is required: every other attribute Maximo
+        leaves out (a null one) reads as the field's default."""
+        await _connect(httpx_mock, connector)
+        identity = _IDENTITY[object_structure]
+        record = {identity: _RECORDS[object_structure][identity]}
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url(object_structure, **params),
+            json={"member": [_member(object_structure, record)], "responseInfo": {}},
+        )
+        with structlog.testing.capture_logs() as logs:
+            [entity] = _entities(await read(connector))
+        assert _refusals(logs) == []
+        entity_id = entity.sku if object_structure == "mxinventory" else entity.id
+        assert entity_id == record[identity]
+
+    @pytest.mark.asyncio
+    async def test_rest_id_from_a_read_is_written_through_the_configured_url(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """metadata["rest_id"] comes from Maximo's answer: a write to it goes to
+        the configured url, never to the host in href, as one checked path
+        segment."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-1"'}),
+            json={"member": [_member("mxwo")], "responseInfo": {}},
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=httpx.URL(f"{OSLC}/os/mxwo/{_MEMBER_REST_ID}", params={"lean": "1"}),
+            status_code=204,
+        )
+        wo = await connector.get_work_order("WO-1")
+        assert wo is not None
+        await connector._patch_resource("mxwo", wo.metadata["rest_id"], {"description": "x"})
+        post = httpx_mock.get_requests()[-1]
+        assert (post.url.host, post.url.path) == (
+            "maximo.example.com",
+            f"/maximo/oslc/os/mxwo/{_MEMBER_REST_ID}",
+        )
 
     @pytest.mark.parametrize(
         ("read", "object_structure", "record", "error_type", "log", "leak"),
@@ -2332,8 +2457,9 @@ class TestReadsSelectAttributes:
             pytest.raises(ConnectorSchemaError) as exc_info,
         ):
             await read(connector)
+        cause = error_type + (f": {', '.join(log['fields'])}" if "fields" in log else "")
         assert str(exc_info.value) == (
-            f"Maximo returned a {object_structure} record that cannot be mapped ({error_type}) "
+            f"Maximo returned a {object_structure} record that cannot be mapped ({cause}) "
             "— refusing to return a partial result"
         )
         assert exc_info.value.__cause__ is None
@@ -2341,6 +2467,7 @@ class TestReadsSelectAttributes:
         assert _refusals(logs) == [
             _refusal(object_structure, f"unmappable_{error_type}", 1, **log)
         ]
+        assert "maximo-internal" not in str(exc_info.value) + str(logs)
         if leak is not None:
             assert leak not in str(logs)
             assert leak not in str(exc_info.value)

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import decimal
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from machina.connectors.cmms.mappers.maximo import (
     ASSET_SELECT,
@@ -464,43 +466,84 @@ class TestParseSparePartOslcShape:
         record = {**_INVENTORY, "item": [{"description": "In a list"}], "description": "Flat"}
         assert parse_spare_part(record).name == "Flat"
 
-    def test_fractions_are_dropped(self) -> None:
+    def test_fractions_are_rounded_down(self) -> None:
         """Quantities are whole units; Maximo can hold 2.5 litres in a bin."""
         part = parse_spare_part(
             {**_INVENTORY, "invbalances": [{"curbal": 2.5}, {"curbal": 0.7}], "minlevel": 1.9}
         )
         assert (part.stock_quantity, part.reorder_point) == (3, 1)
 
+    @pytest.mark.parametrize(
+        ("balances", "stock"),
+        [
+            # As floats, these add up to -2.8e-17, which rounds down to -1.
+            pytest.param([0.3, -0.1, -0.2], 0, id="zero"),
+            # As floats, 0.9999999999999999, which rounds down to 0.
+            pytest.param([0.7, 0.2, 0.1], 1, id="one"),
+            pytest.param([0.1] * 10, 1, id="ten-tenths"),
+        ],
+    )
+    def test_balances_are_added_as_decimals(self, balances: list[float], stock: int) -> None:
+        rows = [{"curbal": balance} for balance in balances]
+        assert parse_spare_part({**_INVENTORY, "invbalances": rows}).stock_quantity == stock
+
+    def test_the_host_decimal_precision_does_not_change_the_sum(self) -> None:
+        """At 6 digits, -0.5 + 1000000.4 - 1000000 would round to 0 instead of -0.1."""
+        rows = [{"curbal": -0.5}, {"curbal": 1000000.4}, {"curbal": -1000000}]
+        with decimal.localcontext(prec=6), pytest.raises(ValidationError):
+            parse_spare_part({**_INVENTORY, "invbalances": rows})
+
+    @pytest.mark.parametrize(
+        ("change", "error"),
+        [
+            pytest.param(
+                {"invbalances": [{"curbal": float("nan")}]}, ValueError, id="nan-balance"
+            ),
+            pytest.param({"invcost": [{"avgcost": float("nan")}]}, ValueError, id="nan-cost"),
+            pytest.param({"minlevel": float("nan")}, ValueError, id="nan-reorder-point"),
+            pytest.param({"minlevel": float("inf")}, OverflowError, id="infinite-reorder-point"),
+            pytest.param(
+                {"invbalances": [{"curbal": float("inf")}, {"curbal": float("-inf")}]},
+                ArithmeticError,
+                id="infinite-balances",
+            ),
+        ],
+    )
+    def test_a_figure_that_is_not_finite_is_refused(
+        self, change: dict[str, Any], error: type[Exception]
+    ) -> None:
+        with pytest.raises(error):
+            parse_spare_part({**_INVENTORY, **change})
+
     def test_minlevel_as_decimal_text(self) -> None:
         assert parse_spare_part({**_INVENTORY, "minlevel": "5.00"}).reorder_point == 5
 
-    def test_negative_balance_is_no_stock(self) -> None:
-        """An organization can allow negative balances; a SparePart cannot hold one."""
-        part = parse_spare_part({**_INVENTORY, "invbalances": [{"curbal": 2}, {"curbal": -5}]})
-        assert part.stock_quantity == 0
-        assert part.needs_reorder
-        assert part.metadata["negative_balance"] == -3.0
-
-    def test_negative_fraction_is_no_stock(self) -> None:
-        """-0.5 truncates to 0, but it is still below zero."""
-        part = parse_spare_part({**_INVENTORY, "invbalances": [{"curbal": -0.5}]})
-        assert part.stock_quantity == 0
-        assert part.metadata["negative_balance"] == -0.5
-
-    def test_negative_cost_is_no_cost(self) -> None:
-        part = parse_spare_part({**_INVENTORY, "invcost": [{"avgcost": -0.5}]})
-        assert part.unit_cost == 0.0
-        assert part.metadata["negative_unit_cost"] == -0.5
+    @pytest.mark.parametrize(
+        ("change", "field"),
+        [
+            # An organization can allow negative balances; a SparePart has no
+            # negative stock, and no figure is invented in its place.
+            pytest.param(
+                {"invbalances": [{"curbal": 2}, {"curbal": -5}]}, "stock_quantity", id="balance"
+            ),
+            # Rounded down, -0.5 is still below zero, not 0.
+            pytest.param({"invbalances": [{"curbal": -0.5}]}, "stock_quantity", id="fraction"),
+            pytest.param({"invcost": [{"avgcost": -0.5}]}, "unit_cost", id="cost"),
+            pytest.param({"minlevel": -0.5}, "reorder_point", id="reorder-point"),
+        ],
+    )
+    def test_a_negative_figure_is_refused_not_adjusted(
+        self, change: dict[str, Any], field: str
+    ) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            parse_spare_part({**_INVENTORY, **change})
+        assert [e["loc"] for e in exc_info.value.errors()] == [(field,)]
 
     @pytest.mark.parametrize("cost", [float("inf"), float("-inf"), "inf"])
     def test_a_cost_that_is_not_finite_is_refused(self, cost: object) -> None:
-        """As an infinite balance is: int() of it raises OverflowError."""
+        """As an infinite balance is: floor() of it raises OverflowError."""
         with pytest.raises(ValueError, match="not a finite number"):
             parse_spare_part({**_INVENTORY, "invcost": [{"avgcost": cost}]})
-
-    def test_no_negative_figures_no_extra_metadata(self) -> None:
-        part = parse_spare_part(_INVENTORY)
-        assert not {"negative_balance", "negative_unit_cost"} & set(part.metadata)
 
     def test_reorder_flag_is_not_a_reorder_point(self) -> None:
         part = parse_spare_part({"itemnum": "X", "reorder": True})

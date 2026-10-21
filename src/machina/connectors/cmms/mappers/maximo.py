@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import UTC, datetime
+from decimal import Decimal, localcontext
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -182,10 +183,10 @@ def _metadata(data: dict[str, Any], mapped: set[str]) -> dict[str, Any]:
     """Return the member's other attributes, for ``metadata``.
 
     Kept: the attributes no domain field took whose value is a plain value
-    (text, number, boolean). Dropped: OSLC transport keys and nested
-    objects or lists, which no selection asks for and which, in a full
-    resource read, are links (``doclinks: {href: ...}``). The record's rest
-    id is kept as ``rest_id``.
+    (text, number, boolean). Dropped: OSLC transport keys and the nested
+    objects or lists no field took, which in a full resource read are links
+    (``doclinks: {href: ...}``). The record's rest id is kept as
+    ``rest_id``.
     """
     metadata = {
         k: v
@@ -328,52 +329,56 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     is Maximo's yes/no reorder flag, not a quantity, so it stays in
     ``metadata``.
 
-    Quantities are whole units: fractions are dropped. A Maximo organization
-    can allow negative balances, which a :class:`SparePart` cannot hold, so
-    a total below zero is reported as no stock, and a cost below zero as no
-    cost, with Maximo's own figure in ``metadata`` (``negative_balance``,
-    ``negative_unit_cost``). A balance or cost that is not a finite number
-    is refused (``OverflowError``, ``ValueError``).
+    Quantities are whole units, rounded down. Nothing is adjusted to fit the
+    domain model: a :class:`SparePart` holds no negative stock, cost or
+    reorder point, so a record whose balances add up to less than zero (a
+    Maximo organization can allow negative balances), or whose cost or
+    ``minlevel`` is negative, fails its validation (``ValidationError`` on
+    ``stock_quantity``, ``unit_cost`` or ``reorder_point``). A balance, cost
+    or ``minlevel`` that is not a finite number is refused too
+    (``OverflowError``, ``ValueError``, or ``decimal.InvalidOperation`` for
+    balances that add up to infinity minus infinity).
     """
     item = data.get("item")
     name = item.get("description") if isinstance(item, dict) else None
     balances = data.get("invbalances")
-    if isinstance(balances, list):
-        stock = sum(float(row.get("curbal", 0)) for row in balances)
-    else:
-        stock = float(data.get("curbal", 0))
+    # Summed as decimals: as floats, 0.3, -0.1 and -0.2 add up to just below
+    # zero, which rounds down to a negative stock Maximo does not hold. The
+    # precision is fixed, so a host that lowers its decimal precision cannot
+    # round a small negative total away.
+    with localcontext(prec=34):
+        if isinstance(balances, list):
+            stock = sum((_decimal(row.get("curbal", 0)) for row in balances), Decimal(0))
+        else:
+            stock = _decimal(data.get("curbal", 0))
     costs = data.get("invcost")
     cost_row = costs[0] if isinstance(costs, list) and costs else data
     cost = float(cost_row.get("avgcost", cost_row.get("lastcost", 0.0)))
-    if not math.isfinite(cost):  # an infinite balance fails int() the same way
+    if not math.isfinite(cost):  # an infinite balance fails floor() the same way
         raise ValueError("the unit cost is not a finite number")
-    metadata = _metadata(
-        data,
-        {
-            "itemnum",
-            "description",
-            "item",
-            "invbalances",
-            "curbal",
-            "minlevel",
-            "invcost",
-            "avgcost",
-            "lastcost",
-            "location",
-        },
-    )
-    if stock < 0:
-        metadata["negative_balance"] = stock
-    if cost < 0:
-        metadata["negative_unit_cost"] = cost
     return SparePart(
         sku=str(data.get("itemnum", "")),
         name=str(name if name is not None else data.get("description", "")),
-        stock_quantity=max(int(stock), 0),
-        reorder_point=int(float(data.get("minlevel", 0))),
-        unit_cost=max(cost, 0.0),
+        # floor, not int(): -0.5 stays below zero instead of becoming 0.
+        stock_quantity=math.floor(stock),
+        reorder_point=math.floor(float(data.get("minlevel", 0))),
+        unit_cost=cost,
         warehouse_location=str(data.get("location", "")),
-        metadata=metadata,
+        metadata=_metadata(
+            data,
+            {
+                "itemnum",
+                "description",
+                "item",
+                "invbalances",
+                "curbal",
+                "minlevel",
+                "invcost",
+                "avgcost",
+                "lastcost",
+                "location",
+            },
+        ),
     )
 
 
@@ -440,6 +445,11 @@ def reverse_status(status: WorkOrderStatus) -> str:
 # ---------------------------------------------------------------------------
 # Module-private helpers (only used by parse_* / reverse_*)
 # ---------------------------------------------------------------------------
+
+
+def _decimal(value: Any) -> Decimal:
+    """Read a Maximo number as the decimal it was written as (``0.1``, not 0.1000…0555)."""
+    return Decimal(repr(float(value)))
 
 
 def _maximo_criticality(priority_val: Any) -> Criticality:
