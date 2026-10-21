@@ -18,7 +18,12 @@ from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import Workflow
@@ -2754,3 +2759,118 @@ class TestPagesKeepTheSelection:
         entity = await lookup(connector)
         assert entity is not None
         assert len(httpx_mock.get_requests()) == 2  # connect, the one page
+
+
+# ---------------------------------------------------------------------------
+# Spare parts by asset: refused before any request
+# ---------------------------------------------------------------------------
+
+# Written out, not imported, so a change to the wording fails these tests.
+_ASSET_FILTER_REFUSED = (
+    "The Maximo connector cannot filter spare parts by asset: it reads them from "
+    "mxinventory, which it cannot query by asset. Look the part up by sku instead."
+)
+_CONNECT_ONLY = ["/maximo/oslc/whoami"]
+
+
+def _paths(httpx_mock) -> list[str]:
+    return [request.url.path for request in httpx_mock.get_requests()]
+
+
+class TestReadSparePartsAssetFilter:
+    """The connector reads spare parts from mxinventory, which it cannot query
+    by asset. Dropping the filter would pass the whole inventory, or a bare sku
+    match, off as the asset's parts, so the read is refused before any request."""
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_is_refused_before_any_request(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorUnsupportedFilterError) as exc_info:
+            await connector.read_spare_parts(asset_id="PUMP-201")
+        assert str(exc_info.value) == _ASSET_FILTER_REFUSED
+        assert _paths(httpx_mock) == _CONNECT_ONLY
+
+    @pytest.mark.asyncio
+    async def test_asset_filter_is_refused_even_with_a_sku(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """A sku match says nothing about the part fitting the asset."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorUnsupportedFilterError) as exc_info:
+            await connector.read_spare_parts(asset_id="PUMP-201", sku="BRG-6205")
+        assert str(exc_info.value) == _ASSET_FILTER_REFUSED
+        assert _paths(httpx_mock) == _CONNECT_ONLY
+
+    @pytest.mark.parametrize(
+        ("sku", "params"),
+        [
+            pytest.param("", {}, id="unfiltered"),
+            pytest.param("BRG-6205", {"oslc.where": 'itemnum="BRG-6205"'}, id="sku"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_empty_asset_id_is_no_filter(
+        self, httpx_mock, connector: MaximoConnector, sku: str, params: dict[str, str]
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxinventory", **params),
+            json={"member": [_member("mxinventory")], "responseInfo": {}},
+        )
+        parts = await connector.read_spare_parts(asset_id="", sku=sku)
+        assert [part.sku for part in parts] == ["BRG-6205"]
+        assert len(httpx_mock.get_requests()) == 2  # connect, the read at that exact URL
+
+    @pytest.mark.asyncio
+    async def test_refusal_carries_no_value_and_logs_nothing(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """The caller logs the refusal; the connector repeats neither filter value."""
+        await _connect(httpx_mock, connector)
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorUnsupportedFilterError) as exc_info,
+        ):
+            await connector.read_spare_parts(asset_id="PUMP-SECRET-201", sku="BRG-SECRET-6205")
+        assert "SECRET" not in str(exc_info.value)
+        assert logs == []
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_reports_the_asset_filter_refusal(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        pytest.importorskip("mcp", reason="MCP SDK not installed (pip install machina-ai[mcp])")
+        # What an MCP client gets, through a real MCP session: an error result
+        # with the refusal, and no inventory read. The MCP SDK is the [mcp]
+        # extra: the core CI jobs skip this test, the optional-extras jobs run it.
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from mcp.server.fastmcp import FastMCP
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.mcp.tools import machina_list_spare_parts
+
+        await _connect(httpx_mock, connector)
+        runtime = MagicMock(sandbox_mode=False)
+        runtime.get_primary_cmms.return_value = connector
+
+        @asynccontextmanager
+        async def lifespan(_server):
+            yield {"runtime": runtime}
+
+        server = FastMCP("maximo-test", lifespan=lifespan)
+        server.add_tool(machina_list_spare_parts)
+        async with create_connected_server_and_client_session(server._mcp_server) as client:
+            result = await client.call_tool("machina_list_spare_parts", {"asset_id": "P-201"})
+        assert result.isError
+        [content] = result.content
+        assert content.text == (
+            "Error executing tool machina_list_spare_parts: The Maximo connector cannot filter "
+            "spare parts by asset: it reads them from mxinventory, which it cannot query by "
+            "asset. Look the part up by sku instead."
+        )
+        assert _paths(httpx_mock) == _CONNECT_ONLY
