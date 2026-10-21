@@ -648,6 +648,23 @@ class TestReadSparePartsByAsset:
         _assert_value_free(str(exc_info.value), logs, "ydOS2PdR3a")
 
     @pytest.mark.asyncio
+    async def test_a_refusal_with_a_sku_names_neither_the_sku_nor_the_parts(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp"]
+        _mock_asset(httpx_mock, _asset_body(parts=listed))
+        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Qm7Tz2XbLp", status_code=404)
+
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as exc_info:
+            await connector.read_spare_parts(asset_id=ASSET_ID, sku="SKU-SECRET-6205")
+
+        _refusal(logs, "listed_part_not_found")
+        assert "SKU-SECRET-6205" not in str(exc_info.value)
+        _assert_value_free(str(exc_info.value), logs, *listed, sku="SKU-SECRET-6205")
+
+    @pytest.mark.asyncio
     async def test_numeric_asset_id_is_matched_as_its_text(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
