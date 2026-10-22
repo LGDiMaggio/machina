@@ -1285,6 +1285,52 @@ class TestWritesPreserveTheFile:
 
         assert path.read_bytes() == self._LF_CSV + b"WO-3,P-201,created,x\n"
 
+    _QUOTED_CSV = (
+        b'"ID","Codice Asset","Stato","Descrizione"\r\n'
+        b'"WO-1","P-201","created","first"\r\n'
+        b'"WO-2","C-3","created","second, with a comma"\r\n'
+    )
+
+    @pytest.mark.asyncio
+    async def test_csv_update_keeps_a_fully_quoted_file_quoted(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(self._QUOTED_CSV)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", description="changed")
+
+        assert path.read_bytes() == self._QUOTED_CSV.replace(b'"first"', b'"changed"')
+
+    @pytest.mark.asyncio
+    async def test_csv_append_to_a_fully_quoted_file_quotes_the_row(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(self._QUOTED_CSV)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert path.read_bytes() == self._QUOTED_CSV + b'"WO-3","P-201","created","x"\r\n'
+
+    @pytest.mark.asyncio
+    async def test_csv_with_some_quoted_fields_keeps_minimal_quoting(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        content = (
+            b"ID,Codice Asset,Stato,Descrizione\r\n"
+            b'WO-1,P-201,created,"first, with a comma"\r\n'
+            b"WO-2,C-3,created,second\r\n"
+        )
+        path.write_bytes(content)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-2", description="changed")
+
+        assert path.read_bytes() == content.replace(b"second", b"changed")
+
     @pytest.mark.asyncio
     async def test_csv_update_keeps_crlf_line_endings(self, tmp_path: Path) -> None:
         path = tmp_path / "odl.csv"

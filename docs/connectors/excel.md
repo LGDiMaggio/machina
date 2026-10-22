@@ -146,9 +146,10 @@ since then count. A work-order row whose values do not make a valid work order
   mapped to is refused with `ConnectorError` rather than silently dropped. If
   the write fails, the cached record is restored. A key that is not a
   work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8
-  BOM, which Excel on Windows needs to read accented text, and its line
-  terminator (`\r\n` or `\n`) on update and append; quoting follows Python's
-  `csv` defaults (only where needed). Without a
+  BOM, which Excel on Windows needs to read accented text, its line
+  terminator (`\r\n` or `\n`) and, if its first records quote every field,
+  that full quoting, on update and append. Otherwise fields are quoted only
+  where needed. The delimiter is always a comma. Without a
   `write_mode`, `update_work_order()` changes the in-memory copy only.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.

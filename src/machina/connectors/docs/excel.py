@@ -469,16 +469,34 @@ def _csv_line_terminator(path: Path) -> str:
     return "\r" if b"\r" in head else "\r\n"
 
 
+_QUOTED_RECORD_RE = re.compile(r'"(?:[^"]|"")*"(?:,"(?:[^"]|"")*")*')
+
+
+def _csv_quotes_all(path: Path, newline: str) -> bool:
+    """Return whether the file's first records quote every field (``csv.QUOTE_ALL``).
+
+    A record with a line break inside a quoted field does not match, so such
+    a file falls back to minimal quoting.
+    """
+    with path.open("rb") as fb:
+        head = fb.read(65536).decode("utf-8-sig", errors="replace")
+    records = [r for r in head.split(newline)[:6] if r]
+    if len(head) == 65536 and len(records) > 1:
+        records = records[:-1]
+    return bool(records) and all(_QUOTED_RECORD_RE.fullmatch(r) for r in records)
+
+
 def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -> None:
     """Append one row to a CSV file, placing each value under its header.
 
-    An existing file keeps its own column order, extra columns and line
-    terminator; a missing or empty file is started with the schema's header
-    row.
+    An existing file keeps its own column order, extra columns, line
+    terminator and full quoting; a missing or empty file is started with the
+    schema's header row.
     """
     header: list[str] = []
     needs_newline = False
     newline = "\r\n"
+    quote_all = False
     if path.exists() and path.stat().st_size > 0:
         with path.open(newline="", encoding="utf-8-sig") as f:
             header = next(csv.reader(f), [])
@@ -486,6 +504,7 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
             fb.seek(-1, 2)
             needs_newline = fb.read(1) not in (b"\n", b"\r")
         newline = _csv_line_terminator(path)
+        quote_all = _csv_quotes_all(path, newline)
     write_header = not header
     if write_header:
         header = [m.column for m in schema.columns]
@@ -500,7 +519,12 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
     with path.open("a", newline="", encoding="utf-8") as f:
         if needs_newline:
             f.write(newline)
-        writer = csv.DictWriter(f, fieldnames=header, lineterminator=newline)
+        writer = csv.DictWriter(
+            f,
+            fieldnames=header,
+            lineterminator=newline,
+            quoting=csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL,
+        )
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -555,13 +579,15 @@ def _update_csv_row(
     """CSV twin of :func:`_update_xlsx_row`: rewrite the file with one row changed.
 
     Every other row and column is written back unchanged, with the file's
-    own line terminator, via a temp sibling and an atomic replace.
+    own line terminator and full quoting, via a temp sibling and an atomic
+    replace.
     """
     with path.open("rb") as fb:
         # Excel on Windows reads BOM-less UTF-8 as the ANSI code page and
         # garbles accented text, so a file that had a BOM keeps it.
         has_bom = fb.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
     newline = _csv_line_terminator(path)
+    quote_all = _csv_quotes_all(path, newline)
     with path.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     if not rows:
@@ -588,7 +614,11 @@ def _update_csv_row(
 
     def _write(tmp: Path) -> None:
         with tmp.open("w", newline="", encoding="utf-8-sig" if has_bom else "utf-8") as f:
-            csv.writer(f, lineterminator=newline).writerows(rows)
+            csv.writer(
+                f,
+                lineterminator=newline,
+                quoting=csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL,
+            ).writerows(rows)
 
     _replace_atomically(path, _write)
 
