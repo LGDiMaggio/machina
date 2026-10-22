@@ -181,6 +181,9 @@ an `.env` file) is substituted as an empty string.
 semantics: the default is used when `VAR` is unset **or empty** (a blank
 `VAR=` line in an `.env` file counts as unset).
 
+Placeholders do not nest: a default that is itself a placeholder, such as
+`${A:-${B}}`, fails to load with a `ValueError` naming `A`.
+
 ```yaml
 llm:
   provider: "${MACHINA_LLM_MODEL:-openai/gpt-4o}"

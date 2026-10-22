@@ -146,6 +146,31 @@ class TestEnvVarDefaults:
         with pytest.raises(ValueError, match="NOT_SET:typo"):
             self._load(tmp_path, "token: ${NOT_SET:typo}\n")
 
+    @pytest.mark.parametrize("outer_set", [False, True])
+    def test_nested_placeholder_in_default_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outer_set: bool
+    ) -> None:
+        # The pattern stops at the first "}", so this used to yield the literal
+        # "${MACHINA_TEST_INNER}" (outer unset) or "value}" (outer set).
+        monkeypatch.setenv("MACHINA_TEST_INNER", "inner")
+        if outer_set:
+            monkeypatch.setenv("MACHINA_TEST_OUTER", "outer")
+        else:
+            monkeypatch.delenv("MACHINA_TEST_OUTER", raising=False)
+        with pytest.raises(ValueError, match=r"[Nn]ested placeholder.*MACHINA_TEST_OUTER"):
+            self._load(tmp_path, 'v: "${MACHINA_TEST_OUTER:-${MACHINA_TEST_INNER}}"\n')
+
+    def test_nested_placeholder_in_name_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match=r"[Nn]ested placeholder"):
+            self._load(tmp_path, 'v: "${${MACHINA_TEST_INNER}}"\n')
+
+    def test_dollar_in_default_is_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MACHINA_TEST_KEY", raising=False)
+        data = self._load(tmp_path, 'v: "${MACHINA_TEST_KEY:-a$b}"\n')
+        assert data["v"] == "a$b"
+
     _DEPLOY_DIR = Path(__file__).resolve().parents[2] / "deploy" / "docker"
     _DEPLOY_VARS = (
         "MACHINA_CMMS_URL",
