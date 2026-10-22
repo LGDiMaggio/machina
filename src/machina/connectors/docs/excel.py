@@ -9,12 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import contextlib
 import csv
-import os
 import re
-import stat
-import uuid
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -27,13 +23,12 @@ from machina.connectors._entity_builders import LIST_CELL_DELIMITER
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
+from machina.connectors._file_replace import replace_atomically
 from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from machina.connectors.docs.excel_schema import (
         ColumnMapping,
         ExcelConnectorConfig,
@@ -358,47 +353,9 @@ def _last_row_with_data(ws: Any, columns: list[int]) -> int:
     return 1
 
 
-def _replace_atomically(path: Path, write: Callable[[Path], None]) -> None:
-    """Write ``path`` through a temp file of its own, then atomically replace it.
-
-    The temp file has a unique name, so concurrent or abandoned writes never
-    share one. It takes the target's permission bits (a new file gets the
-    umask default), is flushed to disk before the replace, and the directory
-    entry is flushed after it, so neither a crash nor a power loss leaves a
-    truncated file. A symlink is written through, not replaced.
-    """
-    target = path.resolve()
-    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    os.close(os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
-    try:
-        write(tmp)
-        with contextlib.suppress(FileNotFoundError):
-            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
-        with tmp.open("rb+") as f:
-            os.fsync(f.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    _fsync_directory(target.parent)
-
-
-def _fsync_directory(directory: Path) -> None:
-    """Flush a directory entry change to disk (a no-op where unsupported, e.g. Windows)."""
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        with contextlib.suppress(OSError):
-            os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _save_xlsx_atomically(wb: Any, path: Path) -> None:
-    """Save a workbook through :func:`_replace_atomically`."""
-    _replace_atomically(path, lambda tmp: wb.save(str(tmp)))
+    """Save a workbook through :func:`replace_atomically`."""
+    replace_atomically(path, lambda tmp: wb.save(str(tmp)))
 
 
 def _log_unwritten_fields(path: Path, fields: list[str]) -> None:
@@ -620,7 +577,7 @@ def _update_csv_row(
                 quoting=csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL,
             ).writerows(rows)
 
-    _replace_atomically(path, _write)
+    replace_atomically(path, _write)
 
 
 def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
@@ -742,7 +699,6 @@ class ExcelCsvConnector:
             self._validate_and_load_work_orders()
         if self._config.failure_modes:
             self._validate_and_load_failure_modes()
-        self._warn_formulas_lost_on_write()
         self._connected = True
         logger.info(
             "connected",
@@ -751,6 +707,7 @@ class ExcelCsvConnector:
             work_orders_loaded=len(self._wo_cache),
             failure_modes_loaded=len(self._fm_cache),
         )
+        self._warn_formulas_lost_on_write()
 
     def _warn_formulas_lost_on_write(self) -> None:
         """Log the mapped columns that hold formulas in the ``.xlsx`` file writes save.
