@@ -139,7 +139,7 @@ MAXIMO = "https://maximo.example.com"
 MAXIMO_PUMP = Asset(id="PUMP-201", name="Cooling Water Pump", type=AssetType.ROTATING_EQUIPMENT)
 MAXIMO_REFUSAL = (
     "The Maximo connector cannot filter spare parts by asset: it reads them from "
-    "mxinventory, which it cannot query by asset. Look the part up by sku instead."
+    "mxinventory, which it does not query by asset. Look the part up by sku instead."
 )
 _MXINVENTORY = re.compile(rf"{re.escape(MAXIMO)}/maximo/oslc/os/mxinventory\?")
 

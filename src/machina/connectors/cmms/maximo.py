@@ -774,7 +774,7 @@ class MaximoConnector:
         if asset_id:
             raise ConnectorUnsupportedFilterError(
                 "The Maximo connector cannot filter spare parts by asset: it reads them "
-                "from mxinventory, which it cannot query by asset. Look the part up by "
+                "from mxinventory, which it does not query by asset. Look the part up by "
                 "sku instead."
             )
         where = _oslc_eq("itemnum", sku) if sku else ""

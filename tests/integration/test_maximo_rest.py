@@ -2776,7 +2776,7 @@ class TestPagesKeepTheSelection:
 # Written out, not imported, so a change to the wording fails these tests.
 _ASSET_FILTER_REFUSED = (
     "The Maximo connector cannot filter spare parts by asset: it reads them from "
-    "mxinventory, which it cannot query by asset. Look the part up by sku instead."
+    "mxinventory, which it does not query by asset. Look the part up by sku instead."
 )
 _CONNECT_ONLY = ["/maximo/oslc/whoami"]
 
@@ -2893,7 +2893,7 @@ class TestReadSparePartsAssetFilter:
         [content] = result.content
         assert content.text == (
             "Error executing tool machina_list_spare_parts: The Maximo connector cannot filter "
-            "spare parts by asset: it reads them from mxinventory, which it cannot query by "
+            "spare parts by asset: it reads them from mxinventory, which it does not query by "
             "asset. Look the part up by sku instead."
         )
         assert _paths(httpx_mock) == _CONNECT_ONLY
