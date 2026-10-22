@@ -26,7 +26,7 @@ def test_an_id_is_returned_as_text(value: object, text: str) -> None:
 @pytest.mark.parametrize("name", ["asset_id", "sku"])
 @pytest.mark.parametrize(
     "value",
-    [None, " ", "\t\n", True, False, 1.5, [], ["P-201"], {}, {"id": "P-201"}],
+    [None, " ", "\t\n", True, False, 1.5, 0.0, [], ["P-201"], {}, {"id": "P-201"}, ("P-201",)],
     ids=[
         "none",
         "blank",
@@ -34,10 +34,12 @@ def test_an_id_is_returned_as_text(value: object, text: str) -> None:
         "true",
         "false",
         "float",
+        "zero-float",
         "empty-list",
         "list",
         "empty-dict",
         "dict",
+        "tuple",
     ],
 )
 def test_a_value_that_is_not_an_id_is_refused(name: str, value: object) -> None:
