@@ -82,7 +82,8 @@ spare_part_reorder = Workflow(
                 "Spare part {trigger.part_id} is below reorder point.\n"
                 "Stock: {trigger.current_stock}, reorder: {trigger.reorder_point}\n"
                 "CMMS record: {lookup_part}\n"
-                "Its compatible_assets lists the assets that use it; their "
+                "compatible_assets holds only the assets the CMMS records for this "
+                "part; an empty list does not mean no asset uses it. Asset "
                 "criticality has not been checked.\n\n"
                 "Assess urgency. Standard or expedited? Recommend quantity."
             ),

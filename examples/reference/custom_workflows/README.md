@@ -15,7 +15,7 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). A CMMS lookup by SKU feeds an LLM urgency assessment. The part record lists the assets that use the part (`compatible_assets`); their criticality is not checked, and the urgency prompt says so. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). A CMMS lookup by SKU feeds an LLM urgency assessment. Asset criticality is not checked, and the urgency prompt says so. The part record's `compatible_assets` lists the assets that use the part only on the Generic CMMS; the SAP PM, Maximo and UpKeep connectors leave it empty, so the prompt also tells the LLM that an empty list does not mean no asset uses the part. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
 
 An event whose `part_id` is missing or blank stops the workflow at `lookup_part`; an empty one would otherwise be no `sku` filter, and the read would return the whole inventory. A SKU the CMMS does not have reads as an empty list, so the later steps share a guard and are skipped: nothing is assessed, ordered or announced. Caveat: a guard skip is not a failure, so that run still reports success and tells no one. Check `lookup_part`'s output on the result if an unknown SKU should raise an alert.
 
