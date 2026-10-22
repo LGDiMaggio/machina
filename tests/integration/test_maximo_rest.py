@@ -1740,7 +1740,10 @@ class TestWhereValuesStayLiteral:
         self, httpx_mock, connector: MaximoConnector, sku: str
     ) -> None:
         await _connect(httpx_mock, connector)
-        with pytest.raises(ConnectorError, match="Invalid itemnum"):
+        # A blank sku is no ID at all: the shared filter check refuses it
+        # before the value reaches _oslc_eq.
+        expected = "the sku filter is not an ID" if not sku.strip() else "Invalid itemnum"
+        with pytest.raises(ConnectorError, match=expected):
             await connector.read_spare_parts(sku=sku)
 
     @pytest.mark.asyncio
@@ -1761,12 +1764,16 @@ def _read_history(conn: MaximoConnector, value: object):
     return conn.read_maintenance_history(value)  # type: ignore[arg-type]
 
 
+def _read_spare_parts_by_sku(conn: MaximoConnector, value: object):
+    return conn.read_spare_parts(sku=value)  # type: ignore[arg-type]
+
+
 _FILTERED_CALLS = [
     pytest.param(lambda c, v: c.get_asset(v), id="get_asset"),
     pytest.param(lambda c, v: c.get_work_order(v), id="get_work_order"),
     pytest.param(lambda c, v: c.read_work_orders(asset_id=v), id="read_work_orders-asset_id"),
     pytest.param(lambda c, v: c.read_work_orders(status=v), id="read_work_orders-status"),
-    pytest.param(lambda c, v: c.read_spare_parts(sku=v), id="read_spare_parts-sku"),
+    pytest.param(_read_spare_parts_by_sku, id="read_spare_parts-sku"),
     pytest.param(_read_history, id="read_maintenance_history"),
     # Looks the order up by wonum before writing, so the value is refused before the lookup.
     pytest.param(lambda c, v: c.update_work_order(v, description="x"), id="update_work_order"),
@@ -1825,12 +1832,13 @@ class TestOslcWhereValues:
     ) -> None:
         await _connect(httpx_mock, connector)
         # read_maintenance_history refuses a blank asset ID with its own
-        # missing-ID message before the value reaches _oslc_eq.
-        expected = (
-            "requires an asset_id"
-            if call is _read_history and not value.strip()
-            else "for a Maximo query"
-        )
+        # missing-ID message, and read_spare_parts a blank sku with the shared
+        # filter check, before the value reaches _oslc_eq.
+        expected = "for a Maximo query"
+        if not value.strip() and call is _read_history:
+            expected = "requires an asset_id"
+        elif not value.strip() and call is _read_spare_parts_by_sku:
+            expected = "the sku filter is not an ID"
         with pytest.raises(ConnectorError, match=expected):
             await call(connector, value)
         # Only the whoami handshake went out: no OSLC query, no write.
@@ -2823,6 +2831,21 @@ class TestReadSparePartsAssetFilter:
         parts = await connector.read_spare_parts(asset_id="", sku=sku)
         assert [part.sku for part in parts] == ["BRG-6205"]
         assert len(httpx_mock.get_requests()) == 2  # connect, the read at that exact URL
+
+    @pytest.mark.parametrize(
+        "asset_id", [None, "  ", ["PUMP-201"]], ids=["unresolved", "blank", "list"]
+    )
+    @pytest.mark.asyncio
+    async def test_asset_filter_that_is_not_an_id_is_refused_before_any_request(
+        self, httpx_mock, connector: MaximoConnector, asset_id: object
+    ) -> None:
+        """``None`` (an unresolved workflow placeholder) is not "no filter"."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError) as exc_info:
+            await connector.read_spare_parts(asset_id=asset_id)  # type: ignore[arg-type]
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value).startswith("read_spare_parts: the asset_id filter is not an ID")
+        assert _paths(httpx_mock) == _CONNECT_ONLY
 
     @pytest.mark.asyncio
     async def test_refusal_carries_no_value_and_logs_nothing(

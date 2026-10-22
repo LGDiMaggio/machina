@@ -75,6 +75,7 @@ async def request_with_retry(
     base_backoff: float = DEFAULT_BASE_BACKOFF,
     max_backoff: float = DEFAULT_MAX_BACKOFF,
     retry_on_network_error: bool | None = None,
+    log_url: str | None = None,
 ) -> Any:
     """Perform an HTTP request with retries on 429/503 and transient errors.
 
@@ -100,6 +101,9 @@ async def request_with_retry(
             retrying a 503, which a gateway can return after the backend
             processed the request; a 429 is retried for every method, since
             the server refused it unprocessed.
+        log_url: What the retry warnings log in place of ``url``, for a URL
+            that carries a value the logs must not hold, such as a vendor
+            record ID. ``None`` (default) logs ``url``.
 
     Returns:
         The final ``httpx.Response``. This is either the first success,
@@ -116,6 +120,7 @@ async def request_with_retry(
 
     if retry_on_network_error is None:
         retry_on_network_error = method.upper() in _IDEMPOTENT_METHODS
+    logged_url = url if log_url is None else log_url
 
     transient_exceptions: tuple[type[BaseException], ...] = (
         httpx.TimeoutException,
@@ -147,7 +152,7 @@ async def request_with_retry(
                 max_retries=max_retries,
                 backoff=backoff,
                 method=method,
-                url=url,
+                url=logged_url,
                 error=str(exc),
             )
             await asyncio.sleep(backoff)
@@ -181,7 +186,7 @@ async def request_with_retry(
                     max_backoff=max_backoff,
                     status_code=resp.status_code,
                     method=method,
-                    url=url,
+                    url=logged_url,
                 )
                 return resp
         else:
@@ -193,7 +198,7 @@ async def request_with_retry(
             backoff=backoff,
             status_code=resp.status_code,
             method=method,
-            url=url,
+            url=logged_url,
         )
         await asyncio.sleep(backoff)
         attempt += 1

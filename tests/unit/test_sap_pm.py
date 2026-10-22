@@ -478,6 +478,21 @@ class TestSparePartsBomGuard:
         assert "SKF-6310" not in str(exc_info.value)
         conn._odata_get.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "asset_id", [None, "  ", ["P-201"]], ids=["unresolved", "blank", "list"]
+    )
+    @pytest.mark.asyncio
+    async def test_asset_filter_that_is_not_an_id_is_refused_before_any_request(
+        self, asset_id: object
+    ) -> None:
+        """Even with the field configured: ``None`` would otherwise read the whole BOM."""
+        conn = self._conn(bom_equipment_field="BillOfMaterialEquipment")
+        with pytest.raises(ConnectorError) as exc_info:
+            await conn.read_spare_parts(asset_id=asset_id)  # type: ignore[arg-type]
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value).startswith("read_spare_parts: the asset_id filter is not an ID")
+        conn._odata_get.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_empty_asset_id_is_no_filter(self) -> None:
         conn = self._conn()

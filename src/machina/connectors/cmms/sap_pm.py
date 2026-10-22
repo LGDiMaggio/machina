@@ -48,6 +48,7 @@ from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.paths import checked_path_id
 from machina.connectors.cmms.retry import request_with_retry
@@ -489,8 +490,11 @@ class SapPmConnector:
                 ``sku``, pass a bare sku match off as one of the asset's
                 parts, and answering ``[]`` would say the asset has no spare
                 parts.
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`).
         """
         self._ensure_connected()
+        asset_id, sku = spare_part_filters(asset_id, sku)
         if asset_id and not self._bom_equipment_field:
             raise ConnectorUnsupportedFilterError(
                 "The SAP PM connector cannot filter spare parts by asset: "

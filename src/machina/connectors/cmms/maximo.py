@@ -45,6 +45,7 @@ from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
@@ -763,10 +764,13 @@ class MaximoConnector:
                 any request.
             ConnectorSchemaError: If a record lacks its ``itemnum`` or cannot
                 be mapped; no partial list is returned.
-            ConnectorError: If ``sku`` is refused by :func:`_oslc_eq`, or on
-                an HTTP or paging error (see :meth:`_oslc_get`).
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`),
+                if ``sku`` is refused by :func:`_oslc_eq`, or on an HTTP or
+                paging error (see :meth:`_oslc_get`).
         """
         self._ensure_connected()
+        asset_id, sku = spare_part_filters(asset_id, sku)
         if asset_id:
             raise ConnectorUnsupportedFilterError(
                 "The Maximo connector cannot filter spare parts by asset: it reads them "

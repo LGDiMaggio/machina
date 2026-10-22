@@ -409,6 +409,40 @@ class TestReadSpareParts:
         assert [p.sku for p in parts] == ["p1"]
         assert _sent(httpx_mock) == [f"{BASE}/api/v2/parts?limit=100&offset=0"]
 
+    @pytest.mark.asyncio
+    async def test_an_inventory_part_that_cannot_be_mapped_refuses_the_read(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """No partial inventory, and no vendor value in the error or the logs."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={
+                "results": [
+                    {"id": "p1", "name": "Bearing", "quantity": "5"},
+                    {"id": "p2", "name": "Seal", "quantity": "many-SECRET"},
+                ]
+            },
+        )
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_spare_parts()
+
+        assert str(exc_info.value) == (
+            "UpKeep returned a malformed part record: cannot read its spare parts"
+        )
+        assert exc_info.value.__cause__ is None
+        (refusal,) = [e for e in logs if e["event"] == "upkeep_spare_parts_refused"]
+        assert refusal["log_level"] == "warning"
+        assert refusal["reason"] == "malformed_part"
+        assert refusal["position"] == 1
+        assert "asset_id" not in refusal
+        assert "SECRET" not in repr(logs)
+
 
 # ---------------------------------------------------------------------------
 # Read spare parts for an asset (GET the asset, then each part it lists)
@@ -891,6 +925,126 @@ class TestReadSparePartsByAsset:
 
         assert [p.sku for p in parts] == distinct
         assert len(_sent(httpx_mock)) == 101
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "asset_id", [None, "  ", [ASSET_ID], True], ids=["unresolved", "blank", "list", "bool"]
+    )
+    async def test_asset_filter_that_is_not_an_id_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector, asset_id: object
+    ) -> None:
+        """``None`` (an unresolved workflow placeholder) is not "no filter"."""
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError) as exc_info:
+            await connector.read_spare_parts(asset_id=asset_id)  # type: ignore[arg-type]
+        assert type(exc_info.value) is ConnectorError
+        assert str(exc_info.value).startswith("read_spare_parts: the asset_id filter is not an ID")
+        assert _sent(httpx_mock) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"quantity": "N/A-SECRET"},
+            {"cost": "eighty-SECRET"},
+            {"quantity": "-3"},
+            {"quantity": None},
+        ],
+        ids=["quantity-text", "cost-text", "quantity-negative", "quantity-null"],
+    )
+    async def test_a_part_whose_fields_cannot_be_mapped_refuses_the_whole_read(
+        self, httpx_mock, connector: UpKeepConnector, fields: dict[str, object]
+    ) -> None:
+        """The mapping error is raised as a typed refusal that repeats no vendor value."""
+        await _connect(httpx_mock, connector)
+        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        _mock_asset(httpx_mock, _asset_body(parts=listed))
+        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Qm7Tz2XbLp", _part_body("Qm7Tz2XbLp", **fields))
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        assert str(exc_info.value) == (
+            "UpKeep returned a malformed record for a part the asset lists: "
+            "its spare parts cannot be read in full, so none are returned"
+        )
+        # The mapper's own message quotes the vendor value: it must not ride along.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a", f"{PART_URL}/Qm7Tz2XbLp"]
+        refusal = _refusal(logs, "malformed_part")
+        assert refusal["position"] == 1
+        assert refusal["error_type"] in {"ValueError", "TypeError", "ValidationError"}
+        _assert_value_free(str(exc_info.value), logs, *listed)
+        assert "SECRET" not in repr(logs)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", ["connect", "read-timeout"])
+    async def test_a_transport_failure_after_a_part_was_read_returns_nothing(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector, error: str
+    ) -> None:
+        """A part request that never gets an answer fails the whole read.
+
+        The transport error propagates as it does from the connector's other
+        reads, after the retries, and the parts already read are not returned
+        as the asset's list. The retry warnings name no part.
+        """
+        import httpx
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+        exc_type = httpx.ConnectError if error == "connect" else httpx.ReadTimeout
+        await _connect(httpx_mock, connector)
+        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        _mock_asset(httpx_mock, _asset_body(parts=listed))
+        _mock_part(httpx_mock, "ydOS2PdR3a")
+        for _ in range(4):  # the request and its three retries
+            httpx_mock.add_exception(
+                exc_type("connection lost"), method="GET", url=f"{PART_URL}/Qm7Tz2XbLp"
+            )
+
+        with structlog.testing.capture_logs() as logs, pytest.raises(exc_type):
+            await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        assert _sent(httpx_mock) == [
+            ASSET_URL,
+            f"{PART_URL}/ydOS2PdR3a",
+            *[f"{PART_URL}/Qm7Tz2XbLp"] * 4,
+        ]
+        retries = [e for e in logs if e["event"] == "http_network_retry"]
+        assert len(retries) == 3
+        # The endpoint is named; the part and the configured host are not.
+        assert {e["url"] for e in retries} == {"/api/v2/parts/<listed part>"}
+        for value in (*listed, BASE):
+            assert value not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_part_request_logs_no_part(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+        await _connect(httpx_mock, connector)
+        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a"]))
+        httpx_mock.add_response(method="GET", url=f"{PART_URL}/ydOS2PdR3a", status_code=429)
+        _mock_part(httpx_mock, "ydOS2PdR3a")
+
+        with structlog.testing.capture_logs() as logs:
+            parts = await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        assert [p.sku for p in parts] == ["ydOS2PdR3a"]
+        (retry,) = [e for e in logs if e["event"] == "http_rate_limit_retry"]
+        assert retry["url"] == "/api/v2/parts/<listed part>"
+        for value in ("ydOS2PdR3a", BASE):
+            assert value not in repr(logs)
 
 
 # ---------------------------------------------------------------------------

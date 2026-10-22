@@ -427,6 +427,33 @@ class TestGenericCmmsConnectorLocal:
         parts = await conn.read_spare_parts()
         assert len(parts) == 2
 
+    @pytest.mark.parametrize(
+        "asset_id",
+        [None, "  ", ["P-201"], True],
+        ids=["unresolved", "blank", "list", "bool"],
+    )
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_refuses_an_asset_filter_that_is_not_an_id(
+        self, sample_data_dir: Path, asset_id: object
+    ) -> None:
+        """Not "no filter": that would list the whole inventory as the asset's parts."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        with pytest.raises(ConnectorError, match=r"^read_spare_parts: the asset_id filter is not"):
+            await conn.read_spare_parts(asset_id=asset_id)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_a_numeric_asset_id_as_text(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "spare_parts.json").write_text(
+            json.dumps([{"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["11430"]}])
+        )
+        conn = GenericCmmsConnector(data_dir=tmp_path)
+        await conn.connect()
+        parts = await conn.read_spare_parts(asset_id=11430)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["SKF-6310"]
+
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, sample_data_dir: Path) -> None:
         """Maintenance history returns completed/closed WOs."""
