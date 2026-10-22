@@ -245,9 +245,11 @@ def format_alarms_context(alarms: list[Alarm]) -> str:
 def format_spare_parts_context(parts: list[SparePart]) -> str:
     """Format the spare parts a successful lookup returned for the asset.
 
-    An empty list is a lookup that found no part, worded apart from a lookup
-    that never ran or failed (see ``spare_parts_unchecked`` in
-    :func:`build_context_message`).
+    An empty list is worded apart from a lookup that never ran or failed (see
+    ``spare_parts_unchecked`` in :func:`build_context_message`). It says what
+    the lookup returned, not what the CMMS holds: a connector can return
+    ``[]`` without asking the CMMS (Generic CMMS in REST mode reads no spare
+    parts).
 
     Args:
         parts: List of spare parts.
@@ -256,7 +258,7 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
         A formatted spare parts summary.
     """
     if not parts:
-        return "**Spare Parts:** none listed for this asset."
+        return "**Spare Parts:** the spare-parts lookup for this asset returned none."
 
     lines = [f"**Spare Parts ({len(parts)}):**"]
     for part in parts:
@@ -1110,7 +1112,8 @@ def build_context_message(
             ``"unsupported"`` (the connector cannot filter spare parts by
             asset) or ``"failed"`` (the lookup raised). Rendered as one "not
             checked" line, only when ``spare_parts`` is ``None``, so the model
-            never reads an unchecked lookup as "no spare parts".
+            never reads an unchecked lookup as "no spare parts"; any other
+            reason renders as ``"failed"``.
         document_results: RAG retrieval results.
 
     Returns:
@@ -1132,8 +1135,10 @@ def build_context_message(
 
     if spare_parts is not None:
         sections.append(format_spare_parts_context(spare_parts))
-    elif spare_parts_unchecked in _SPARE_PARTS_UNCHECKED:
-        sections.append(_SPARE_PARTS_UNCHECKED[spare_parts_unchecked])
+    elif spare_parts_unchecked is not None:
+        sections.append(
+            _SPARE_PARTS_UNCHECKED.get(spare_parts_unchecked, _SPARE_PARTS_UNCHECKED["failed"])
+        )
 
     if document_results is not None:
         sections.append(format_document_results(document_results))

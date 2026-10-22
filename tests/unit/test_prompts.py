@@ -143,8 +143,15 @@ class TestFormatSpareParts:
     """Test spare parts context formatting."""
 
     def test_empty(self) -> None:
-        """A successful lookup that found nothing, distinct from "not checked"."""
-        assert format_spare_parts_context([]) == "**Spare Parts:** none listed for this asset."
+        """A successful lookup that found nothing, distinct from "not checked".
+
+        It reports what the lookup returned rather than what the CMMS holds: a
+        connector can answer ``[]`` without asking the CMMS (Generic CMMS in
+        REST mode reads no spare parts).
+        """
+        assert format_spare_parts_context([]) == (
+            "**Spare Parts:** the spare-parts lookup for this asset returned none."
+        )
 
     def test_parts_render_one_line_each(self) -> None:
         parts = [
@@ -472,6 +479,13 @@ class TestBuildContextMessage:
     )
     def test_unchecked_spare_parts_render_one_line(self, unchecked: str, line: str) -> None:
         assert build_context_message(spare_parts_unchecked=unchecked) == line
+
+    def test_an_unknown_unchecked_reason_still_says_not_checked(self) -> None:
+        """Fail closed: a reason the table lacks renders as a failed lookup, not nothing."""
+        text = build_context_message(spare_parts_unchecked="timeout")  # type: ignore[arg-type]
+        assert (
+            text == "**Spare Parts:** not checked: the spare-parts lookup for this asset failed."
+        )
 
     def test_no_unchecked_line_when_parts_were_read(self) -> None:
         parts = [SparePart(sku="SKF-6310", name="Bearing 6310", stock_quantity=4)]

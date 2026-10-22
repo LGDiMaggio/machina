@@ -3112,11 +3112,15 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
-                # Only the filters the model gave: an empty value is no filter.
-                # A provider refuses a filter it cannot apply by raising
-                # ConnectorUnsupportedFilterError, which _execute_tool returns
-                # to the model as a tool error.
-                filters = {key: args[key] for key in ("asset_id", "sku") if args.get(key)}
+                # Only the filters the model gave: a missing, null or empty
+                # one is no filter. Any other value, 0 included, is the
+                # provider's to apply or refuse; a refusal reaches the model as
+                # a tool error from _execute_tool.
+                filters = {
+                    key: args[key]
+                    for key in ("asset_id", "sku")
+                    if args.get(key) not in (None, "")
+                }
                 parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
                 return [p.model_dump(mode="json") for p in parts]
             return {"error": "No spare parts connector available"}

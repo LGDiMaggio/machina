@@ -450,7 +450,7 @@ class _NoAssetRelationSparePartsConnector:
         return True
 
     async def _read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
-        if asset_id:
+        if asset_id != "":  # the contract: only "" is no filter
             raise ConnectorUnsupportedFilterError(_ASSET_FILTER_REFUSAL)
         return [p for p in _NO_ASSET_RELATION_INVENTORY if not sku or p.sku == sku]
 
@@ -1163,6 +1163,25 @@ class TestExecuteTool:
         assert refusal["tool"] == "check_spare_parts"
         assert refusal["error_type"] == "ConnectorUnsupportedFilterError"
         assert not [e for e in logs if e["log_level"] == "warning"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asset_id", [0, []], ids=["zero", "empty-list"])
+    async def test_check_spare_parts_forwards_a_falsy_filter_it_was_given(
+        self, asset_id: object
+    ) -> None:
+        """A filter the model gave is the connector's to apply or refuse.
+
+        Dropping ``0`` (a numeric asset ID) or ``[]`` as "no filter" would
+        return the whole inventory as that asset's parts.
+        """
+        conn = _NoAssetRelationSparePartsConnector()
+        agent = Agent(connectors=[conn])
+        await agent.start()
+
+        result = await agent._execute_tool("check_spare_parts", {"asset_id": asset_id})
+
+        assert conn.read_spare_parts.await_args_list == [call(asset_id=asset_id)]
+        assert result == {"error": _ASSET_FILTER_REFUSAL}  # not the inventory
 
     @pytest.mark.asyncio
     async def test_diagnose_failure_tool(self) -> None:
@@ -3243,16 +3262,16 @@ class TestGatherContext:
                 "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts "
                 "by asset. A specific part can be checked by its SKU with the "
                 "check_spare_parts tool.",
-                "none listed",
+                "returned none",
             ),
             (
                 _FakeSparePartsOutageConnector,
                 "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
-                "none listed",
+                "returned none",
             ),
             (
                 _NoPartsForAssetConnector,
-                "**Spare Parts:** none listed for this asset.",
+                "**Spare Parts:** the spare-parts lookup for this asset returned none.",
                 "not checked",
             ),
         ],
