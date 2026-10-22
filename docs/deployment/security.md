@@ -303,13 +303,28 @@ default.
   structlog configuration, including none at all.
 - Exception messages are logged verbatim, and the traceback shows each frame's
   source line.
-- After `configure_logging()`, the `httpx` and `httpcore` loggers are at
-  WARNING or a stricter level you set, so their per-request lines are not
-  logged. Those lines carry each
-  request's full URL: the CMMS host and the record IDs and filter values of
-  the read (UpKeep part IDs, SKUs in SAP PM's `$filter` and Maximo's
-  `oslc.where`). An application that lowers the two loggers again gets those
-  URLs in its logs.
+- When `configure_logging()` runs, it raises the `httpx` and `httpcore`
+  loggers to WARNING. A stricter level the application already set (ERROR,
+  say) is kept, never lowered. httpx's per-request INFO lines, and httpcore's
+  DEBUG lines, are therefore not logged. Those lines carry each request's full
+  URL: the CMMS host and the record IDs and filter values of the read (UpKeep
+  part IDs, SKUs in SAP PM's `$filter` and Maximo's `oslc.where`).
+  Limitations:
+  - The levels are set once, when `configure_logging()` runs. An application
+    that does not call it, calls it and then lowers the two loggers, or
+    reconfigures logging afterwards (`logging.config.dictConfig`, its own
+    handlers on those loggers) gets those URLs in its logs again. Logging
+    systems configured independently of `configure_logging()` are not
+    protected by it.
+  - Only the `httpx` and `httpcore` loggers are covered. Other libraries'
+    records reach the log as those libraries write them, without Machina's
+    redaction: for example urllib3 and the Google API client at DEBUG.
+  - Machina's own retry warnings (`http_rate_limit_retry`,
+    `http_network_retry`, `http_retry_after_exceeds_max_backoff`) log the
+    request URL. They name UpKeep's listed-part requests as
+    `/api/v2/parts/<listed part>`. Other URLs are logged as sent: a record
+    path with its ID, or a Maximo or SAP PM next-page link with its query.
+    First-page filters, sent as query parameters, are not in that URL.
 - The Telegram bot token is kept out of log output:
   - The Bot API carries the token in every URL. httpx logs request URLs at INFO, and python-telegram-bot logs its API URLs at DEBUG. `TelegramConnector` replaces its token with `<redacted>` in the records of those loggers. The redaction is in place from `connect()` until the process ends.
   - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
