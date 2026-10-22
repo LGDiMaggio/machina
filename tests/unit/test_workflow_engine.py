@@ -873,8 +873,9 @@ class TestErrorPolicies:
 class _SkuOnlySparePartsConnector:
     """CMMS whose ``read_spare_parts`` takes ``sku`` only.
 
-    A step passing ``asset_id`` makes the call raise ``TypeError``, as
-    the Maximo and UpKeep connectors did under the alarm workflow.
+    A step passing ``asset_id`` makes the call raise ``TypeError``: any
+    connector whose method signature does not accept a step's inputs fails
+    this way, whatever the method.
     """
 
     capabilities: ClassVar[list[str]] = ["read_spare_parts"]
@@ -997,6 +998,135 @@ class TestSkippedStepErrors:
         await engine.execute(wf, {"asset_id": "P-201"})
 
         assert comms.last_message == "Spare Parts: {check_spare_parts}"
+
+
+# ---------------------------------------------------------------------------
+# Tests — required inputs
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSparePartsConnector:
+    """CMMS whose ``read_spare_parts`` records the asset each call asked for."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_SPARE_PARTS})
+
+    def __init__(self) -> None:
+        self.asset_ids: list[object] = []
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[dict[str, Any]]:
+        self.asset_ids.append(asset_id)
+        return [{"sku": "SKF-6310"}]
+
+
+def _asset_scoped_step(**kwargs: Any) -> Step:
+    return Step(
+        "check_spare_parts",
+        action="cmms.read_spare_parts",
+        inputs={"asset_id": "{trigger.asset_id}"},
+        required_inputs=("asset_id",),
+        **kwargs,
+    )
+
+
+_MISSING_ASSET = (
+    "WorkflowError: Step 'check_spare_parts' needs its 'asset_id' input "
+    "({trigger.asset_id}), which is missing or blank"
+)
+
+
+class TestRequiredInputs:
+    """A required input that is missing or blank fails the step before its action."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "trigger",
+        [{}, {"asset_id": None}, {"asset_id": ""}, {"asset_id": " \t"}],
+        ids=["missing", "none", "empty", "blank"],
+    )
+    async def test_the_step_fails_under_its_error_policy(
+        self, tracer: ActionTracer, trigger: dict[str, Any]
+    ) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="AssetScoped", steps=[_asset_scoped_step(on_error=ErrorPolicy.SKIP)])
+
+        result = await engine.execute(wf, trigger)
+
+        (step,) = result.step_results
+        assert (step.skipped, step.success, step.output) == (True, True, None)
+        assert step.error == _MISSING_ASSET
+        assert cmms.asset_ids == []  # the action never ran
+
+    @pytest.mark.asyncio
+    async def test_a_stop_policy_stops_the_workflow(self, tracer: ActionTracer) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="AssetScopedStop",
+            steps=[_asset_scoped_step(on_error=ErrorPolicy.STOP), Step("after")],
+        )
+
+        result = await engine.execute(wf, {})
+
+        assert result.success is False
+        assert [sr.step_name for sr in result.step_results] == ["check_spare_parts"]
+        assert result.step_results[0].error == _MISSING_ASSET
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asset_id", ["P-201", 201, 0], ids=["text", "number", "zero"])
+    async def test_a_present_input_runs_the_step(
+        self, tracer: ActionTracer, asset_id: object
+    ) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="AssetScopedRuns", steps=[_asset_scoped_step()])
+
+        result = await engine.execute(wf, {"asset_id": asset_id})
+
+        assert result.step_results[0].output == [{"sku": "SKF-6310"}]
+        assert cmms.asset_ids == [asset_id]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "required",
+        [("asset",), "asset_id"],
+        ids=["not-an-input", "bare-string"],
+    )
+    async def test_a_required_name_that_is_not_an_input_is_refused_up_front(
+        self, tracer: ActionTracer, required: Any
+    ) -> None:
+        """A typo would otherwise fail the step on every run, under its policy."""
+        from machina.exceptions import WorkflowError
+
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        step = Step(
+            "check_spare_parts",
+            action="cmms.read_spare_parts",
+            inputs={"asset_id": "{trigger.asset_id}"},
+            required_inputs=required,
+        )
+
+        with pytest.raises(WorkflowError, match="required_inputs must be a tuple of its input"):
+            await engine.execute(Workflow(name="Typo", steps=[step]), {"asset_id": "P-201"})
+        assert cmms.asset_ids == []
 
 
 # ---------------------------------------------------------------------------
@@ -1714,6 +1844,8 @@ class TestGuardExceptionLogging:
     ) -> None:
         root = logging.getLogger()
         handlers, level = root.handlers[:], root.level
+        # configure_logging() also raises the HTTP-client loggers: restore them.
+        library_levels = {name: logging.getLogger(name).level for name in ("httpx", "httpcore")}
         configure_logging(json_output=True)
         stream = io.StringIO()
         root.handlers[0].setStream(stream)  # type: ignore[attr-defined]
@@ -1726,6 +1858,8 @@ class TestGuardExceptionLogging:
             structlog.reset_defaults()
             root.handlers[:] = handlers
             root.setLevel(level)
+            for name, library_level in library_levels.items():
+                logging.getLogger(name).setLevel(library_level)
 
         [event] = [
             line

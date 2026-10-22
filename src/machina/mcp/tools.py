@@ -454,17 +454,21 @@ async def machina_get_maintenance_history(
 async def machina_list_spare_parts(
     ctx: Context,
     asset_id: str = "",
+    sku: str = "",
 ) -> list[dict[str, Any]]:
-    """List spare parts, optionally filtered by compatible asset.
+    """List spare parts, optionally filtered by compatible asset or by SKU.
 
     Args:
-        asset_id: Filter by compatible asset.
+        asset_id: Filter by compatible asset. A CMMS that cannot filter by asset refuses the call.
+        sku: Look up one part by its SKU (part number).
     """
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
     kwargs: dict[str, Any] = {}
     if asset_id:
         kwargs["asset_id"] = asset_id
+    if sku:
+        kwargs["sku"] = sku
     parts = await cmms.read_spare_parts(**kwargs)
     return [
         {

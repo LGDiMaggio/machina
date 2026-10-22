@@ -48,11 +48,16 @@ from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.paths import checked_path_id
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -144,10 +149,11 @@ class SapPmConnector:
             ``"BillOfMaterialComponent"``.
         bom_equipment_field: Name of the equipment field on
             ``bom_entity_set`` used by the ``asset_id`` filter. Defaults
-            to the empty string, which disables server-side filtering by
-            asset (because the default ``BillOfMaterialItem`` entity
-            does not directly expose an Equipment key). Set this to a
-            valid field name if your SAP version exposes one.
+            to the empty string, because the default ``BillOfMaterialItem``
+            entity does not directly expose an Equipment key; while it is
+            unset, :meth:`read_spare_parts` refuses an ``asset_id`` filter
+            with :class:`~machina.exceptions.ConnectorUnsupportedFilterError`.
+            Set this to a valid field name if your SAP version exposes one.
 
     Example:
         ```python
@@ -245,17 +251,20 @@ class SapPmConnector:
         self._connected = True
         logger.info("connected", connector="SapPmConnector", url=self.url)
         if not self._bom_equipment_field:
-            # Surface the misconfiguration once, loudly, at connect time rather
-            # than only on each read: asset-scoped spare-part reads cannot be
-            # server-side filtered and will return empty instead of OOMing (H3).
+            # Surface the configuration gap once, at connect time: each
+            # asset-filtered spare-part read is then refused before any request
+            # (no unbounded BOM fetch, H3), and a caller may treat that refusal
+            # as expected and log it quietly.
             logger.warning(
                 "bom_equipment_field_unconfigured",
                 connector="SapPmConnector",
+                operation="connect",
                 bom_entity_set=self._bom_entity_set,
                 message=(
-                    "bom_equipment_field is not set — asset-scoped spare-part reads "
-                    "will return empty (no unbounded BOM fetch). Set bom_equipment_field "
-                    "to enable them."
+                    "bom_equipment_field is not configured: spare-part reads filtered "
+                    "by asset are refused with ConnectorUnsupportedFilterError until "
+                    "it names the BOM entity set's equipment field. Reads by sku "
+                    "alone still work."
                 ),
             )
 
@@ -464,48 +473,37 @@ class SapPmConnector:
         ``API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`` entity.
 
         Args:
-            asset_id: Optional Equipment identifier. Applied as a
-                server-side OData ``$filter`` clause only when
-                ``bom_equipment_field`` is configured; otherwise logged
-                and ignored.
-            sku: Optional material number, translated to a server-side
-                ``$filter`` on ``bom_material_field``.
+            asset_id: Optional Equipment identifier; empty means no asset
+                filter. Applied as a server-side OData ``$filter`` clause on
+                ``bom_equipment_field``. While that field is not configured
+                (the default), a non-empty value is refused, never dropped.
+            sku: Optional material number; empty means no sku filter.
+                Applied as a server-side ``$filter`` on
+                ``bom_material_field``. When both filters are given, both
+                must hold.
+
+        Raises:
+            ConnectorUnsupportedFilterError: If ``asset_id`` is given but
+                ``bom_equipment_field`` is not configured, with or without a
+                ``sku``. Raised before any request: reading without the asset
+                filter would page the entire BOM into memory or, with a
+                ``sku``, pass a bare sku match off as one of the asset's
+                parts, and answering ``[]`` would say the asset has no spare
+                parts.
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`).
         """
         self._ensure_connected()
+        asset_id, sku = spare_part_filters(asset_id, sku)
+        if asset_id and not self._bom_equipment_field:
+            raise ConnectorUnsupportedFilterError(
+                "The SAP PM connector cannot filter spare parts by asset: "
+                "bom_equipment_field is not configured. Configure it to name the BOM "
+                "entity set's equipment field, or look the part up by sku without an asset."
+            )
         filters: list[str] = []
         if asset_id:
-            if self._bom_equipment_field:
-                filters.append(f"{self._bom_equipment_field} eq {_odata_string(asset_id)}")
-            elif not sku:
-                # asset_id requested, but it cannot be filtered server-side
-                # (bom_equipment_field unset — the default) and there is no sku to
-                # narrow the query. Issuing this read would page the ENTIRE BOM
-                # into memory (OOM on a real S/4HANA). Refuse it (H3).
-                logger.warning(
-                    "bom_asset_filter_unsupported",
-                    connector="SapPmConnector",
-                    asset_id=asset_id,
-                    bom_entity_set=self._bom_entity_set,
-                    message=(
-                        "asset_id filter ignored and no sku to narrow the query: "
-                        "refusing an unbounded BOM fetch. Configure bom_equipment_field "
-                        "for asset-scoped spare-part reads."
-                    ),
-                )
-                return []
-            else:
-                # asset_id cannot be filtered, but the sku below will keep the
-                # query bounded — proceed with the sku filter only.
-                logger.warning(
-                    "bom_asset_filter_unsupported",
-                    connector="SapPmConnector",
-                    asset_id=asset_id,
-                    bom_entity_set=self._bom_entity_set,
-                    message=(
-                        "asset_id filter ignored (bom_equipment_field unset); "
-                        "narrowing by sku instead"
-                    ),
-                )
+            filters.append(f"{self._bom_equipment_field} eq {_odata_string(asset_id)}")
         if sku:
             filters.append(f"{self._bom_material_field} eq {_odata_string(sku)}")
         odata_filter = " and ".join(filters) if filters else ""

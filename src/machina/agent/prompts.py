@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from machina.agent.citations import CITATION_PROMPT
 from machina.agent.entity_resolver import (
@@ -243,7 +243,13 @@ def format_alarms_context(alarms: list[Alarm]) -> str:
 
 
 def format_spare_parts_context(parts: list[SparePart]) -> str:
-    """Format spare parts availability for the prompt.
+    """Format the spare parts a successful lookup returned for the asset.
+
+    An empty list is worded apart from a lookup that never ran or failed (see
+    ``spare_parts_unchecked`` in :func:`build_context_message`). It says what
+    the lookup returned, not what the CMMS holds: a connector can return
+    ``[]`` without asking the CMMS (Generic CMMS in REST mode reads no spare
+    parts).
 
     Args:
         parts: List of spare parts.
@@ -252,13 +258,28 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
         A formatted spare parts summary.
     """
     if not parts:
-        return "No spare parts data available."
+        return "**Spare Parts:** the spare-parts lookup for this asset returned none."
 
     lines = [f"**Spare Parts ({len(parts)}):**"]
     for part in parts:
         status = "✅ In stock" if part.stock_quantity > 0 else "❌ Out of stock"
         lines.append(f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}")
     return "\n".join(lines)
+
+
+SparePartsUnchecked = Literal["unsupported", "failed", "timed_out"]
+
+_SPARE_PARTS_UNCHECKED: dict[SparePartsUnchecked, str] = {
+    "unsupported": (
+        "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts by "
+        "asset. A specific part can be checked by its SKU with the check_spare_parts tool."
+    ),
+    "failed": "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
+    "timed_out": (
+        "**Spare Parts:** not checked: the spare-parts lookup for this asset did not finish "
+        "in the time this turn allows it. The check_spare_parts tool runs the full lookup."
+    ),
+}
 
 
 def format_resolved_entities(
@@ -1072,6 +1093,7 @@ def build_context_message(
     work_orders: list[WorkOrder] | None = None,
     alarms: list[Alarm] | None = None,
     spare_parts: list[SparePart] | None = None,
+    spare_parts_unchecked: SparePartsUnchecked | None = None,
     document_results: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a context injection message from all available data.
@@ -1088,7 +1110,15 @@ def build_context_message(
         asset: The asset the runtime committed to, if any.
         work_orders: Work orders prefetched for the asset.
         alarms: Active alarms prefetched for the asset.
-        spare_parts: Spare parts prefetched for the asset.
+        spare_parts: Spare parts prefetched for the asset; ``[]`` when the
+            lookup found none.
+        spare_parts_unchecked: Why the spare-parts prefetch has no result:
+            ``"unsupported"`` (the connector cannot filter spare parts by
+            asset), ``"failed"`` (the lookup raised) or ``"timed_out"`` (the
+            lookup outlasted the prefetch's budget and was cancelled).
+            Rendered as one "not checked" line, only when ``spare_parts`` is
+            ``None``, so the model never reads an unchecked lookup as "no spare
+            parts"; any other reason renders as ``"failed"``.
         document_results: RAG retrieval results.
 
     Returns:
@@ -1110,6 +1140,10 @@ def build_context_message(
 
     if spare_parts is not None:
         sections.append(format_spare_parts_context(spare_parts))
+    elif spare_parts_unchecked is not None:
+        sections.append(
+            _SPARE_PARTS_UNCHECKED.get(spare_parts_unchecked, _SPARE_PARTS_UNCHECKED["failed"])
+        )
 
     if document_results is not None:
         sections.append(format_document_results(document_results))

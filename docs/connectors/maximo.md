@@ -73,7 +73,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description — see [How updates are sent](#how-updates-are-sent) |
-| `read_spare_parts` | Read inventory items (`mxinventory` object structure) |
+| `read_spare_parts` | Read inventory items (`mxinventory` object structure) — filter by `sku`; an `asset_id` filter is refused with `ConnectorUnsupportedFilterError` (see [Known Limitations](#known-limitations)) |
 | `read_maintenance_plans` | Read PM triggers (`mxpm` object structure) |
 | `read_maintenance_history` | Read an asset's completed and closed work orders (`mxwo`, status `COMP` or `CLOSE`) |
 
@@ -188,11 +188,11 @@ its key:
   the connector does not report a figure Maximo does not hold. A spare part whose bin
   balances add up to less than zero, or whose cost or `minlevel` is negative, is
   therefore refused like any record the mapping cannot read (`ValidationError:
-  stock_quantity`, `unit_cost` or `reorder_point`). Through the Python API,
-  `read_spare_parts(sku=...)` still returns any other item. The MCP tool
-  `machina_list_spare_parts` has no `sku` filter, so it fails for as long as any item
-  has a negative balance. Bin balances are added as decimals, and the total is rounded
-  down to whole units, so a total of −0.5 is refused too.
+  stock_quantity`, `unit_cost` or `reorder_point`). A read filtered by `sku`, through
+  the Python API (`read_spare_parts(sku=...)`) or the MCP tool `machina_list_spare_parts`
+  (its optional `sku` parameter), still returns any other item; an unfiltered read fails
+  for as long as any item has a negative balance. Bin balances are added as decimals,
+  and the total is rounded down to whole units, so a total of −0.5 is refused too.
 - **Next pages use Maximo's link.** Each next page is requested at the link Maximo
   returns, which repeats the query; the selection is not added again.
 - **`metadata` holds the rest.** It keeps the selected attributes that no field takes,
@@ -333,7 +333,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 ## Known Limitations
 
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.
-- **Spare parts by asset**: Maximo's `mxinventory` does not directly link to assets. Filtering spare parts by `asset_id` is not supported; use work-order job plans instead.
+- **Spare parts by asset**: `read_spare_parts(asset_id=...)` is refused with `ConnectorUnsupportedFilterError` (a `ConnectorError`) before any request, with or without a `sku`, because the connector reads spare parts from `mxinventory`, which it does not query by asset. Look parts up by `sku` instead. Asset-scoped spare parts for Maximo are not supported yet.
 - **Filter values**: asset and work-order numbers, SKUs and statuses are matched exactly through `oslc.where`. Maximo documents no escape inside its string literals, and its QBE framework reads wildcards (`%`, `*`, `?`), value lists (`,`, `[ ]`) and operators (`=`, `!`, `<`, `>`, `~`) inside them as query syntax. A value that contains any of `" \ % * ? , [ ] = ! < > ~` or a non-printable character, is blank, or is the keyword `null` is therefore refused with `ConnectorError` before any request, including the lookup `update_work_order` sends before writing. The message names the offending characters, not the value. A number is matched as its digits.
 - **Work-order numbers never reach a URL path**: `update_work_order` matches the `wonum` in `oslc.where` and sends the update to the rest id Maximo returns (see [How updates are sent](#how-updates-are-sent)). That rest id is sent as one percent-encoded path segment (`/` becomes `%2F`), and one with an empty, `.` or `..` part between `/` or `\` separators is refused with `ConnectorError`, so a proxy that decodes `%2F` cannot resolve it into another resource.
 - **The same `wonum` in several sites**: there is no site setting yet. An update refuses such a `wonum`; `get_work_order` returns the first match.

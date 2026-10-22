@@ -28,12 +28,15 @@ def _restore_logging() -> Iterator[None]:
     """
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
+    library_levels = {name: logging.getLogger(name).level for name in ("httpx", "httpcore")}
     try:
         yield
     finally:
         structlog.reset_defaults()
         root.handlers[:] = handlers
         root.setLevel(level)
+        for name, library_level in library_levels.items():
+            logging.getLogger(name).setLevel(library_level)
 
 
 class TestConfigureLogging:
@@ -411,3 +414,28 @@ def test_secret_named_fields_are_redacted() -> None:
     assert line["password"] == "***REDACTED***"
     assert line["api_key"] == "***REDACTED***"
     assert "hunter2" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_http_client_request_lines_stay_out_of_the_log() -> None:
+    """httpx logs each request at INFO with its full URL: the CMMS host and the
+    record IDs and filter values in its path and query."""
+    import httpx
+
+    stream = _configure()
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+    async with httpx.AsyncClient(transport=transport) as client:
+        await client.get("https://cmms.internal/api/v2/parts/SECRET-PART?sku=SECRET-SKU")
+
+    assert "SECRET" not in stream.getvalue()
+    assert "cmms.internal" not in stream.getvalue()
+    # Its warnings still reach the log; httpcore's per-request DEBUG lines do not.
+    assert logging.getLogger("httpx").isEnabledFor(logging.WARNING)
+    assert logging.getLogger("httpcore.http11").getEffectiveLevel() == logging.WARNING
+
+
+def test_a_stricter_http_client_level_the_host_set_is_kept() -> None:
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    _configure()
+    assert logging.getLogger("httpx").level == logging.ERROR
+    assert logging.getLogger("httpcore").level == logging.WARNING

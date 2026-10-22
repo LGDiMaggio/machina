@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -411,8 +411,36 @@ class TestListSpareParts:
         conn.read_spare_parts = AsyncMock(return_value=parts)
         runtime = MachinaRuntime(connectors={"cmms": conn})
         result = await machina_list_spare_parts(_make_ctx(runtime))
-        assert len(result) == 1
-        assert result[0]["sku"] == "BRG-6205"
+        assert result == [
+            {
+                "sku": "BRG-6205",
+                "name": "Bearing 6205",
+                "stock_quantity": 12,
+                "reorder_point": 0,
+                "unit_cost": 0.0,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sends_only_the_given_filters(self) -> None:
+        """``sku`` narrows the lookup; an empty filter is not sent."""
+        from machina.mcp.tools import machina_list_spare_parts
+
+        conn = _mock_cmms()
+        conn.read_spare_parts = AsyncMock(return_value=[])
+        ctx = _make_ctx(MachinaRuntime(connectors={"cmms": conn}))
+
+        await machina_list_spare_parts(ctx)
+        await machina_list_spare_parts(ctx, sku="BRG-6205")
+        await machina_list_spare_parts(ctx, asset_id="P-001")
+        await machina_list_spare_parts(ctx, asset_id="P-001", sku="BRG-6205")
+
+        assert conn.read_spare_parts.await_args_list == [
+            call(),
+            call(sku="BRG-6205"),
+            call(asset_id="P-001"),
+            call(asset_id="P-001", sku="BRG-6205"),
+        ]
 
 
 class TestGetMaintenancePlan:

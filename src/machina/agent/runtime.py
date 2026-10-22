@@ -49,7 +49,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import LLMError
+from machina.exceptions import ConnectorUnsupportedFilterError, LLMError, MachinaError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -296,6 +296,22 @@ _MAX_FAILED_READ_RETRIES = 1
 # Above this many assets, ``list_assets`` returns a count plus a grouped summary
 # instead of every record, so a large plant cannot flood the prompt/answer (R1.2).
 _ENUM_SUMMARY_THRESHOLD = 50
+
+# How long the per-turn context prefetch waits for an asset's spare parts from a
+# connector whose asset-scoped read sends one request per part
+# (``spare_parts_by_asset_fans_out``; UpKeep: 1 + k requests). The read is then
+# cancelled and the prompt says the parts were not checked. A prefetch policy,
+# not a completeness guarantee: the check_spare_parts tool and read_spare_parts
+# itself have no such deadline.
+_SPARE_PARTS_PREFETCH_BUDGET = 5.0
+
+
+class _SparePartsPrefetchTimeoutError(MachinaError):
+    """The spare-parts prefetch outlasted its budget and was cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__("the spare-parts prefetch did not finish within its budget")
+
 
 # Prefix of the grounding note appended to a stored assistant reply. Single
 # source of truth shared by _HISTORY_SOURCES_TEMPLATE (which writes the note)
@@ -1638,7 +1654,25 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
+                    # Read from the class and only a literal True opts in: a
+                    # mock or proxy answers any attribute with a truthy object.
+                    if getattr(type(_conn), "spare_parts_by_asset_fans_out", False) is not True:
+                        return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
+                    # At the deadline the read is cancelled where it waits, so
+                    # its pending request and HTTP client end with it.
+                    deadline = asyncio.timeout(_SPARE_PARTS_PREFETCH_BUDGET)
+                    try:
+                        async with deadline:
+                            parts: list[Any] = await _conn.read_spare_parts(asset_id=asset.id)
+                    except TimeoutError:
+                        if not deadline.expired():
+                            raise  # the read's own timeout, not this deadline
+                        raise _SparePartsPrefetchTimeoutError from None
+                    if deadline.expired():
+                        # The read swallowed its cancellation: what it returned
+                        # is not the asset's full list.
+                        raise _SparePartsPrefetchTimeoutError
+                    return parts
 
             tasks.append(_get_parts())
             task_names.append("spare_parts")
@@ -1678,13 +1712,43 @@ class Agent:
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for name, result in zip(task_names, results, strict=False):
-                if isinstance(result, BaseException):
+                if name == "spare_parts" and isinstance(result, ConnectorUnsupportedFilterError):
+                    # A CMMS that cannot filter spare parts by asset refuses on
+                    # every turn that resolves an asset: expected, so INFO. No
+                    # unfiltered fallback (the inventory is not this asset's
+                    # parts); the prompt says availability was not checked
+                    # instead of implying there are none.
+                    logger.info(
+                        "context_gather_skipped",
+                        agent=self.name,
+                        connector=sp_connectors[0][0],
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        reason="unsupported_filter",
+                    )
+                    context["spare_parts_unchecked"] = "unsupported"
+                elif name == "spare_parts" and isinstance(result, _SparePartsPrefetchTimeoutError):
+                    # Degraded, not refused: availability is unknown, not empty.
+                    logger.warning(
+                        "context_gather_timed_out",
+                        agent=self.name,
+                        connector=sp_connectors[0][0],
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        budget_seconds=_SPARE_PARTS_PREFETCH_BUDGET,
+                    )
+                    context["spare_parts_unchecked"] = "timed_out"
+                elif isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",
                         agent=self.name,
                         source=name,
                         error=str(result),
                     )
+                    if name == "spare_parts":
+                        context["spare_parts_unchecked"] = "failed"
                 else:
                     context[name] = result
 
@@ -2130,6 +2194,7 @@ class Agent:
             work_orders=context_data.get("work_orders"),
             alarms=context_data.get("alarms"),
             spare_parts=context_data.get("spare_parts"),
+            spare_parts_unchecked=context_data.get("spare_parts_unchecked"),
             document_results=context_data.get("document_results"),
         )
         if context_str:
@@ -3094,10 +3159,16 @@ class Agent:
             connectors = self._registry.find_by_capability(Capability.READ_SPARE_PARTS)
             if connectors:
                 _, conn = connectors[0]
-                parts = await conn.read_spare_parts(  # type: ignore[attr-defined]
-                    asset_id=args.get("asset_id", ""),
-                    sku=args.get("sku", ""),
-                )
+                # Only the filters the model gave: a missing, null or empty
+                # one is no filter. Any other value, 0 included, is the
+                # provider's to apply or refuse; a refusal reaches the model as
+                # a tool error from _execute_tool.
+                filters = {
+                    key: args[key]
+                    for key in ("asset_id", "sku")
+                    if args.get(key) not in (None, "")
+                }
+                parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
                 return [p.model_dump(mode="json") for p in parts]
             return {"error": "No spare parts connector available"}
 

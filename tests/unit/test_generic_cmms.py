@@ -427,6 +427,92 @@ class TestGenericCmmsConnectorLocal:
         parts = await conn.read_spare_parts()
         assert len(parts) == 2
 
+    @pytest.mark.parametrize("name", ["asset_id", "sku"])
+    @pytest.mark.parametrize(
+        "value",
+        [None, "  ", "\t", True, False, 1.5, 0.0, ["P-201"], {"id": "P-201"}, ("P-201",)],
+        ids=[
+            "unresolved",
+            "blank",
+            "tab",
+            "true",
+            "false",
+            "float",
+            "zero-float",
+            "list",
+            "dict",
+            "tuple",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_refuses_a_filter_that_is_not_an_id(
+        self, sample_data_dir: Path, name: str, value: object
+    ) -> None:
+        """Not "no filter": that would list the whole inventory as the asset's parts."""
+        from machina.exceptions import ConnectorUnsupportedFilterError
+
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        with pytest.raises(ConnectorError) as exc_info:
+            await conn.read_spare_parts(**{name: value})
+        # A value no CMMS can match, not a filter this connector cannot apply.
+        assert not isinstance(exc_info.value, ConnectorUnsupportedFilterError)
+        assert str(exc_info.value) == (
+            f"read_spare_parts: the {name} filter is not an ID; give a non-blank {name}, "
+            f"or leave it out for no {name} filter"
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_zero_as_an_id(self, tmp_path: Path) -> None:
+        """A falsy ID is a filter, not "no filter"."""
+        (tmp_path / "spare_parts.json").write_text(
+            json.dumps(
+                [
+                    {"sku": "0", "name": "Shim", "compatible_assets": ["0"]},
+                    {"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["P-201"]},
+                ]
+            )
+        )
+        conn = GenericCmmsConnector(data_dir=tmp_path)
+        await conn.connect()
+        assert [p.sku for p in await conn.read_spare_parts(asset_id=0)] == ["0"]  # type: ignore[arg-type]
+        assert [p.sku for p in await conn.read_spare_parts(sku=0)] == ["0"]  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_ids_exactly_and_both_filters_hold(
+        self, sample_data_dir: Path
+    ) -> None:
+        """No normalization: case and surrounding spaces count, as they did before the check."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        assert await conn.read_spare_parts(asset_id=" P-201 ") == []
+        assert await conn.read_spare_parts(sku="skf-6310") == []
+        both = await conn.read_spare_parts(asset_id="P-201", sku="SKF-6310")
+        assert [p.sku for p in both] == ["SKF-6310"]
+        assert await conn.read_spare_parts(asset_id="P-201", sku="FILTER-GA55") == []
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_a_numeric_asset_id_as_text(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "spare_parts.json").write_text(
+            json.dumps([{"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["11430"]}])
+        )
+        conn = GenericCmmsConnector(data_dir=tmp_path)
+        await conn.connect()
+        parts = await conn.read_spare_parts(asset_id=11430)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["SKF-6310"]
+
+    @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_a_numeric_sku_as_text(self, tmp_path: Path) -> None:
+        (tmp_path / "spare_parts.json").write_text(
+            json.dumps([{"sku": "6310", "name": "Bearing", "compatible_assets": ["P-201"]}])
+        )
+        conn = GenericCmmsConnector(data_dir=tmp_path)
+        await conn.connect()
+        parts = await conn.read_spare_parts(sku=6310)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["6310"]
+
     @pytest.mark.asyncio
     async def test_read_maintenance_history(self, sample_data_dir: Path) -> None:
         """Maintenance history returns completed/closed WOs."""

@@ -590,6 +590,9 @@ class TestBotTokenStaysOutOfLogs:
         try:
             with _open_token_loggers():
                 configure_logging(level="DEBUG", json_output=True)
+                # configure_logging() keeps httpx at WARNING; an application
+                # that lowers it again must still get its request line redacted.
+                logging.getLogger("httpx").setLevel(logging.NOTSET)
                 root.handlers[0].stream = out  # type: ignore[attr-defined]
                 with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", _unauthorized):
                     conn = TelegramConnector(bot_token=_TOKEN)

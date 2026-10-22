@@ -29,6 +29,7 @@ from machina.connectors.cmms.auth import (
     BearerAuth,
     NoAuth,
 )
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.generic_coercers import (
     COERCER_REGISTRY as _YAML_COERCERS,
 )
@@ -423,8 +424,14 @@ class GenericCmmsConnector:
         asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read spare parts, optionally filtered."""
+        """Read spare parts, optionally filtered.
+
+        Raises:
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`).
+        """
         self._ensure_connected()
+        asset_id, sku = spare_part_filters(asset_id, sku)
         results = self._spare_parts
         if asset_id:
             results = [sp for sp in results if asset_id in sp.compatible_assets]

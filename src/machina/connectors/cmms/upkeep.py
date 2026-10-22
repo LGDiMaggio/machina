@@ -24,6 +24,7 @@ import structlog
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
@@ -32,7 +33,7 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -40,6 +41,24 @@ if TYPE_CHECKING:
     from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
+
+# The most parts read_spare_parts(asset_id=...) fetches for one asset, one
+# request each: an asset listing more is refused before any part request.
+_MAX_ASSET_PARTS = 100
+
+# What a retry of a listed part's request logs in place of its URL, which
+# carries the part's ID.
+_LISTED_PART_LOG_URL = "/api/v2/parts/<listed part>"
+
+# The errors mapping a vendor value can raise. pydantic's ValidationError is a
+# ValueError; ArithmeticError covers int() of an infinite number.
+_UNMAPPABLE = (ValueError, TypeError, AttributeError, ArithmeticError)
+
+_MALFORMED_PART = "UpKeep returned a malformed part record: cannot read its spare parts"
+_MALFORMED_LISTED_PART = (
+    "UpKeep returned a malformed record for a part the asset lists: "
+    "its spare parts cannot be read in full, so none are returned"
+)
 
 
 def _require_httpx() -> Any:
@@ -52,6 +71,37 @@ def _require_httpx() -> Any:
             "Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+def _raise_for_record_status(status_code: int, kind: str) -> None:
+    """Raise for a failed single-record GET, naming only the record kind and status."""
+    if status_code == 401:
+        raise ConnectorAuthError("UpKeep API key is invalid")
+    if status_code != 200:
+        raise ConnectorError(f"UpKeep GET {kind} failed: HTTP {status_code}")
+
+
+def _log_spare_parts_refused(reason: str, **context: Any) -> None:
+    """Log why a spare-parts read was refused, without part IDs, SKUs or URLs."""
+    logger.warning(
+        "upkeep_spare_parts_refused",
+        connector="UpKeepConnector",
+        operation="read_spare_parts",
+        reason=reason,
+        **context,
+    )
+
+
+def _map_spare_part(record: Any, message: str, **log_context: Any) -> SparePart:
+    """Map an UpKeep part record, refusing the read when a field cannot be mapped."""
+    try:
+        return upkeep_mapper.parse_spare_part(record)
+    except _UNMAPPABLE as exc:
+        error_type = type(exc).__name__
+    _log_spare_parts_refused("malformed_part", error_type=error_type, **log_context)
+    # Raised outside the except block: the mapping error's message quotes the
+    # vendor value, and `from None` would still keep it as __context__.
+    raise ConnectorSchemaError(message)
 
 
 class UpKeepConnector:
@@ -86,6 +136,10 @@ class UpKeepConnector:
             Capability.READ_MAINTENANCE_HISTORY,
         }
     )
+
+    # read_spare_parts(asset_id=...) sends one request per part the asset
+    # lists (1 + k), so the agent's per-turn prefetch gives it a deadline.
+    spare_parts_by_asset_fans_out: ClassVar[bool] = True
 
     _DEFAULT_URL: ClassVar[str] = "https://api.onupkeep.com"
     _PAGE_SIZE: ClassVar[int] = 100
@@ -334,24 +388,58 @@ class UpKeepConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read spare parts (UpKeep calls them *parts*).
 
+        Without ``asset_id`` the whole parts inventory is paged from
+        ``/api/v2/parts``. With it, the asset is read and each part its
+        ``parts`` list names is fetched (see Note).
+
         Args:
+            asset_id: Optional UpKeep asset ID: returns only the parts that
+                asset lists. Empty means no asset filter.
             sku: Optional SKU / part number to filter the result in-memory
                 after fetching. Matches the parsed :attr:`SparePart.sku`,
-                which prefers the physical part identifier.
+                which prefers the physical part identifier. With
+                ``asset_id``, both filters must hold.
+
+        Raises:
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`),
+                the asset ID cannot be one URL path segment, UpKeep has no
+                such asset, the asset lists more than 100 parts, UpKeep
+                cannot return a part the asset lists (HTTP 404), or a request
+                answers another error status.
+            ConnectorAuthError: If UpKeep rejects the API key.
+            ConnectorSchemaError: If UpKeep does not return a well-formed
+                record of the asset (another record, or a malformed ``parts``
+                list), a part record is malformed or has fields that cannot be
+                mapped, or a part request returns another part. No partial
+                list is returned.
+            httpx.TransportError: If a request still fails after its retries
+                (a connection error or a timeout); no partial list is
+                returned.
 
         Note:
-            UpKeep's ``/api/v2/parts`` endpoint does not expose an
-            asset-compatibility relation, so filtering by asset is not
-            supported here. Use work-order line items to discover parts
-            associated with a specific asset.
+            UpKeep's ``/api/v2/parts`` endpoint has no asset filter; the
+            asset record (``GET /api/v2/assets/<ID>``) lists the IDs of its
+            parts, and each is fetched with ``GET /api/v2/parts/<ID>``: 1 + k
+            requests for k listed parts, never the whole inventory. A part
+            listed twice is fetched and returned once. Any part that cannot
+            be read refuses the whole read rather than returning the others
+            as the asset's complete list.
         """
         self._ensure_connected()
-        raw = await self._paginated_get("/api/v2/parts")
-        parts = [upkeep_mapper.parse_spare_part(item) for item in raw]
+        asset_id, sku = spare_part_filters(asset_id, sku)
+        if asset_id:
+            parts = await self._read_asset_spare_parts(asset_id)
+        else:
+            parts = [
+                _map_spare_part(item, _MALFORMED_PART, position=position)
+                for position, item in enumerate(await self._paginated_get("/api/v2/parts"))
+            ]
         if sku:
             parts = [p for p in parts if p.sku == sku]
         return parts
@@ -398,6 +486,84 @@ class UpKeepConnector:
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise ConnectorError("Not connected — call connect() first")
+
+    async def _read_asset_spare_parts(self, asset_id: str) -> list[SparePart]:
+        """Read the parts an asset lists: the asset, then each listed part.
+
+        The asset's ``parts`` list is checked in full before the first part
+        request, and any part that cannot be read refuses the whole read, so
+        a partial list is never returned as the asset's complete one.
+        """
+        asset_path = f"/api/v2/assets/{path_segment(asset_id)}"
+        httpx = _require_httpx()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await request_with_retry(
+                client, "GET", f"{self.url}{asset_path}", headers=self._headers()
+            )
+            if resp.status_code == 404:
+                _log_spare_parts_refused("asset_not_found", asset_id=asset_id)
+                raise ConnectorError("UpKeep asset not found: cannot read its spare parts")
+            _raise_for_record_status(resp.status_code, "asset")
+            try:
+                # path_segment raises ConnectorError for an ID that cannot be
+                # one path segment.
+                listed = [
+                    (part_id, f"/api/v2/parts/{path_segment(part_id)}")
+                    for part_id in upkeep_mapper.parse_asset_part_ids(resp.json(), asset_id)
+                ]
+            except (ValueError, TypeError, ConnectorError) as exc:
+                _log_spare_parts_refused("malformed_asset", asset_id=asset_id)
+                raise ConnectorSchemaError(
+                    "UpKeep did not return a well-formed record of the asset: "
+                    "cannot read its spare parts"
+                ) from exc
+            if len(listed) > _MAX_ASSET_PARTS:
+                _log_spare_parts_refused(
+                    "too_many_asset_parts", asset_id=asset_id, part_count=len(listed)
+                )
+                raise ConnectorError(
+                    f"The UpKeep asset lists more than {_MAX_ASSET_PARTS} parts, "
+                    "the most read_spare_parts fetches for one asset"
+                )
+            parts: list[SparePart] = []
+            for position, (part_id, part_path) in enumerate(listed):
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}{part_path}",
+                    headers=self._headers(),
+                    log_url=_LISTED_PART_LOG_URL,
+                )
+                if resp.status_code == 404:
+                    _log_spare_parts_refused(
+                        "listed_part_not_found", asset_id=asset_id, position=position
+                    )
+                    raise ConnectorError(
+                        "UpKeep could not return a part the asset lists (HTTP 404): "
+                        "its spare parts cannot be read in full, so none are returned"
+                    )
+                _raise_for_record_status(resp.status_code, "part")
+                try:
+                    returned_id, record = upkeep_mapper.parse_part_record(resp.json())
+                except (ValueError, TypeError) as exc:
+                    _log_spare_parts_refused(
+                        "malformed_part", asset_id=asset_id, position=position
+                    )
+                    raise ConnectorSchemaError(_MALFORMED_LISTED_PART) from exc
+                if returned_id != part_id:
+                    _log_spare_parts_refused(
+                        "part_id_mismatch", asset_id=asset_id, position=position
+                    )
+                    raise ConnectorSchemaError(
+                        "UpKeep returned a different part than the one the asset lists: "
+                        "its spare parts cannot be read in full, so none are returned"
+                    )
+                parts.append(
+                    _map_spare_part(
+                        record, _MALFORMED_LISTED_PART, asset_id=asset_id, position=position
+                    )
+                )
+        return parts
 
     async def _paginated_get(
         self,

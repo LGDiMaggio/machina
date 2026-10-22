@@ -75,7 +75,7 @@ pip install machina-ai[cmms-rest]
 | `get_work_order` | Fetch a single maintenance order by number |
 | `create_work_order` | Create maintenance orders (CSRF token handled automatically) |
 | `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
-| `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`) |
+| `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`). Filters by `sku`, and by `asset_id` only when `bom_equipment_field` is configured; otherwise an `asset_id` filter is refused with `ConnectorUnsupportedFilterError` |
 | `read_maintenance_plans` | Read preventive-maintenance plans (`API_MAINTENANCEPLAN/MaintenancePlan`) |
 | `read_maintenance_history` | Read an asset's confirmed, technically completed or closed maintenance orders (`API_MAINTENANCEORDER/MaintenanceOrder` filtered by `Equipment`, status `CNF`, `TECO` or `CLSD`) |
 
@@ -170,6 +170,15 @@ connector = SapPM(
 )
 ```
 
+`bom_equipment_field` is empty by default, because the default
+`BillOfMaterialItem` entity has no equipment field. Until it names the entity
+set's equipment field, `read_spare_parts` refuses any call with a non-empty
+`asset_id`, with or without a `sku`: it raises `ConnectorUnsupportedFilterError`
+(a `ConnectorError`) before sending a request. Reads by `sku` alone, and reads
+with no filter, work without it. When `bom_equipment_field` is set, an
+`asset_id` and a `sku` given together must both match. `connect()` logs one
+`bom_equipment_field_unconfigured` warning while the field is unset.
+
 ## Entity Mapping
 
 | SAP Field | Machina Field |
@@ -210,6 +219,7 @@ paged reads and startup.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.
+- **Spare parts by asset**: `read_spare_parts` can filter by `asset_id` only through `bom_equipment_field` (see [Configurable BOM Endpoint](#configurable-bom-endpoint)). While it is unset (the default), a non-empty `asset_id` raises `ConnectorUnsupportedFilterError` before any request, even when a `sku` is also given. The connector never answers `[]` for an asset it could not filter, and never drops the asset filter to return the whole BOM or a bare `sku` match. Look the part up by `sku` without an asset, or configure `bom_equipment_field`.
 - **Filter values and keys**: equipment, order and material numbers and statuses reach `$filter` as OData string literals with any `'` doubled, so a value cannot close its literal and add a clause; a number is sent as its digits. The `MaintenanceOrder(...)` key of `update_work_order` is also percent-encoded (`/`, `?`, `#`, `%`, `(`, `)`), so it stays one path segment, and a key that is empty or has an empty, `.` or `..` part between `/` or `\` separators is refused with `ConnectorError` before any request.
 
 ## API Reference

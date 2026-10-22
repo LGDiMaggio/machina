@@ -45,11 +45,17 @@ from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
+from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -740,27 +746,37 @@ class MaximoConnector:
     async def read_spare_parts(
         self,
         *,
+        asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
         """Read inventory items (spare parts) from Maximo.
 
         Args:
+            asset_id: Not supported yet: the connector reads spare parts from
+                ``mxinventory``, which it does not query by asset. An empty
+                string means no filter; any other value is refused, with or
+                without ``sku``, rather than dropped.
             sku: Optional Maximo ``itemnum`` to narrow the lookup via an
-                OSLC ``where`` clause.
-
-        Note:
-            Maximo's ``mxinventory`` object structure does not expose a
-            direct asset-compatibility relation, so filtering by asset is
-            not supported here. For asset-specific spare parts, consult
-            the corresponding work-order job plan or ``mxpmpart``.
+                OSLC ``where`` clause. An empty string means no filter.
 
         Raises:
+            ConnectorUnsupportedFilterError: If ``asset_id`` is given, before
+                any request.
             ConnectorSchemaError: If a record lacks its ``itemnum`` or cannot
                 be mapped; no partial list is returned.
-            ConnectorError: If ``sku`` is refused by :func:`_oslc_eq`, or on
-                an HTTP or paging error (see :meth:`_oslc_get`).
+            ConnectorError: If a filter is neither ``""`` nor an ID (see
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`),
+                if ``sku`` is refused by :func:`_oslc_eq`, or on an HTTP or
+                paging error (see :meth:`_oslc_get`).
         """
         self._ensure_connected()
+        asset_id, sku = spare_part_filters(asset_id, sku)
+        if asset_id:
+            raise ConnectorUnsupportedFilterError(
+                "The Maximo connector cannot filter spare parts by asset: it reads them "
+                "from mxinventory, which it does not query by asset. Look the part up by "
+                "sku instead."
+            )
         where = _oslc_eq("itemnum", sku) if sku else ""
         raw = await self._oslc_get(
             "mxinventory", oslc_where=where, oslc_select=maximo_mapper.INVENTORY_SELECT
