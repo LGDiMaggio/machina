@@ -370,6 +370,8 @@ class WorkflowEngine:
         if not action:
             return None
 
+        self._check_required_inputs(step, context)
+
         # -- LLM reasoning step ----------------------------------------
         if action == "agent.reason":
             return await self._dispatch_llm(step, context)
@@ -549,6 +551,22 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_required_inputs(step: Step, context: WorkflowContext) -> None:
+        """Refuse to run a step whose required input is missing or blank.
+
+        Raises:
+            WorkflowError: Naming the input and its template, never a value.
+        """
+        for name in step.required_inputs:
+            template = step.inputs.get(name)
+            value = context.resolve_input_value(template)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                raise WorkflowError(
+                    f"Step '{step.name}' needs its '{name}' input ({template}), "
+                    "which is missing or blank"
+                )
 
     @staticmethod
     def _validate_workflow(workflow: Workflow) -> None:

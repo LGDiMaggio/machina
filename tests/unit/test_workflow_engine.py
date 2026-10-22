@@ -1001,6 +1001,108 @@ class TestSkippedStepErrors:
 
 
 # ---------------------------------------------------------------------------
+# Tests — required inputs
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSparePartsConnector:
+    """CMMS whose ``read_spare_parts`` records the asset each call asked for."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_SPARE_PARTS})
+
+    def __init__(self) -> None:
+        self.asset_ids: list[object] = []
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[dict[str, Any]]:
+        self.asset_ids.append(asset_id)
+        return [{"sku": "SKF-6310"}]
+
+
+def _asset_scoped_step(**kwargs: Any) -> Step:
+    return Step(
+        "check_spare_parts",
+        action="cmms.read_spare_parts",
+        inputs={"asset_id": "{trigger.asset_id}"},
+        required_inputs=("asset_id",),
+        **kwargs,
+    )
+
+
+_MISSING_ASSET = (
+    "WorkflowError: Step 'check_spare_parts' needs its 'asset_id' input "
+    "({trigger.asset_id}), which is missing or blank"
+)
+
+
+class TestRequiredInputs:
+    """A required input that is missing or blank fails the step before its action."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "trigger",
+        [{}, {"asset_id": None}, {"asset_id": ""}, {"asset_id": " \t"}],
+        ids=["missing", "none", "empty", "blank"],
+    )
+    async def test_the_step_fails_under_its_error_policy(
+        self, tracer: ActionTracer, trigger: dict[str, Any]
+    ) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="AssetScoped", steps=[_asset_scoped_step(on_error=ErrorPolicy.SKIP)])
+
+        result = await engine.execute(wf, trigger)
+
+        (step,) = result.step_results
+        assert (step.skipped, step.success, step.output) == (True, True, None)
+        assert step.error == _MISSING_ASSET
+        assert cmms.asset_ids == []  # the action never ran
+
+    @pytest.mark.asyncio
+    async def test_a_stop_policy_stops_the_workflow(self, tracer: ActionTracer) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(
+            name="AssetScopedStop",
+            steps=[_asset_scoped_step(on_error=ErrorPolicy.STOP), Step("after")],
+        )
+
+        result = await engine.execute(wf, {})
+
+        assert result.success is False
+        assert [sr.step_name for sr in result.step_results] == ["check_spare_parts"]
+        assert result.step_results[0].error == _MISSING_ASSET
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asset_id", ["P-201", 201, 0], ids=["text", "number", "zero"])
+    async def test_a_present_input_runs_the_step(
+        self, tracer: ActionTracer, asset_id: object
+    ) -> None:
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        wf = Workflow(name="AssetScopedRuns", steps=[_asset_scoped_step()])
+
+        result = await engine.execute(wf, {"asset_id": asset_id})
+
+        assert result.step_results[0].output == [{"sku": "SKF-6310"}]
+        assert cmms.asset_ids == [asset_id]
+
+
+# ---------------------------------------------------------------------------
 # Tests — timeout cancellation safety (U10)
 # ---------------------------------------------------------------------------
 

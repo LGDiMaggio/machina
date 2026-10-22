@@ -57,6 +57,9 @@ alarm_to_workorder = Workflow(
             action="cmms.read_spare_parts",
             description="Verify spare parts availability for the diagnosed failure mode",
             inputs={"asset_id": "{trigger.asset_id}"},
+            # Without the alarm's asset the read has no asset filter: the step
+            # fails instead of listing the whole inventory as the asset's parts.
+            required_inputs=("asset_id",),
             on_error=ErrorPolicy.SKIP,
         ),
         Step(

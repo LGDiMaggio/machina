@@ -366,6 +366,62 @@ class TestAlarmToWorkorderWorkflow:
         assert "[check_spare_parts failed]" in comms.messages_sent[0]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "asset",
+        [{}, {"asset_id": None}, {"asset_id": ""}, {"asset_id": "   "}],
+        ids=["missing", "none", "empty", "blank"],
+    )
+    async def test_an_alarm_without_an_asset_skips_the_spare_parts_check(
+        self, asset: dict[str, Any]
+    ) -> None:
+        """The inventory is never read as the alarm asset's parts.
+
+        Under its SKIP policy the step fails before the CMMS is asked, the
+        later steps still run, and they see a failed check, not a part list.
+        """
+        engine, cmms, comms = self._build_engine()
+        trigger = {"alarm_id": "AL-1", "severity": "critical", **asset}
+
+        result = await engine.execute(alarm_to_workorder, trigger)
+
+        assert result.success is True
+        steps = {sr.step_name: sr for sr in result.step_results}
+        spare_parts = steps["check_spare_parts"]
+        assert (spare_parts.skipped, spare_parts.output) == (True, None)
+        assert "needs its 'asset_id' input" in (spare_parts.error or "")
+        assert cmms.spare_parts_calls == []
+        # The work order is still drafted and the technician told the check failed.
+        assert steps["generate_work_order"].skipped is False
+        message = comms.messages_sent[0]
+        assert "Spare Parts: [check_spare_parts failed]" in message
+        assert "SKF-6310" not in message
+
+    @pytest.mark.asyncio
+    async def test_a_successful_empty_check_is_not_reported_as_failed(self) -> None:
+        """An asset with no parts listed reads as an empty list, not a failure."""
+
+        class _NoPartsCmms(_FakeCmmsConnector):
+            async def read_spare_parts(
+                self, *, asset_id: str = "", sku: str = ""
+            ) -> list[dict[str, Any]]:
+                self.spare_parts_calls.append({"asset_id": asset_id, "sku": sku})
+                return []
+
+        engine, _cmms, comms = self._build_engine(cmms=_NoPartsCmms())
+
+        result = await engine.execute(alarm_to_workorder, {"asset_id": "P-201"})
+
+        steps = {sr.step_name: sr for sr in result.step_results}
+        assert (steps["check_spare_parts"].skipped, steps["check_spare_parts"].output) == (
+            False,
+            [],
+        )
+        assert steps["check_spare_parts"].error is None
+        message = comms.messages_sent[0]
+        assert "Spare Parts: []" in message
+        assert "[check_spare_parts failed]" not in message
+
+    @pytest.mark.asyncio
     async def test_sandbox_mode_blocks_writes(self) -> None:
         """In sandbox mode, write actions (create_work_order) are logged not executed."""
         engine, cmms, comms = self._build_engine(sandbox=True)

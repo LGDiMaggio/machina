@@ -151,6 +151,13 @@ class Step:
         timeout_seconds: Optional per-step timeout.
         inputs: Explicit input mappings using template variables, e.g.
             ``{"asset_id": "{trigger.asset_id}"}``.
+        required_inputs: Names of ``inputs`` that must resolve to a value
+            before the action runs. One that resolves to ``None`` (its
+            placeholder does not resolve) or to a blank string fails the
+            step under ``on_error``. Use it for an input whose absence would
+            change what the action means: ``read_spare_parts`` reads an
+            empty ``asset_id`` as no filter, so an asset-scoped step without
+            it would return the whole inventory.
 
     Example:
         ```python
@@ -176,6 +183,7 @@ class Step:
     timeout_seconds: float | None = None
     inputs: dict[str, Any] = field(default_factory=dict)
     is_write: bool | None = None
+    required_inputs: tuple[str, ...] = ()
 
 
 # ------------------------------------------------------------------
