@@ -305,18 +305,16 @@ default.
   source line.
 - When `configure_logging()` runs, it raises the `httpx` and `httpcore`
   loggers to WARNING. A stricter level the application already set (ERROR,
-  say) is kept, never lowered. Two kinds of library line are therefore not
-  logged:
-  - httpx's per-request INFO lines, which carry each request's full URL: the
-    CMMS host and the record IDs and filter values of the read (UpKeep part
-    IDs, SKUs in SAP PM's `$filter` and Maximo's `oslc.where`);
-  - httpcore's DEBUG lines, which carry the host and port and each response's
-    headers.
+  say) is kept, never lowered. Two kinds of line are therefore not logged:
+  httpx's per-request INFO lines, which carry each request's full URL (the
+  CMMS host and the record IDs and filter values of the read: UpKeep part
+  IDs, SKUs in SAP PM's `$filter` and Maximo's `oslc.where`), and httpcore's
+  DEBUG lines, which carry the host and port and each response's headers.
   Limitations:
   - The levels are set once, when `configure_logging()` runs. An application
     that does not call it, calls it and then lowers the two loggers, or
     reconfigures logging afterwards (`logging.config.dictConfig`, its own
-    handlers on those loggers) gets those URLs in its logs again. Logging
+    handlers on those loggers) gets those lines in its logs again. Logging
     systems configured independently of `configure_logging()` are not
     protected by it.
   - Only the `httpx` and `httpcore` loggers are covered. Other libraries'
