@@ -15,10 +15,14 @@ python agent.py --llm openai:gpt-4o
 
 ### 1. Spare Part Reorder
 
-Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). Mixes deterministic checks with an LLM urgency assessment. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
+Meant for the moment stock drops below the reorder point (the demo starts it by hand for `SKF-6310`). A CMMS lookup by SKU feeds an LLM urgency assessment. The part record lists the assets that use the part (`compatible_assets`); their criticality is not checked, and the urgency prompt says so. Machina ships no ERP connector: in sandbox mode `place_order` returns a placeholder; run live, the workflow stops there, because `create_purchase_order` is not a connector `Capability`.
+
+An event without a `part_id` stops the workflow at `lookup_part`: an empty `sku` is no filter, and the read would return the whole inventory. A SKU the CMMS does not have reads as an empty list, so the later steps share a guard and are skipped: nothing is assessed, ordered or announced. Caveat: a guard skip is not a failure, so that run still reports success and tells no one. Check `lookup_part`'s output on the result if an unknown SKU should raise an alert.
 
 ```python
 from machina.workflows import Workflow, Step, Trigger, TriggerType, ErrorPolicy, GuardCondition
+
+part_found = GuardCondition(check=lambda ctx: bool(ctx.get("lookup_part")))  # [] = unknown SKU
 
 spare_part_reorder = Workflow(
     name="Spare Part Reorder",
@@ -26,29 +30,21 @@ spare_part_reorder = Workflow(
                     filter={"condition": "stock_below_reorder_point"}),
     steps=[
         Step("lookup_part",        action="cmms.read_spare_parts",
-             inputs={"part_id": "{trigger.part_id}"},
+             inputs={"sku": "{trigger.part_id}"},
+             required_inputs=("sku",),                      # no part_id: stop here
              on_error=ErrorPolicy.STOP),
 
-        Step("check_dependencies", action="cmms.read_assets",
-             on_error=ErrorPolicy.SKIP),
-
-        Step("verify_criticality", action="domain.check_asset_criticality",
-             guard=GuardCondition(                          # skip if no deps
-                 check=lambda ctx: bool(ctx.get("check_dependencies")),
-             ),
-             on_error=ErrorPolicy.SKIP),
-
         Step("assess_urgency",     action="agent.reason",   # <-- LLM step
-             prompt="...standard or expedited procurement?...",
-             on_error=ErrorPolicy.SKIP),
+             prompt="...CMMS record: {lookup_part}... standard or expedited?...",
+             guard=part_found, on_error=ErrorPolicy.SKIP),
 
         Step("place_order",        action="erp.create_purchase_order",
              is_write=True,                                 # blocked in sandbox
-             on_error=ErrorPolicy.STOP),
+             guard=part_found, on_error=ErrorPolicy.STOP),
 
         Step("notify_warehouse",   action="channels.send_message",
              template="Reorder: {trigger.part_id}...",
-             on_error=ErrorPolicy.NOTIFY),
+             guard=part_found, on_error=ErrorPolicy.NOTIFY),
     ],
 )
 ```
@@ -101,7 +97,7 @@ A trigger describes the event a workflow handles; it does not start the workflow
 
 ### Template Variables
 
-Reference trigger data with `{trigger.field}` and prior step outputs with `{step_name}` or `{step_name.field}`.
+Reference trigger data with `{trigger.field}` and prior step outputs with `{step_name}` or `{step_name.field}`. The `.field` form reads a key of a dict output or an attribute of an object output. A list output, which most `read_*` capabilities return, has no fields: reference it whole, as `{step_name}`. On a list, `{lookup_part.name}` stays in the text as written, and `{scan_plans.count}` renders the list's `count` method. A placeholder naming a step that failed renders as `[step_name failed]`; any other placeholder that does not resolve stays in the text as written and logs a `template_unresolved` warning.
 
 ### Guard Conditions
 
