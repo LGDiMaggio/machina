@@ -1224,6 +1224,75 @@ class TestWritesPreserveTheFile:
             "new,,WO-2,C-3",
         ]
 
+    @staticmethod
+    def _csv_schema(path: Path) -> ExcelConnectorConfig:
+        return ExcelConnectorConfig(
+            work_orders=SheetSchema(
+                path=str(path),
+                sheet="ignored",
+                write_mode="append",
+                columns=[
+                    ColumnMapping(column="ID", field="id", required=True),
+                    ColumnMapping(column="Codice Asset", field="asset_id", required=True),
+                    ColumnMapping(column="Stato", field="status"),
+                    ColumnMapping(column="Descrizione", field="description"),
+                ],
+            )
+        )
+
+    _LF_CSV = (
+        b"ID,Codice Asset,Stato,Descrizione\nWO-1,P-201,created,first\nWO-2,C-3,created,second\n"
+    )
+
+    @pytest.mark.asyncio
+    async def test_csv_update_keeps_lf_line_endings(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(self._LF_CSV)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-1", description="changed")
+
+        assert path.read_bytes() == self._LF_CSV.replace(b"first", b"changed")
+
+    @pytest.mark.asyncio
+    async def test_csv_append_keeps_lf_line_endings(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(self._LF_CSV)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert path.read_bytes() == self._LF_CSV + b"WO-3,P-201,created,x\n"
+
+    @pytest.mark.asyncio
+    async def test_csv_append_to_lf_file_without_final_newline(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(self._LF_CSV.rstrip(b"\n"))
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert path.read_bytes() == self._LF_CSV + b"WO-3,P-201,created,x\n"
+
+    @pytest.mark.asyncio
+    async def test_csv_update_keeps_crlf_line_endings(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        crlf = self._LF_CSV.replace(b"\n", b"\r\n")
+        path.write_bytes(crlf)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.update_work_order("WO-2", description="changed")
+
+        assert path.read_bytes() == crlf.replace(b"second", b"changed")
+
     @pytest.mark.asyncio
     async def test_update_sees_rows_added_after_connect(self, tmp_path: Path) -> None:
         conn = await _connected_with_work_orders(tmp_path)

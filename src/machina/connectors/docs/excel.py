@@ -419,20 +419,35 @@ def _append_xlsx_row(
     _log_unwritten_fields(path, unwritten)
 
 
+def _csv_line_terminator(path: Path) -> str:
+    """Return the line terminator the CSV file already uses (``\\r\\n`` if none yet)."""
+    with path.open("rb") as fb:
+        head = fb.read(65536)
+    end = head.find(b"\n")
+    if end > 0 and head[end - 1 : end] == b"\r":
+        return "\r\n"
+    if end >= 0:
+        return "\n"
+    return "\r" if b"\r" in head else "\r\n"
+
+
 def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -> None:
     """Append one row to a CSV file, placing each value under its header.
 
-    An existing file keeps its own column order and extra columns; a missing
-    or empty file is started with the schema's header row.
+    An existing file keeps its own column order, extra columns and line
+    terminator; a missing or empty file is started with the schema's header
+    row.
     """
     header: list[str] = []
     needs_newline = False
+    newline = "\r\n"
     if path.exists() and path.stat().st_size > 0:
         with path.open(newline="", encoding="utf-8-sig") as f:
             header = next(csv.reader(f), [])
         with path.open("rb") as fb:
             fb.seek(-1, 2)
             needs_newline = fb.read(1) not in (b"\n", b"\r")
+        newline = _csv_line_terminator(path)
     write_header = not header
     if write_header:
         header = [m.column for m in schema.columns]
@@ -446,8 +461,8 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
             unwritten.append(mapping.field)
     with path.open("a", newline="", encoding="utf-8") as f:
         if needs_newline:
-            f.write("\r\n")
-        writer = csv.DictWriter(f, fieldnames=header)
+            f.write(newline)
+        writer = csv.DictWriter(f, fieldnames=header, lineterminator=newline)
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -501,13 +516,14 @@ def _update_csv_row(
 ) -> None:
     """CSV twin of :func:`_update_xlsx_row`: rewrite the file with one row changed.
 
-    Every other row and column is written back unchanged, via a temp sibling
-    and an atomic replace.
+    Every other row and column is written back unchanged, with the file's
+    own line terminator, via a temp sibling and an atomic replace.
     """
     with path.open("rb") as fb:
         # Excel on Windows reads BOM-less UTF-8 as the ANSI code page and
         # garbles accented text, so a file that had a BOM keeps it.
         has_bom = fb.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    newline = _csv_line_terminator(path)
     with path.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     if not rows:
@@ -534,7 +550,7 @@ def _update_csv_row(
     tmp = path.with_name(path.name + ".tmp")
     try:
         with tmp.open("w", newline="", encoding="utf-8-sig" if has_bom else "utf-8") as f:
-            csv.writer(f).writerows(rows)
+            csv.writer(f, lineterminator=newline).writerows(rows)
         tmp.replace(path)
     except Exception:
         tmp.unlink(missing_ok=True)
