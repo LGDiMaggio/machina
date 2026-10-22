@@ -187,6 +187,16 @@ def build_agent(llm: str = "ollama:llama3", sandbox: bool = True) -> Agent:
     )
 
 
+# The event run_demo() sends. The sample CMMS holds BELT-1200-EP400 at stock 0
+# against a reorder point of 1, so the event agrees with the record.
+DEMO_EVENT = {
+    "part_id": "BELT-1200-EP400",
+    "current_stock": 0,
+    "reorder_point": 1,
+    "condition": "stock_below_reorder_point",
+}
+
+
 async def run_demo(llm: str, sandbox: bool) -> None:
     """Trigger the spare part reorder workflow as a demo."""
     agent = build_agent(llm=llm, sandbox=sandbox)
@@ -213,15 +223,7 @@ async def run_demo(llm: str, sandbox: bool) -> None:
 
     # Trigger spare part reorder
     print(f"  Triggering '{spare_part_reorder.name}'...")
-    result = await agent.trigger_workflow(
-        spare_part_reorder.name,
-        {
-            "part_id": "SKF-6310",
-            "current_stock": 1,
-            "reorder_point": 2,
-            "condition": "stock_below_reorder_point",
-        },
-    )
+    result = await agent.trigger_workflow(spare_part_reorder.name, DEMO_EVENT)
 
     status = "SUCCESS" if result.success else "PARTIAL"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")

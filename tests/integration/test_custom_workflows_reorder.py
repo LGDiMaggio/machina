@@ -27,12 +27,7 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_AGENT = REPO_ROOT / "examples" / "reference" / "custom_workflows" / "agent.py"
 
-DEMO_EVENT = {
-    "part_id": "SKF-6310",
-    "current_stock": 1,
-    "reorder_point": 2,
-    "condition": "stock_below_reorder_point",
-}
+_ABSENT = object()
 
 
 def _load_example() -> ModuleType:
@@ -81,6 +76,22 @@ async def _run_on_sample_cmms(
 
 
 @pytest.mark.asyncio
+async def test_demo_event_matches_the_sample_cmms_record() -> None:
+    example = _load_example()
+    event = example.DEMO_EVENT
+    cmms = GenericCmmsConnector(data_dir=example.SAMPLE_DIR / "cmms")
+    await cmms.connect()
+
+    (part,) = await cmms.read_spare_parts(sku=event["part_id"])
+
+    assert (event["current_stock"], event["reorder_point"]) == (
+        part.stock_quantity,
+        part.reorder_point,
+    )
+    assert part.stock_quantity < part.reorder_point
+
+
+@pytest.mark.asyncio
 async def test_reorder_workflow_runs_every_step_on_the_sample_data() -> None:
     example = _load_example()
     agent = example.build_agent(llm=_UncalledLLM(), sandbox=True)
@@ -88,7 +99,7 @@ async def test_reorder_workflow_runs_every_step_on_the_sample_data() -> None:
     try:
         with capture_logs() as logs:
             result = await agent.trigger_workflow(
-                example.spare_part_reorder.name, dict(DEMO_EVENT)
+                example.spare_part_reorder.name, dict(example.DEMO_EVENT)
             )
     finally:
         await agent.stop()
@@ -102,10 +113,11 @@ async def test_reorder_workflow_runs_every_step_on_the_sample_data() -> None:
         ("notify_warehouse", True, False, None),
     ]
     steps = {s.name: s.output for s in result.steps}
-    assert [part.sku for part in steps["lookup_part"]] == ["SKF-6310"]
+    assert [part.sku for part in steps["lookup_part"]] == ["BELT-1200-EP400"]
     assert steps["place_order"]["__sandbox__"] is True
     assert steps["notify_warehouse"]["message"] == (
-        f"Spare Part Reorder\nPart: SKF-6310\nStock: 1\nAssessment: {steps['assess_urgency']}"
+        "Spare Part Reorder\nPart: BELT-1200-EP400\nStock: 0\n"
+        f"Assessment: {steps['assess_urgency']}"
     )
 
 
@@ -114,11 +126,11 @@ async def test_urgency_prompt_says_what_the_workflow_did_not_check() -> None:
     # Live, the run reaches the LLM, then stops at place_order: no connector
     # can create a purchase order.
     llm = _CapturingLLM()
-    result, _ = await _run_on_sample_cmms(dict(DEMO_EVENT), llm=llm)
+    result, _ = await _run_on_sample_cmms(dict(_load_example().DEMO_EVENT), llm=llm)
 
     assert [s.name for s in result.steps] == ["lookup_part", "assess_urgency", "place_order"]
     (prompt,) = llm.prompts
-    assert "stock_quantity=4" in prompt
+    assert "sku='BELT-1200-EP400'" in prompt
     # Only the Generic CMMS fills compatible_assets; on the vendor CMMSs it is
     # always empty, which must not read as "no asset uses this part".
     assert "an empty list does not mean no asset uses it" in prompt
@@ -127,7 +139,8 @@ async def test_urgency_prompt_says_what_the_workflow_did_not_check() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_sku_is_not_assessed_ordered_or_announced() -> None:
-    result, logs = await _run_on_sample_cmms({**DEMO_EVENT, "part_id": "NOT-IN-CMMS"})
+    event = {**_load_example().DEMO_EVENT, "part_id": "NOT-IN-CMMS"}
+    result, logs = await _run_on_sample_cmms(event)
 
     assert _warnings(logs) == []
     steps = {s.name: s for s in result.steps}
@@ -141,16 +154,12 @@ async def test_unknown_sku_is_not_assessed_ordered_or_announced() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "event",
-    [
-        {k: v for k, v in DEMO_EVENT.items() if k != "part_id"},
-        {**DEMO_EVENT, "part_id": None},
-        {**DEMO_EVENT, "part_id": ""},
-        {**DEMO_EVENT, "part_id": "   "},
-    ],
-    ids=["absent", "none", "empty", "blank"],
+    "part_id", [_ABSENT, None, "", "   "], ids=["absent", "none", "empty", "blank"]
 )
-async def test_event_without_a_part_id_stops_at_the_lookup(event: dict[str, Any]) -> None:
+async def test_event_without_a_part_id_stops_at_the_lookup(part_id: object) -> None:
+    event = {k: v for k, v in _load_example().DEMO_EVENT.items() if k != "part_id"}
+    if part_id is not _ABSENT:
+        event["part_id"] = part_id
     result, _ = await _run_on_sample_cmms(event)
 
     assert not result.success
