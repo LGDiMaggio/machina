@@ -138,8 +138,11 @@ since then count. A work-order row whose values do not make a valid work order
   unknown status, raises `ConnectorError`); asking for the status the work
   order already has changes nothing. It then writes only the changed cells of
   that work order's row: other rows, columns and sheets stay as they are, and
-  the file is written to a temporary sibling and atomically replaced, so a
-  crash mid-write cannot truncate it. A change to a field that no column is
+  the file is written to a temporary sibling of its own (a hidden
+  `.<name>.<random>.tmp`), flushed to disk and atomically replaced, so neither
+  a crash nor a power loss mid-write can truncate it. The file keeps its
+  permission bits, and a symlink is written through rather than replaced
+  (ownership and ACLs other than the permission bits are not copied). A change to a field that no column is
   mapped to is refused with `ConnectorError` rather than silently dropped. If
   the write fails, the cached record is restored. A key that is not a
   work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import codecs
+import os
 import shutil
+import stat
 from datetime import date, datetime
 from pathlib import Path
 
@@ -1339,6 +1341,118 @@ class TestWritesPreserveTheFile:
 
         row = path.read_text(encoding="utf-8").splitlines()[1]
         assert row == "WO-1,P-201,assigned,BEAR-WEAR-01,2026-01-15T10:00:00"
+
+
+class TestAtomicReplace:
+    """Writes go through a temp file of their own, then replace the file in place."""
+
+    @staticmethod
+    def _make(tmp_path: Path, suffix: str, name: str = "odl") -> Path:
+        path = tmp_path / f"{name}{suffix}"
+        if suffix == ".xlsx":
+            TestWritesPreserveTheFile._workbook(path)
+        else:
+            path.write_text(
+                "ID,Note,Codice Asset,Stato,Descrizione\nWO-1,keep me,P-201,created,first\n",
+                encoding="utf-8",
+            )
+        return path
+
+    @staticmethod
+    async def _update(path: Path) -> None:
+        conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+        await conn.connect()
+        await conn.update_work_order("WO-1", description="changed")
+
+    @staticmethod
+    async def _description(path: Path) -> str | None:
+        conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+        await conn.connect()
+        return (await conn.read_work_orders())[0].description
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+    async def test_another_writers_temp_file_is_left_alone(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        """A fixed ``<file>.tmp`` name let two writers overwrite, replace or
+        delete each other's temp file."""
+        path = self._make(tmp_path, suffix)
+        other = path.with_name(path.name + ".tmp")
+        other.write_bytes(b"another writer's save in progress")
+
+        await self._update(path)
+
+        assert other.read_bytes() == b"another writer's save in progress"
+        assert await self._description(path) == "changed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+    async def test_no_temp_file_is_left_behind(self, tmp_path: Path, suffix: str) -> None:
+        path = self._make(tmp_path, suffix)
+
+        await self._update(path)
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+    async def test_file_mode_is_kept(self, tmp_path: Path, suffix: str) -> None:
+        path = self._make(tmp_path, suffix)
+        path.chmod(0o640)
+
+        await self._update(path)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    async def test_new_file_gets_the_default_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.xlsx"
+        conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-1", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        umask = os.umask(0)
+        os.umask(umask)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+    async def test_write_goes_through_a_symlink(self, tmp_path: Path, suffix: str) -> None:
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        real = self._make(shared, suffix)
+        link = tmp_path / f"odl{suffix}"
+        link.symlink_to(real)
+
+        await self._update(link)
+
+        assert link.is_symlink()
+        assert await self._description(real) == "changed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+    async def test_temp_file_is_flushed_to_disk_before_the_replace(
+        self, tmp_path: Path, suffix: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import machina.connectors.docs.excel as excel_mod
+
+        path = self._make(tmp_path, suffix)
+        synced: list[int] = []
+        real_fsync = os.fsync
+        monkeypatch.setattr(
+            excel_mod.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1]
+        )
+
+        await self._update(path)
+
+        assert synced, "the temp file was never fsync'ed"
 
 
 class TestRefresh:

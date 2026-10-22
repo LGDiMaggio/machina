@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import csv
+import os
 import re
+import stat
+import uuid
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +32,8 @@ from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aw
 from machina.connectors.capabilities import Capability
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.connectors.docs.excel_schema import (
         ColumnMapping,
         ExcelConnectorConfig,
@@ -352,15 +358,47 @@ def _last_row_with_data(ws: Any, columns: list[int]) -> int:
     return 1
 
 
-def _save_xlsx_atomically(wb: Any, path: Path) -> None:
-    """Save to a temp sibling, then replace the target, so a crash cannot truncate it."""
-    tmp = path.with_name(path.name + ".tmp")
+def _replace_atomically(path: Path, write: Callable[[Path], None]) -> None:
+    """Write ``path`` through a temp file of its own, then atomically replace it.
+
+    The temp file has a unique name, so concurrent or abandoned writes never
+    share one. It takes the target's permission bits (a new file gets the
+    umask default), is flushed to disk before the replace, and the directory
+    entry is flushed after it, so neither a crash nor a power loss leaves a
+    truncated file. A symlink is written through, not replaced.
+    """
+    target = path.resolve()
+    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    os.close(os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
     try:
-        wb.save(str(tmp))
-        tmp.replace(path)
-    except Exception:
+        write(tmp)
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
+        with tmp.open("rb+") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_directory(target.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush a directory entry change to disk (a no-op where unsupported, e.g. Windows)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _save_xlsx_atomically(wb: Any, path: Path) -> None:
+    """Save a workbook through :func:`_replace_atomically`."""
+    _replace_atomically(path, lambda tmp: wb.save(str(tmp)))
 
 
 def _log_unwritten_fields(path: Path, fields: list[str]) -> None:
@@ -547,14 +585,12 @@ def _update_csv_row(
     target.extend([""] * (len(header) - len(target)))
     for column, value in values.items():
         target[index[column]] = "" if value is None else value
-    tmp = path.with_name(path.name + ".tmp")
-    try:
+
+    def _write(tmp: Path) -> None:
         with tmp.open("w", newline="", encoding="utf-8-sig" if has_bom else "utf-8") as f:
             csv.writer(f, lineterminator=newline).writerows(rows)
-        tmp.replace(path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+
+    _replace_atomically(path, _write)
 
 
 def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
