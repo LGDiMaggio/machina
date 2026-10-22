@@ -26,9 +26,7 @@ if TYPE_CHECKING:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_AGENT = REPO_ROOT / "examples" / "reference" / "custom_workflows" / "agent.py"
-SAMPLE_CMMS_DIR = REPO_ROOT / "examples" / "sample_data" / "cmms"
 
-# The event run_demo() sends.
 DEMO_EVENT = {
     "part_id": "SKF-6310",
     "current_stock": 1,
@@ -38,7 +36,6 @@ DEMO_EVENT = {
 
 
 def _load_example() -> ModuleType:
-    """Import the example under its own name — other tests import an ``agent`` module."""
     spec = importlib.util.spec_from_file_location("_custom_workflows_example", EXAMPLE_AGENT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -46,32 +43,28 @@ def _load_example() -> ModuleType:
     try:
         spec.loader.exec_module(module)
     finally:
-        # The module body prepends the repo's src/ and examples/ to sys.path.
         sys.path[:] = path_snapshot
     return module
 
 
 class _UncalledLLM:
-    """``agent.reason`` needs an LLM, which sandbox mode never calls."""
-
-    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+    async def complete(self, messages: list[dict[str, str]]) -> str:
         raise AssertionError("sandbox mode must not call the LLM")
 
 
 def _warnings(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # A step that raised logs step_error; an unresolved placeholder logs
-    # template_unresolved or input_unresolved.
     return [e for e in logs if e["log_level"] in {"warning", "error"}]
 
 
 async def _run_on_sample_cmms(event: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
-    cmms = GenericCmmsConnector(data_dir=SAMPLE_CMMS_DIR)
+    example = _load_example()
+    cmms = GenericCmmsConnector(data_dir=example.SAMPLE_DIR / "cmms")
     await cmms.connect()
     registry = ConnectorRegistry()
     registry.register("cmms", cmms)
     engine = WorkflowEngine(registry=registry, llm=_UncalledLLM(), sandbox=True)
     with capture_logs() as logs:
-        result = await engine.execute(_load_example().spare_part_reorder, event)
+        result = await engine.execute(example.spare_part_reorder, event)
     return result, logs
 
 
@@ -99,7 +92,6 @@ async def test_reorder_workflow_runs_every_step_on_the_sample_data() -> None:
     steps = {s.name: s.output for s in result.steps}
     assert [part.sku for part in steps["lookup_part"]] == ["SKF-6310"]
     assert steps["place_order"]["__sandbox__"] is True
-    # The part is named by the event's SKU, which the lookup just found in the CMMS.
     assert steps["notify_warehouse"]["message"] == (
         f"Spare Part Reorder\nPart: SKF-6310\nStock: 1\nAssessment: {steps['assess_urgency']}"
     )
@@ -112,7 +104,6 @@ async def test_unknown_sku_is_not_assessed_ordered_or_announced() -> None:
     assert _warnings(logs) == []
     steps = {s.name: s for s in result.steps}
     assert steps["lookup_part"].success and steps["lookup_part"].output == []
-    # Skipped by the guard, not after an error: nothing ran on the empty lookup.
     assert [(s.name, s.skipped, s.error, s.output) for s in result.steps[1:]] == [
         ("assess_urgency", True, None, None),
         ("place_order", True, None, None),
@@ -132,7 +123,6 @@ async def test_unknown_sku_is_not_assessed_ordered_or_announced() -> None:
     ids=["absent", "none", "empty", "blank"],
 )
 async def test_event_without_a_part_id_stops_at_the_lookup(event: dict[str, Any]) -> None:
-    # An empty sku is no filter: the read would return the whole inventory.
     result, _ = await _run_on_sample_cmms(event)
 
     assert not result.success
