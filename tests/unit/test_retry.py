@@ -381,3 +381,40 @@ async def test_content_kwarg_is_forwarded() -> None:
     await request_with_retry(client, "POST", "https://example.com/x", content=b"raw-body")
     assert client.calls == 1
     assert client.last_kwargs["content"] == b"raw-body"
+
+
+_PART_URL = "https://cmms.example.com/api/v2/parts/SECRET-PART"
+_REDACTED = "/api/v2/parts/<listed part>"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "event_name"),
+    [
+        ([httpx.ConnectError("refused"), _FakeResponse(200)], "http_network_retry"),
+        ([_FakeResponse(429), _FakeResponse(200)], "http_rate_limit_retry"),
+        (
+            [_FakeResponse(429, headers={"Retry-After": "300"})],
+            "http_retry_after_exceeds_max_backoff",
+        ),
+    ],
+    ids=["network-retry", "rate-limit-retry", "retry-after-too-long"],
+)
+@pytest.mark.parametrize(
+    ("log_url", "logged"), [(_REDACTED, _REDACTED), (None, _PART_URL)], ids=["log-url", "default"]
+)
+async def test_every_retry_warning_logs_log_url_in_place_of_the_url(
+    events: list[Any], event_name: str, log_url: str | None, logged: str
+) -> None:
+    """A caller whose URL carries a record ID keeps it out of all three warnings."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        await request_with_retry(
+            _SequenceClient(events), "GET", _PART_URL, max_backoff=8.0, log_url=log_url
+        )
+
+    (warning,) = [e for e in logs if e["event"] == event_name]
+    assert warning["url"] == logged
+    if log_url is not None:
+        assert "SECRET-PART" not in repr(logs)

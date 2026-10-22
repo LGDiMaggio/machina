@@ -455,6 +455,16 @@ class TestGenericCmmsConnectorLocal:
         assert [p.sku for p in parts] == ["SKF-6310"]
 
     @pytest.mark.asyncio
+    async def test_read_spare_parts_matches_a_numeric_sku_as_text(self, tmp_path: Path) -> None:
+        (tmp_path / "spare_parts.json").write_text(
+            json.dumps([{"sku": "6310", "name": "Bearing", "compatible_assets": ["P-201"]}])
+        )
+        conn = GenericCmmsConnector(data_dir=tmp_path)
+        await conn.connect()
+        parts = await conn.read_spare_parts(sku=6310)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["6310"]
+
+    @pytest.mark.asyncio
     async def test_read_maintenance_history(self, sample_data_dir: Path) -> None:
         """Maintenance history returns completed/closed WOs."""
         conn = GenericCmmsConnector(data_dir=sample_data_dir)

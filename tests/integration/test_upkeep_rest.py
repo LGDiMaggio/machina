@@ -410,6 +410,20 @@ class TestReadSpareParts:
         assert _sent(httpx_mock) == [f"{BASE}/api/v2/parts?limit=100&offset=0"]
 
     @pytest.mark.asyncio
+    async def test_a_numeric_sku_is_matched_as_its_text(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A part number from a workflow event or model JSON can arrive as a number."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/parts?limit=100&offset=0",
+            json={"results": [{"id": "p1", "partNumber": "6205", "name": "Bearing"}]},
+        )
+        parts = await connector.read_spare_parts(sku=6205)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["6205"]
+
+    @pytest.mark.asyncio
     async def test_an_inventory_part_that_cannot_be_mapped_refuses_the_read(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
@@ -1023,6 +1037,70 @@ class TestReadSparePartsByAsset:
         assert {e["url"] for e in retries} == {"/api/v2/parts/<listed part>"}
         for value in (*listed, BASE):
             assert value not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_a_part_that_stays_unavailable_refuses_the_whole_read(
+        self, httpx_mock, monkeypatch, connector: UpKeepConnector
+    ) -> None:
+        """A 503 that outlasts the retries on a later part: no partial list."""
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+        await _connect(httpx_mock, connector)
+        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        _mock_asset(httpx_mock, _asset_body(parts=listed))
+        _mock_part(httpx_mock, "ydOS2PdR3a")
+        for _ in range(4):  # the request and its three retries
+            _mock_part(httpx_mock, "Qm7Tz2XbLp", status_code=503)
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match=r"^UpKeep GET part failed: HTTP 503$"),
+        ):
+            await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        assert _sent(httpx_mock) == [
+            ASSET_URL,
+            f"{PART_URL}/ydOS2PdR3a",
+            *[f"{PART_URL}/Qm7Tz2XbLp"] * 4,
+        ]
+        retries = [e for e in logs if e["event"] == "http_rate_limit_retry"]
+        assert {e["url"] for e in retries} == {"/api/v2/parts/<listed part>"}
+        for value in (*listed, BASE):
+            assert value not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_a_listed_part_answered_with_a_non_json_body_refuses_the_whole_read(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
+        httpx_mock.add_response(
+            method="GET", url=f"{PART_URL}/ydOS2PdR3a", text="<html>maintenance</html>"
+        )
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError) as exc_info,
+        ):
+            await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        assert str(exc_info.value).startswith("UpKeep returned a malformed record for a part")
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a"]
+        assert _refusal(logs, "malformed_part")["position"] == 0
+        assert "maintenance" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_a_numeric_sku_is_matched_as_its_text_among_the_assets_parts(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a"]))
+        _mock_part(httpx_mock, "ydOS2PdR3a", _part_body("ydOS2PdR3a", partNumber="6205"))
+        parts = await connector.read_spare_parts(asset_id=ASSET_ID, sku=6205)  # type: ignore[arg-type]
+        assert [p.sku for p in parts] == ["6205"]
 
     @pytest.mark.asyncio
     async def test_a_rate_limited_part_request_logs_no_part(
