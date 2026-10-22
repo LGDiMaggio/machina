@@ -92,8 +92,14 @@ class McpConfig(BaseModel):
             "https://localhost",
             "http://localhost:*",
             "https://localhost:*",
+            "http://127.0.0.1",
+            "https://127.0.0.1",
             "http://127.0.0.1:*",
             "https://127.0.0.1:*",
+            "http://[::1]",
+            "https://[::1]",
+            "http://[::1]:*",
+            "https://[::1]:*",
         ],
         description=(
             "Origin header values the streamable-http transport accepts from "

@@ -263,16 +263,31 @@ class TestOriginAllowList:
         assert self._list_tools(http_config, "https://evil.example") == 403
 
     @pytest.mark.parametrize(
-        "origin", ["http://localhost", "http://localhost:5173", "https://127.0.0.1:8443"]
+        "origin",
+        [
+            "http://localhost",
+            "http://localhost:5173",
+            "https://127.0.0.1:8443",
+            "http://127.0.0.1",
+            "https://127.0.0.1",
+            "http://[::1]",
+            "http://[::1]:5173",
+            "https://[::1]:8443",
+        ],
     )
     def test_default_loopback_origins_are_accepted(
         self, http_config: MachinaConfig, origin: str
     ) -> None:
+        """The default origins cover the loopback names the default hosts do."""
         assert self._list_tools(http_config, origin) == 200
 
-    def test_loopback_ip_without_a_port_is_not_a_default(self, http_config: MachinaConfig) -> None:
-        """The defaults list ``http://127.0.0.1:*`` — a port is required."""
-        assert self._list_tools(http_config, "http://127.0.0.1") == 403
+    @pytest.mark.parametrize(
+        "origin", ["http://127.0.0.2", "http://127.0.0.1.evil.example", "http://[::2]:5173"]
+    )
+    def test_other_addresses_are_not_defaults(
+        self, http_config: MachinaConfig, origin: str
+    ) -> None:
+        assert self._list_tools(http_config, origin) == 403
 
     def test_configured_origins_replace_the_defaults(self, http_config: MachinaConfig) -> None:
         config = http_config.model_copy(
