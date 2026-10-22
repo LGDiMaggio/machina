@@ -355,7 +355,7 @@ REST mocking or VCR for recorded responses.
   - **Never drop it.** That passes the unfiltered result off as the filtered one: the whole inventory as one asset's parts.
   - **Never answer `[]` for it.** That says nothing matches: "this asset has no spare parts".
   - **What callers do with a refusal.** The agent relays it to the model, which can retry with a filter you support, such as `sku`. Its context prefetch reports the source as not checked, rather than empty.
-  - **A read that sends one request per part.** If your `read_spare_parts(asset_id=...)` fetches each of the asset's parts separately, as UpKeep's does, declare `spare_parts_by_asset_fans_out: ClassVar[bool] = True`. The agent's per-turn prefetch then waits at most 5 seconds for it, cancels it at the deadline, and reports the parts as not checked. Other callers keep waiting for the full read. Make the read cancellable: await your requests rather than starting work that outlives the call.
+  - **A read that sends one request per part.** If your `read_spare_parts(asset_id=...)` fetches each of the asset's parts separately, as UpKeep's does, declare `spare_parts_by_asset_fans_out: ClassVar[bool] = True`. The agent's per-turn prefetch then waits at most 5 seconds for it, cancels it at the deadline, and reports the parts as not checked. Other callers keep waiting for the full read. Make the read cancellable: await your requests rather than starting work that outlives the call, and let `CancelledError` propagate. A read that catches it and returns anyway is still reported as not checked.
 - **Graceful degradation.** Declare only the capabilities you actually
   support. If your CMMS doesn't expose spare parts, omit
   `Capability.READ_SPARE_PARTS` from the frozenset — the agent will simply

@@ -49,7 +49,7 @@ from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
 from machina.domain.plant import Plant
-from machina.exceptions import ConnectorUnsupportedFilterError, LLMError
+from machina.exceptions import ConnectorUnsupportedFilterError, LLMError, MachinaError
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
@@ -306,8 +306,11 @@ _ENUM_SUMMARY_THRESHOLD = 50
 _SPARE_PARTS_PREFETCH_BUDGET = 5.0
 
 
-class _SparePartsPrefetchTimeoutError(Exception):
+class _SparePartsPrefetchTimeoutError(MachinaError):
     """The spare-parts prefetch outlasted its budget and was cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__("the spare-parts prefetch did not finish within its budget")
 
 
 # Prefix of the grounding note appended to a stored assistant reply. Single
@@ -1651,7 +1654,9 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    if not getattr(_conn, "spare_parts_by_asset_fans_out", False):
+                    # Read from the class and only a literal True opts in: a
+                    # mock or proxy answers any attribute with a truthy object.
+                    if getattr(type(_conn), "spare_parts_by_asset_fans_out", False) is not True:
                         return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
                     # At the deadline the read is cancelled where it waits, so
                     # its pending request and HTTP client end with it.
@@ -1663,6 +1668,10 @@ class Agent:
                         if not deadline.expired():
                             raise  # the read's own timeout, not this deadline
                         raise _SparePartsPrefetchTimeoutError from None
+                    if deadline.expired():
+                        # The read swallowed its cancellation: what it returned
+                        # is not the asset's full list.
+                        raise _SparePartsPrefetchTimeoutError
                     return parts
 
             tasks.append(_get_parts())

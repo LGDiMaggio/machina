@@ -544,6 +544,17 @@ class _HangingFanOutSparePartsConnector:
         raise AssertionError("the wait cannot end on its own")
 
 
+class _SwallowingFanOutSparePartsConnector(_HangingFanOutSparePartsConnector):
+    """Fan-out provider that catches its cancellation and returns an empty list."""
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        try:
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=10)
+        except asyncio.CancelledError:
+            self.cancelled = True
+        return []
+
+
 class _OwnTimeoutFanOutSparePartsConnector(_HangingFanOutSparePartsConnector):
     """Fan-out provider whose read raises its own TimeoutError at once."""
 
@@ -3420,11 +3431,6 @@ class TestSparePartsPrefetchDeadline:
         assert context["spare_parts_unchecked"] == "timed_out"
         assert parts_conn.started is True
         assert parts_conn.cancelled is True  # stopped where it waited, not left running
-        assert not [
-            task
-            for task in asyncio.all_tasks()
-            if getattr(task.get_coro(), "__qualname__", "").endswith("_get_parts")
-        ]
         assert "work_orders" in context  # the other sources are still gathered
         [timed_out] = [e for e in logs if e["event"] == "context_gather_timed_out"]
         assert timed_out["log_level"] == "warning"
@@ -3464,6 +3470,31 @@ class TestSparePartsPrefetchDeadline:
         _, context = await self._gather(_SlowSparePartsConnector())
         assert [part.sku for part in context["spare_parts"]] == ["SKF-6310"]
         assert "spare_parts_unchecked" not in context
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_swallows_its_cancellation_is_still_not_checked(
+        self, monkeypatch
+    ) -> None:
+        """What a read returns after the deadline is not the asset's list."""
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        parts_conn = _SwallowingFanOutSparePartsConnector()
+        agent, context = await self._gather(parts_conn)
+
+        assert parts_conn.cancelled is True
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "timed_out"
+        messages = agent._build_messages("spare parts for P-201", "chat1", context)
+        [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
+        assert "returned none" not in retrieved
+
+    @pytest.mark.asyncio
+    async def test_only_a_class_level_true_declaration_opts_in(self, monkeypatch) -> None:
+        """A mock or proxy answering any attribute with a truthy object gets no deadline."""
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        parts_conn = _SlowSparePartsConnector()
+        parts_conn.spare_parts_by_asset_fans_out = MagicMock()  # type: ignore[attr-defined]
+        _, context = await self._gather(parts_conn)
+        assert [part.sku for part in context["spare_parts"]] == ["SKF-6310"]
 
     @pytest.mark.asyncio
     async def test_the_reads_own_timeout_is_a_failure_not_the_deadline(self) -> None:

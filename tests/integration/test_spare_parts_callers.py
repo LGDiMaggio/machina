@@ -477,8 +477,6 @@ class TestUpKeepPrefetchDeadline:
             f"/api/v2/parts/{part_id}" for part_id in _THREE_LISTED[:2]
         ]
         assert _upkeep_requests(httpx_mock) == sent
-        await asyncio.sleep(0.05)  # a read left running would send the third part's request
-        assert _upkeep_requests(httpx_mock) == sent
         messages = agent._build_messages(UPKEEP_ASSET_ID, "chat1", context)
         retrieved = next(m["content"] for m in messages if "Retrieved Context" in m["content"])
         assert (
@@ -488,6 +486,44 @@ class TestUpKeepPrefetchDeadline:
         )
         assert "Flux" not in retrieved
         assert "returned none" not in retrieved
+
+    @pytest.mark.asyncio
+    async def test_a_deadline_during_a_retry_backoff_sends_no_retry(
+        self, httpx_mock, monkeypatch, upkeep: UpKeepConnector
+    ) -> None:
+        """A read left running past the deadline would retry the part once its backoff ends.
+
+        The part answers 503, so ``request_with_retry`` sleeps its 0.5 s
+        backoff; the 0.2 s budget ends inside that sleep. Waiting past the
+        backoff afterwards shows the retry was never sent.
+        """
+        import asyncio
+
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0.2)
+        httpx_mock.add_response(
+            url=re.compile(rf"{re.escape(UPKEEP)}/api/v2/work-orders\?"), json={"results": []}
+        )  # the work orders are read alongside the spare parts
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
+            json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _LISTED}},
+        )
+        httpx_mock.add_response(url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}", status_code=503)
+        httpx_mock.add_response(  # the retry, which the deadline must cancel
+            url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
+            json={"success": True, "result": {"id": _LISTED[0], "name": "Flux"}},
+            is_optional=True,
+        )
+        agent = _agent(upkeep, UPKEEP_PUMP)
+        pump = ResolvedEntity(asset=UPKEEP_PUMP, confidence=1.0, match_reason="exact_id")
+
+        context = await agent._gather_context(UPKEEP_ASSET_ID, [pump])
+        await asyncio.sleep(0.8)  # past the backoff the cancelled read was sleeping out
+
+        assert context["spare_parts_unchecked"] == "timed_out"
+        assert _upkeep_requests(httpx_mock) == [
+            f"/api/v2/assets/{UPKEEP_ASSET_ID}",
+            f"/api/v2/parts/{_LISTED[0]}",
+        ]
 
     @pytest.mark.asyncio
     async def test_the_tool_and_mcp_reads_have_no_prefetch_deadline(
