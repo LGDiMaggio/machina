@@ -22,7 +22,7 @@ from __future__ import annotations
 import base64
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BearerAuth(BaseModel):
@@ -31,6 +31,8 @@ class BearerAuth(BaseModel):
     Produces ``Authorization: Bearer <token>``, the default scheme used by
     most modern CMMS REST APIs (UpKeep, MaintainX, Limble, Fiix).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["bearer"] = "bearer"
     token: str
@@ -46,6 +48,8 @@ class BasicAuth(BaseModel):
     Produces ``Authorization: Basic <base64(user:password)>``. Common in
     older or on-premise CMMS deployments (eMaint, some Infor EAM setups).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["basic"] = "basic"
     username: str
@@ -66,6 +70,8 @@ class ApiKeyHeaderAuth(BaseModel):
     ``Authorization`` header.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["api_key"] = "api_key"
     header_name: str = "X-API-Key"
     value: str
@@ -77,6 +83,8 @@ class ApiKeyHeaderAuth(BaseModel):
 
 class NoAuth(BaseModel):
     """No authentication — public or intranet-only endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["none"] = "none"
 
@@ -112,6 +120,8 @@ class OAuth2ClientCredentials(BaseModel):
         headers = auth.apply({})
         ```
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["oauth2_client_credentials"] = "oauth2_client_credentials"
     token_url: str

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
@@ -23,6 +23,8 @@ class FieldMapping(BaseModel):
     ``"BEAR-WEAR-01;SEAL-LEAK-01"``.  The connector splits on ``;``,
     strips whitespace from each entry, and drops empty entries.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     column: str = Field(..., description="Database column name")
     coerce: str | None = Field(
@@ -44,6 +46,8 @@ class TableMapping(BaseModel):
     ``Capability.READ_FAILURE_MODES`` and serves the rows through
     ``read_failure_modes()``.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., description="SQL SELECT query for reading")
     entity: Literal["Asset", "WorkOrder", "FailureMode"] = Field(
@@ -82,6 +86,8 @@ class TableMapping(BaseModel):
 class SqlRetryConfig(BaseModel):
     """Retry settings for transient SQL errors."""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_retries: int = Field(default=3, ge=0, le=10)
     base_backoff: float = Field(default=0.5, ge=0.1, le=5.0)
     max_backoff: float = Field(default=8.0, ge=1.0, le=60.0)
@@ -89,6 +95,8 @@ class SqlRetryConfig(BaseModel):
 
 class SqlConnectorConfig(BaseModel):
     """Top-level configuration for GenericSqlConnector."""
+
+    model_config = ConfigDict(extra="forbid")
 
     dsn: str = Field(..., description="ODBC/JDBC connection string")
     driver_type: Literal["odbc", "jdbc"] = Field(default="odbc", description="Driver backend")
