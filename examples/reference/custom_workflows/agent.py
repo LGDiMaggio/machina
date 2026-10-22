@@ -65,14 +65,12 @@ spare_part_reorder = Workflow(
         filter={"condition": "stock_below_reorder_point"},
     ),
     steps=[
-        # Returns a list, which later steps can reference only whole, as
-        # {lookup_part}. Each part lists the assets that use it (compatible_assets).
         Step(
             "lookup_part",
             action="cmms.read_spare_parts",
             inputs={"sku": "{trigger.part_id}"},
-            # An empty sku is no filter: without a part_id the read would
-            # return the whole inventory.
+            # An empty sku is no filter: a part_id of "" would read the
+            # whole inventory as the part.
             required_inputs=("sku",),
             on_error=ErrorPolicy.STOP,
         ),
