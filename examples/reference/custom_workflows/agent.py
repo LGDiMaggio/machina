@@ -46,12 +46,20 @@ SAMPLE_DIR = _examples_dir / "sample_data"
 
 # ── Workflow 1: Spare Part Reorder ──────────────────────────────
 #
-# Stock drops below reorder point? The agent checks dependencies,
-# assesses urgency with LLM reasoning, and places the order.
+# Stock drops below reorder point? The agent looks the part up in the
+# CMMS, assesses urgency with LLM reasoning, and places the order.
+
+# A SKU the CMMS does not have reads as an empty list. The steps after the
+# lookup run only when it found the part, so an unknown SKU is never
+# assessed, ordered or announced.
+part_found = GuardCondition(
+    check=lambda ctx: bool(ctx.get("lookup_part")),
+    description="Skip unless the CMMS has a part with this SKU",
+)
 
 spare_part_reorder = Workflow(
     name="Spare Part Reorder",
-    description="Assess urgency and reorder when stock is low.",
+    description="Look the part up in the CMMS, assess urgency and reorder when stock is low.",
     trigger=Trigger(
         type=TriggerType.CONDITION,
         filter={"condition": "stock_below_reorder_point"},
@@ -60,23 +68,11 @@ spare_part_reorder = Workflow(
         Step(
             "lookup_part",
             action="cmms.read_spare_parts",
-            inputs={"part_id": "{trigger.part_id}"},
+            inputs={"sku": "{trigger.part_id}"},
+            # An empty sku is no filter: a part_id of "" would read the
+            # whole inventory as the part.
+            required_inputs=("sku",),
             on_error=ErrorPolicy.STOP,
-        ),
-        Step(
-            "check_dependencies",
-            action="cmms.read_assets",
-            inputs={"part_id": "{trigger.part_id}"},
-            on_error=ErrorPolicy.SKIP,
-        ),
-        Step(
-            "verify_criticality",
-            action="domain.check_asset_criticality",
-            guard=GuardCondition(
-                check=lambda ctx: bool(ctx.get("check_dependencies")),
-                description="Skip if no dependent assets found",
-            ),
-            on_error=ErrorPolicy.SKIP,
         ),
         # LLM decides: standard or expedited procurement?
         Step(
@@ -85,11 +81,13 @@ spare_part_reorder = Workflow(
             prompt=(
                 "Spare part {trigger.part_id} is below reorder point.\n"
                 "Stock: {trigger.current_stock}, reorder: {trigger.reorder_point}\n"
-                "Part: {lookup_part}\n"
-                "Dependent assets: {check_dependencies}\n"
-                "Criticality: {verify_criticality}\n\n"
+                "CMMS record: {lookup_part}\n"
+                "compatible_assets holds only the assets the CMMS records for this "
+                "part; an empty list does not mean no asset uses it. Asset "
+                "criticality has not been checked.\n\n"
                 "Assess urgency. Standard or expedited? Recommend quantity."
             ),
+            guard=part_found,
             on_error=ErrorPolicy.SKIP,
         ),
         # NOTE: Machina ships no ERP connector, and create_purchase_order is
@@ -99,6 +97,7 @@ spare_part_reorder = Workflow(
             "place_order",
             action="erp.create_purchase_order",
             is_write=True,
+            guard=part_found,
             on_error=ErrorPolicy.STOP,
         ),
         Step(
@@ -106,10 +105,11 @@ spare_part_reorder = Workflow(
             action="channels.send_message",
             template=(
                 "Spare Part Reorder\n"
-                "Part: {trigger.part_id} -- {lookup_part.name}\n"
+                "Part: {trigger.part_id}\n"
                 "Stock: {trigger.current_stock}\n"
                 "Assessment: {assess_urgency}"
             ),
+            guard=part_found,
             on_error=ErrorPolicy.NOTIFY,
         ),
     ],
@@ -187,6 +187,16 @@ def build_agent(llm: str = "ollama:llama3", sandbox: bool = True) -> Agent:
     )
 
 
+# The event run_demo() sends. The sample CMMS holds BELT-1200-EP400 at stock 0
+# against a reorder point of 1, so the event agrees with the record.
+DEMO_EVENT = {
+    "part_id": "BELT-1200-EP400",
+    "current_stock": 0,
+    "reorder_point": 1,
+    "condition": "stock_below_reorder_point",
+}
+
+
 async def run_demo(llm: str, sandbox: bool) -> None:
     """Trigger the spare part reorder workflow as a demo."""
     agent = build_agent(llm=llm, sandbox=sandbox)
@@ -213,15 +223,7 @@ async def run_demo(llm: str, sandbox: bool) -> None:
 
     # Trigger spare part reorder
     print(f"  Triggering '{spare_part_reorder.name}'...")
-    result = await agent.trigger_workflow(
-        spare_part_reorder.name,
-        {
-            "part_id": "SKF-6310",
-            "current_stock": 1,
-            "reorder_point": 2,
-            "condition": "stock_below_reorder_point",
-        },
-    )
+    result = await agent.trigger_workflow(spare_part_reorder.name, DEMO_EVENT)
 
     status = "SUCCESS" if result.success else "PARTIAL"
     print(f"\n  Result: {status} ({result.duration_seconds:.2f}s)")
