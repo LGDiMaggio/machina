@@ -159,8 +159,11 @@ since then count. A work-order row whose values do not make a valid work order
   stored as Excel extensions. It also discards the cached results of
   formulas, and the connector reads cell values, not formulas — after a
   write, a formula cell in a mapped column reads as empty until Excel
-  recalculates the file. Keep the work-order sheet in a workbook of its own,
-  with plain values.
+  recalculates the file. `connect()` warns about this
+  (`xlsx_formulas_lose_values_on_write`, naming each sheet and column) when a
+  mapped column of any configured sheet in the written workbook holds a
+  formula. Keep the work-order sheet in a workbook of its own, with plain
+  values.
 - Dates are written as ISO 8601 text (`2026-01-15T10:00:00+00:00`), which
   the connector reads back as dates.
 

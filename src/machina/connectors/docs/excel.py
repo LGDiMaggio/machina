@@ -712,6 +712,7 @@ class ExcelCsvConnector:
             self._validate_and_load_work_orders()
         if self._config.failure_modes:
             self._validate_and_load_failure_modes()
+        self._warn_formulas_lost_on_write()
         self._connected = True
         logger.info(
             "connected",
@@ -720,6 +721,64 @@ class ExcelCsvConnector:
             work_orders_loaded=len(self._wo_cache),
             failure_modes_loaded=len(self._fm_cache),
         )
+
+    def _warn_formulas_lost_on_write(self) -> None:
+        """Log the mapped columns that hold formulas in the ``.xlsx`` file writes save.
+
+        openpyxl does not keep a formula's cached result when it saves, and
+        reads use ``data_only=True``, so after a write those cells read as
+        empty until Excel recalculates and saves the file. Every sheet of the
+        saved workbook is affected, not only the work-order sheet.
+        """
+        wo_schema = self._config.work_orders
+        if wo_schema is None or wo_schema.write_mode is None:
+            return
+        path = Path(wo_schema.path)
+        if path.suffix.lower() != ".xlsx" or not path.exists():
+            return
+        schemas = [
+            s
+            for s in (self._config.asset_registry, wo_schema, self._config.failure_modes)
+            if s is not None and Path(s.path).resolve() == path.resolve()
+        ]
+        openpyxl = _require_openpyxl()
+        try:
+            wb = openpyxl.load_workbook(str(path), read_only=True)
+        except OSError:
+            return
+        columns: dict[str, list[str]] = {}
+        try:
+            for schema in schemas:
+                if schema.sheet not in wb.sheetnames:
+                    continue
+                rows = wb[schema.sheet].iter_rows()
+                header = [
+                    str(c.value).strip() if c.value is not None else "" for c in next(rows, ())
+                ]
+                mapped = {m.column for m in schema.columns}
+                watched = {i: name for i, name in enumerate(header) if name in mapped}
+                found: set[str] = set()
+                for row in rows:
+                    for i, cell in enumerate(row):
+                        if i in watched and getattr(cell, "data_type", None) == "f":
+                            found.add(watched[i])
+                if found:
+                    columns[schema.sheet] = sorted(found)
+        finally:
+            wb.close()
+        if columns:
+            logger.warning(
+                "xlsx_formulas_lose_values_on_write",
+                connector="ExcelCsvConnector",
+                operation="connect",
+                file=path.name,
+                columns=columns,
+                hint=(
+                    "a work-order write saves this workbook through openpyxl, which drops "
+                    "cached formula results: these cells read as empty until Excel "
+                    "recalculates and saves the file"
+                ),
+            )
 
     async def disconnect(self) -> None:
         """Release caches."""

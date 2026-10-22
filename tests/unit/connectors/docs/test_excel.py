@@ -9,6 +9,7 @@ import shutil
 import stat
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1519,6 +1520,96 @@ class TestAtomicReplace:
         await self._update(path)
 
         assert synced, "the temp file was never fsync'ed"
+
+
+class TestFormulaWarning:
+    """openpyxl drops cached formula results when it saves; with data_only
+    reads, such a cell then reads empty. connect() names the cells at risk."""
+
+    _EVENT = "xlsx_formulas_lose_values_on_write"
+
+    @staticmethod
+    def _workbook(path: Path, *, odl_desc: str = "first", asset_name: str = "Pompa A") -> None:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "OdL"
+        ws.append(["ID", "Note", "Codice Asset", "Stato", "Descrizione"])
+        ws.append(["WO-1", "=1+1", "P-201", "created", odl_desc])
+        assets = wb.create_sheet("Asset")
+        assets.append(["Codice", "Nome"])
+        assets.append(["P-201", asset_name])
+        wb.save(str(path))
+        wb.close()
+
+    @staticmethod
+    def _config(odl: Path, registry: Path | None = None, *, writable: bool = True) -> Any:
+        wo = TestWritesPreserveTheFile._config(odl).work_orders
+        assert wo is not None
+        if not writable:
+            wo = wo.model_copy(update={"write_mode": None})
+        reg = SheetSchema(
+            path=str(registry or odl),
+            sheet="Asset",
+            columns=[
+                ColumnMapping(column="Codice", field="id", required=True),
+                ColumnMapping(column="Nome", field="name", required=True),
+            ],
+        )
+        return ExcelConnectorConfig(work_orders=wo, asset_registry=reg)
+
+    async def _warnings(self, config: Any) -> list[dict[str, Any]]:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as events:
+            await ExcelCsvConnector(config=config).connect()
+        return [e for e in events if e["event"] == self._EVENT]
+
+    @pytest.mark.asyncio
+    async def test_formula_in_a_mapped_work_order_column_is_reported(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path, odl_desc='=C2&" leaking"')
+
+        (warning,) = await self._warnings(self._config(path))
+
+        assert warning["log_level"] == "warning"
+        assert warning["file"] == "odl.xlsx"
+        assert warning["columns"] == {"OdL": ["Descrizione"]}
+
+    @pytest.mark.asyncio
+    async def test_formula_in_another_sheet_of_the_written_file_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path, asset_name='="Pompa "&A2')
+
+        (warning,) = await self._warnings(self._config(path))
+
+        assert warning["columns"] == {"Asset": ["Nome"]}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "case",
+        ["unmapped column only", "read-only sheet", "text guarded as formula", "other file"],
+    )
+    async def test_no_warning(self, tmp_path: Path, case: str) -> None:
+        path = tmp_path / "odl.xlsx"
+        registry = None
+        writable = True
+        if case == "read-only sheet":
+            self._workbook(path, odl_desc='=C2&" leaking"')
+            writable = False
+        elif case == "text guarded as formula":
+            self._workbook(path, odl_desc="'=not a formula")
+        elif case == "other file":
+            self._workbook(path)
+            registry = tmp_path / "registry.xlsx"
+            self._workbook(registry, asset_name='="Pompa "&A2')
+        else:
+            self._workbook(path)
+
+        assert await self._warnings(self._config(path, registry, writable=writable)) == []
 
 
 class TestRefresh:
