@@ -494,8 +494,11 @@ class TestUpKeepPrefetchDeadline:
         """A read left running past the deadline would retry the part once its backoff ends.
 
         The part answers 503, so ``request_with_retry`` sleeps its 0.5 s
-        backoff; the 0.2 s budget ends inside that sleep. Waiting past the
-        backoff afterwards shows the retry was never sent.
+        backoff. pytest-httpx answers the requests before it without
+        suspending, so that sleep is the read's first wait, and the 0.2 s
+        deadline cancels the read there, whether it already ran out or runs
+        out during the sleep. Waiting past the backoff afterwards shows the retry was
+        never sent.
         """
         import asyncio
 
