@@ -12,6 +12,7 @@ transport; no real API is called.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 from unittest.mock import MagicMock
@@ -22,6 +23,7 @@ from machina.agent.entity_resolver import ResolvedEntity
 from machina.agent.runtime import Agent
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.connectors.cmms.maximo import MaximoConnector
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset, AssetType
@@ -50,14 +52,83 @@ def _mcp_ctx(cmms: Any) -> Any:
 
 async def _run_spare_parts_step(cmms: Any, asset_id: str) -> Any:
     """Run the alarm workflow's own check_spare_parts step for an alarm on ``asset_id``."""
+    return await _run_spare_parts_step_for(cmms, {"asset_id": asset_id})
+
+
+async def _run_spare_parts_step_for(cmms: Any, alarm: dict[str, Any]) -> Any:
+    """Run the alarm workflow's own check_spare_parts step for the ``alarm`` event."""
     step = next(s for s in alarm_to_workorder.steps if s.name == "check_spare_parts")
     registry = ConnectorRegistry()
     registry.register("cmms", cmms)
     result = await WorkflowEngine(registry=registry).execute(
-        Workflow(name="Spare parts", steps=[step]), {"asset_id": asset_id}
+        Workflow(name="Spare parts", steps=[step]), alarm
     )
     (outcome,) = result.step_results
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# An alarm without a usable asset: no inventory as the asset's parts
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def generic(tmp_path) -> GenericCmmsConnector:
+    """A local Generic CMMS whose inventory holds one part for each of two assets."""
+    (tmp_path / "spare_parts.json").write_text(
+        json.dumps(
+            [
+                {"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["P-201"]},
+                {"sku": "FILTER-GA55", "name": "Air filter", "compatible_assets": ["COMP-301"]},
+            ]
+        )
+    )
+    connector = GenericCmmsConnector(data_dir=tmp_path)
+    await connector.connect()
+    return connector
+
+
+class TestAlarmWithoutAUsableAsset:
+    """The alarm workflow's spare-parts check is scoped to the alarm's asset.
+
+    Without one it fails under its SKIP policy, so the technician's message
+    says the check failed; an unknown asset with no parts is a successful,
+    empty check. Neither lists the inventory.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "alarm",
+        [
+            {},
+            {"asset_id": None},
+            {"asset_id": ""},
+            {"asset_id": "   "},
+            {"asset_id": ["P-201"]},
+            {"asset_id": {"id": "P-201"}},
+            {"asset_id": True},
+        ],
+        ids=["missing", "none", "empty", "blank", "list", "dict", "bool"],
+    )
+    async def test_the_check_fails_without_reading_the_inventory(
+        self, generic: GenericCmmsConnector, alarm: dict[str, Any]
+    ) -> None:
+        outcome = await _run_spare_parts_step_for(generic, {"alarm_id": "AL-1", **alarm})
+        assert (outcome.skipped, outcome.output) == (True, None)
+        assert outcome.error is not None
+
+    @pytest.mark.asyncio
+    async def test_the_alarm_assets_parts(self, generic: GenericCmmsConnector) -> None:
+        outcome = await _run_spare_parts_step_for(generic, {"asset_id": "P-201"})
+        assert outcome.skipped is False
+        assert [part.sku for part in outcome.output] == ["SKF-6310"]
+
+    @pytest.mark.asyncio
+    async def test_an_asset_with_no_parts_is_a_successful_empty_check(
+        self, generic: GenericCmmsConnector
+    ) -> None:
+        outcome = await _run_spare_parts_step_for(generic, {"asset_id": "P-999"})
+        assert (outcome.skipped, outcome.output, outcome.error) == (False, [], None)
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +322,97 @@ class TestUpKeepAppliesTheAssetFilter:
         outcome = await _run_spare_parts_step(upkeep, UPKEEP_ASSET_ID)
         assert outcome.skipped is False
         assert [part.sku for part in outcome.output] == _LISTED
+
+
+def _mock_upkeep_asset_with_unmappable_part(httpx_mock) -> None:
+    """The second listed part carries a quantity the mapping cannot read."""
+    httpx_mock.add_response(
+        url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
+        json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _LISTED}},
+    )
+    httpx_mock.add_response(
+        url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
+        json={"success": True, "result": {"id": _LISTED[0], "name": "Flux", "quantity": "5"}},
+    )
+    httpx_mock.add_response(
+        url=f"{UPKEEP}/api/v2/parts/{_LISTED[1]}",
+        json={"success": True, "result": {"id": _LISTED[1], "quantity": "N/A-SECRET"}},
+    )
+
+
+_UNMAPPABLE_PART = (
+    "UpKeep returned a malformed record for a part the asset lists: "
+    "its spare parts cannot be read in full, so none are returned"
+)
+
+
+class TestUpKeepRefusesAPartialRead:
+    """Callers get a value-free refusal, never the parts read before the failure."""
+
+    @pytest.mark.asyncio
+    async def test_an_unmappable_part_reaches_the_agent_as_a_value_free_error(
+        self, httpx_mock, upkeep: UpKeepConnector
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        _mock_upkeep_asset_with_unmappable_part(httpx_mock)
+        agent = _agent(upkeep, UPKEEP_PUMP)
+
+        with capture_logs() as logs:
+            result = await agent._execute_tool("check_spare_parts", {"asset_id": UPKEEP_ASSET_ID})
+
+        assert result == {"error": _UNMAPPABLE_PART}
+        assert "SECRET" not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_an_unmappable_part_reaches_an_mcp_client_as_a_value_free_error(
+        self, httpx_mock, upkeep: UpKeepConnector
+    ) -> None:
+        """FastMCP reports the raised error's message as the MCP error result."""
+        from machina.exceptions import ConnectorSchemaError
+
+        _mock_upkeep_asset_with_unmappable_part(httpx_mock)
+        with pytest.raises(ConnectorSchemaError) as exc_info:
+            await machina_list_spare_parts(_mcp_ctx(upkeep), asset_id=UPKEEP_ASSET_ID)
+        assert str(exc_info.value) == _UNMAPPABLE_PART
+
+    @pytest.mark.asyncio
+    async def test_a_transport_failure_makes_the_prefetch_say_not_checked(
+        self, httpx_mock, monkeypatch, upkeep: UpKeepConnector
+    ) -> None:
+        """Parts read before the failure are not shown as the asset's list."""
+        import httpx
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+        httpx_mock.add_response(
+            url=re.compile(rf"{re.escape(UPKEEP)}/api/v2/work-orders\?"), json={"results": []}
+        )  # the work orders are read alongside the spare parts
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
+            json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _LISTED}},
+        )
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
+            json={"success": True, "result": {"id": _LISTED[0], "name": "Flux", "quantity": "5"}},
+        )
+        for _ in range(4):  # the request and its three retries
+            httpx_mock.add_exception(
+                httpx.ConnectError("connection lost"), url=f"{UPKEEP}/api/v2/parts/{_LISTED[1]}"
+            )
+        agent = _agent(upkeep, UPKEEP_PUMP)
+        pump = ResolvedEntity(asset=UPKEEP_PUMP, confidence=1.0, match_reason="exact_id")
+
+        context = await agent._gather_context(UPKEEP_ASSET_ID, [pump])
+
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "failed"
+        messages = agent._build_messages(UPKEEP_ASSET_ID, "chat1", context)
+        retrieved = next(m["content"] for m in messages if "Retrieved Context" in m["content"])
+        assert (
+            "**Spare Parts:** not checked: the spare-parts lookup for this asset failed."
+            in retrieved.splitlines()
+        )
+        assert "Flux" not in retrieved
