@@ -582,11 +582,9 @@ class WorkflowEngine:
         """
         step_names = set(workflow.step_names)
         for step in workflow.steps:
-            # A bare string (("asset_id") without its comma) would be read
-            # one character at a time.
-            if isinstance(step.required_inputs, str) or any(
-                name not in step.inputs for name in step.required_inputs
-            ):
+            # A bare string (("asset_id") without its comma) is read one
+            # character at a time, so it fails this check too.
+            if any(name not in step.inputs for name in step.required_inputs):
                 raise WorkflowError(
                     f"Step '{step.name}' in workflow '{workflow.name}': required_inputs "
                     f"must be a tuple of its input names, {sorted(step.inputs)}"
