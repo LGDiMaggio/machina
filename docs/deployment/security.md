@@ -304,7 +304,8 @@ default.
 - Exception messages are logged verbatim, and the traceback shows each frame's
   source line.
 - After `configure_logging()`, the `httpx` and `httpcore` loggers are at
-  WARNING, so their per-request lines are not logged. Those lines carry each
+  WARNING or a stricter level you set, so their per-request lines are not
+  logged. Those lines carry each
   request's full URL: the CMMS host and the record IDs and filter values of
   the read (UpKeep part IDs, SKUs in SAP PM's `$filter` and Maximo's
   `oslc.where`). An application that lowers the two loggers again gets those

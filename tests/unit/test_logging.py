@@ -429,5 +429,13 @@ async def test_http_client_request_lines_stay_out_of_the_log() -> None:
 
     assert "SECRET" not in stream.getvalue()
     assert "cmms.internal" not in stream.getvalue()
-    # Its warnings still reach the log.
+    # Its warnings still reach the log; httpcore's per-request DEBUG lines do not.
     assert logging.getLogger("httpx").isEnabledFor(logging.WARNING)
+    assert logging.getLogger("httpcore.http11").getEffectiveLevel() == logging.WARNING
+
+
+def test_a_stricter_http_client_level_the_host_set_is_kept() -> None:
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    _configure()
+    assert logging.getLogger("httpx").level == logging.ERROR
+    assert logging.getLogger("httpcore").level == logging.WARNING

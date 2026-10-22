@@ -1844,6 +1844,8 @@ class TestGuardExceptionLogging:
     ) -> None:
         root = logging.getLogger()
         handlers, level = root.handlers[:], root.level
+        # configure_logging() also raises the HTTP-client loggers: restore them.
+        library_levels = {name: logging.getLogger(name).level for name in ("httpx", "httpcore")}
         configure_logging(json_output=True)
         stream = io.StringIO()
         root.handlers[0].setStream(stream)  # type: ignore[attr-defined]
@@ -1856,6 +1858,8 @@ class TestGuardExceptionLogging:
             structlog.reset_defaults()
             root.handlers[:] = handlers
             root.setLevel(level)
+            for name, library_level in library_levels.items():
+                logging.getLogger(name).setLevel(library_level)
 
         [event] = [
             line

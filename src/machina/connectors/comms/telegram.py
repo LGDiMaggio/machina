@@ -42,8 +42,9 @@ class _RedactToken(logging.Filter):
 
     The Bot API puts the token in every request URL
     (``https://api.telegram.org/bot<token>/getUpdates``). httpx logs each
-    request URL at INFO, so under ``configure_logging()`` every poll would
-    write the token to the log.
+    request URL at INFO, so wherever that logger is let through at INFO
+    (``configure_logging()`` keeps it at WARNING, but an application can
+    lower it) every poll would write the token to the log.
     """
 
     def __init__(self, token: str) -> None:
