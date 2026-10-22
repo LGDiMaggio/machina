@@ -186,8 +186,13 @@ Files: `assets.json`, `work_orders.json`, `spare_parts.json`,
 `maintenance_plans.json` and, optionally, `failure_modes.json`. Created and
 updated work orders are written back to `work_orders.json` atomically (unless
 a `yaml_mapping` is set, in which case the external file format is left
-untouched and changes stay in memory). Creating a work order whose ID already
-exists returns the existing record.
+untouched and changes stay in memory). Each create or update re-reads
+`work_orders.json` first, so work orders another process added, edited or
+removed in the file are kept as they are on disk; if the file cannot be read,
+the write is refused with `ConnectorError` instead of replacing it. Creating a
+work order whose ID already exists, in memory or in the file, returns the
+existing record. Reads serve the copy loaded at `connect()` or by the last
+write.
 
 Writes run one at a time. Cancelling a create or update (an MCP request
 cancellation, a workflow step timeout) does not stop it once it has started: it

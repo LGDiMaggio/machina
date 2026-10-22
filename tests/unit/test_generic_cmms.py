@@ -248,6 +248,129 @@ class TestGenericCmmsConnectorLocal:
         assert reloaded.status == WorkOrderStatus.ASSIGNED
 
     @pytest.mark.asyncio
+    async def test_create_keeps_work_order_added_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """A write re-reads work_orders.json, so a record another process
+        added while the connector ran is not overwritten."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        await other.create_work_order(
+            WorkOrder(
+                id="WO-EXT", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="y"
+            )
+        )
+
+        disk = json.loads((sample_data_dir / "work_orders.json").read_text())
+        assert [w["id"] for w in disk] == ["WO-001", "WO-002", "WO-EXT", "WO-NEW"]
+        assert {w.id for w in await conn.read_work_orders()} >= {"WO-EXT", "WO-NEW"}
+
+    @pytest.mark.asyncio
+    async def test_update_keeps_edit_made_by_another_process(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        disk = json.loads(wof.read_text())
+        disk[1]["description"] = "Filter replacement (edited by hand)"
+        wof.write_text(json.dumps(disk))
+
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        after = {w["id"]: w for w in json.loads(wof.read_text())}
+        assert after["WO-002"]["description"] == "Filter replacement (edited by hand)"
+        assert after["WO-001"]["status"] == "assigned"
+
+    @pytest.mark.asyncio
+    async def test_update_finds_work_order_created_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        await other.create_work_order(
+            WorkOrder(
+                id="WO-EXT", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        updated = await conn.update_work_order("WO-EXT", assigned_to="Mario")
+
+        assert updated.assigned_to == "Mario"
+        disk = {w["id"]: w for w in json.loads((sample_data_dir / "work_orders.json").read_text())}
+        assert disk["WO-EXT"]["assigned_to"] == "Mario"
+
+    @pytest.mark.asyncio
+    async def test_create_is_idempotent_against_work_order_created_elsewhere(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        first = await other.create_work_order(
+            WorkOrder(
+                id="WO-DUP", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="first"
+            )
+        )
+        await other.update_work_order("WO-DUP", assigned_to="Mario")
+
+        result = await conn.create_work_order(
+            WorkOrder(
+                id="WO-DUP", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="retry"
+            )
+        )
+
+        assert result.description == "first"
+        assert result.assigned_to == "Mario"
+        assert result.created_at == first.created_at
+        disk = json.loads((sample_data_dir / "work_orders.json").read_text())
+        dup = [w for w in disk if w["id"] == "WO-DUP"]
+        assert len(dup) == 1
+        assert (dup[0]["description"], dup[0]["assigned_to"]) == ("first", "Mario")
+
+    @pytest.mark.asyncio
+    async def test_write_respects_work_order_removed_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """The file is the source of truth: a record removed from it is not
+        written back from the connector's memory."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text(json.dumps([w for w in json.loads(wof.read_text()) if w["id"] != "WO-002"]))
+
+        await conn.update_work_order("WO-001", assigned_to="Mario")
+
+        assert [w["id"] for w in json.loads(wof.read_text())] == ["WO-001"]
+        assert await conn.get_work_order("WO-002") is None
+
+    @pytest.mark.asyncio
+    async def test_write_refuses_to_overwrite_unreadable_file(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text("[{not json", encoding="utf-8")
+
+        with pytest.raises(ConnectorError, match=r"work_orders\.json"):
+            await conn.create_work_order(
+                WorkOrder(
+                    id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+                )
+            )
+
+        assert wof.read_text(encoding="utf-8") == "[{not json"
+        assert await conn.get_work_order("WO-NEW") is None
+
+    @pytest.mark.asyncio
     async def test_local_persist_skipped_with_mapping(self, tmp_path: Path) -> None:
         """A configured inbound mapping disables write-back to avoid corrupting
         the on-disk (external-format) file."""
