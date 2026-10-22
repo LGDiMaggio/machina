@@ -4,11 +4,19 @@
 #   docker compose run --rm machina --live    # writes data/workorders.xlsx
 #
 # ./data is mounted so the registry you edit and the work orders the agent
-# writes live on the host.
+# writes live on the host. On Linux the container user must own it: the image
+# is built with MACHINA_UID / MACHINA_GID (default 1000). If `id -u` is not
+# 1000, set both in .env, or rebuild with
+#
+#   MACHINA_UID=$(id -u) MACHINA_GID=$(id -g) docker compose build
 
 services:
   machina:
-    build: .
+    build:
+      context: .
+      args:
+        MACHINA_UID: ${MACHINA_UID:-1000}
+        MACHINA_GID: ${MACHINA_GID:-1000}
     env_file: .env
     stdin_open: true
     tty: true

@@ -130,6 +130,14 @@ The agent is interactive, so use `docker compose run` (not `up`). `./data` is
 mounted, so the registry you edit and the work orders written live on the
 host.
 
+On Linux the mounted `./data` keeps your user's ownership, so the image's
+`machina` user is created with your UID/GID to be able to write
+`data/workorders.xlsx` in live mode. The default is `1000:1000`, the first
+regular user on most distributions. If `id -u` prints something else, add
+`MACHINA_UID` and `MACHINA_GID` to `.env` (or rebuild with
+`MACHINA_UID=$(id -u) MACHINA_GID=$(id -g) docker compose build`). Docker
+Desktop on macOS and Windows needs no change.
+
 ## File Structure
 
 ```
