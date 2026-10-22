@@ -1101,6 +1101,33 @@ class TestRequiredInputs:
         assert result.step_results[0].output == [{"sku": "SKF-6310"}]
         assert cmms.asset_ids == [asset_id]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "required",
+        [("asset",), "asset_id"],
+        ids=["not-an-input", "bare-string"],
+    )
+    async def test_a_required_name_that_is_not_an_input_is_refused_up_front(
+        self, tracer: ActionTracer, required: Any
+    ) -> None:
+        """A typo would otherwise fail the step on every run, under its policy."""
+        from machina.exceptions import WorkflowError
+
+        cmms = _RecordingSparePartsConnector()
+        registry = ConnectorRegistry()
+        registry.register("cmms", cmms)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+        step = Step(
+            "check_spare_parts",
+            action="cmms.read_spare_parts",
+            inputs={"asset_id": "{trigger.asset_id}"},
+            required_inputs=required,
+        )
+
+        with pytest.raises(WorkflowError, match="required_inputs must be a tuple of its input"):
+            await engine.execute(Workflow(name="Typo", steps=[step]), {"asset_id": "P-201"})
+        assert cmms.asset_ids == []
+
 
 # ---------------------------------------------------------------------------
 # Tests — timeout cancellation safety (U10)

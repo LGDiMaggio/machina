@@ -82,6 +82,8 @@ predictive_maintenance = Workflow(
             action="cmms.read_spare_parts",
             description="Verify spare parts for the diagnosed failure",
             inputs={"asset_id": "{trigger.asset_id}"},
+            # Without the alarm's asset the read has no asset filter.
+            required_inputs=("asset_id",),
         ),
         Step(
             "check_history",

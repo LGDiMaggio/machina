@@ -157,7 +157,11 @@ class Step:
             step under ``on_error``. Use it for an input whose absence would
             change what the action means: ``read_spare_parts`` reads an
             empty ``asset_id`` as no filter, so an asset-scoped step without
-            it would return the whole inventory.
+            it would return the whole inventory. Give such an input a bare
+            placeholder (``"{trigger.asset_id}"``): a template with text
+            around its placeholder keeps that text when the placeholder does
+            not resolve, so it counts as present. Each name must be a key of
+            ``inputs``.
 
     Example:
         ```python

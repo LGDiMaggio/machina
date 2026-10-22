@@ -573,13 +573,24 @@ class WorkflowEngine:
         """Validate workflow step references before execution.
 
         Checks that every ``depends_on`` entry references an existing
-        step name within the workflow.
+        step name within the workflow, and that every ``required_inputs``
+        name is one of the step's ``inputs``.
 
         Raises:
-            WorkflowError: If any dependency reference is invalid.
+            WorkflowError: If any dependency or required-input reference is
+                invalid.
         """
         step_names = set(workflow.step_names)
         for step in workflow.steps:
+            # A bare string (("asset_id") without its comma) would be read
+            # one character at a time.
+            if isinstance(step.required_inputs, str) or any(
+                name not in step.inputs for name in step.required_inputs
+            ):
+                raise WorkflowError(
+                    f"Step '{step.name}' in workflow '{workflow.name}': required_inputs "
+                    f"must be a tuple of its input names, {sorted(step.inputs)}"
+                )
             for dep in step.depends_on:
                 if dep not in step_names:
                     raise WorkflowError(
