@@ -416,3 +416,109 @@ class TestUpKeepRefusesAPartialRead:
             in retrieved.splitlines()
         )
         assert "Flux" not in retrieved
+
+
+_PREFETCH_BUDGET = "machina.agent.runtime._SPARE_PARTS_PREFETCH_BUDGET"
+_THREE_LISTED = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+
+
+def _upkeep_requests(httpx_mock) -> list[str]:
+    """The asset and part paths sent, in order (the connect and work-order reads left out)."""
+    return [
+        r.url.path
+        for r in httpx_mock.get_requests()
+        if r.url.path.startswith(("/api/v2/assets/", "/api/v2/parts/"))
+    ]
+
+
+class TestUpKeepPrefetchDeadline:
+    """The agent's per-turn prefetch gives UpKeep's 1 + k read a budget; explicit reads keep none."""
+
+    @pytest.mark.asyncio
+    async def test_a_read_past_the_budget_is_cancelled_with_its_pending_request(
+        self, httpx_mock, monkeypatch, upkeep: UpKeepConnector
+    ) -> None:
+        """The second part never answers: the read stops there, and nothing runs on."""
+        import asyncio
+
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0.5)
+        httpx_mock.add_response(
+            url=re.compile(rf"{re.escape(UPKEEP)}/api/v2/work-orders\?"), json={"results": []}
+        )  # the work orders are read alongside the spare parts
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
+            json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _THREE_LISTED}},
+        )
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/parts/{_THREE_LISTED[0]}",
+            json={"success": True, "result": {"id": _THREE_LISTED[0], "name": "Flux"}},
+        )
+        pending: list[str] = []
+
+        async def _never_answers(request: Any) -> Any:
+            pending.append("sent")
+            try:
+                # The 10 s net makes a missing deadline fail the test, not hang it.
+                await asyncio.wait_for(asyncio.Event().wait(), timeout=10)
+            except asyncio.CancelledError:
+                pending.append("cancelled")
+                raise
+
+        httpx_mock.add_callback(_never_answers, url=f"{UPKEEP}/api/v2/parts/{_THREE_LISTED[1]}")
+        agent = _agent(upkeep, UPKEEP_PUMP)
+        pump = ResolvedEntity(asset=UPKEEP_PUMP, confidence=1.0, match_reason="exact_id")
+
+        context = await agent._gather_context(UPKEEP_ASSET_ID, [pump])
+
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "timed_out"
+        assert pending == ["sent", "cancelled"]
+        sent = [f"/api/v2/assets/{UPKEEP_ASSET_ID}"] + [
+            f"/api/v2/parts/{part_id}" for part_id in _THREE_LISTED[:2]
+        ]
+        assert _upkeep_requests(httpx_mock) == sent
+        await asyncio.sleep(0.05)  # a read left running would send the third part's request
+        assert _upkeep_requests(httpx_mock) == sent
+        messages = agent._build_messages(UPKEEP_ASSET_ID, "chat1", context)
+        retrieved = next(m["content"] for m in messages if "Retrieved Context" in m["content"])
+        assert (
+            "**Spare Parts:** not checked: the spare-parts lookup for this asset did not finish "
+            "in the time this turn allows it. The check_spare_parts tool runs the full lookup."
+            in retrieved.splitlines()
+        )
+        assert "Flux" not in retrieved
+        assert "returned none" not in retrieved
+
+    @pytest.mark.asyncio
+    async def test_the_tool_and_mcp_reads_have_no_prefetch_deadline(
+        self, httpx_mock, monkeypatch, upkeep: UpKeepConnector
+    ) -> None:
+        """Each part answers only after a yield, which a 0 s deadline would not survive."""
+        import asyncio
+
+        import httpx
+
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        httpx_mock.add_response(
+            url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
+            json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _LISTED}},
+            is_reusable=True,
+        )
+
+        async def _part_after_a_yield(request: Any) -> Any:
+            await asyncio.sleep(0)
+            part_id = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"success": True, "result": {"id": part_id}})
+
+        httpx_mock.add_callback(
+            _part_after_a_yield,
+            url=re.compile(rf"{re.escape(UPKEEP)}/api/v2/parts/\w+$"),
+            is_reusable=True,
+        )
+        agent = _agent(upkeep, UPKEEP_PUMP)
+
+        tool_result = await agent._execute_tool("check_spare_parts", {"asset_id": UPKEEP_ASSET_ID})
+        mcp_result = await machina_list_spare_parts(_mcp_ctx(upkeep), asset_id=UPKEEP_ASSET_ID)
+
+        assert [part["sku"] for part in tool_result] == _LISTED
+        assert [part["sku"] for part in mcp_result] == _LISTED

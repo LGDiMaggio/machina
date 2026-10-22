@@ -297,6 +297,19 @@ _MAX_FAILED_READ_RETRIES = 1
 # instead of every record, so a large plant cannot flood the prompt/answer (R1.2).
 _ENUM_SUMMARY_THRESHOLD = 50
 
+# How long the per-turn context prefetch waits for an asset's spare parts from a
+# connector whose asset-scoped read sends one request per part
+# (``spare_parts_by_asset_fans_out``; UpKeep: 1 + k requests). The read is then
+# cancelled and the prompt says the parts were not checked. A prefetch policy,
+# not a completeness guarantee: the check_spare_parts tool and read_spare_parts
+# itself have no such deadline.
+_SPARE_PARTS_PREFETCH_BUDGET = 5.0
+
+
+class _SparePartsPrefetchTimeoutError(Exception):
+    """The spare-parts prefetch outlasted its budget and was cancelled."""
+
+
 # Prefix of the grounding note appended to a stored assistant reply. Single
 # source of truth shared by _HISTORY_SOURCES_TEMPLATE (which writes the note)
 # and _strip_history_note (which removes it before echo comparison) so the two
@@ -1638,7 +1651,19 @@ class Agent:
                     asset_id=asset.id,
                     operation="read_spare_parts",
                 ):
-                    return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
+                    if not getattr(_conn, "spare_parts_by_asset_fans_out", False):
+                        return await _conn.read_spare_parts(asset_id=asset.id)  # type: ignore[no-any-return]
+                    # At the deadline the read is cancelled where it waits, so
+                    # its pending request and HTTP client end with it.
+                    deadline = asyncio.timeout(_SPARE_PARTS_PREFETCH_BUDGET)
+                    try:
+                        async with deadline:
+                            parts: list[Any] = await _conn.read_spare_parts(asset_id=asset.id)
+                    except TimeoutError:
+                        if not deadline.expired():
+                            raise  # the read's own timeout, not this deadline
+                        raise _SparePartsPrefetchTimeoutError from None
+                    return parts
 
             tasks.append(_get_parts())
             task_names.append("spare_parts")
@@ -1694,6 +1719,18 @@ class Agent:
                         reason="unsupported_filter",
                     )
                     context["spare_parts_unchecked"] = "unsupported"
+                elif name == "spare_parts" and isinstance(result, _SparePartsPrefetchTimeoutError):
+                    # Degraded, not refused: availability is unknown, not empty.
+                    logger.warning(
+                        "context_gather_timed_out",
+                        agent=self.name,
+                        connector=sp_connectors[0][0],
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        budget_seconds=_SPARE_PARTS_PREFETCH_BUDGET,
+                    )
+                    context["spare_parts_unchecked"] = "timed_out"
                 elif isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",

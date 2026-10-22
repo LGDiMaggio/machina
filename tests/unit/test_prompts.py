@@ -475,6 +475,12 @@ class TestBuildContextMessage:
                 "failed",
                 "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
             ),
+            (
+                "timed_out",
+                "**Spare Parts:** not checked: the spare-parts lookup for this asset did not "
+                "finish in the time this turn allows it. The check_spare_parts tool runs the "
+                "full lookup.",
+            ),
         ],
     )
     def test_unchecked_spare_parts_render_one_line(self, unchecked: str, line: str) -> None:

@@ -267,7 +267,7 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     return "\n".join(lines)
 
 
-SparePartsUnchecked = Literal["unsupported", "failed"]
+SparePartsUnchecked = Literal["unsupported", "failed", "timed_out"]
 
 _SPARE_PARTS_UNCHECKED: dict[SparePartsUnchecked, str] = {
     "unsupported": (
@@ -275,6 +275,10 @@ _SPARE_PARTS_UNCHECKED: dict[SparePartsUnchecked, str] = {
         "asset. A specific part can be checked by its SKU with the check_spare_parts tool."
     ),
     "failed": "**Spare Parts:** not checked: the spare-parts lookup for this asset failed.",
+    "timed_out": (
+        "**Spare Parts:** not checked: the spare-parts lookup for this asset did not finish "
+        "in the time this turn allows it. The check_spare_parts tool runs the full lookup."
+    ),
 }
 
 
@@ -1110,10 +1114,11 @@ def build_context_message(
             lookup found none.
         spare_parts_unchecked: Why the spare-parts prefetch has no result:
             ``"unsupported"`` (the connector cannot filter spare parts by
-            asset) or ``"failed"`` (the lookup raised). Rendered as one "not
-            checked" line, only when ``spare_parts`` is ``None``, so the model
-            never reads an unchecked lookup as "no spare parts"; any other
-            reason renders as ``"failed"``.
+            asset), ``"failed"`` (the lookup raised) or ``"timed_out"`` (the
+            lookup outlasted the prefetch's budget and was cancelled).
+            Rendered as one "not checked" line, only when ``spare_parts`` is
+            ``None``, so the model never reads an unchecked lookup as "no spare
+            parts"; any other reason renders as ``"failed"``.
         document_results: RAG retrieval results.
 
     Returns:

@@ -491,6 +491,66 @@ class _NoPartsForAssetConnector:
         return []
 
 
+class _SlowSparePartsConnector(_FakeSparePartsConnector):
+    """Spare-parts provider that yields to the event loop before it answers.
+
+    With the prefetch budget at 0, a deadline would cancel it at its first
+    yield, so a test can tell "no deadline" from "deadline met".
+    """
+
+    async def read_spare_parts(self, **kwargs: Any) -> list[SparePart]:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return await super().read_spare_parts(**kwargs)
+
+
+class _SlowFanOutSparePartsConnector(_SlowSparePartsConnector):
+    """The same provider, declaring an asset-scoped read of one request per part."""
+
+    spare_parts_by_asset_fans_out: ClassVar[bool] = True
+
+
+class _HangingFanOutSparePartsConnector:
+    """Fan-out spare-parts provider whose read never finishes on its own.
+
+    Records whether the read started and whether it was cancelled where it
+    waited, the way a pending HTTP request is.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+    spare_parts_by_asset_fans_out: ClassVar[bool] = True
+
+    def __init__(self) -> None:
+        self.started = False
+        self.cancelled = False
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        self.started = True
+        try:
+            # The 10 s net makes a missing deadline fail the test, not hang it.
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=10)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("the wait cannot end on its own")
+
+
+class _OwnTimeoutFanOutSparePartsConnector(_HangingFanOutSparePartsConnector):
+    """Fan-out provider whose read raises its own TimeoutError at once."""
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        raise TimeoutError("the backend timed out")
+
+
 class _FakeChannel:
     """Channel stub that delivers one message to the handler and exits.
 
@@ -3323,6 +3383,107 @@ class TestGatherContext:
         context = await agent._gather_context("P-201", resolved)
         # work_orders should NOT be in context since the connector errored
         assert "work_orders" not in context
+
+
+_PREFETCH_BUDGET = "machina.agent.runtime._SPARE_PARTS_PREFETCH_BUDGET"
+_TIMED_OUT_LINE = (
+    "**Spare Parts:** not checked: the spare-parts lookup for this asset did not finish "
+    "in the time this turn allows it. The check_spare_parts tool runs the full lookup."
+)
+
+
+class TestSparePartsPrefetchDeadline:
+    """The per-turn prefetch bounds a fan-out spare-parts read; nothing else.
+
+    A budget of 0 expires at the read's first yield to the event loop, so
+    these tests need no wall-clock timing.
+    """
+
+    @staticmethod
+    async def _gather(*connectors: Any) -> tuple[Agent, dict[str, Any]]:
+        agent = Agent(plant=_make_plant(), connectors=list(connectors))
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        return agent, await agent._gather_context("spare parts for P-201", resolved)
+
+    @pytest.mark.asyncio
+    async def test_a_read_past_the_budget_is_cancelled_and_not_checked(self, monkeypatch) -> None:
+        from structlog.testing import capture_logs
+
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        parts_conn = _HangingFanOutSparePartsConnector()
+
+        with capture_logs() as logs:
+            agent, context = await self._gather(_FakeConnector(), parts_conn)
+
+        assert "spare_parts" not in context
+        assert context["spare_parts_unchecked"] == "timed_out"
+        assert parts_conn.started is True
+        assert parts_conn.cancelled is True  # stopped where it waited, not left running
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if getattr(task.get_coro(), "__qualname__", "").endswith("_get_parts")
+        ]
+        assert "work_orders" in context  # the other sources are still gathered
+        [timed_out] = [e for e in logs if e["event"] == "context_gather_timed_out"]
+        assert timed_out["log_level"] == "warning"
+        assert timed_out["agent"] == agent.name
+        assert timed_out["source"] == "spare_parts"
+        assert timed_out["asset_id"] == "P-201"
+        assert timed_out["operation"] == "gather_context"
+        assert timed_out["budget_seconds"] == 0
+        from machina.connectors.capabilities import Capability
+
+        ((parts_connector_name, _),) = agent._registry.find_by_capability(
+            Capability.READ_SPARE_PARTS
+        )[:1]
+        assert timed_out["connector"] == parts_connector_name
+        assert not [e for e in logs if e["event"] == "context_gather_error"]
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_says_a_timed_out_lookup_was_not_checked(self, monkeypatch) -> None:
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        agent, context = await self._gather(_HangingFanOutSparePartsConnector())
+
+        messages = agent._build_messages("spare parts for P-201", "chat1", context)
+
+        [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
+        assert _TIMED_OUT_LINE in retrieved.splitlines()
+        assert "returned none" not in retrieved
+
+    @pytest.mark.asyncio
+    async def test_a_read_within_the_budget_is_prefetched(self) -> None:
+        _, context = await self._gather(_SlowFanOutSparePartsConnector())
+        assert [part.sku for part in context["spare_parts"]] == ["SKF-6310"]
+        assert "spare_parts_unchecked" not in context
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_does_not_fan_out_has_no_deadline(self, monkeypatch) -> None:
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        _, context = await self._gather(_SlowSparePartsConnector())
+        assert [part.sku for part in context["spare_parts"]] == ["SKF-6310"]
+        assert "spare_parts_unchecked" not in context
+
+    @pytest.mark.asyncio
+    async def test_the_reads_own_timeout_is_a_failure_not_the_deadline(self) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            _, context = await self._gather(_OwnTimeoutFanOutSparePartsConnector())
+
+        assert context["spare_parts_unchecked"] == "failed"
+        assert [e["event"] for e in logs if e.get("source") == "spare_parts"] == [
+            "context_gather_error"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_check_spare_parts_tool_has_no_deadline(self, monkeypatch) -> None:
+        monkeypatch.setattr(_PREFETCH_BUDGET, 0)
+        agent = Agent(plant=_make_plant(), connectors=[_SlowFanOutSparePartsConnector()])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
+        assert [part["sku"] for part in result] == ["SKF-6310"]
 
 
 class TestBuildMessages:

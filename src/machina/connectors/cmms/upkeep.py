@@ -137,6 +137,10 @@ class UpKeepConnector:
         }
     )
 
+    # read_spare_parts(asset_id=...) sends one request per part the asset
+    # lists (1 + k), so the agent's per-turn prefetch gives it a deadline.
+    spare_parts_by_asset_fans_out: ClassVar[bool] = True
+
     _DEFAULT_URL: ClassVar[str] = "https://api.onupkeep.com"
     _PAGE_SIZE: ClassVar[int] = 100
 
