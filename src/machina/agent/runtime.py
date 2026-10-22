@@ -1687,6 +1687,7 @@ class Agent:
                     logger.info(
                         "context_gather_skipped",
                         agent=self.name,
+                        connector=sp_connectors[0][0],
                         source=name,
                         asset_id=asset.id,
                         operation="gather_context",

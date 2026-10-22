@@ -3228,6 +3228,13 @@ class TestGatherContext:
         [skipped] = [e for e in logs if e["event"] == "context_gather_skipped"]
         assert skipped["log_level"] == "info"
         assert skipped["agent"] == agent.name
+        from machina.connectors.capabilities import Capability
+
+        # The connector the prefetch asked: the first spare-parts provider.
+        ((parts_connector_name, _),) = agent._registry.find_by_capability(
+            Capability.READ_SPARE_PARTS
+        )[:1]
+        assert skipped["connector"] == parts_connector_name
         assert skipped["source"] == "spare_parts"
         assert skipped["asset_id"] == "P-201"
         assert skipped["operation"] == "gather_context"
