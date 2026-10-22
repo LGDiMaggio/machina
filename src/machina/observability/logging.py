@@ -66,10 +66,11 @@ def configure_logging(
     handler an application adds later formats third-party records itself,
     so it needs its own ``format_exc_info`` to keep their locals out.
 
-    The ``httpx`` and ``httpcore`` loggers are set to at least WARNING: below
-    it they log each HTTP request with its full URL, and a CMMS request URL
-    carries the CMMS host and the record IDs and filter values of the read.
-    A stricter level already set on them is kept. An application that wants
+    The ``httpx`` and ``httpcore`` loggers are set to at least WARNING. Below
+    it, httpx logs each HTTP request with its full URL (a CMMS request URL
+    carries the CMMS host and the record IDs and filter values of the read),
+    and httpcore logs the host and port and each response's headers. A
+    stricter level already set on them is kept. An application that wants
     those lines can lower the two loggers after this call.
 
     Args:
@@ -135,9 +136,9 @@ def configure_logging(
     root.addHandler(handler)
     root.setLevel(level.upper())
 
-    # httpx logs every request at INFO (httpcore at DEBUG) with its full URL:
-    # the CMMS host and the record IDs and filter values in the path and query.
-    # A stricter level the host already set is kept.
+    # httpx logs every request at INFO with its full URL: the CMMS host and the
+    # record IDs and filter values in the path and query. httpcore logs at DEBUG
+    # the host and the response headers. A stricter level already set is kept.
     for library in ("httpx", "httpcore"):
         library_logger = logging.getLogger(library)
         library_logger.setLevel(max(library_logger.level, logging.WARNING))
