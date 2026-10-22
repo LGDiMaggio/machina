@@ -54,6 +54,7 @@ _LISTED_PART_LOG_URL = "/api/v2/parts/<listed part>"
 # ValueError; ArithmeticError covers int() of an infinite number.
 _UNMAPPABLE = (ValueError, TypeError, AttributeError, ArithmeticError)
 
+_MALFORMED_PART = "UpKeep returned a malformed part record: cannot read its spare parts"
 _MALFORMED_LISTED_PART = (
     "UpKeep returned a malformed record for a part the asset lists: "
     "its spare parts cannot be read in full, so none are returned"
@@ -89,6 +90,16 @@ def _log_spare_parts_refused(reason: str, **context: Any) -> None:
         reason=reason,
         **context,
     )
+
+
+def _map_spare_part(record: Any, message: str, **log_context: Any) -> SparePart:
+    """Map an UpKeep part record, refusing the read when a field cannot be mapped."""
+    try:
+        return upkeep_mapper.parse_spare_part(record)
+    except _UNMAPPABLE as exc:
+        _log_spare_parts_refused("malformed_part", error_type=type(exc).__name__, **log_context)
+        # from None: the mapping error's message quotes the vendor value.
+        raise ConnectorSchemaError(message) from None
 
 
 class UpKeepConnector:
@@ -419,18 +430,10 @@ class UpKeepConnector:
         if asset_id:
             parts = await self._read_asset_spare_parts(asset_id)
         else:
-            parts = []
-            for position, item in enumerate(await self._paginated_get("/api/v2/parts")):
-                try:
-                    parts.append(upkeep_mapper.parse_spare_part(item))
-                except _UNMAPPABLE as exc:
-                    _log_spare_parts_refused(
-                        "malformed_part", position=position, error_type=type(exc).__name__
-                    )
-                    # from None: the mapping error's message quotes the vendor value.
-                    raise ConnectorSchemaError(
-                        "UpKeep returned a malformed part record: cannot read its spare parts"
-                    ) from None
+            parts = [
+                _map_spare_part(item, _MALFORMED_PART, position=position)
+                for position, item in enumerate(await self._paginated_get("/api/v2/parts"))
+            ]
         if sku:
             parts = [p for p in parts if p.sku == sku]
         return parts
@@ -549,17 +552,11 @@ class UpKeepConnector:
                         "UpKeep returned a different part than the one the asset lists: "
                         "its spare parts cannot be read in full, so none are returned"
                     )
-                try:
-                    parts.append(upkeep_mapper.parse_spare_part(record))
-                except _UNMAPPABLE as exc:
-                    _log_spare_parts_refused(
-                        "malformed_part",
-                        asset_id=asset_id,
-                        position=position,
-                        error_type=type(exc).__name__,
+                parts.append(
+                    _map_spare_part(
+                        record, _MALFORMED_LISTED_PART, asset_id=asset_id, position=position
                     )
-                    # from None: the mapping error's message quotes the vendor value.
-                    raise ConnectorSchemaError(_MALFORMED_LISTED_PART) from None
+                )
         return parts
 
     async def _paginated_get(
