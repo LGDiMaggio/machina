@@ -105,13 +105,20 @@ class _DebouncedHandler:
         refresh callback's own read would otherwise re-arm the timer and
         feed back into an endless refresh loop (Windows backends never emit
         these, which is why the loop only reproduces on Linux CI).
+
+        A move matches on either end: a save that writes a temp file and
+        renames it over the watched file (the connector's own atomic replace,
+        Excel and LibreOffice saves) reaches inotify only as a move whose
+        ``dest_path`` is the watched file.
         """
         if event.is_directory:
             return
         if event.event_type in ("opened", "closed_no_write"):
             return
-        src = str(Path(event.src_path).resolve())
-        if src not in self._paths:
+        touched = {str(Path(event.src_path).resolve())}
+        if event.event_type == "moved":
+            touched.add(str(Path(event.dest_path).resolve()))
+        if touched.isdisjoint(self._paths):
             return
         with self._lock:
             if self._timer is not None:
