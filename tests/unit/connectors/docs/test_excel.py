@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import os
 import shutil
@@ -1385,6 +1386,71 @@ class TestAtomicReplace:
 
         assert other.read_bytes() == b"another writer's save in progress"
         assert await self._description(path) == "changed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "second_writer", ["same connector, first cancelled", "another connector"]
+    )
+    async def test_overlapping_saves_use_distinct_temp_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_writer: str
+    ) -> None:
+        """A cancelled write releases the write lock while its thread keeps
+        saving, and another process does not share the lock at all: the next
+        save overlaps the first and must not touch its temp file."""
+        import threading
+
+        import openpyxl
+        from openpyxl.workbook.workbook import Workbook
+
+        path = self._make(tmp_path, ".xlsx")
+        saved_to: list[str] = []
+        first_written = threading.Event()
+        release_first = threading.Event()
+        real_save = Workbook.save
+
+        def save(wb: Workbook, filename: str) -> None:
+            saved_to.append(str(filename))
+            real_save(wb, filename)
+            if len(saved_to) == 1:
+                first_written.set()
+                release_first.wait(10.0)
+
+        monkeypatch.setattr(Workbook, "save", save)
+
+        def wo(wo_id: str) -> WorkOrder:
+            return WorkOrder(
+                id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="P-201", description=wo_id
+            )
+
+        first_conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+        await first_conn.connect()
+        first = asyncio.ensure_future(first_conn.create_work_order(wo("WO-A")))
+        assert await asyncio.to_thread(first_written.wait, 10.0)
+        if second_writer == "another connector":
+            second_conn = ExcelCsvConnector(config=TestWritesPreserveTheFile._config(path))
+            await second_conn.connect()
+        else:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            second_conn = first_conn
+
+        try:
+            await second_conn.create_work_order(wo("WO-B"))
+        finally:
+            release_first.set()
+        if not first.cancelled():
+            await first
+        for _ in range(100):
+            if not Path(saved_to[0]).exists():
+                break
+            await asyncio.sleep(0.05)
+
+        assert len(saved_to) == 2
+        assert saved_to[0] != saved_to[1]
+        assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+        wb = openpyxl.load_workbook(str(path))
+        wb.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
