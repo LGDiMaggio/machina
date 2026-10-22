@@ -450,6 +450,7 @@ class TestReadSpareParts:
             "UpKeep returned a malformed part record: cannot read its spare parts"
         )
         assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
         (refusal,) = [e for e in logs if e["event"] == "upkeep_spare_parts_refused"]
         assert refusal["log_level"] == "warning"
         assert refusal["reason"] == "malformed_part"
@@ -986,9 +987,10 @@ class TestReadSparePartsByAsset:
             "UpKeep returned a malformed record for a part the asset lists: "
             "its spare parts cannot be read in full, so none are returned"
         )
-        # The mapper's own message quotes the vendor value: it must not ride along.
+        # The mapper's own message quotes the vendor value: no link of the
+        # exception chain may keep it.
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
         assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a", f"{PART_URL}/Qm7Tz2XbLp"]
         refusal = _refusal(logs, "malformed_part")
         assert refusal["position"] == 1

@@ -97,9 +97,11 @@ def _map_spare_part(record: Any, message: str, **log_context: Any) -> SparePart:
     try:
         return upkeep_mapper.parse_spare_part(record)
     except _UNMAPPABLE as exc:
-        _log_spare_parts_refused("malformed_part", error_type=type(exc).__name__, **log_context)
-        # from None: the mapping error's message quotes the vendor value.
-        raise ConnectorSchemaError(message) from None
+        error_type = type(exc).__name__
+    _log_spare_parts_refused("malformed_part", error_type=error_type, **log_context)
+    # Raised outside the except block: the mapping error's message quotes the
+    # vendor value, and `from None` would still keep it as __context__.
+    raise ConnectorSchemaError(message)
 
 
 class UpKeepConnector:
