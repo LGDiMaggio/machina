@@ -126,7 +126,10 @@ since then count. A work-order row whose values do not make a valid work order
 (`invalid_work_order_row_skipped`) instead of making the sheet unreadable.
 
 - **Create** appends one row, placing each value under its column header in
-  the file's own column order; columns the schema does not map stay empty. It
+  the file's own column order; columns the schema does not map stay empty. In
+  an `.xlsx` sheet the row goes right after the last row with a value in a
+  mapped column, so a template's pre-formatted empty rows are filled in order
+  (keeping their formatting and any unmapped cells) instead of skipped. It
   is idempotent on the work-order ID: creating a work order whose ID is already
   in the sheet returns the existing record instead of adding a duplicate row.
   A missing work-order file or sheet is created on the first write, with the

@@ -340,6 +340,18 @@ def _xlsx_header(ws: Any) -> list[str]:
     return [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
 
 
+def _last_row_with_data(ws: Any, columns: list[int]) -> int:
+    """Return the last row (at least the header row) with a value in one of ``columns``.
+
+    ``ws.max_row`` also counts empty rows that only carry formatting, as a
+    templated sheet has, so it cannot place an appended row.
+    """
+    for row in range(ws.max_row, 1, -1):
+        if any(ws.cell(row=row, column=col).value not in (None, "") for col in columns):
+            return row
+    return 1
+
+
 def _save_xlsx_atomically(wb: Any, path: Path) -> None:
     """Save to a temp sibling, then replace the target, so a crash cannot truncate it."""
     tmp = path.with_name(path.name + ".tmp")
@@ -391,14 +403,16 @@ def _append_xlsx_row(
             header = [m.column for m in schema.columns]
             for col, name in enumerate(header, start=1):
                 ws.cell(row=1, column=col, value=name)
-        row_values: list[Any] = [None] * len(header)
+        row_values: dict[int, Any] = {}
         for mapping in schema.columns:
             value = row_data.get(mapping.field)
             if mapping.column in header:
-                row_values[header.index(mapping.column)] = value
+                row_values[header.index(mapping.column) + 1] = value
             elif value not in (None, ""):
                 unwritten.append(mapping.field)
-        ws.append(row_values)
+        target = _last_row_with_data(ws, sorted(row_values)) + 1
+        for col, value in row_values.items():
+            ws.cell(row=target, column=col, value=value)
         _save_xlsx_atomically(wb, path)
     finally:
         wb.close()

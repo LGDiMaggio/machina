@@ -1126,6 +1126,75 @@ class TestWritesPreserveTheFile:
         assert [wo.id for wo in await fresh.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
 
     @pytest.mark.asyncio
+    async def test_xlsx_append_goes_after_the_last_row_with_data(self, tmp_path: Path) -> None:
+        """A template pre-formats empty rows; ``ws.max_row`` counts them, so
+        appending after it left a gap before the new row."""
+        import openpyxl
+        from openpyxl.styles import PatternFill
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+        ws = wb["OdL"]
+        fill = PatternFill("solid", fgColor="FFFF00")
+        for row in range(4, 31):
+            for col in range(1, 6):
+                ws.cell(row=row, column=col).fill = fill
+        wb.save(str(path))
+        wb.close()
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+            )
+        )
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            ws = wb["OdL"]
+            assert ws.cell(row=4, column=1).value == "WO-3"
+            assert ws.cell(row=4, column=1).fill.fgColor.rgb == "00FFFF00"
+            assert ws.max_row == 30
+        finally:
+            wb.close()
+        fresh = ExcelCsvConnector(config=self._config(path))
+        await fresh.connect()
+        assert [wo.id for wo in await fresh.read_work_orders()] == ["WO-1", "WO-2", "WO-3"]
+
+    @pytest.mark.asyncio
+    async def test_xlsx_append_keeps_unmapped_cells_of_the_target_row(
+        self, tmp_path: Path
+    ) -> None:
+        """The row after the data may carry template content in unmapped
+        columns (a pre-filled formula, a note); it is kept, not overwritten."""
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path)
+        wb = openpyxl.load_workbook(str(path))
+        wb["OdL"].cell(row=4, column=2, value="template note")
+        wb.save(str(path))
+        wb.close()
+        conn = ExcelCsvConnector(config=self._config(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+            )
+        )
+
+        wb = openpyxl.load_workbook(str(path))
+        try:
+            rows = list(wb["OdL"].iter_rows(values_only=True))
+            assert rows[3] == ("WO-3", "template note", "P-201", "created", "new")
+            assert len(rows) == 4
+        finally:
+            wb.close()
+
+    @pytest.mark.asyncio
     async def test_csv_append_follows_the_file_column_order(self, tmp_path: Path) -> None:
         path = tmp_path / "odl.csv"
         path.write_text(
