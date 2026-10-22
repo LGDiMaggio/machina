@@ -538,13 +538,13 @@ class UpKeepConnector:
                     )
                 _raise_for_record_status(resp.status_code, "part")
                 try:
-                    record = upkeep_mapper.parse_part_record(resp.json())
+                    returned_id, record = upkeep_mapper.parse_part_record(resp.json())
                 except (ValueError, TypeError) as exc:
                     _log_spare_parts_refused(
                         "malformed_part", asset_id=asset_id, position=position
                     )
                     raise ConnectorSchemaError(_MALFORMED_LISTED_PART) from exc
-                if record["id"] != part_id:
+                if returned_id != part_id:
                     _log_spare_parts_refused(
                         "part_id_mismatch", asset_id=asset_id, position=position
                     )

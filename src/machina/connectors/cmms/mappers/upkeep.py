@@ -235,8 +235,8 @@ def parse_asset_part_ids(body: Any, asset_id: str) -> list[str]:
     return list(dict.fromkeys(parts))
 
 
-def parse_part_record(body: Any) -> dict[str, Any]:
-    """Return the part record of a ``GET /api/v2/parts/<ID>`` response.
+def parse_part_record(body: Any) -> tuple[str, dict[str, Any]]:
+    """Return the ID and the record of a ``GET /api/v2/parts/<ID>`` response.
 
     The response is ``{"success": true, "result": {...}}``. See
     https://developers.onupkeep.com/#get-a-specific-part.
@@ -244,6 +244,10 @@ def parse_part_record(body: Any) -> dict[str, Any]:
     Args:
         body: The decoded response body. A body without ``result`` is read as
             the part record itself.
+
+    Returns:
+        The record's ``id`` and the record, so the caller can check that the
+        part it requested is the part it got.
 
     Raises:
         TypeError: If the body or its ``result`` is not an object, or the
@@ -256,7 +260,7 @@ def parse_part_record(body: Any) -> dict[str, Any]:
         raise ValueError("the part record has no 'id'")
     if not isinstance(part_id, str):
         raise TypeError("the part record's 'id' is not a string")
-    return record
+    return part_id, record
 
 
 def parse_maintenance_plans(

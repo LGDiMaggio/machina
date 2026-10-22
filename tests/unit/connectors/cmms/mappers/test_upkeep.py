@@ -242,16 +242,17 @@ class TestParseAssetPartIds:
 
 
 class TestParsePartRecord:
-    """The part record of a single-part read, checked for an ``id``."""
+    """The ID and record of a single-part read, checked for an ``id``."""
 
     def test_documented_part(self) -> None:
-        record = parse_part_record(_docs_part_body())
-        assert record["id"] == "1YHUWGVgdC"
+        part_id, record = parse_part_record(_docs_part_body())
+        assert part_id == "1YHUWGVgdC"
         assert record["name"] == "Flux Capacitor"
 
     def test_record_outside_result(self) -> None:
-        record = parse_part_record(_docs_part_body()["result"])
-        assert record["id"] == "1YHUWGVgdC"
+        part_id, record = parse_part_record(_docs_part_body()["result"])
+        assert part_id == "1YHUWGVgdC"
+        assert record["name"] == "Flux Capacitor"
 
     @pytest.mark.parametrize(
         "body",
