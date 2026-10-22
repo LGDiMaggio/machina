@@ -303,6 +303,12 @@ default.
   structlog configuration, including none at all.
 - Exception messages are logged verbatim, and the traceback shows each frame's
   source line.
+- After `configure_logging()`, the `httpx` and `httpcore` loggers are at
+  WARNING, so their per-request lines are not logged. Those lines carry each
+  request's full URL: the CMMS host and the record IDs and filter values of
+  the read (UpKeep part IDs, SKUs in SAP PM's `$filter` and Maximo's
+  `oslc.where`). An application that lowers the two loggers again gets those
+  URLs in its logs.
 - The Telegram bot token is kept out of log output:
   - The Bot API carries the token in every URL. httpx logs request URLs at INFO, and python-telegram-bot logs its API URLs at DEBUG. `TelegramConnector` replaces its token with `<redacted>` in the records of those loggers. The redaction is in place from `connect()` until the process ends.
   - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
