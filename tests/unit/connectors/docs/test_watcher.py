@@ -37,11 +37,13 @@ def _recording_factory(record: list[FakeTimer]):
     return factory
 
 
-def _file_event(path, event_type: str = "modified") -> MagicMock:
+def _file_event(path, event_type: str = "modified", dest_path=None) -> MagicMock:
     event = MagicMock()
     event.is_directory = False
     event.src_path = str(path)
     event.event_type = event_type
+    if dest_path is not None:
+        event.dest_path = str(dest_path)
     return event
 
 
@@ -196,30 +198,30 @@ class TestDebouncedHandler:
     def test_rename_over_watched_file_arms(self, tmp_path):
         """A save that writes a temp sibling and renames it over the watched
         file arrives as a move whose ``dest_path`` is the watched file."""
-        from watchdog.events import FileMovedEvent
-
         target = tmp_path / "test.xlsx"
         target.touch()
         cb = MagicMock()
         timers: list[FakeTimer] = []
         handler = self._handler(target, cb, timers)
 
-        handler.dispatch(FileMovedEvent(str(tmp_path / "test.xlsx.tmp"), str(target)))
+        handler.dispatch(
+            _file_event(tmp_path / "test.xlsx.tmp", event_type="moved", dest_path=target)
+        )
 
         assert len(timers) == 1
         timers[0].fire()
         cb.assert_called_once()
 
     def test_move_between_unwatched_paths_is_ignored(self, tmp_path):
-        from watchdog.events import FileMovedEvent
-
         target = tmp_path / "test.xlsx"
         target.touch()
         cb = MagicMock()
         timers: list[FakeTimer] = []
         handler = self._handler(target, cb, timers)
 
-        handler.dispatch(FileMovedEvent(str(tmp_path / "a.tmp"), str(tmp_path / "b.xlsx")))
+        handler.dispatch(
+            _file_event(tmp_path / "a.tmp", event_type="moved", dest_path=tmp_path / "b.xlsx")
+        )
 
         assert timers == []
         cb.assert_not_called()
