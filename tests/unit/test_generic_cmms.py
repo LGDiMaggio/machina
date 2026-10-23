@@ -371,6 +371,58 @@ class TestGenericCmmsConnectorLocal:
         assert await conn.get_work_order("WO-NEW") is None
 
     @pytest.mark.asyncio
+    async def test_write_refuses_to_overwrite_file_that_is_not_a_list(
+        self, sample_data_dir: Path
+    ) -> None:
+        """An object would read as no work orders, and the write would replace
+        the file with only the new one."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(ConnectorError, match=r"work_orders\.json"):
+            await conn.update_work_order("WO-001", assigned_to="Mario")
+
+        assert wof.read_text(encoding="utf-8") == "{}"
+
+    @pytest.mark.asyncio
+    async def test_write_recreates_file_removed_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.unlink()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        assert [w["id"] for w in json.loads(wof.read_text())] == ["WO-001", "WO-002", "WO-NEW"]
+
+    @pytest.mark.asyncio
+    async def test_write_reads_hand_written_record_added_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """A record without the fields the native format writes is read with
+        the tolerant parser, as at connect."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        disk = json.loads(wof.read_text())
+        disk.append({"id": "WO-HAND", "asset_id": "P-201", "description": "written by hand"})
+        wof.write_text(json.dumps(disk))
+
+        updated = await conn.update_work_order("WO-HAND", assigned_to="Mario")
+
+        assert (updated.type, updated.assigned_to) == (WorkOrderType.CORRECTIVE, "Mario")
+        after = {w["id"]: w for w in json.loads(wof.read_text())}
+        assert after["WO-HAND"]["assigned_to"] == "Mario"
+
+    @pytest.mark.asyncio
     async def test_local_persist_skipped_with_mapping(self, tmp_path: Path) -> None:
         """A configured inbound mapping disables write-back to avoid corrupting
         the on-disk (external-format) file."""
