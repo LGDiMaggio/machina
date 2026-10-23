@@ -4,9 +4,10 @@ On a Linux host, ``./data`` keeps the host user's ownership inside the
 container (typically UID 1000, mode 755). The image must run as a user that
 can write there, or a ``--live`` work order fails with ``ConnectorLockedError``.
 
-The data directory is simulated with a named volume owned by ``1000:1000``
+The data directory is simulated with a named volume owned by ``4321:4321``
 (mode 755), so the test behaves the same under Docker Desktop, whose bind
-mounts hide ownership. The probe performs the write ``agent.py --live`` makes
+mounts hide ownership. The IDs differ from the Dockerfile's default of 1000,
+so the test fails if Compose stops passing them as build arguments. The probe performs the write ``agent.py --live`` makes
 (``ExcelCsvConnector.create_work_order`` on ``data/workorders.xlsx``) without
 an LLM.
 
@@ -29,8 +30,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "odl-generator-from-text"
-HOST_UID = 1000
-HOST_GID = 1000
+HOST_UID = 4321
+HOST_GID = 4321
 
 PROBE = """
 import asyncio
@@ -73,7 +74,7 @@ def _docker(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture
 def linux_owned_data_volume() -> Iterator[str]:
-    """A copy of the template's ``data/`` owned by 1000:1000, mode 755, as on a Linux host."""
+    """A copy of the template's ``data/`` owned by the host IDs, mode 755, as on a Linux host."""
     name = f"machina-odl-data-{uuid.uuid4().hex[:8]}"
     created = _docker("volume", "create", name)
     assert created.returncode == 0, created.stderr
