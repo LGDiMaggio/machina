@@ -49,7 +49,7 @@ SAMPLE_DIR = _examples_dir / "sample_data"
 #   from machina.connectors import Maximo
 #   cmms = Maximo(
 #       url="https://maximo.yourcompany.com/maximo/oslc",
-#       auth=ApiKeyHeaderAuth(header="apikey", value=os.environ["MAXIMO_API_KEY"]),
+#       auth=ApiKeyHeaderAuth(header_name="apikey", value=os.environ["MAXIMO_API_KEY"]),
 #   )
 #
 #   from machina.connectors import UpKeep
@@ -77,7 +77,7 @@ BACKEND_CONFIGS = {
         "from machina.connectors import Maximo\n"
         "cmms = Maximo(\n"
         '    url="https://maximo.yourcompany.com/maximo/oslc",\n'
-        '    auth=ApiKeyHeaderAuth(header="apikey", value=os.environ["MAXIMO_API_KEY"]),\n'
+        '    auth=ApiKeyHeaderAuth(header_name="apikey", value=os.environ["MAXIMO_API_KEY"]),\n'
         ")"
     ),
     "upkeep": (
