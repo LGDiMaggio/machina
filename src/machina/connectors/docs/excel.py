@@ -736,8 +736,6 @@ class ExcelCsvConnector:
         columns: dict[str, list[str]] = {}
         try:
             for schema in schemas:
-                if schema.sheet not in wb.sheetnames:
-                    continue
                 rows = wb[schema.sheet].iter_rows()
                 header = [
                     str(c.value).strip() if c.value is not None else "" for c in next(rows, ())

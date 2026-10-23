@@ -244,6 +244,59 @@ class TestCsvFormatKept:
 
         assert path.read_bytes() == crlf.replace(b"second", b"changed")
 
+    @pytest.mark.asyncio
+    async def test_csv_append_keeps_cr_only_line_endings(self, tmp_path: Path) -> None:
+        """Classic Mac OS files end lines with a bare ``\\r``."""
+        path = tmp_path / "odl.csv"
+        cr = self._LF_CSV.replace(b"\n", b"\r")
+        path.write_bytes(cr)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert path.read_bytes() == cr + b"WO-3,P-201,created,x\r"
+
+    @pytest.mark.asyncio
+    async def test_csv_append_to_a_header_without_line_break_uses_crlf(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "odl.csv"
+        path.write_bytes(b"ID,Codice Asset,Stato,Descrizione")
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-3", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert (
+            path.read_bytes() == b"ID,Codice Asset,Stato,Descrizione\r\nWO-3,P-201,created,x\r\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_csv_append_to_a_large_fully_quoted_file_quotes_the_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Quoting is detected from the first 64 KiB; a record cut at that
+        boundary is not taken as unquoted."""
+        path = tmp_path / "odl.csv"
+        long = "x" * 30_000
+        content = b'"ID","Codice Asset","Stato","Descrizione"\r\n' + b"".join(
+            f'"WO-{i}","P-201","created","{long}"\r\n'.encode() for i in range(1, 5)
+        )
+        path.write_bytes(content)
+        conn = ExcelCsvConnector(config=self._csv_schema(path))
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x")
+        )
+
+        assert path.read_bytes() == content + b'"WO-9","P-201","created","x"\r\n'
+
 
 class TestAtomicReplace:
     """Writes go through a temp file of their own, then replace the file in place."""
@@ -425,6 +478,43 @@ class TestAtomicReplace:
 
         assert synced_files, "the temp file was never fsync'ed"
 
+    def test_failed_write_keeps_the_file_and_removes_the_temp_file(self, tmp_path: Path) -> None:
+        from machina.connectors._file_replace import replace_atomically
+
+        path = tmp_path / "odl.csv"
+        path.write_bytes(b"original")
+
+        def write(tmp: Path) -> None:
+            tmp.write_bytes(b"half")
+            raise OSError("disk full")
+
+        with pytest.raises(OSError, match="disk full"):
+            replace_atomically(path, write)
+
+        assert path.read_bytes() == b"original"
+        assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
+
+    def test_directory_that_cannot_be_opened_is_not_flushed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows cannot open a directory; the replace still completes."""
+        import machina.connectors._file_replace as file_replace
+
+        path = tmp_path / "odl.csv"
+        path.write_bytes(b"original")
+        real_open = os.open
+
+        def no_directories(target: Any, flags: int, *args: Any) -> int:
+            if Path(target).is_dir():
+                raise PermissionError("cannot open a directory")
+            return real_open(target, flags, *args)
+
+        monkeypatch.setattr(file_replace.os, "open", no_directories)
+
+        file_replace.replace_atomically(path, lambda tmp: tmp.write_bytes(b"new"))
+
+        assert path.read_bytes() == b"new"
+
 
 class TestFormulaWarning:
     """openpyxl drops cached formula results when it saves; with data_only
@@ -514,3 +604,24 @@ class TestFormulaWarning:
             self._workbook(path)
 
         assert await self._warnings(self._config(path, registry, writable=writable)) == []
+
+    @pytest.mark.asyncio
+    async def test_workbook_locked_after_loading_skips_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Another program (Excel on Windows) may lock the file between the
+        load and the check; connect() still succeeds, without the warning."""
+        import openpyxl
+
+        path = tmp_path / "odl.xlsx"
+        self._workbook(path, odl_desc='=C2&" leaking"')
+        real_load = openpyxl.load_workbook
+
+        def load(filename: str, *args: Any, **kwargs: Any) -> Any:
+            if not kwargs.get("data_only"):
+                raise PermissionError("locked by another program")
+            return real_load(filename, *args, **kwargs)
+
+        monkeypatch.setattr(openpyxl, "load_workbook", load)
+
+        assert await self._warnings(self._config(path)) == []
