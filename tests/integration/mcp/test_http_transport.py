@@ -265,14 +265,9 @@ class TestOriginAllowList:
     @pytest.mark.parametrize(
         "origin",
         [
-            "http://localhost",
-            "http://localhost:5173",
-            "https://127.0.0.1:8443",
-            "http://127.0.0.1",
-            "https://127.0.0.1",
-            "http://[::1]",
-            "http://[::1]:5173",
-            "https://[::1]:8443",
+            f"{scheme}://{host.replace(':*', ':8443')}"
+            for host in McpConfig().allowed_hosts
+            for scheme in ("http", "https")
         ],
     )
     def test_default_loopback_origins_are_accepted(
