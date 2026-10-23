@@ -6,9 +6,10 @@
 # ./data is mounted so the registry you edit and the work orders the agent
 # writes live on the host. On Linux the container user must own it: the image
 # is built with MACHINA_UID / MACHINA_GID (default 1000). If `id -u` is not
-# 1000, set both in .env, or rebuild with
+# 1000, set both in .env. They take effect only when the image is built, and
+# `docker compose run` reuses an existing image, so rebuild after changing them:
 #
-#   MACHINA_UID=$(id -u) MACHINA_GID=$(id -g) docker compose build
+#   docker compose build      # or: docker compose run --build --rm machina
 
 services:
   machina:

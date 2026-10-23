@@ -133,10 +133,22 @@ host.
 On Linux the mounted `./data` keeps your user's ownership, so the image's
 `machina` user is created with your UID/GID to be able to write
 `data/workorders.xlsx` in live mode. The default is `1000:1000`, the first
-regular user on most distributions. If `id -u` prints something else, add
-`MACHINA_UID` and `MACHINA_GID` to `.env` (or rebuild with
-`MACHINA_UID=$(id -u) MACHINA_GID=$(id -g) docker compose build`). Docker
-Desktop on macOS and Windows needs no change.
+regular user on most distributions. If `id -u` prints something else, set
+`MACHINA_UID` and `MACHINA_GID` in `.env`. The IDs are fixed when the image is
+built, and `docker compose run` reuses an image that already exists, so after
+setting or changing them rebuild it:
+
+```bash
+docker compose build                       # or: docker compose run --build --rm machina --live
+```
+
+Docker Desktop on macOS and Windows needs no change.
+
+The UID/GID alone may not make `./data` writable on a host that enforces
+SELinux, where a bind mount also needs a matching security label, or with a
+rootless engine (rootless Docker, Podman), where container UIDs are mapped to
+other host UIDs. The fix depends on the setup: see your platform's
+documentation on SELinux volume labels or on user-namespace UID mapping.
 
 ## File Structure
 
