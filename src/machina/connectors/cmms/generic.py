@@ -417,7 +417,9 @@ class GenericCmmsConnector:
         see :meth:`_persist_work_orders`). Local writes run one at a time:
         cancelling the caller does not stop a write that has started — it
         still finishes, and the next write waits for it, so a retry after a
-        cancellation finds the stored work order.
+        cancellation finds the stored work order. The file is re-read
+        first, so records another process wrote to it are kept and count
+        for the idempotency check.
         """
         self._ensure_connected()
         if self._data_dir:
@@ -476,9 +478,9 @@ class GenericCmmsConnector:
     ) -> WorkOrder:
         """Update an existing work order.
 
-        In local mode a copy of the stored work order is updated, written
-        to ``work_orders.json``, and only then replaces the stored one, so a
-        failed write leaves it as it was. As with :meth:`create_work_order`,
+        In local mode ``work_orders.json`` is re-read, then a copy of the
+        stored work order is updated, written back, and only then replaces
+        the stored one, so a failed write leaves it as it was. As with :meth:`create_work_order`,
         a write that has started finishes even if the caller is cancelled,
         and the next write waits for it. In REST mode the configured
         endpoint is called and the work order is re-fetched to return fresh
@@ -548,6 +550,7 @@ class GenericCmmsConnector:
         but not on disk would be lost on restart, and the ID check would
         return it as "existing" for a record never durably stored.
         """
+        self._reload_work_orders()
         stored = self._work_orders
         existing = next((wo for wo in stored if wo.id == work_order.id), None)
         if existing is not None:
@@ -587,6 +590,7 @@ class GenericCmmsConnector:
         leaves the stored one as it was, and reads on the event loop never
         see a half-applied change.
         """
+        self._reload_work_orders()
         stored = self._work_orders
         idx = next((i for i, wo in enumerate(stored) if wo.id == work_order_id), None)
         if idx is None:
@@ -656,6 +660,68 @@ class GenericCmmsConnector:
             tmp.unlink(missing_ok=True)
             raise
 
+    def _reload_work_orders(self) -> None:
+        """Re-read ``work_orders.json`` into memory before a local write.
+
+        Another process (a second connector, a hand edit) may have changed
+        the file since :meth:`connect`. The write then applies to the file's
+        current records, so :meth:`_persist_work_orders` does not overwrite
+        them with a stale copy. Runs on the file thread.
+
+        Only when the connector writes the file back (native format); a
+        missing file keeps the in-memory list.
+
+        Raises:
+            ConnectorError: If the file cannot be read or parsed. The write
+                is refused rather than replacing a file it could not read.
+        """
+        if self._data_dir is None or self._schema_mapping or self._yaml_mapping is not None:
+            return
+        path = self._data_dir / "work_orders.json"
+        try:
+            text = path.read_text(encoding="utf-8")
+            raw = json.loads(text)
+            if not isinstance(raw, list):
+                raise TypeError("expected a JSON array of work orders")
+            work_orders = self._parse_local_work_orders(raw)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ConnectorError(
+                f"Cannot read work_orders.json before writing it ({type(exc).__name__}); "
+                "refusing to overwrite it"
+            ) from exc
+        self._work_orders = work_orders
+
+    def _parse_local_work_orders(self, raw: list[Any]) -> list[WorkOrder]:
+        """Parse the records of a local ``work_orders.json``."""
+        # Native (unmapped) files are the ones _persist_work_orders writes via
+        # model_dump(mode="json"); model_validate is its lossless inverse, so
+        # timestamps, spare_parts, requested_skills and metadata survive a
+        # write→restart→reload cycle. Fall back to the tolerant parser for
+        # hand-written files that omit or mistype fields.
+        native = not self._schema_mapping and self._yaml_mapping is None
+        work_orders: list[WorkOrder] = []
+        for item in raw:
+            if native:
+                try:
+                    work_orders.append(WorkOrder.model_validate(item))
+                    continue
+                except ValidationError as exc:
+                    # Native-format file failed strict validation — a sign of
+                    # corruption or a hand-edit. Log (don't swallow silently)
+                    # then degrade to the tolerant parser below.
+                    logger.debug(
+                        "work_order_native_parse_fallback",
+                        connector="GenericCmmsConnector",
+                        operation="_load_local_data",
+                        work_order_id=item.get("id", "?") if isinstance(item, dict) else "?",
+                        error=str(exc),
+                    )
+            mapped = self._apply_mapping("work_orders", item)
+            work_orders.append(_parse_work_order(mapped))
+        return work_orders
+
     # ------------------------------------------------------------------
     # Internal: local data loading
     # ------------------------------------------------------------------
@@ -682,31 +748,7 @@ class GenericCmmsConnector:
 
         if work_orders_file.exists():
             text = await asyncio.to_thread(work_orders_file.read_text, encoding="utf-8")
-            raw = json.loads(text)
-            # Native (unmapped) files are the ones _persist_work_orders writes via
-            # model_dump(mode="json"); model_validate is its lossless inverse, so
-            # timestamps, spare_parts, requested_skills and metadata survive a
-            # write→restart→reload cycle. Fall back to the tolerant parser for
-            # hand-written files that omit or mistype fields.
-            native = not self._schema_mapping and self._yaml_mapping is None
-            for item in raw:
-                if native:
-                    try:
-                        self._work_orders.append(WorkOrder.model_validate(item))
-                        continue
-                    except ValidationError as exc:
-                        # Native-format file failed strict validation — a sign of
-                        # corruption or a hand-edit. Log (don't swallow silently)
-                        # then degrade to the tolerant parser below.
-                        logger.debug(
-                            "work_order_native_parse_fallback",
-                            connector="GenericCmmsConnector",
-                            operation="_load_local_data",
-                            work_order_id=item.get("id", "?") if isinstance(item, dict) else "?",
-                            error=str(exc),
-                        )
-                mapped = self._apply_mapping("work_orders", item)
-                self._work_orders.append(_parse_work_order(mapped))
+            self._work_orders.extend(self._parse_local_work_orders(json.loads(text)))
             logger.debug(
                 "loaded_work_orders",
                 connector="GenericCmmsConnector",
