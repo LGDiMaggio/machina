@@ -96,7 +96,7 @@ class SqlRetryConfig(BaseModel):
 class SqlConnectorConfig(BaseModel):
     """Top-level configuration for GenericSqlConnector."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     dsn: str = Field(..., description="ODBC/JDBC connection string")
     driver_type: Literal["odbc", "jdbc"] = Field(default="odbc", description="Driver backend")

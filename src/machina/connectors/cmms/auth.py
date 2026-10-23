@@ -32,7 +32,7 @@ class BearerAuth(BaseModel):
     most modern CMMS REST APIs (UpKeep, MaintainX, Limble, Fiix).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     type: Literal["bearer"] = "bearer"
     token: str
@@ -49,7 +49,7 @@ class BasicAuth(BaseModel):
     older or on-premise CMMS deployments (eMaint, some Infor EAM setups).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     type: Literal["basic"] = "basic"
     username: str
@@ -70,7 +70,7 @@ class ApiKeyHeaderAuth(BaseModel):
     ``Authorization`` header.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     type: Literal["api_key"] = "api_key"
     header_name: str = "X-API-Key"
@@ -84,7 +84,7 @@ class ApiKeyHeaderAuth(BaseModel):
 class NoAuth(BaseModel):
     """No authentication — public or intranet-only endpoints."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     type: Literal["none"] = "none"
 
@@ -121,7 +121,7 @@ class OAuth2ClientCredentials(BaseModel):
         ```
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     type: Literal["oauth2_client_credentials"] = "oauth2_client_credentials"
     token_url: str
