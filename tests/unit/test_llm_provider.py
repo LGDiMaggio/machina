@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -344,3 +345,51 @@ class TestLiteLLMModelStringContract:
             match="LLM Provider NOT provided",
         ):
             litellm.get_llm_provider("openai:gpt-4o")
+
+
+class TestLiteLLMToolCallContract:
+    """A tool-enabled call must complete through the real LiteLLM.
+
+    LiteLLM 1.106 started importing its proxy MCP stack on every call that
+    passes ``tools``, and that stack needs ``mcp`` 2.x. ``machina-ai[litellm]``
+    installs no ``mcp`` and the ``mcp`` extra caps it below 2.0, so every
+    agent turn failed (#160) while the fake-based tests above stayed green.
+    ``mock_tool_calls`` keeps the call offline but runs LiteLLM's own request
+    path, where that import happens.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_returns_tool_call_from_real_litellm(self) -> None:
+        pytest.importorskip("litellm")
+
+        provider = LLMProvider(model="openai:gpt-4o-mini")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_work_order",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"asset_id": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        result = await provider.complete_with_tools(
+            messages=[{"role": "user", "content": "Create WO for P-201"}],
+            tools=tools,
+            mock_tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "create_work_order",
+                        "arguments": '{"asset_id": "P-201"}',
+                    },
+                }
+            ],
+        )
+
+        (tool_call,) = result["tool_calls"]
+        assert tool_call.function.name == "create_work_order"
+        assert json.loads(tool_call.function.arguments) == {"asset_id": "P-201"}

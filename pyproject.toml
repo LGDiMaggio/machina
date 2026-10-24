@@ -44,7 +44,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-litellm = ["litellm>=1.0"]
+litellm = [
+    # <1.106: litellm 1.106.0-1.106.3 import their proxy MCP stack on every
+    # call that passes tools, and that stack needs mcp>=2.2. Neither this
+    # extra nor the mcp extra (<2.0) installs it, so every agent turn failed
+    # (#160). Lift the bound once a litellm release carries
+    # BerriAI/litellm#45961 and the litellm-only CI job passes against it.
+    "litellm>=1.0,<1.106",
+]
 sap = ["pyodata>=1.10", "requests>=2.31"]
 opcua = ["asyncua>=1.0"]
 mqtt = ["aiomqtt>=2.0"]
