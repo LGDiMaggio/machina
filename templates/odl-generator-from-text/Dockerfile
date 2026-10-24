@@ -13,7 +13,16 @@ ENV PATH="/opt/machina-venv/bin:$PATH" \
 
 RUN pip install --no-cache-dir "machina-ai[excel,litellm]==0.4.0"
 
-RUN useradd --system --create-home machina
+# The mounted ./data keeps the host's ownership on Linux, so the container user
+# takes the host user's UID/GID (docker-compose.yml passes them; 1000 is the
+# first regular user on most distributions). --no-log-init keeps useradd from
+# writing lastlog/faillog records sized by the UID, which a large UID turns
+# into a huge image layer.
+ARG MACHINA_UID=1000
+ARG MACHINA_GID=1000
+RUN groupadd --non-unique --gid "$MACHINA_GID" machina \
+    && useradd --no-log-init --non-unique --uid "$MACHINA_UID" --gid "$MACHINA_GID" \
+        --create-home machina
 WORKDIR /home/machina/app
 COPY --chown=machina:machina . .
 USER machina
