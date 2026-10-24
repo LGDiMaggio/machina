@@ -146,7 +146,9 @@ mcp:
   enable_vendor_tools: false          # register the raw SAP PM / Maximo tools
   allowed_hosts: ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]", "[::1]:*"]
   allowed_origins: ["http://localhost", "https://localhost", "http://localhost:*",
-                    "https://localhost:*", "http://127.0.0.1:*", "https://127.0.0.1:*"]
+                    "https://localhost:*", "http://127.0.0.1", "https://127.0.0.1",
+                    "http://127.0.0.1:*", "https://127.0.0.1:*", "http://[::1]",
+                    "https://[::1]", "http://[::1]:*", "https://[::1]:*"]
   token_verifier_class: ""            # dotted path under machina.; empty = static bearer tokens
 ```
 
@@ -180,6 +182,9 @@ an `.env` file) is substituted as an empty string.
 `${VAR:-default}` supplies a fallback, with POSIX shell / Docker Compose
 semantics: the default is used when `VAR` is unset **or empty** (a blank
 `VAR=` line in an `.env` file counts as unset).
+
+Placeholders do not nest: a default that is itself a placeholder, such as
+`${A:-${B}}`, fails to load with a `ValueError` naming `A`.
 
 ```yaml
 llm:

@@ -7,6 +7,8 @@ Placeholders:
   unset or empty (POSIX shell / Docker Compose semantics). Defaults are meant
   for non-secret settings: a forgotten secret should fail loudly, not fall
   back.
+
+Placeholders do not nest: ``${A:-${B}}`` fails to load.
 """
 
 from __future__ import annotations
@@ -32,6 +34,15 @@ def _substitute_env_vars(value: str) -> str:
 
     def _replacer(match: re.Match[str]) -> str:
         var_name, default = match.group(1), match.group(2)
+        if "${" in var_name or (default is not None and "${" in default):
+            # The pattern ends at the first "}", so a nested placeholder would
+            # resolve to literal text or leave a stray "}".
+            outer = var_name.rsplit("${", 1)[-1] if "${" in var_name else var_name
+            msg = (
+                f"Nested placeholder in ${{{outer}...}} is not supported; "
+                "use a literal default or set the variable"
+            )
+            raise ValueError(msg)
         env_value = os.environ.get(var_name)
         if default is not None:
             return env_value if env_value else default

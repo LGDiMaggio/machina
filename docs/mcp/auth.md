@@ -81,10 +81,9 @@ server read-only toward the CMMS.
 The HTTP transport also checks the `Host` header (and the `Origin` header,
 when present) to block DNS-rebinding attacks. The default hosts are the
 loopback names `localhost`, `127.0.0.1` and `[::1]`, with or without a port.
-The default origins are `http://localhost` and `https://localhost`, with or
-without a port, and `http://127.0.0.1` and `https://127.0.0.1` with a port —
-a page served from `http://127.0.0.1` without a port, or from `[::1]`, is
-refused unless you list it. Setting either list replaces its defaults. When
+The default origins are the same loopback names over `http` and `https`, with
+or without a port (`http://localhost`, `https://127.0.0.1:8443`,
+`http://[::1]:5173`, ...). Setting either list replaces its defaults. When
 clients reach the server under another name, list it in the config:
 
 ```yaml
