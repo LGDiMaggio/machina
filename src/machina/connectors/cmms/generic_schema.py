@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from machina.connectors.cmms.generic_coercers import COERCER_REGISTRY
 
 
 class FieldSpec(BaseModel):
     """Mapping spec for a single entity field."""
+
+    model_config = ConfigDict(extra="forbid")
 
     source: str = Field(..., description="JSONPath-lite path into the raw API response")
     coerce: str | None = Field(default=None, description="Named coercer to apply")
@@ -42,6 +44,8 @@ class FieldSpec(BaseModel):
 class ReverseFieldSpec(BaseModel):
     """Reverse mapping spec: domain field → external API field for writes."""
 
+    model_config = ConfigDict(extra="forbid")
+
     target: str = Field(..., description="Target field name in the outbound JSON")
     reverse_enum_map: dict[str, str] | None = Field(
         default=None, description="Domain value → external value lookup"
@@ -51,6 +55,8 @@ class ReverseFieldSpec(BaseModel):
 class EndpointSpec(BaseModel):
     """HTTP endpoint configuration for a mapped entity."""
 
+    model_config = ConfigDict(extra="forbid")
+
     method: str = Field(default="GET")
     path: str = Field(..., description="API path (appended to base_url)")
     pagination: dict[str, Any] | None = Field(default=None)
@@ -58,6 +64,8 @@ class EndpointSpec(BaseModel):
 
 class EntityMapping(BaseModel):
     """Complete mapping for one entity type (Asset or WorkOrder)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     endpoint: EndpointSpec
     root: str = Field(default="", description="JSONPath-lite root for the items array")
@@ -72,6 +80,8 @@ class EntityMapping(BaseModel):
 
 class GenericCmmsYamlConfig(BaseModel):
     """Top-level YAML mapper configuration for GenericCmmsConnector."""
+
+    model_config = ConfigDict(extra="forbid")
 
     mapping: dict[str, EntityMapping] = Field(
         ..., min_length=1, description="Entity type mappings (e.g. 'asset', 'work_order')"

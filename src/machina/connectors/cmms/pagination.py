@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import jmespath
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -61,6 +61,8 @@ class NoPagination(BaseModel):
     ``GenericCmmsConnector`` versions that did not support pagination.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["none"] = "none"
     items_path: str | None = Field(
         default=None,
@@ -91,6 +93,8 @@ class OffsetLimitPagination(BaseModel):
     Stops when a page returns fewer than ``page_size`` items (the typical
     end-of-collection signal for offset-style APIs).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["offset_limit"] = "offset_limit"
     limit_param: str = "limit"
@@ -135,6 +139,8 @@ class PageNumberPagination(BaseModel):
     Stops when a page returns fewer than ``page_size`` items. Supports APIs
     that number pages starting at either 0 or 1 via :attr:`start_page`.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["page_number"] = "page_number"
     page_param: str = "page"
@@ -182,6 +188,8 @@ class CursorPagination(BaseModel):
     :attr:`cursor_param` query parameter on the next request. Iteration
     stops when the cursor is missing, empty, or ``None``.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["cursor"] = "cursor"
     cursor_param: str = "cursor"
