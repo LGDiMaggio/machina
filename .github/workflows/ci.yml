@@ -99,6 +99,45 @@ jobs:
           name: extras-py3.12
           fail_ci_if_error: false
 
+  # Installs the litellm extra the way `pip install machina-ai[litellm]` does,
+  # without mcp. ci-extras installs mcp next to litellm, so it cannot see a
+  # litellm release that needs a package this extra does not declare (#160).
+  # Python 3.11 is the package floor and the odl-generator template's image.
+  ci-litellm-only:
+    name: Tests with the litellm extra and no mcp (Python 3.11)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (litellm extra only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,litellm]"
+
+      - name: Fail unless litellm imports and mcp is absent
+        shell: python
+        run: |
+          import importlib
+          import importlib.metadata
+          import importlib.util
+          import sys
+
+          if importlib.util.find_spec("mcp") is not None:
+              sys.exit("mcp is installed; this job must run without it")
+          try:
+              importlib.import_module("litellm")
+          except Exception as exc:
+              sys.exit(f"litellm does not import: {exc!r}")
+          print("litellm", importlib.metadata.version("litellm"), "imports; mcp absent")
+
+      - name: Tests
+        run: pytest tests/ -v
+
   validate-examples:
     name: Validate examples & doc snippets
     runs-on: ubuntu-24.04
