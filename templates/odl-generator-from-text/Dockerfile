@@ -11,7 +11,10 @@ RUN python -m venv /opt/machina-venv
 ENV PATH="/opt/machina-venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
-RUN pip install --no-cache-dir "machina-ai[excel,litellm]==0.4.0"
+# litellm<1.106: the litellm extra of 0.4.0 has no upper bound, and litellm
+# 1.106 fails every tool call unless mcp 2.x is installed (#160). Drop it once
+# the pin moves to a release whose litellm extra carries the bound.
+RUN pip install --no-cache-dir "machina-ai[excel,litellm]==0.4.0" "litellm<1.106"
 
 # The mounted ./data keeps the host's ownership on Linux, so the container user
 # takes the host user's UID/GID (docker-compose.yml passes them; 1000 is the
