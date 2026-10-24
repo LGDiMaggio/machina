@@ -104,7 +104,7 @@ jobs:
   # litellm release that needs a package this extra does not declare (#160).
   # Python 3.11 is the package floor and the odl-generator template's image.
   ci-litellm-only:
-    name: Tests with the litellm extra alone (Python 3.11)
+    name: Tests with the litellm extra and no mcp (Python 3.11)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -119,20 +119,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,litellm]"
 
-      # The real-litellm tests skip when litellm is missing, so a green run
-      # means something only when litellm is installed and mcp is not.
-      - name: Check the installed set
+      - name: Fail unless litellm imports and mcp is absent
         shell: python
         run: |
+          import importlib
           import importlib.metadata
           import importlib.util
           import sys
 
-          if importlib.util.find_spec("litellm") is None:
-              sys.exit("litellm is not installed")
           if importlib.util.find_spec("mcp") is not None:
               sys.exit("mcp is installed; this job must run without it")
-          print("litellm", importlib.metadata.version("litellm"), "installed; mcp absent")
+          try:
+              importlib.import_module("litellm")
+          except Exception as exc:
+              sys.exit(f"litellm does not import: {exc!r}")
+          print("litellm", importlib.metadata.version("litellm"), "imports; mcp absent")
 
       - name: Tests
         run: pytest tests/ -v
