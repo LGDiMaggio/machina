@@ -126,7 +126,10 @@ since then count. A work-order row whose values do not make a valid work order
 (`invalid_work_order_row_skipped`) instead of making the sheet unreadable.
 
 - **Create** appends one row, placing each value under its column header in
-  the file's own column order; columns the schema does not map stay empty. It
+  the file's own column order; columns the schema does not map stay empty. In
+  an `.xlsx` sheet the row goes right after the last row with a value in a
+  mapped column, so a template's pre-formatted empty rows are filled in order
+  (keeping their formatting and any unmapped cells) instead of skipped. It
   is idempotent on the work-order ID: creating a work order whose ID is already
   in the sheet returns the existing record instead of adding a duplicate row.
   A missing work-order file or sheet is created on the first write, with the
@@ -135,12 +138,18 @@ since then count. A work-order row whose values do not make a valid work order
   unknown status, raises `ConnectorError`); asking for the status the work
   order already has changes nothing. It then writes only the changed cells of
   that work order's row: other rows, columns and sheets stay as they are, and
-  the file is written to a temporary sibling and atomically replaced, so a
-  crash mid-write cannot truncate it. A change to a field that no column is
+  the file is written to a temporary sibling of its own (a hidden
+  `.<name>.<random>.tmp`), flushed to disk and atomically replaced, so neither
+  a crash nor a power loss mid-write can truncate it. The file keeps its
+  permission bits, and a symlink is written through rather than replaced
+  (ownership and ACLs other than the permission bits are not copied). A change to a field that no column is
   mapped to is refused with `ConnectorError` rather than silently dropped. If
   the write fails, the cached record is restored. A key that is not a
   work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8
-  BOM, which Excel on Windows needs to read accented text. Without a
+  BOM, which Excel on Windows needs to read accented text, its line
+  terminator (`\r\n` or `\n`) and, if its first records quote every field,
+  that full quoting, on update and append. Otherwise fields are quoted only
+  where needed. The delimiter is always a comma. Without a
   `write_mode`, `update_work_order()` changes the in-memory copy only.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.
@@ -151,8 +160,11 @@ since then count. A work-order row whose values do not make a valid work order
   stored as Excel extensions. It also discards the cached results of
   formulas, and the connector reads cell values, not formulas — after a
   write, a formula cell in a mapped column reads as empty until Excel
-  recalculates the file. Keep the work-order sheet in a workbook of its own,
-  with plain values.
+  recalculates the file. `connect()` warns about this
+  (`xlsx_formulas_lose_values_on_write`, naming each sheet and column) when a
+  mapped column of any configured sheet in the written workbook holds a
+  formula. Keep the work-order sheet in a workbook of its own, with plain
+  values.
 - Dates are written as ISO 8601 text (`2026-01-15T10:00:00+00:00`), which
   the connector reads back as dates.
 

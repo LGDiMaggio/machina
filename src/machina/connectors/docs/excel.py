@@ -23,6 +23,7 @@ from machina.connectors._entity_builders import LIST_CELL_DELIMITER
 from machina.connectors._entity_builders import dict_to_asset as _dict_to_asset
 from machina.connectors._entity_builders import dict_to_failure_mode as _dict_to_failure_mode
 from machina.connectors._entity_builders import dict_to_work_order as _dict_to_work_order
+from machina.connectors._file_replace import replace_atomically
 from machina.connectors._settings import validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
@@ -340,15 +341,21 @@ def _xlsx_header(ws: Any) -> list[str]:
     return [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
 
 
+def _last_row_with_data(ws: Any, columns: list[int]) -> int:
+    """Return the last row (at least the header row) with a value in one of ``columns``.
+
+    ``ws.max_row`` also counts empty rows that only carry formatting, as a
+    templated sheet has, so it cannot place an appended row.
+    """
+    for row in range(ws.max_row, 1, -1):
+        if any(ws.cell(row=row, column=col).value not in (None, "") for col in columns):
+            return row
+    return 1
+
+
 def _save_xlsx_atomically(wb: Any, path: Path) -> None:
-    """Save to a temp sibling, then replace the target, so a crash cannot truncate it."""
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        wb.save(str(tmp))
-        tmp.replace(path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Save a workbook through :func:`replace_atomically`."""
+    replace_atomically(path, lambda tmp: wb.save(str(tmp)))
 
 
 def _log_unwritten_fields(path: Path, fields: list[str]) -> None:
@@ -391,34 +398,70 @@ def _append_xlsx_row(
             header = [m.column for m in schema.columns]
             for col, name in enumerate(header, start=1):
                 ws.cell(row=1, column=col, value=name)
-        row_values: list[Any] = [None] * len(header)
+        row_values: dict[int, Any] = {}
         for mapping in schema.columns:
             value = row_data.get(mapping.field)
             if mapping.column in header:
-                row_values[header.index(mapping.column)] = value
+                row_values[header.index(mapping.column) + 1] = value
             elif value not in (None, ""):
                 unwritten.append(mapping.field)
-        ws.append(row_values)
+        target = _last_row_with_data(ws, sorted(row_values)) + 1
+        for col, value in row_values.items():
+            ws.cell(row=target, column=col, value=value)
         _save_xlsx_atomically(wb, path)
     finally:
         wb.close()
     _log_unwritten_fields(path, unwritten)
 
 
+def _csv_line_terminator(path: Path) -> str:
+    """Return the line terminator the CSV file already uses (``\\r\\n`` if none yet)."""
+    with path.open("rb") as fb:
+        head = fb.read(65536)
+    end = head.find(b"\n")
+    if end > 0 and head[end - 1 : end] == b"\r":
+        return "\r\n"
+    if end >= 0:
+        return "\n"
+    return "\r" if b"\r" in head else "\r\n"
+
+
+_QUOTED_RECORD_RE = re.compile(r'"(?:[^"]|"")*"(?:,"(?:[^"]|"")*")*')
+
+
+def _csv_quotes_all(path: Path, newline: str) -> bool:
+    """Return whether the file's first records quote every field (``csv.QUOTE_ALL``).
+
+    A record with a line break inside a quoted field does not match, so such
+    a file falls back to minimal quoting.
+    """
+    with path.open("rb") as fb:
+        head = fb.read(65536).decode("utf-8-sig", errors="replace")
+    records = [r for r in head.split(newline)[:6] if r]
+    if len(head) == 65536 and len(records) > 1:
+        records = records[:-1]
+    return bool(records) and all(_QUOTED_RECORD_RE.fullmatch(r) for r in records)
+
+
 def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -> None:
     """Append one row to a CSV file, placing each value under its header.
 
-    An existing file keeps its own column order and extra columns; a missing
-    or empty file is started with the schema's header row.
+    An existing file keeps its own column order, extra columns, line
+    terminator and full quoting; a missing or empty file is started with the
+    schema's header row.
     """
     header: list[str] = []
     needs_newline = False
+    newline = "\r\n"
+    quote_all = False
     if path.exists() and path.stat().st_size > 0:
         with path.open(newline="", encoding="utf-8-sig") as f:
             header = next(csv.reader(f), [])
         with path.open("rb") as fb:
             fb.seek(-1, 2)
             needs_newline = fb.read(1) not in (b"\n", b"\r")
+        newline = _csv_line_terminator(path)
+        quote_all = _csv_quotes_all(path, newline)
     write_header = not header
     if write_header:
         header = [m.column for m in schema.columns]
@@ -432,8 +475,13 @@ def _append_csv_row(path: Path, schema: SheetSchema, row_data: dict[str, Any]) -
             unwritten.append(mapping.field)
     with path.open("a", newline="", encoding="utf-8") as f:
         if needs_newline:
-            f.write("\r\n")
-        writer = csv.DictWriter(f, fieldnames=header)
+            f.write(newline)
+        writer = csv.DictWriter(
+            f,
+            fieldnames=header,
+            lineterminator=newline,
+            quoting=csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL,
+        )
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -487,13 +535,16 @@ def _update_csv_row(
 ) -> None:
     """CSV twin of :func:`_update_xlsx_row`: rewrite the file with one row changed.
 
-    Every other row and column is written back unchanged, via a temp sibling
-    and an atomic replace.
+    Every other row and column is written back unchanged, with the file's
+    own line terminator and full quoting, via a temp sibling and an atomic
+    replace.
     """
     with path.open("rb") as fb:
         # Excel on Windows reads BOM-less UTF-8 as the ANSI code page and
         # garbles accented text, so a file that had a BOM keeps it.
         has_bom = fb.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    newline = _csv_line_terminator(path)
+    quote_all = _csv_quotes_all(path, newline)
     with path.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     if not rows:
@@ -517,14 +568,16 @@ def _update_csv_row(
     target.extend([""] * (len(header) - len(target)))
     for column, value in values.items():
         target[index[column]] = "" if value is None else value
-    tmp = path.with_name(path.name + ".tmp")
-    try:
+
+    def _write(tmp: Path) -> None:
         with tmp.open("w", newline="", encoding="utf-8-sig" if has_bom else "utf-8") as f:
-            csv.writer(f).writerows(rows)
-        tmp.replace(path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+            csv.writer(
+                f,
+                lineterminator=newline,
+                quoting=csv.QUOTE_ALL if quote_all else csv.QUOTE_MINIMAL,
+            ).writerows(rows)
+
+    replace_atomically(path, _write)
 
 
 def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
@@ -654,6 +707,63 @@ class ExcelCsvConnector:
             work_orders_loaded=len(self._wo_cache),
             failure_modes_loaded=len(self._fm_cache),
         )
+        self._warn_formulas_lost_on_write()
+
+    def _warn_formulas_lost_on_write(self) -> None:
+        """Log the mapped columns that hold formulas in the ``.xlsx`` file writes save.
+
+        openpyxl does not keep a formula's cached result when it saves, and
+        reads use ``data_only=True``, so after a write those cells read as
+        empty until Excel recalculates and saves the file. Every sheet of the
+        saved workbook is affected, not only the work-order sheet.
+        """
+        wo_schema = self._config.work_orders
+        if wo_schema is None or wo_schema.write_mode is None:
+            return
+        path = Path(wo_schema.path)
+        if path.suffix.lower() != ".xlsx" or not path.exists():
+            return
+        schemas = [
+            s
+            for s in (self._config.asset_registry, wo_schema, self._config.failure_modes)
+            if s is not None and Path(s.path).resolve() == path.resolve()
+        ]
+        openpyxl = _require_openpyxl()
+        try:
+            wb = openpyxl.load_workbook(str(path), read_only=True)
+        except OSError:
+            return
+        columns: dict[str, list[str]] = {}
+        try:
+            for schema in schemas:
+                rows = wb[schema.sheet].iter_rows()
+                header = [
+                    str(c.value).strip() if c.value is not None else "" for c in next(rows, ())
+                ]
+                mapped = {m.column for m in schema.columns}
+                watched = {i: name for i, name in enumerate(header) if name in mapped}
+                found: set[str] = set()
+                for row in rows:
+                    for i, cell in enumerate(row):
+                        if i in watched and getattr(cell, "data_type", None) == "f":
+                            found.add(watched[i])
+                if found:
+                    columns[schema.sheet] = sorted(found)
+        finally:
+            wb.close()
+        if columns:
+            logger.warning(
+                "xlsx_formulas_lose_values_on_write",
+                connector="ExcelCsvConnector",
+                operation="connect",
+                file=path.name,
+                columns=columns,
+                hint=(
+                    "a work-order write saves this workbook through openpyxl, which drops "
+                    "cached formula results: these cells read as empty until Excel "
+                    "recalculates and saves the file"
+                ),
+            )
 
     async def disconnect(self) -> None:
         """Release caches."""
