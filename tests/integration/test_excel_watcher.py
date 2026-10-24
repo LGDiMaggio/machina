@@ -115,6 +115,46 @@ class TestWatcherIntegration:
             assert not watcher.running
 
     @pytest.mark.asyncio
+    async def test_watcher_refreshes_after_rename_over_save(self, tmp_path: Path) -> None:
+        """A save that writes a temp file and renames it over the watched file
+        (the connector's own atomic replace, Excel and LibreOffice saves)."""
+        asset_file = tmp_path / "assets.xlsx"
+        _create_asset_file(asset_file, [("P-001", "Pompa 1")])
+
+        conn = ExcelCsvConnector(
+            config=ExcelConnectorConfig(asset_registry=_asset_schema(asset_file))
+        )
+        await conn.connect()
+        assert len(await conn.read_assets()) == 1
+
+        refresh_done = threading.Event()
+        original_refresh = conn.refresh
+
+        def _tracked_refresh() -> None:
+            original_refresh()
+            refresh_done.set()
+
+        watcher = FileWatcher(
+            paths=[str(asset_file)],
+            callback=_tracked_refresh,
+            debounce_ms=100,
+            poll_fallback_sec=5,
+        )
+        await watcher.start()
+
+        try:
+            staged = tmp_path / "assets.xlsx.tmp"
+            _create_asset_file(staged, [("P-001", "Pompa 1"), ("P-002", "Pompa 2")])
+            staged.replace(asset_file)
+
+            if not await asyncio.to_thread(refresh_done.wait, 10.0):
+                pytest.fail("Watcher did not fire within 10s after a rename-over save")
+
+            assert [a.id for a in await conn.read_assets()] == ["P-001", "P-002"]
+        finally:
+            await watcher.stop()
+
+    @pytest.mark.asyncio
     async def test_watcher_debounce(self, tmp_path: Path) -> None:
         """A rapid save burst coalesces into exactly one trailing-edge callback
         that observes the final on-disk state."""
