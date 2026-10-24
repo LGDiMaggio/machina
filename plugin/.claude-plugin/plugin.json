@@ -4,5 +4,6 @@
   "description": "Build and extend Machina maintenance agents with an LLM, driven by Machina's code-derived self-description spine (machina describe / docs/capabilities.md / llms.txt).",
   "author": {
     "name": "Machina"
-  }
+  },
+  "license": "Apache-2.0"
 }
