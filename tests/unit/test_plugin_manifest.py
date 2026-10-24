@@ -26,11 +26,12 @@ def _command_files() -> list[Path]:
 
 
 def test_manifest_is_valid() -> None:
-    """plugin.json parses and carries the required string fields."""
+    """plugin.json parses, carries the required string fields and declares the licence."""
     data = json.loads(_MANIFEST.read_text(encoding="utf-8"))
     assert data["name"] == "machina-agent-builder"
     for field in ("name", "version", "description"):
         assert isinstance(data[field], str) and data[field].strip(), field
+    assert data.get("license") == "Apache-2.0"
 
 
 def test_ships_at_least_one_command() -> None:
