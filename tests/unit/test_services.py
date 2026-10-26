@@ -268,21 +268,21 @@ class TestSchedulerWithoutCalendarInterval:
         assert scheduler.plans_without_calendar_due_date(asset_id="P-2") == []
 
     def test_upkeep_meter_schedules_are_listed_but_never_due(self) -> None:
-        # The meter schedule from UpKeep's documented "Get all PMs" response
-        # (developers.onupkeep.com/#get-all-pms): its meterDueFrequency /
-        # meterDueInterval describe the meter, not a calendar recurrence, and
-        # its endDate has passed. A running copy of it and a weekly calendar
-        # schedule sit next to it in the same template.
+        # A meter schedule shaped after the one in UpKeep's documented "Get a
+        # specific PM" response (developers.onupkeep.com/#get-a-specific-pm),
+        # with synthetic values: its meterDueFrequency / meterDueInterval
+        # describe the meter, not a calendar recurrence, and its endDate has
+        # passed. A running copy of it and a weekly calendar schedule sit next
+        # to it in the same template.
         meter_schedule = {
             "asset": "P-1",
-            "endDate": "2024-10-09T16:23:35.000Z",
-            "id": "65672e0c90176209662a4fc4",
-            "meter": "vXMGBoLMJv",
-            "meterConditionValue": 1000,
+            "endDate": "2025-12-22T08:00:00.000Z",
+            "id": "bf4c571eb5e50d756a15193d",
+            "meter": "n0Mf2DSUcV",
+            "meterConditionValue": 750,
             "meterDueFrequency": "weeks",
-            "meterDueInterval": 1,
-            "nextMeterReading": 1075,
-            "startDate": "2023-12-10T16:23:35.000Z",
+            "meterDueInterval": 2,
+            "startDate": "2025-04-07T08:00:00.000Z",
         }
         running_meter = {k: v for k, v in meter_schedule.items() if k != "endDate"}
         running_meter["id"] = "sch-meter-running"
@@ -295,7 +295,7 @@ class TestSchedulerWithoutCalendarInterval:
         }
         plans = parse_maintenance_plans(template, now=datetime(2026, 10, 16, tzinfo=UTC))
         assert [(p.id, p.active) for p in plans] == [
-            ("65672e0c90176209662a4fc4", False),
+            ("bf4c571eb5e50d756a15193d", False),
             ("sch-meter-running", True),
             ("sch-weekly", True),
         ]
@@ -306,6 +306,6 @@ class TestSchedulerWithoutCalendarInterval:
         assert [
             (p["plan_id"], p["active"]) for p in scheduler.plans_without_calendar_due_date()
         ] == [
-            ("65672e0c90176209662a4fc4", False),
+            ("bf4c571eb5e50d756a15193d", False),
             ("sch-meter-running", True),
         ]

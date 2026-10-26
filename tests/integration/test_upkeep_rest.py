@@ -463,7 +463,7 @@ class TestReadSpareParts:
 # Read spare parts for an asset (GET the asset, then each part it lists)
 # ---------------------------------------------------------------------------
 
-ASSET_ID = "fjQXLsOvG7"
+ASSET_ID = "8iqb8hStJt"
 ASSET_URL = f"{BASE}/api/v2/assets/{ASSET_ID}"
 PART_URL = f"{BASE}/api/v2/parts"
 REFUSED = "upkeep_spare_parts_refused"
@@ -477,27 +477,18 @@ def _sent(httpx_mock) -> list[str]:
 def _asset_body(**result: object) -> dict[str, object]:
     """Response of "Get a Specific Asset", GET /api/v2/assets/<ID>.
 
-    Taken from https://developers.onupkeep.com/, without the file objects and
-    ``customFields``. ``parts`` holds the IDs of the parts the asset lists.
+    Shaped after the documented response
+    (https://developers.onupkeep.com/#get-a-specific-asset), with synthetic
+    values and a subset of its keys. ``parts`` holds the IDs of the parts the
+    asset lists; the parent and sub-asset IDs next to it are not parts.
     Keyword arguments replace fields of ``result``.
     """
     record: dict[str, object] = {
         "id": ASSET_ID,
-        "serial": "S5614B09118",
-        "serialNumber": "SER-100",
-        "model": "Deluxe 5500",
-        "name": "The Ultra Power Generator",
-        "barcode": "S5614B09118",
-        "location": "OPkIOYYZ0F",
-        "status": "active",
-        "category": "Generators",
-        "parentAsset": "0lcpd45AKe",
-        "subAssets": ["z40xOYM9yd"],
-        "parts": ["ydOS2PdR3a"],
-        "files": ["sKrlT2f3mf", "Vgwf41LLg1"],
-        "formItems": ["Ia536KS4RZ"],
-        "updatedAt": "2017-11-16T15:01:01",
-        "createdAt": "2017-11-16T15:01:01",
+        "name": "Cooling water pump CWP-2",
+        "parentAsset": "QRFWg1fz1b",
+        "subAssets": ["McaNx1Zl4u"],
+        "parts": ["Wuy1TIHIfL"],
     }
     record.update(result)
     return {"success": True, "result": record}
@@ -506,26 +497,24 @@ def _asset_body(**result: object) -> dict[str, object]:
 def _part_body(part_id: object, **result: object) -> dict[str, object]:
     """Response of "Get a Specific Part", GET /api/v2/parts/<ID>, for ``part_id``.
 
-    Taken from https://developers.onupkeep.com/, without the image object and
-    ``customFieldsPart``. Keyword arguments replace fields of ``result``.
+    Shaped after the documented response
+    (https://developers.onupkeep.com/#get-a-specific-part), with synthetic
+    values and a subset of its keys: those the mapper reads, and the
+    ``partId``, ``partName``, ``serial``, ``minimumQuantity`` and ``location``
+    it must not read in their place. Keyword arguments replace fields of
+    ``result``.
     """
     record: dict[str, object] = {
         "id": part_id,
-        "name": "Flux Capacitor",
-        "description": "This is what makes time travel possible.",
-        "cost": "88.00",
-        "quantity": "5",
-        "minimumQuantity": "1",
-        "partId": "654a1b433dc9596ef9af2a1f",
-        "partName": "PT-1",
-        "serial": "40161502",
-        "area": "Center console",
-        "category": "Filter",
-        "location": "jmHFWGVgd1",
-        "createdByUser": "pCmWGVgfW",
-        "files": ["MUfUCa0JBo", "FGyvo6raqZ"],
-        "createdAt": "2017-10-23T23:51:58.097Z",
-        "updatedAt": "2017-10-23T23:51:58.097Z",
+        "name": "GS-45 seal cartridge",
+        "cost": "37.80",
+        "quantity": "6",
+        "minimumQuantity": "2",
+        "partId": "def8ec501103f8f3cab63802",
+        "partName": "Seal cartridge",
+        "serial": "SC45-20931",
+        "area": "Store 2, bin 14",
+        "location": "TvXIVf42fB",
     }
     record.update(result)
     return {"success": True, "result": record}
@@ -579,24 +568,24 @@ class TestReadSparePartsByAsset:
     @pytest.mark.asyncio
     async def test_reads_each_listed_part(self, httpx_mock, connector: UpKeepConnector) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp", _part_body("Qm7Tz2XbLp", name="Oil filter"))
 
         parts = await connector.read_spare_parts(asset_id=ASSET_ID)
 
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             f"{PART_URL}/Qm7Tz2XbLp",
         ]
         assert all(isinstance(p, SparePart) for p in parts)
-        # The documented part carries neither partNumber nor barcode: its id is the SKU.
-        assert [p.sku for p in parts] == ["ydOS2PdR3a", "Qm7Tz2XbLp"]
-        assert [p.name for p in parts] == ["Flux Capacitor", "Oil filter"]
-        assert parts[0].stock_quantity == 5
-        assert parts[0].unit_cost == 88.0
-        assert parts[0].warehouse_location == "Center console"
+        # Like the documented part, it carries neither partNumber nor barcode: its id is the SKU.
+        assert [p.sku for p in parts] == ["Wuy1TIHIfL", "Qm7Tz2XbLp"]
+        assert [p.name for p in parts] == ["GS-45 seal cartridge", "Oil filter"]
+        assert parts[0].stock_quantity == 6
+        assert parts[0].unit_cost == 37.8
+        assert parts[0].warehouse_location == "Store 2, bin 14"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("listed", ["missing", None, []], ids=["missing", "null", "empty"])
@@ -634,9 +623,9 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """A listed part UpKeep cannot return ends the read: no partial list."""
         await _connect(httpx_mock, connector)
-        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        listed = ["Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
         _mock_asset(httpx_mock, _asset_body(parts=listed))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp", status_code=404)
 
         with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as exc_info:
@@ -646,7 +635,7 @@ class TestReadSparePartsByAsset:
         assert "HTTP 404" in str(exc_info.value)
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             f"{PART_URL}/Qm7Tz2XbLp",
         ]
         assert _refusal(logs, "listed_part_not_found")["position"] == 1
@@ -658,19 +647,19 @@ class TestReadSparePartsByAsset:
         [
             pytest.param([ASSET_ID], id="body-array"),
             pytest.param({"success": True, "result": None}, id="result-null"),
-            pytest.param({"success": True, "result": ["ydOS2PdR3a"]}, id="result-array"),
-            pytest.param(_asset_body(parts="ydOS2PdR3a"), id="parts-string"),
-            pytest.param(_asset_body(parts={"id": "ydOS2PdR3a"}), id="parts-object"),
-            pytest.param(_asset_body(parts=["ydOS2PdR3a", 12345]), id="entry-number"),
-            pytest.param(_asset_body(parts=["ydOS2PdR3a", None]), id="entry-null"),
-            pytest.param(_asset_body(parts=["ydOS2PdR3a", ""]), id="entry-empty"),
+            pytest.param({"success": True, "result": ["Wuy1TIHIfL"]}, id="result-array"),
+            pytest.param(_asset_body(parts="Wuy1TIHIfL"), id="parts-string"),
+            pytest.param(_asset_body(parts={"id": "Wuy1TIHIfL"}), id="parts-object"),
+            pytest.param(_asset_body(parts=["Wuy1TIHIfL", 12345]), id="entry-number"),
+            pytest.param(_asset_body(parts=["Wuy1TIHIfL", None]), id="entry-null"),
+            pytest.param(_asset_body(parts=["Wuy1TIHIfL", ""]), id="entry-empty"),
             pytest.param(
-                _asset_body(parts=[{"id": "ydOS2PdR3a", "name": "Flux Capacitor"}]),
+                _asset_body(parts=[{"id": "Wuy1TIHIfL", "name": "GS-45 seal cartridge"}]),
                 id="entry-object",
             ),
-            pytest.param(_asset_body(parts=["ydOS2PdR3a", ".."]), id="entry-dot-segment"),
+            pytest.param(_asset_body(parts=["Wuy1TIHIfL", ".."]), id="entry-dot-segment"),
             pytest.param(
-                _asset_body(parts=["ydOS2PdR3a", f"../assets/{ASSET_ID}"]),
+                _asset_body(parts=["Wuy1TIHIfL", f"../assets/{ASSET_ID}"]),
                 id="entry-traversal",
             ),
             # Not this asset's record: it cannot say the asset lists no parts.
@@ -694,16 +683,16 @@ class TestReadSparePartsByAsset:
 
         assert _sent(httpx_mock) == [ASSET_URL]
         _refusal(logs, "malformed_asset")
-        _assert_value_free(str(exc_info.value), logs, "ydOS2PdR3a")
+        _assert_value_free(str(exc_info.value), logs, "Wuy1TIHIfL")
 
     @pytest.mark.asyncio
     async def test_a_refusal_with_a_sku_names_neither_the_sku_nor_the_parts(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
         await _connect(httpx_mock, connector)
-        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp"]
+        listed = ["Wuy1TIHIfL", "Qm7Tz2XbLp"]
         _mock_asset(httpx_mock, _asset_body(parts=listed))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp", status_code=404)
 
         with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as exc_info:
@@ -745,10 +734,12 @@ class TestReadSparePartsByAsset:
     @pytest.mark.parametrize(
         "body",
         [
-            pytest.param(["ydOS2PdR3a"], id="body-array"),
+            pytest.param(["Wuy1TIHIfL"], id="body-array"),
             pytest.param({"success": True, "result": None}, id="result-null"),
-            pytest.param({"success": True, "result": ["ydOS2PdR3a"]}, id="result-array"),
-            pytest.param({"success": True, "result": {"name": "Flux Capacitor"}}, id="no-id"),
+            pytest.param({"success": True, "result": ["Wuy1TIHIfL"]}, id="result-array"),
+            pytest.param(
+                {"success": True, "result": {"name": "GS-45 seal cartridge"}}, id="no-id"
+            ),
             pytest.param(_part_body(12345), id="id-number"),
         ],
     )
@@ -756,8 +747,8 @@ class TestReadSparePartsByAsset:
         self, httpx_mock, connector: UpKeepConnector, body: object
     ) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a", body)
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL", body)
 
         with (
             structlog.testing.capture_logs() as logs,
@@ -765,9 +756,9 @@ class TestReadSparePartsByAsset:
         ):
             await connector.read_spare_parts(asset_id=ASSET_ID)
 
-        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a"]
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/Wuy1TIHIfL"]
         assert _refusal(logs, "malformed_part")["position"] == 0
-        _assert_value_free(str(exc_info.value), logs, "ydOS2PdR3a", "Qm7Tz2XbLp")
+        _assert_value_free(str(exc_info.value), logs, "Wuy1TIHIfL", "Qm7Tz2XbLp")
 
     @pytest.mark.asyncio
     async def test_another_parts_record_refuses_the_whole_read(
@@ -775,8 +766,8 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """A part request answered with another part's record is an inconsistent association."""
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a", _part_body("Hc4Wv8NsJd"))
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL", _part_body("Hc4Wv8NsJd"))
 
         with (
             structlog.testing.capture_logs() as logs,
@@ -784,25 +775,25 @@ class TestReadSparePartsByAsset:
         ):
             await connector.read_spare_parts(asset_id=ASSET_ID)
 
-        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a"]
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/Wuy1TIHIfL"]
         assert _refusal(logs, "part_id_mismatch")["position"] == 0
-        _assert_value_free(str(exc_info.value), logs, "ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd")
+        _assert_value_free(str(exc_info.value), logs, "Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd")
 
     @pytest.mark.asyncio
     async def test_a_part_listed_twice_is_fetched_and_returned_once(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp", "ydOS2PdR3a"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp", "Wuy1TIHIfL"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp")
 
         parts = await connector.read_spare_parts(asset_id=ASSET_ID)
 
-        assert [p.sku for p in parts] == ["ydOS2PdR3a", "Qm7Tz2XbLp"]
+        assert [p.sku for p in parts] == ["Wuy1TIHIfL", "Qm7Tz2XbLp"]
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             f"{PART_URL}/Qm7Tz2XbLp",
         ]
 
@@ -812,8 +803,8 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """Both filters hold: the listed part with that SKU, and only it."""
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp", _part_body("Qm7Tz2XbLp", name="Oil filter"))
 
         parts = await connector.read_spare_parts(asset_id=ASSET_ID, sku="Qm7Tz2XbLp")
@@ -826,14 +817,14 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """A SKU the asset does not list matches none of its parts; the inventory is not read."""
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp")
 
         assert await connector.read_spare_parts(asset_id=ASSET_ID, sku="SKF-6205") == []
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             f"{PART_URL}/Qm7Tz2XbLp",
         ]
 
@@ -851,12 +842,12 @@ class TestReadSparePartsByAsset:
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a", status_code=500)
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL", status_code=500)
 
         with pytest.raises(ConnectorError, match=r"^UpKeep GET part failed: HTTP 500$"):
             await connector.read_spare_parts(asset_id=ASSET_ID)
-        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a"]
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/Wuy1TIHIfL"]
 
     @pytest.mark.asyncio
     async def test_asset_auth_failure(self, httpx_mock, connector: UpKeepConnector) -> None:
@@ -869,8 +860,8 @@ class TestReadSparePartsByAsset:
     @pytest.mark.asyncio
     async def test_part_auth_failure(self, httpx_mock, connector: UpKeepConnector) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a", status_code=401)
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL", status_code=401)
 
         with pytest.raises(ConnectorAuthError, match="invalid"):
             await connector.read_spare_parts(asset_id=ASSET_ID)
@@ -972,9 +963,9 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """The mapping error is raised as a typed refusal that repeats no vendor value."""
         await _connect(httpx_mock, connector)
-        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        listed = ["Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
         _mock_asset(httpx_mock, _asset_body(parts=listed))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         _mock_part(httpx_mock, "Qm7Tz2XbLp", _part_body("Qm7Tz2XbLp", **fields))
 
         with (
@@ -991,7 +982,7 @@ class TestReadSparePartsByAsset:
         # exception chain may keep it.
         assert exc_info.value.__cause__ is None
         assert exc_info.value.__context__ is None
-        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a", f"{PART_URL}/Qm7Tz2XbLp"]
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/Wuy1TIHIfL", f"{PART_URL}/Qm7Tz2XbLp"]
         refusal = _refusal(logs, "malformed_part")
         assert refusal["position"] == 1
         assert refusal["error_type"] in {"ValueError", "TypeError", "ValidationError"}
@@ -1017,9 +1008,9 @@ class TestReadSparePartsByAsset:
         monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
         exc_type = httpx.ConnectError if error == "connect" else httpx.ReadTimeout
         await _connect(httpx_mock, connector)
-        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        listed = ["Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
         _mock_asset(httpx_mock, _asset_body(parts=listed))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         for _ in range(4):  # the request and its three retries
             httpx_mock.add_exception(
                 exc_type("connection lost"), method="GET", url=f"{PART_URL}/Qm7Tz2XbLp"
@@ -1030,7 +1021,7 @@ class TestReadSparePartsByAsset:
 
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             *[f"{PART_URL}/Qm7Tz2XbLp"] * 4,
         ]
         retries = [e for e in logs if e["event"] == "http_network_retry"]
@@ -1051,9 +1042,9 @@ class TestReadSparePartsByAsset:
 
         monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
         await _connect(httpx_mock, connector)
-        listed = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+        listed = ["Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
         _mock_asset(httpx_mock, _asset_body(parts=listed))
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
         for _ in range(4):  # the request and its three retries
             _mock_part(httpx_mock, "Qm7Tz2XbLp", status_code=503)
 
@@ -1065,7 +1056,7 @@ class TestReadSparePartsByAsset:
 
         assert _sent(httpx_mock) == [
             ASSET_URL,
-            f"{PART_URL}/ydOS2PdR3a",
+            f"{PART_URL}/Wuy1TIHIfL",
             *[f"{PART_URL}/Qm7Tz2XbLp"] * 4,
         ]
         retries = [e for e in logs if e["event"] == "http_rate_limit_retry"]
@@ -1078,9 +1069,9 @@ class TestReadSparePartsByAsset:
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a", "Qm7Tz2XbLp"]))
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL", "Qm7Tz2XbLp"]))
         httpx_mock.add_response(
-            method="GET", url=f"{PART_URL}/ydOS2PdR3a", text="<html>maintenance</html>"
+            method="GET", url=f"{PART_URL}/Wuy1TIHIfL", text="<html>maintenance</html>"
         )
 
         with (
@@ -1090,7 +1081,7 @@ class TestReadSparePartsByAsset:
             await connector.read_spare_parts(asset_id=ASSET_ID)
 
         assert str(exc_info.value).startswith("UpKeep returned a malformed record for a part")
-        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/ydOS2PdR3a"]
+        assert _sent(httpx_mock) == [ASSET_URL, f"{PART_URL}/Wuy1TIHIfL"]
         assert _refusal(logs, "malformed_part")["position"] == 0
         assert "maintenance" not in str(exc_info.value)
 
@@ -1099,8 +1090,8 @@ class TestReadSparePartsByAsset:
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a"]))
-        _mock_part(httpx_mock, "ydOS2PdR3a", _part_body("ydOS2PdR3a", partNumber="6205"))
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL"]))
+        _mock_part(httpx_mock, "Wuy1TIHIfL", _part_body("Wuy1TIHIfL", partNumber="6205"))
         parts = await connector.read_spare_parts(asset_id=ASSET_ID, sku=6205)  # type: ignore[arg-type]
         assert [p.sku for p in parts] == ["6205"]
 
@@ -1113,17 +1104,17 @@ class TestReadSparePartsByAsset:
 
         monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
         await _connect(httpx_mock, connector)
-        _mock_asset(httpx_mock, _asset_body(parts=["ydOS2PdR3a"]))
-        httpx_mock.add_response(method="GET", url=f"{PART_URL}/ydOS2PdR3a", status_code=429)
-        _mock_part(httpx_mock, "ydOS2PdR3a")
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL"]))
+        httpx_mock.add_response(method="GET", url=f"{PART_URL}/Wuy1TIHIfL", status_code=429)
+        _mock_part(httpx_mock, "Wuy1TIHIfL")
 
         with structlog.testing.capture_logs() as logs:
             parts = await connector.read_spare_parts(asset_id=ASSET_ID)
 
-        assert [p.sku for p in parts] == ["ydOS2PdR3a"]
+        assert [p.sku for p in parts] == ["Wuy1TIHIfL"]
         (retry,) = [e for e in logs if e["event"] == "http_rate_limit_retry"]
         assert retry["url"] == "/api/v2/parts/<listed part>"
-        for value in ("ydOS2PdR3a", BASE):
+        for value in ("Wuy1TIHIfL", BASE):
             assert value not in repr(logs)
 
 
@@ -1138,10 +1129,11 @@ PM_URL = f"{BASE}/api/v2/pm?includes=schedules&pageSize=100"
 class TestReadMaintenancePlans:
     @pytest.mark.asyncio
     async def test_read_maintenance_plans(self, httpx_mock, connector: UpKeepConnector) -> None:
-        """The "Get all PMs" response (developers.onupkeep.com/#get-all-pms).
+        """A "Get all PMs" page (developers.onupkeep.com/#get-all-pms).
 
-        The documented template is soft-deleted; its deletedAt/deletedBy
-        markers are left out so it reads as a live one.
+        Shaped after the documented response, with synthetic values and a
+        subset of its keys. The calendar schedule's cadence differs from its
+        recurrence, so the interval can only come from ``repeatFrequency``.
         """
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
@@ -1150,85 +1142,45 @@ class TestReadMaintenancePlans:
             json={
                 "data": [
                     {
-                        "__v": 0,
-                        "_id": "6568e5bf7a771cd3d83b337c",
-                        "category": "Inspection",
-                        "createFirstWO": True,
-                        "createdAt": "2023-11-30T19:42:55.984Z",
-                        "createdBy": "N5lbFIv8LW",
-                        "estimatedTime": 100,
-                        "files": ["trfyrp53kw"],
-                        "images": [],
-                        "legacyPMId": "t69EvI5kMq",
-                        "mainDescription": "Oil change #FP-ZFP-1",
-                        "name": "Oil change #FP-ZFP-1",
-                        "note": "Oil change for asset #FP-ZFP-1",
-                        "partInventories": [],
-                        "priority": 3,
-                        "requiresSignature": False,
-                        "role": "JtdU6sKOwD",
+                        "_id": "a2755281a950e9cc8ddff7aa",
+                        "estimatedTime": 6,
+                        "name": "CWP-2 quarterly service",
                         "schedules": [
                             {
-                                "asset": "BcmoxOY4mE",
-                                "assignee": "Fu8PEA9P9G",
-                                "bySetPosition": [],
+                                "asset": "8iqb8hStJt",
                                 "cadenceFreq": "DAILY",
-                                "cadenceInterval": 3,
-                                "cadenceType": "manual",
-                                "endDate": "2024-10-09T08:42:24.000Z",
-                                "excludedates": [],
-                                "id": "65672e0c90176209662a4fc2",
-                                "includeDates": [],
-                                "isBasedOnCompletion": False,
-                                "location": "c78MVjkbvh",
-                                "monthdays": [],
-                                "nextDueDate": "2023-12-11T08:42:24.000Z",
-                                "nextTriggerDate": "2023-12-10T08:42:24.000Z",
-                                "pmTemplate": "65672e0c90176209662a4fc1",
+                                "cadenceInterval": 7,
+                                "endDate": "2026-01-05T07:00:00.000Z",
+                                "id": "f78b0de6a74bf19044640826",
+                                "location": "HZsOn28jvL",
+                                "pmTemplate": "a2755281a950e9cc8ddff7aa",
                                 "repeatFrequency": "MONTHLY",
-                                "repeatInterval": 7,
-                                "role": "PUlegnw3ml",
+                                "repeatInterval": 3,
                                 "scheduleType": "EVERY_N_MONTHS",
-                                "startDate": "2023-12-10T08:42:24.000Z",
-                                "supportUsers": ["IDb8mbMV9l"],
-                                "team": "SFejxVqERT",
-                                "timeZone": "Asia/Kolkata",
-                                "weekdays": [],
+                                "startDate": "2025-01-06T07:00:00.000Z",
                             },
                             {
-                                "asset": "BcmoxOY4mE",
-                                "assignee": "Fu8PEA9P9G",
-                                "bySetPosition": [],
-                                "endDate": "2024-10-09T16:23:35.000Z",
-                                "excludedates": [],
-                                "id": "65672e0c90176209662a4fc4",
-                                "includeDates": [],
-                                "location": "c78MVjkbvh",
-                                "meter": "vXMGBoLMJv",
-                                "meterConditionValue": 10000,
+                                "asset": "8iqb8hStJt",
+                                "endDate": "2026-01-05T07:30:00.000Z",
+                                "id": "3b9afb3de631bb2aa68a68f6",
+                                "location": "HZsOn28jvL",
+                                "meter": "2g5tVrrs0R",
+                                "meterConditionValue": 2000,
                                 "meterDueFrequency": "weeks",
-                                "meterDueInterval": 1,
-                                "monthdays": [],
-                                "nextMeterReading": 45750,
-                                "pmTemplate": "65672e0c90176209662a4fc1",
-                                "role": "PUlegnw3ml",
-                                "startDate": "2023-12-10T16:23:35.000Z",
-                                "supportUsers": ["IDb8mbMV9l"],
-                                "team": "SFejxVqERT",
-                                "timeZone": "Asia/Kolkata",
-                                "weekdays": [],
+                                "meterDueInterval": 2,
+                                "pmTemplate": "a2755281a950e9cc8ddff7aa",
+                                "startDate": "2025-01-06T07:30:00.000Z",
                             },
                         ],
                         "tasks": [],
-                        "updatedAt": "2023-11-30T19:43:30.230Z",
                     }
                 ],
                 "pagination": {
                     "currentPage": 1,
-                    "currentPageSize": 25,
+                    "currentPageSize": 100,
                     "nextPage": None,
                     "previousPage": None,
-                    "totalCount": 2,
+                    "totalCount": 1,
                     "totalPages": 1,
                 },
                 "success": True,
@@ -1236,12 +1188,12 @@ class TestReadMaintenancePlans:
         )
         plans = await connector.read_maintenance_plans()
         assert all(isinstance(p, MaintenancePlan) for p in plans)
-        assert [p.id for p in plans] == ["65672e0c90176209662a4fc2", "65672e0c90176209662a4fc4"]
-        assert {p.asset_id for p in plans} == {"BcmoxOY4mE"}
-        assert {p.name for p in plans} == {"Oil change #FP-ZFP-1"}
-        assert plans[0].interval == Interval(months=7)
+        assert [p.id for p in plans] == ["f78b0de6a74bf19044640826", "3b9afb3de631bb2aa68a68f6"]
+        assert {p.asset_id for p in plans} == {"8iqb8hStJt"}
+        assert {p.name for p in plans} == {"CWP-2 quarterly service"}
+        assert plans[0].interval == Interval(months=3)
         assert plans[1].interval == Interval()  # meter-triggered
-        assert plans[0].estimated_duration_hours == 100
+        assert plans[0].estimated_duration_hours == 6
 
     @pytest.mark.asyncio
     async def test_read_maintenance_plans_pagination(
