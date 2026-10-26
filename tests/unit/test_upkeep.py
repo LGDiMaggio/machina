@@ -224,94 +224,54 @@ class TestParseMaintenancePlans:
     """Verify UpKeep PM template JSON → MaintenancePlan conversion."""
 
     def test_documented_template_maps_one_plan_per_schedule(self) -> None:
-        # One template from "Get all PMs" (developers.onupkeep.com/#get-all-pms),
-        # without the deletedAt/deletedBy markers of the documented example.
+        # One template shaped after "Get all PMs" (developers.onupkeep.com/#get-all-pms),
+        # with synthetic values and a subset of its keys.
         raw = {
-            "__v": 0,
-            "_id": "6568e5bf7a771cd3d83b337c",
-            "category": "Inspection",
-            "createFirstWO": True,
-            "createdAt": "2023-11-30T19:42:55.984Z",
-            "createdBy": "N5lbFIv8LW",
-            "estimatedTime": 100,
-            "files": ["trfyrp53kw"],
-            "images": [],
-            "legacyPMId": "t69EvI5kMq",
-            "mainDescription": "Oil change #FP-ZFP-1",
-            "name": "Oil change #FP-ZFP-1",
-            "note": "Oil change for asset #FP-ZFP-1",
-            "partInventories": [],
-            "priority": 3,
-            "requiresSignature": False,
-            "role": "JtdU6sKOwD",
+            "_id": "a2755281a950e9cc8ddff7aa",
+            "estimatedTime": 6,
+            "name": "CWP-2 quarterly service",
             "schedules": [
                 {
-                    "asset": "BcmoxOY4mE",
-                    "assignee": "Fu8PEA9P9G",
-                    "bySetPosition": [],
+                    "asset": "8iqb8hStJt",
                     "cadenceFreq": "DAILY",
-                    "cadenceInterval": 3,
-                    "cadenceType": "manual",
-                    "endDate": "2024-10-09T08:42:24.000Z",
-                    "excludedates": [],
-                    "id": "65672e0c90176209662a4fc2",
-                    "includeDates": [],
-                    "isBasedOnCompletion": False,
-                    "location": "c78MVjkbvh",
-                    "monthdays": [],
-                    "nextDueDate": "2023-12-11T08:42:24.000Z",
-                    "nextTriggerDate": "2023-12-10T08:42:24.000Z",
-                    "pmTemplate": "65672e0c90176209662a4fc1",
+                    "cadenceInterval": 7,
+                    "endDate": "2026-01-05T07:00:00.000Z",
+                    "id": "f78b0de6a74bf19044640826",
+                    "location": "HZsOn28jvL",
+                    "pmTemplate": "a2755281a950e9cc8ddff7aa",
                     "repeatFrequency": "MONTHLY",
-                    "repeatInterval": 7,
-                    "role": "PUlegnw3ml",
+                    "repeatInterval": 3,
                     "scheduleType": "EVERY_N_MONTHS",
-                    "startDate": "2023-12-10T08:42:24.000Z",
-                    "supportUsers": ["IDb8mbMV9l"],
-                    "team": "SFejxVqERT",
-                    "timeZone": "Asia/Kolkata",
-                    "weekdays": [],
+                    "startDate": "2025-01-06T07:00:00.000Z",
                 },
                 {
-                    "asset": "BcmoxOY4mE",
-                    "assignee": "Fu8PEA9P9G",
-                    "bySetPosition": [],
-                    "endDate": "2024-10-09T16:23:35.000Z",
-                    "excludedates": [],
-                    "id": "65672e0c90176209662a4fc4",
-                    "includeDates": [],
-                    "location": "c78MVjkbvh",
-                    "meter": "vXMGBoLMJv",
-                    "meterConditionValue": 10000,
+                    "asset": "8iqb8hStJt",
+                    "endDate": "2026-01-05T07:30:00.000Z",
+                    "id": "3b9afb3de631bb2aa68a68f6",
+                    "location": "HZsOn28jvL",
+                    "meter": "2g5tVrrs0R",
+                    "meterConditionValue": 2000,
                     "meterDueFrequency": "weeks",
-                    "meterDueInterval": 1,
-                    "monthdays": [],
-                    "nextMeterReading": 45750,
-                    "pmTemplate": "65672e0c90176209662a4fc1",
-                    "role": "PUlegnw3ml",
-                    "startDate": "2023-12-10T16:23:35.000Z",
-                    "supportUsers": ["IDb8mbMV9l"],
-                    "team": "SFejxVqERT",
-                    "timeZone": "Asia/Kolkata",
-                    "weekdays": [],
+                    "meterDueInterval": 2,
+                    "pmTemplate": "a2755281a950e9cc8ddff7aa",
+                    "startDate": "2025-01-06T07:30:00.000Z",
                 },
             ],
             "tasks": [],
-            "updatedAt": "2023-11-30T19:43:30.230Z",
         }
-        # A moment between the documented schedules' startDate and endDate.
-        plans = _parse_maintenance_plans(raw, now=datetime(2024, 1, 1, tzinfo=UTC))
+        # A moment between the schedules' startDate and endDate.
+        plans = _parse_maintenance_plans(raw, now=datetime(2025, 6, 1, tzinfo=UTC))
         assert len(plans) == 2
         calendar, meter = plans
         assert isinstance(calendar, MaintenancePlan)
-        assert calendar.id == "65672e0c90176209662a4fc2"
-        assert calendar.asset_id == "BcmoxOY4mE"
-        assert calendar.name == "Oil change #FP-ZFP-1"
-        assert calendar.interval == Interval(months=7)
+        assert calendar.id == "f78b0de6a74bf19044640826"
+        assert calendar.asset_id == "8iqb8hStJt"
+        assert calendar.name == "CWP-2 quarterly service"
+        assert calendar.interval == Interval(months=3)
         assert calendar.tasks == []
-        assert calendar.estimated_duration_hours == 100
+        assert calendar.estimated_duration_hours == 6
         assert calendar.active is True
-        assert meter.id == "65672e0c90176209662a4fc4"
+        assert meter.id == "3b9afb3de631bb2aa68a68f6"
         assert meter.interval == Interval()
 
 

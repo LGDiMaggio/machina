@@ -244,11 +244,11 @@ class TestMaximoRefusesTheAssetFilter:
 # ---------------------------------------------------------------------------
 
 UPKEEP = "https://api.onupkeep.com"
-UPKEEP_ASSET_ID = "fjQXLsOvG7"
+UPKEEP_ASSET_ID = "8iqb8hStJt"
 UPKEEP_PUMP = Asset(
-    id=UPKEEP_ASSET_ID, name="The Ultra Power Generator", type=AssetType.ROTATING_EQUIPMENT
+    id=UPKEEP_ASSET_ID, name="Cooling water pump CWP-2", type=AssetType.ROTATING_EQUIPMENT
 )
-_LISTED = ["ydOS2PdR3a", "Qm7Tz2XbLp"]
+_LISTED = ["Wuy1TIHIfL", "Qm7Tz2XbLp"]
 
 
 @pytest.fixture
@@ -265,7 +265,7 @@ def _mock_upkeep_asset_parts(httpx_mock) -> None:
         url=f"{UPKEEP}/api/v2/assets/{UPKEEP_ASSET_ID}",
         json={"success": True, "result": {"id": UPKEEP_ASSET_ID, "parts": _LISTED}},
     )
-    for part_id, name in zip(_LISTED, ["Flux Capacitor", "Oil filter"], strict=True):
+    for part_id, name in zip(_LISTED, ["GS-45 seal cartridge", "Oil filter"], strict=True):
         httpx_mock.add_response(
             url=f"{UPKEEP}/api/v2/parts/{part_id}",
             json={"success": True, "result": {"id": part_id, "name": name, "quantity": "5"}},
@@ -332,7 +332,7 @@ def _mock_upkeep_asset_with_unmappable_part(httpx_mock) -> None:
     )
     httpx_mock.add_response(
         url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
-        json={"success": True, "result": {"id": _LISTED[0], "name": "Flux", "quantity": "5"}},
+        json={"success": True, "result": {"id": _LISTED[0], "name": "GS-45", "quantity": "5"}},
     )
     httpx_mock.add_response(
         url=f"{UPKEEP}/api/v2/parts/{_LISTED[1]}",
@@ -396,7 +396,7 @@ class TestUpKeepRefusesAPartialRead:
         )
         httpx_mock.add_response(
             url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
-            json={"success": True, "result": {"id": _LISTED[0], "name": "Flux", "quantity": "5"}},
+            json={"success": True, "result": {"id": _LISTED[0], "name": "GS-45", "quantity": "5"}},
         )
         for _ in range(4):  # the request and its three retries
             httpx_mock.add_exception(
@@ -415,11 +415,11 @@ class TestUpKeepRefusesAPartialRead:
             "**Spare Parts:** not checked: the spare-parts lookup for this asset failed."
             in retrieved.splitlines()
         )
-        assert "Flux" not in retrieved
+        assert "GS-45" not in retrieved
 
 
 _PREFETCH_BUDGET = "machina.agent.runtime._SPARE_PARTS_PREFETCH_BUDGET"
-_THREE_LISTED = ["ydOS2PdR3a", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
+_THREE_LISTED = ["Wuy1TIHIfL", "Qm7Tz2XbLp", "Hc4Wv8NsJd"]
 
 
 def _upkeep_requests(httpx_mock) -> list[str]:
@@ -451,7 +451,7 @@ class TestUpKeepPrefetchDeadline:
         )
         httpx_mock.add_response(
             url=f"{UPKEEP}/api/v2/parts/{_THREE_LISTED[0]}",
-            json={"success": True, "result": {"id": _THREE_LISTED[0], "name": "Flux"}},
+            json={"success": True, "result": {"id": _THREE_LISTED[0], "name": "GS-45"}},
         )
         pending: list[str] = []
 
@@ -484,7 +484,7 @@ class TestUpKeepPrefetchDeadline:
             "in the time this turn allows it. The check_spare_parts tool runs the full lookup."
             in retrieved.splitlines()
         )
-        assert "Flux" not in retrieved
+        assert "GS-45" not in retrieved
         assert "returned none" not in retrieved
 
     @pytest.mark.asyncio
@@ -513,7 +513,7 @@ class TestUpKeepPrefetchDeadline:
         httpx_mock.add_response(url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}", status_code=503)
         httpx_mock.add_response(  # the retry, which the deadline must cancel
             url=f"{UPKEEP}/api/v2/parts/{_LISTED[0]}",
-            json={"success": True, "result": {"id": _LISTED[0], "name": "Flux"}},
+            json={"success": True, "result": {"id": _LISTED[0], "name": "GS-45"}},
             is_optional=True,
         )
         agent = _agent(upkeep, UPKEEP_PUMP)

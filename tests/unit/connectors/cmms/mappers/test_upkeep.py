@@ -120,26 +120,18 @@ class TestParseSparePartSku:
 def _docs_asset_body(**result: Any) -> dict[str, Any]:
     """Response of "Get a Specific Asset", GET /api/v2/assets/<ID>.
 
-    Taken from https://developers.onupkeep.com/, without the file objects and
-    ``customFields``. ``parts`` holds the IDs of the parts the asset lists.
+    Shaped after the documented response
+    (https://developers.onupkeep.com/#get-a-specific-asset), with synthetic
+    values and a subset of its keys. ``parts`` holds the IDs of the parts the
+    asset lists; the parent and sub-asset IDs next to it are not parts.
     Keyword arguments replace fields of ``result``.
     """
     record: dict[str, Any] = {
-        "id": "fjQXLsOvG7",
-        "serialNumber": "SER-100",
-        "model": "Deluxe 5500",
-        "name": "The Ultra Power Generator",
-        "barcode": "S5614B09118",
-        "location": "OPkIOYYZ0F",
-        "status": "active",
-        "category": "Generators",
-        "parentAsset": "0lcpd45AKe",
-        "subAssets": ["z40xOYM9yd"],
-        "parts": ["ydOS2PdR3a"],
-        "files": ["sKrlT2f3mf", "Vgwf41LLg1"],
-        "formItems": ["Ia536KS4RZ"],
-        "updatedAt": "2017-11-16T15:01:01",
-        "createdAt": "2017-11-16T15:01:01",
+        "id": "8iqb8hStJt",
+        "name": "Cooling water pump CWP-2",
+        "parentAsset": "QRFWg1fz1b",
+        "subAssets": ["McaNx1Zl4u"],
+        "parts": ["Wuy1TIHIfL"],
     }
     record.update(result)
     return {"success": True, "result": record}
@@ -148,44 +140,42 @@ def _docs_asset_body(**result: Any) -> dict[str, Any]:
 def _docs_part_body(**result: Any) -> dict[str, Any]:
     """Response of "Get a Specific Part", GET /api/v2/parts/<ID>.
 
-    Taken from https://developers.onupkeep.com/, without the image object and
-    ``customFieldsPart``. Keyword arguments replace fields of ``result``.
+    Shaped after the documented response
+    (https://developers.onupkeep.com/#get-a-specific-part), with synthetic
+    values and a subset of its keys: those the mapper reads, and the
+    ``partId``, ``partName``, ``serial``, ``minimumQuantity`` and ``location``
+    it must not read in their place. Keyword arguments replace fields of
+    ``result``.
     """
     record: dict[str, Any] = {
-        "id": "1YHUWGVgdC",
-        "name": "Flux Capacitor",
-        "description": "This is what makes time travel possible.",
-        "cost": "88.00",
-        "quantity": "5",
-        "minimumQuantity": "1",
-        "partId": "654a1b433dc9596ef9af2a1f",
-        "partName": "PT-1",
-        "serial": "40161502",
-        "area": "Center console",
-        "category": "Filter",
-        "location": "jmHFWGVgd1",
-        "createdByUser": "pCmWGVgfW",
-        "files": ["MUfUCa0JBo", "FGyvo6raqZ"],
-        "createdAt": "2017-10-23T23:51:58.097Z",
-        "updatedAt": "2017-10-23T23:51:58.097Z",
+        "id": "Wuy1TIHIfL",
+        "name": "GS-45 seal cartridge",
+        "cost": "37.80",
+        "quantity": "6",
+        "minimumQuantity": "2",
+        "partId": "def8ec501103f8f3cab63802",
+        "partName": "Seal cartridge",
+        "serial": "SC45-20931",
+        "area": "Store 2, bin 14",
+        "location": "TvXIVf42fB",
     }
     record.update(result)
     return {"success": True, "result": record}
 
 
-_DOCS_ASSET_ID = "fjQXLsOvG7"
+_DOCS_ASSET_ID = "8iqb8hStJt"
 
 
 class TestParseAssetPartIds:
     """The asset's ``parts`` list holds the IDs of the parts UpKeep associates with it."""
 
     def test_documented_asset(self) -> None:
-        assert parse_asset_part_ids(_docs_asset_body(), _DOCS_ASSET_ID) == ["ydOS2PdR3a"]
+        assert parse_asset_part_ids(_docs_asset_body(), _DOCS_ASSET_ID) == ["Wuy1TIHIfL"]
 
     def test_record_outside_result(self) -> None:
         """A body without ``result`` is read as the record, as the connector's reads do."""
         record = _docs_asset_body()["result"]
-        assert parse_asset_part_ids(record, _DOCS_ASSET_ID) == ["ydOS2PdR3a"]
+        assert parse_asset_part_ids(record, _DOCS_ASSET_ID) == ["Wuy1TIHIfL"]
 
     @pytest.mark.parametrize("parts", ["missing", None, []], ids=["missing", "null", "empty"])
     def test_no_parts_listed_is_an_empty_association(self, parts: object) -> None:
@@ -215,19 +205,19 @@ class TestParseAssetPartIds:
     @pytest.mark.parametrize(
         "body",
         [
-            pytest.param(["ydOS2PdR3a"], id="body-array"),
-            pytest.param("ydOS2PdR3a", id="body-string"),
+            pytest.param(["Wuy1TIHIfL"], id="body-array"),
+            pytest.param("Wuy1TIHIfL", id="body-string"),
             pytest.param(None, id="body-null"),
             pytest.param({"success": True, "result": None}, id="result-null"),
-            pytest.param({"success": True, "result": ["ydOS2PdR3a"]}, id="result-array"),
-            pytest.param({"success": True, "result": "fjQXLsOvG7"}, id="result-string"),
-            pytest.param(_docs_asset_body(parts="ydOS2PdR3a"), id="parts-string"),
-            pytest.param(_docs_asset_body(parts={"id": "ydOS2PdR3a"}), id="parts-object"),
+            pytest.param({"success": True, "result": ["Wuy1TIHIfL"]}, id="result-array"),
+            pytest.param({"success": True, "result": "8iqb8hStJt"}, id="result-string"),
+            pytest.param(_docs_asset_body(parts="Wuy1TIHIfL"), id="parts-string"),
+            pytest.param(_docs_asset_body(parts={"id": "Wuy1TIHIfL"}), id="parts-object"),
             pytest.param(_docs_asset_body(parts=[12345]), id="entry-number"),
             pytest.param(_docs_asset_body(parts=[None]), id="entry-null"),
             pytest.param(_docs_asset_body(parts=[True]), id="entry-boolean"),
             pytest.param(
-                _docs_asset_body(parts=[{"id": "ydOS2PdR3a", "name": "Flux Capacitor"}]),
+                _docs_asset_body(parts=[{"id": "Wuy1TIHIfL", "name": "GS-45 seal cartridge"}]),
                 id="entry-object",
             ),
         ],
@@ -238,7 +228,7 @@ class TestParseAssetPartIds:
 
     def test_empty_entry_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
-            parse_asset_part_ids(_docs_asset_body(parts=["ydOS2PdR3a", ""]), _DOCS_ASSET_ID)
+            parse_asset_part_ids(_docs_asset_body(parts=["Wuy1TIHIfL", ""]), _DOCS_ASSET_ID)
 
 
 class TestParsePartRecord:
@@ -246,21 +236,21 @@ class TestParsePartRecord:
 
     def test_documented_part(self) -> None:
         part_id, record = parse_part_record(_docs_part_body())
-        assert part_id == "1YHUWGVgdC"
-        assert record["name"] == "Flux Capacitor"
+        assert part_id == "Wuy1TIHIfL"
+        assert record["name"] == "GS-45 seal cartridge"
 
     def test_record_outside_result(self) -> None:
         part_id, record = parse_part_record(_docs_part_body()["result"])
-        assert part_id == "1YHUWGVgdC"
-        assert record["name"] == "Flux Capacitor"
+        assert part_id == "Wuy1TIHIfL"
+        assert record["name"] == "GS-45 seal cartridge"
 
     @pytest.mark.parametrize(
         "body",
         [
-            pytest.param(["1YHUWGVgdC"], id="body-array"),
+            pytest.param(["Wuy1TIHIfL"], id="body-array"),
             pytest.param(None, id="body-null"),
             pytest.param({"success": True, "result": None}, id="result-null"),
-            pytest.param({"success": True, "result": ["1YHUWGVgdC"]}, id="result-array"),
+            pytest.param({"success": True, "result": ["Wuy1TIHIfL"]}, id="result-array"),
             pytest.param(_docs_part_body(id=12345), id="id-number"),
         ],
     )
@@ -277,90 +267,48 @@ class TestParsePartRecord:
             parse_part_record(body)
 
 
-# Both documented schedules run from 2023-12-10 to 2024-10-09.
-DURING_SCHEDULES = datetime(2024, 1, 1, tzinfo=UTC)
-AFTER_SCHEDULES = datetime(2024, 10, 10, tzinfo=UTC)
+# Both schedules run from 2025-03-03 to 2026-03-02.
+DURING_SCHEDULES = datetime(2025, 6, 1, tzinfo=UTC)
+AFTER_SCHEDULES = datetime(2026, 3, 3, tzinfo=UTC)
 
 
 def _docs_pm_template() -> dict[str, Any]:
     """Response of "Get a specific PM" (#get-a-specific-pm), GET /api/v2/pm/:id.
 
-    Taken from https://developers.onupkeep.com/ — one calendar schedule and
-    one meter schedule on the same asset.
+    Shaped after https://developers.onupkeep.com/#get-a-specific-pm, with
+    synthetic values and a subset of its keys: a pump's daily round, with one
+    calendar schedule and one meter schedule on the same asset. A schedule's
+    ``location`` is not its asset.
     """
     return {
-        "category": "Inspection",
-        "createFirstWO": True,
-        "createdAt": "2023-11-29T12:26:52.682Z",
-        "createdBy": "2kGw1JigKE",
-        "estimatedTime": 71,
-        "files": ["fED0SSDyqF"],
-        "formTemplate": "fUC7Anvm2y",
-        "id": "65672e0c90176209662a4fc1",
-        "images": [],
-        "mainDescription": "Oil change",
-        "name": "Oil change",
-        "note": "Oil change",
-        "partInventories": [{"part": "nrnMB2M6O5", "quantity": 1}],
-        "priority": 0,
-        "requiresSignature": True,
-        "role": "PUlegnw3ml",
+        "estimatedTime": 2,
+        "id": "6045fdf022af4032c65aa3f6",
+        "name": "CWP-2 daily round",
         "schedules": [
             {
-                "asset": "BcmoxOY4mE",
-                "assignee": "Fu8PEA9P9G",
-                "bySetPosition": [],
+                "asset": "8iqb8hStJt",
                 "cadenceFreq": "DAILY",
                 "cadenceInterval": 1,
-                "cadenceType": "manual",
-                "endDate": "2024-10-09T08:42:24.000Z",
-                "excludedates": [],
-                "id": "65672e0c90176209662a4fc2",
-                "inactiveIntervals": [
-                    {"start": {"month": 1, "day": 1}, "end": {"month": 1, "day": 16}}
-                ],
-                "includeDates": [],
-                "isBasedOnCompletion": False,
-                "location": "c78MVjkbvh",
-                "monthdays": [],
-                "nextDueDate": "2023-12-11T08:42:24.000Z",
-                "nextTriggerDate": "2023-12-10T08:42:24.000Z",
-                "pmTemplate": "65672e0c90176209662a4fc1",
+                "endDate": "2026-03-02T06:00:00.000Z",
+                "id": "4054992e77b334fa30d1e8f0",
+                "location": "HZsOn28jvL",
+                "pmTemplate": "6045fdf022af4032c65aa3f6",
                 "repeatFrequency": "DAILY",
                 "repeatInterval": 1,
-                "role": "PUlegnw3ml",
                 "scheduleType": "EVERY_N_DAYS",
-                "startDate": "2023-12-10T08:42:24.000Z",
-                "supportUsers": ["IDb8mbMV9l"],
-                "team": "SFejxVqERT",
-                "timeZone": "Asia/Kolkata",
-                "weekdays": [],
+                "startDate": "2025-03-03T06:00:00.000Z",
             },
             {
-                "asset": "BcmoxOY4mE",
-                "assignee": "Fu8PEA9P9G",
-                "bySetPosition": [],
-                "endDate": "2024-10-09T16:23:35.000Z",
-                "excludedates": [],
-                "id": "65672e0c90176209662a4fc4",
-                "inactiveIntervals": [
-                    {"start": {"month": 5, "day": 1}, "end": {"month": 8, "day": 1}}
-                ],
-                "includeDates": [],
-                "location": "c78MVjkbvh",
-                "meter": "vXMGBoLMJv",
-                "meterConditionValue": 1000,
+                "asset": "8iqb8hStJt",
+                "endDate": "2026-03-02T06:30:00.000Z",
+                "id": "fe3e7424e3d4d6a54df9f00b",
+                "location": "HZsOn28jvL",
+                "meter": "2g5tVrrs0R",
+                "meterConditionValue": 250,
                 "meterDueFrequency": "weeks",
-                "meterDueInterval": 1,
-                "monthdays": [],
-                "nextMeterReading": 1075,
-                "pmTemplate": "65672e0c90176209662a4fc1",
-                "role": "PUlegnw3ml",
-                "startDate": "2023-12-10T16:23:35.000Z",
-                "supportUsers": ["IDb8mbMV9l"],
-                "team": "SFejxVqERT",
-                "timeZone": "Asia/Kolkata",
-                "weekdays": [],
+                "meterDueInterval": 2,
+                "pmTemplate": "6045fdf022af4032c65aa3f6",
+                "startDate": "2025-03-03T06:30:00.000Z",
             },
         ],
         "tasks": [],
@@ -377,16 +325,16 @@ class TestParseMaintenancePlans:
     def test_one_plan_per_schedule(self) -> None:
         plans = parse_maintenance_plans(_docs_pm_template())
         assert [p.id for p in plans] == [
-            "65672e0c90176209662a4fc2",
-            "65672e0c90176209662a4fc4",
+            "4054992e77b334fa30d1e8f0",
+            "fe3e7424e3d4d6a54df9f00b",
         ]
-        assert {p.name for p in plans} == {"Oil change"}
-        assert {p.asset_id for p in plans} == {"BcmoxOY4mE"}
+        assert {p.name for p in plans} == {"CWP-2 daily round"}
+        assert {p.asset_id for p in plans} == {"8iqb8hStJt"}
 
     def test_calendar_schedule_interval_duration_and_active(self) -> None:
         calendar = parse_maintenance_plans(_docs_pm_template(), now=DURING_SCHEDULES)[0]
         assert calendar.interval == Interval(days=1)
-        assert calendar.estimated_duration_hours == 71  # "Duration ... in hours"
+        assert calendar.estimated_duration_hours == 2  # "Duration ... in hours"
         assert calendar.active is True
 
     def test_meter_schedule_has_no_calendar_interval(self) -> None:
@@ -418,18 +366,18 @@ class TestParseMaintenancePlans:
         template["_id"] = template.pop("id")
         schedule = template["schedules"][0]
         schedule["_id"] = schedule.pop("id")
-        assert parse_maintenance_plans(template)[0].id == "65672e0c90176209662a4fc2"
+        assert parse_maintenance_plans(template)[0].id == "4054992e77b334fa30d1e8f0"
 
     def test_task_names_become_tasks(self) -> None:
         """Tasks are form items with ``name`` and ``type`` keys (no populated docs example)."""
         template = _docs_pm_template()
         template["tasks"] = [
-            {"name": "Drain old oil", "type": "TASK"},
-            {"name": "Oil level after refill", "type": "NUMBER"},
-            {"name": "Hour meter", "type": "METER", "meter": "vXMGBoLMJv"},
+            {"name": "Check the seal for leaks", "type": "TASK"},
+            {"name": "Bearing temperature", "type": "NUMBER"},
+            {"name": "Run hours", "type": "METER", "meter": "2g5tVrrs0R"},
         ]
         plan = parse_maintenance_plans(template)[0]
-        assert plan.tasks == ["Drain old oil", "Oil level after refill", "Hour meter"]
+        assert plan.tasks == ["Check the seal for leaks", "Bearing temperature", "Run hours"]
 
     def test_schedule_without_asset(self) -> None:
         template = _docs_pm_template()
@@ -455,8 +403,8 @@ class TestParseMaintenancePlans:
     def test_deleted_template_yields_no_plans(self) -> None:
         """The "Get all PMs" example shows a soft-deleted template (``deletedAt``)."""
         template = _docs_pm_template()
-        template["deletedAt"] = "2023-11-30T19:43:30.229Z"
-        template["deletedBy"] = "N5lbFIv8LW"
+        template["deletedAt"] = "2025-09-15T10:12:44.318Z"
+        template["deletedBy"] = "zHbT5ePyUm"
         assert parse_maintenance_plans(template) == []
 
     def test_template_without_schedules_yields_no_plans(self) -> None:
