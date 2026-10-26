@@ -1,0 +1,113 @@
+# Weekly litellm compatibility check.
+#
+# Installs this checkout's litellm extra without mcp, as `pip install
+# machina-ai[litellm]` resolves it, and runs only the real-litellm tool-call
+# contract test, which must pass against the newest litellm the extra's bound
+# admits.
+# It tests the bound in this source tree, not the published machina-ai 0.4.0,
+# which has no bound and still resolves litellm 1.106.x (#160). litellm ships
+# patch releases inside the bound between pull requests, and 1.106 broke every
+# tool call while the other jobs stayed green. The check has its own status, so
+# the quality audit's verdict cannot hide it. It reads no secret and calls no
+# LLM: the contract test uses litellm's offline mock_tool_calls path.
+name: litellm compatibility
+
+on:
+  schedule:
+    # Mondays 05:43 UTC; off the hour, when scheduled runs queue the longest.
+    - cron: "43 5 * * 1"
+  # No inputs: an input would add a shell-injection surface.
+  workflow_dispatch:
+  # A change to this check, or to the recorder it uses, runs it before it merges.
+  pull_request:
+    paths:
+      - ".github/workflows/litellm-compat.yml"
+      - "scripts/audit/record.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  litellm-only:
+    name: litellm extra without mcp (Python 3.11)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        # GitHub runs bash with -eo pipefail, so a failed install fails its
+        # step despite the tee.
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      # No lockfile and no pip cache: every run resolves the newest litellm the
+      # extra admits.
+      - name: Install the litellm extra without mcp
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,litellm]" 2>&1 | tee "$RUNNER_TEMP/install.log"
+
+      - name: Fail unless litellm imports and mcp is absent
+        shell: python
+        run: |
+          import importlib
+          import importlib.metadata
+          import importlib.util
+          import os
+          import sys
+
+          if importlib.util.find_spec("mcp") is not None:
+              sys.exit("mcp is installed; this check must run without it")
+          try:
+              importlib.import_module("litellm")
+          except Exception as exc:
+              sys.exit(f"litellm does not import: {exc!r}")
+          line = f"litellm {importlib.metadata.version('litellm')} imports; mcp absent"
+          print(line)
+          if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(summary_path, "a", encoding="utf-8") as summary:
+                  summary.write(line + "\n")
+
+      # Only the contract test runs, so this status reflects litellm alone; the
+      # CI and quality-audit jobs run the rest of the suite. The exit code tells
+      # the record step a failed run from an interrupted one.
+      - name: Tests
+        run: |
+          set +e
+          python -m pytest tests/unit/test_llm_provider.py::TestLiteLLMToolCallContract \
+            -p no:cacheprovider --junitxml="$RUNNER_TEMP/junit.xml"
+          status=$?
+          echo "$status" > "$RUNNER_TEMP/pytest-exit-code"
+          exit "$status"
+
+      # Runs after a failed step too. record.py exits 1 when a test failed and 2
+      # when the required test was skipped, deselected or never collected, or
+      # when pytest left no results, so the job fails in each of those cases.
+      - name: Require the tool-call contract test
+        if: always()
+        run: |
+          set +e
+          version="$(python -c 'import importlib.metadata as m; print(m.version("litellm"))' 2>/dev/null)"
+          python scripts/audit/record.py suite --variant litellm-only-py3.11 \
+            --fact "litellm=$version" \
+            --junit "$RUNNER_TEMP/junit.xml" \
+            --exit-code-file "$RUNNER_TEMP/pytest-exit-code" \
+            --install-log "$RUNNER_TEMP/install.log" \
+            --require tests/unit/test_llm_provider.py::TestLiteLLMToolCallContract::test_complete_with_tools_returns_tool_call_from_real_litellm \
+            --out "$RUNNER_TEMP/result.json"
+          status=$?
+          cat "$RUNNER_TEMP/result.json"
+          exit "$status"
