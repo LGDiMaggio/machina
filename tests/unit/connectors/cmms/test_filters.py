@@ -14,7 +14,7 @@ def test_the_empty_string_is_no_filter() -> None:
 
 @pytest.mark.parametrize(
     ("value", "text"),
-    [("P-201", "P-201"), (" P-201 ", " P-201 "), (11430, "11430"), (0, "0")],
+    [("P-201", "P-201"), (" P-201 ", " P-201 "), (96916, "96916"), (0, "0")],
     ids=["text", "padded-text", "number", "zero"],
 )
 def test_an_id_is_returned_as_text(value: object, text: str) -> None:

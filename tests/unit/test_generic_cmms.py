@@ -496,11 +496,11 @@ class TestGenericCmmsConnectorLocal:
         self, tmp_path: Path
     ) -> None:
         (tmp_path / "spare_parts.json").write_text(
-            json.dumps([{"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["11430"]}])
+            json.dumps([{"sku": "SKF-6310", "name": "Bearing", "compatible_assets": ["96916"]}])
         )
         conn = GenericCmmsConnector(data_dir=tmp_path)
         await conn.connect()
-        parts = await conn.read_spare_parts(asset_id=11430)  # type: ignore[arg-type]
+        parts = await conn.read_spare_parts(asset_id=96916)  # type: ignore[arg-type]
         assert [p.sku for p in parts] == ["SKF-6310"]
 
     @pytest.mark.asyncio

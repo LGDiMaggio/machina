@@ -174,7 +174,7 @@ async def maximo_raw_attribute_update(
         resource_type: OSLC object structure (e.g. 'mxwo', 'mxasset'):
             ASCII letters, digits and underscores only.
         resource_id: Rest ID of the resource, the last segment of its OSLC
-            href (e.g. '_QkVERk9SRC9XQzY-'); sent as one URL path segment.
+            href (e.g. '_SElMTFRPUC9XNzc-'); sent as one URL path segment.
             The machina://v1/assets/{asset_id} and
             machina://v1/work-orders/{wo_id} resources of a Maximo record
             carry it as ``metadata['rest_id']``.

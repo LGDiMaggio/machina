@@ -709,9 +709,9 @@ class TestReadSparePartsByAsset:
         """A workflow event or model JSON can carry an ID as a number."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
-            method="GET", url=f"{BASE}/api/v2/assets/11430", json=_asset_body(id="11430", parts=[])
+            method="GET", url=f"{BASE}/api/v2/assets/96916", json=_asset_body(id="96916", parts=[])
         )
-        assert await connector.read_spare_parts(asset_id=11430) == []  # type: ignore[arg-type]
+        assert await connector.read_spare_parts(asset_id=96916) == []  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     async def test_non_json_asset_body_is_refused(
