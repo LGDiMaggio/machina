@@ -174,7 +174,7 @@ class TestMaximoRawUpdateStaysOnOneResource:
             "mxwo/..",
             "../script",
             "../../../api",
-            "mxwo/_QkVERk9SRC9XQzY-",
+            "mxwo/_SElMTFRPUC9XNzc-",
             "mxwo?_action=x",
             "mxwo#x",
             "mxwo%2F..",
@@ -270,7 +270,7 @@ class TestMaximoRawUpdateStaysOnOneResource:
         [
             ("X?_action=x#f", "X%3F_action%3Dx%23f"),
             ("x?lean=0", "x%3Flean%3D0"),
-            ("BEDFORD/WC6", "BEDFORD%2FWC6"),
+            ("HILLTOP/W77", "HILLTOP%2FW77"),
             ("WO;1", "WO%3B1"),
             # A server that decodes the path before routing would see "../mxasset".
             ("..%2Fmxasset", "..%252Fmxasset"),
@@ -295,7 +295,7 @@ class TestMaximoRawUpdateStaysOnOneResource:
     @pytest.mark.parametrize(
         "resource_id",
         [
-            "_QkVERk9SRC9XQzY-",  # SITEID/WONUM "BEDFORD/WC6", from IBM's docs
+            "_SElMTFRPUC9XNzc-",  # SITEID/WONUM "HILLTOP/W77", a test value: "=" sent as "-"
             "_5ZCN5Y_k5bGLLzEwMDA-",  # "名古屋/1000": base64 "+" sent as "_"
             "_6KW~5a6JLzEwMDA-",  # "西安/1000": base64 "/" sent as "~"
         ],

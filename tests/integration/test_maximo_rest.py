@@ -1024,8 +1024,8 @@ class TestGetWorkOrder:
 # ---------------------------------------------------------------------------
 
 # Maximo addresses a record by a rest id derived from its primary key: here "_"
-# plus the base64 of "WO-001/BEDFORD" (wonum/siteid), with "=" written as "-".
-_REST_ID = "_V08tMDAxL0JFREZPUkQ-"
+# plus the base64 of "WO-001/HILLTOP" (wonum/siteid), with "=" written as "-".
+_REST_ID = "_V08tMDAxL0hJTExUT1A-"
 # Maximo reports a URI on the host it sees itself on, often an internal name.
 _INTERNAL_URI = f"http://maximo-internal:9080/maximo/oslc/os/mxwo/{_REST_ID}"
 _UPDATE_URL = httpx.URL(f"{OSLC}/os/mxwo/{_REST_ID}", params={"lean": "1"})
@@ -1093,7 +1093,7 @@ class TestUpdateWorkOrder:
         self, httpx_mock, connector: MaximoConnector, post_status: int
     ) -> None:
         await _connect(httpx_mock, connector)
-        _add_lookup(httpx_mock, "WO-001", {"siteid": "BEDFORD", "href": _INTERNAL_URI})
+        _add_lookup(httpx_mock, "WO-001", {"siteid": "HILLTOP", "href": _INTERNAL_URI})
         httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=post_status)
         _add_reread(httpx_mock, "CLOSE")
         updated = await connector.update_work_order("WO-001", status=WorkOrderStatus.CLOSED)
@@ -1200,8 +1200,8 @@ class TestUpdateWorkOrder:
         _add_lookup(
             httpx_mock,
             "1001",
-            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_MTAwMS9URVhBUw--"},
-            {"siteid": "BEDFORD", "href": f"{OSLC}/os/mxwo/_MTAwMS9CRURGT1JE"},
+            {"siteid": "DUNES", "href": f"{OSLC}/os/mxwo/_MTAwMS9EVU5FUw--"},
+            {"siteid": "HILLTOP", "href": f"{OSLC}/os/mxwo/_MTAwMS9ISUxMVE9Q"},
         )
         with pytest.raises(ConnectorError) as exc_info:
             await connector.update_work_order("1001", description="x")
@@ -1221,7 +1221,7 @@ class TestUpdateWorkOrder:
         _add_lookup(
             httpx_mock,
             "1001",
-            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_MTAwMS9URVhBUw--"},
+            {"siteid": "DUNES", "href": f"{OSLC}/os/mxwo/_MTAwMS9EVU5FUw--"},
             next_page=page_2,
         )
         httpx_mock.add_response(
@@ -1231,8 +1231,8 @@ class TestUpdateWorkOrder:
                 "member": [
                     {
                         "wonum": "1001",
-                        "siteid": "BEDFORD",
-                        "href": f"{OSLC}/os/mxwo/_MTAwMS9CRURGT1JE",
+                        "siteid": "HILLTOP",
+                        "href": f"{OSLC}/os/mxwo/_MTAwMS9ISUxMVE9Q",
                     }
                 ],
                 "responseInfo": {},
@@ -1252,8 +1252,8 @@ class TestUpdateWorkOrder:
         _add_lookup(
             httpx_mock,
             "1001",
-            {"siteid": "TEXAS", "href": f"{OSLC}/os/mxwo/_A"},
-            {"siteid": "BEDFORD", "href": f"{OSLC}/os/mxwo/_B"},
+            {"siteid": "DUNES", "href": f"{OSLC}/os/mxwo/_A"},
+            {"siteid": "HILLTOP", "href": f"{OSLC}/os/mxwo/_B"},
             next_page=f"{OSLC}/os/mxwo?pageno=2",
         )
         with pytest.raises(ConnectorError, match="more than one site"):
@@ -1605,7 +1605,7 @@ class TestUpdateResourceIdentity:
     @pytest.mark.parametrize(
         ("member", "reason"),
         [
-            pytest.param({"siteid": "BEDFORD"}, "no work-order URI", id="no-href"),
+            pytest.param({"siteid": "HILLTOP"}, "no work-order URI", id="no-href"),
             pytest.param({"href": None}, "no work-order URI", id="null-href"),
             pytest.param({"href": 7}, "no work-order URI", id="non-string-href"),
             pytest.param({"href": "http://[x/os/mxwo/_A"}, "no work-order URI", id="unparseable"),
@@ -1805,11 +1805,11 @@ class TestOslcWhereValues:
             method="GET",
             url=_oslc_url(
                 "mxasset",
-                **{"oslc.pageSize": "1", "oslc.where": 'assetnum="BR300/P_201 O\'NEIL"'},
+                **{"oslc.pageSize": "1", "oslc.where": 'assetnum="PH210/P_201 O\'NEIL"'},
             ),
             json={"member": [], "responseInfo": {}},
         )
-        assert await connector.get_asset("BR300/P_201 O'NEIL") is None
+        assert await connector.get_asset("PH210/P_201 O'NEIL") is None
 
     @pytest.mark.asyncio
     async def test_numeric_id_is_quoted_like_its_string(
@@ -1819,10 +1819,10 @@ class TestOslcWhereValues:
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
-            url=_oslc_url("mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="11430"'}),
+            url=_oslc_url("mxasset", **{"oslc.pageSize": "1", "oslc.where": 'assetnum="96916"'}),
             json={"member": [], "responseInfo": {}},
         )
-        assert await connector.get_asset(11430) is None  # type: ignore[arg-type]
+        assert await connector.get_asset(96916) is None  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("value", _HOSTILE_VALUES)
@@ -1921,8 +1921,8 @@ class TestRetryBehaviour:
 # ---------------------------------------------------------------------------
 
 # Maximo reports a member's URI on the host it sees itself on; its last
-# segment is the record's rest id.
-_MEMBER_REST_ID = "_QkVERk9SRC9YMQ--"
+# segment is the record's rest id: here "_" plus the base64 of "HILLTOP/X1".
+_MEMBER_REST_ID = "_SElMTFRPUC9YMQ--"
 _MEMBER_HREF = "http://maximo-internal:9080/maximo/oslc/os/{os}/" + _MEMBER_REST_ID
 
 # One record per object structure as Maximo returns it for the read's
@@ -1936,16 +1936,16 @@ _MEMBER_HREF = "http://maximo-internal:9080/maximo/oslc/os/{os}/" + _MEMBER_REST
 _RECORDS: dict[str, dict[str, object]] = {
     "mxasset": {
         "assetnum": "PUMP-201",
-        "siteid": "BEDFORD",
+        "siteid": "HILLTOP",
         "description": "Centrifugal pump",
-        "location": "BR300",
+        "location": "PH210",
         "manufacturer": "GRUNDFOS",
         "priority": 1,
         "classstructureid": "1020",
     },
     "mxwo": {
         "wonum": "WO-1",
-        "siteid": "BEDFORD",
+        "siteid": "HILLTOP",
         "description": "Replace seal",
         "status": "INPRG",
         "status_description": "In Progress",
@@ -1959,8 +1959,8 @@ _RECORDS: dict[str, dict[str, object]] = {
     },
     "mxinventory": {
         "itemnum": "BRG-6205",
-        "siteid": "BEDFORD",
-        "location": "CENTRAL",
+        "siteid": "HILLTOP",
+        "location": "MAINSTR",
         "minlevel": 5,
         "item": {"description": "Bearing SKF 6205"},
         "invbalances": [{"curbal": 3}, {"curbal": 4}],
@@ -1968,7 +1968,7 @@ _RECORDS: dict[str, dict[str, object]] = {
     },
     "mxpm": {
         "pmnum": "PM-1",
-        "siteid": "BEDFORD",
+        "siteid": "HILLTOP",
         "assetnum": "PUMP-201",
         "description": "Quarterly inspection",
         "frequency": 3,
@@ -2114,7 +2114,7 @@ class TestReadsSelectAttributes:
         assert (asset.id, asset.name, asset.location, asset.manufacturer) == (
             "PUMP-201",
             "Centrifugal pump",
-            "BR300",
+            "PH210",
             "GRUNDFOS",
         )
         assert asset.criticality == Criticality.A  # priority 1
@@ -2122,7 +2122,7 @@ class TestReadsSelectAttributes:
         assert asset.serial_number == ""
         assert asset.parent is None
         assert asset.metadata == {
-            "siteid": "BEDFORD",
+            "siteid": "HILLTOP",
             "classstructureid": "1020",
             "rest_id": _MEMBER_REST_ID,
         }
@@ -2159,7 +2159,7 @@ class TestReadsSelectAttributes:
         assert wo.failure_cause == "LEAK"
         assert wo.created_at.isoformat() == "2026-10-01T08:00:00+00:00"
         assert wo.metadata == {
-            "siteid": "BEDFORD",
+            "siteid": "HILLTOP",
             "status_description": "In Progress",
             "rest_id": _MEMBER_REST_ID,
         }
@@ -2176,10 +2176,10 @@ class TestReadsSelectAttributes:
         assert (part.sku, part.name, part.warehouse_location) == (
             "BRG-6205",
             "Bearing SKF 6205",
-            "CENTRAL",
+            "MAINSTR",
         )
         assert (part.stock_quantity, part.reorder_point, part.unit_cost) == (7, 5, 12.5)
-        assert part.metadata == {"siteid": "BEDFORD", "rest_id": _MEMBER_REST_ID}
+        assert part.metadata == {"siteid": "HILLTOP", "rest_id": _MEMBER_REST_ID}
 
     @pytest.mark.parametrize(
         ("change", "fields"),

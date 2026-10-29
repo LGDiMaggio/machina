@@ -160,7 +160,7 @@ def _mock_maximo_part(httpx_mock, sku: str) -> None:
             "member": [
                 {
                     "itemnum": sku,
-                    "siteid": "BEDFORD",
+                    "siteid": "HILLTOP",
                     "item": {"description": "Bearing SKF 6205"},
                     "invbalances": [{"curbal": 3}],
                 }

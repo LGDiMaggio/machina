@@ -13,7 +13,7 @@ from machina.exceptions import ConnectorError
     [
         ("a1", "a1"),
         ("PUMP-201_A.1~x", "PUMP-201_A.1~x"),
-        ("BR300/1", "BR300%2F1"),
+        ("PH210/1", "PH210%2F1"),
         ("wo1?limit=1#x", "wo1%3Flimit%3D1%23x"),
         ("50%", "50%25"),
         ("a b", "a%20b"),

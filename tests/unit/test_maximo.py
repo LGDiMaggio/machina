@@ -200,11 +200,11 @@ class TestParseSparePart:
             "itemnum": "BRG-6205",
             "description": "Bearing",
             "curbal": 1,
-            "siteid": "BEDFORD",
+            "siteid": "HILLTOP",
             "binnum": "B-42",
         }
         sp = _parse_spare_part(raw)
-        assert sp.metadata["siteid"] == "BEDFORD"
+        assert sp.metadata["siteid"] == "HILLTOP"
         assert sp.metadata["binnum"] == "B-42"
         # Known fields must NOT leak into metadata.
         assert "itemnum" not in sp.metadata
@@ -275,14 +275,14 @@ class TestOslcEq:
 
     @pytest.mark.parametrize(
         "value",
-        ["PUMP-201", "11430", "BRG.6205", "PUMP_201", "BR300/1", "PUMP 201", "O'NEIL", "PUMPE-Ü1"],
+        ["PUMP-201", "96916", "BRG.6205", "PUMP_201", "PH210/1", "PUMP 201", "O'NEIL", "PUMPE-Ü1"],
     )
     def test_identifier_is_double_quoted_verbatim(self, value: str) -> None:
         assert _oslc_eq("assetnum", value) == f'assetnum="{value}"'
 
     def test_int_is_quoted_like_its_digits(self) -> None:
         # Tool arguments parsed from model JSON can carry an asset number as a number.
-        assert _oslc_eq("assetnum", 11430) == 'assetnum="11430"'
+        assert _oslc_eq("assetnum", 96916) == 'assetnum="96916"'
 
     @pytest.mark.parametrize("char", list('"\\%*?,[]=!<>~'))
     def test_query_syntax_character_is_refused_and_named(self, char: str) -> None:
@@ -333,9 +333,9 @@ class TestOslcResourcePath:
     @pytest.mark.parametrize(
         ("object_structure", "resource_id", "path"),
         [
-            ("mxwo", "_QkVERk9SRC9XQzY-", "/maximo/oslc/os/mxwo/_QkVERk9SRC9XQzY-"),
-            ("ZZ_WO", "BEDFORD/WC6", "/maximo/oslc/os/ZZ_WO/BEDFORD%2FWC6"),
-            ("MXASSET", 11430, "/maximo/oslc/os/MXASSET/11430"),
+            ("mxwo", "_SElMTFRPUC9XNzc-", "/maximo/oslc/os/mxwo/_SElMTFRPUC9XNzc-"),
+            ("ZZ_WO", "HILLTOP/W77", "/maximo/oslc/os/ZZ_WO/HILLTOP%2FW77"),
+            ("MXASSET", 96916, "/maximo/oslc/os/MXASSET/96916"),
         ],
     )
     def test_path_names_one_resource(

@@ -200,9 +200,9 @@ def _leaves(paths: set[str]) -> set[str]:
 # the keys OSLC adds to each member.
 _ASSET = {
     "assetnum": "PUMP-201",
-    "siteid": "BEDFORD",
+    "siteid": "HILLTOP",
     "description": "Centrifugal pump",
-    "location": "BR300",
+    "location": "PH210",
     "manufacturer": "GRUNDFOS",
     "serialnum": "SN-1",
     "priority": 1,
@@ -212,7 +212,7 @@ _ASSET = {
 }
 _WORK_ORDER = {
     "wonum": "WO-1",
-    "siteid": "BEDFORD",
+    "siteid": "HILLTOP",
     "description": "Replace seal",
     "status": "INPRG",
     "status_description": "In Progress",
@@ -228,8 +228,8 @@ _WORK_ORDER = {
 }
 _INVENTORY = {
     "itemnum": "BRG-6205",
-    "siteid": "BEDFORD",
-    "location": "CENTRAL",
+    "siteid": "HILLTOP",
+    "location": "MAINSTR",
     "minlevel": 5,
     "item": {"description": "Bearing SKF 6205"},
     "invbalances": [{"curbal": 3}, {"curbal": 4.0}],
@@ -237,7 +237,7 @@ _INVENTORY = {
 }
 _PM = {
     "pmnum": "PM-1",
-    "siteid": "BEDFORD",
+    "siteid": "HILLTOP",
     "assetnum": "PUMP-201",
     "description": "Quarterly inspection",
     "frequency": 3,
@@ -361,36 +361,36 @@ class TestOslcKeysStayOutOfMetadata:
     ) -> None:
         entity = parse({**record, **_OSLC_KEYS})
         assert not set(_OSLC_KEYS) & set(entity.metadata)
-        assert entity.metadata["siteid"] == "BEDFORD"
+        assert entity.metadata["siteid"] == "HILLTOP"
         assert "maximo-internal" not in str(entity.metadata)
 
     def test_unmapped_record_attributes_stay(self) -> None:
         wo = parse_work_order({**_WORK_ORDER, **_OSLC_KEYS})
         assert wo.metadata == {
-            "siteid": "BEDFORD",
+            "siteid": "HILLTOP",
             "status_description": "In Progress",
             "rest_id": _REST_ID,
         }
 
     def test_the_rest_id_is_kept_without_the_host(self) -> None:
         """The rest id addresses the record, for maximo_raw_attribute_update."""
-        asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_QkVERk9SRC8xMDAw"})
-        assert asset.metadata["rest_id"] == "_QkVERk9SRC8xMDAw"
+        asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_SElMTFRPUC8xMDAw"})
+        assert asset.metadata["rest_id"] == "_SElMTFRPUC8xMDAw"
 
     @pytest.mark.parametrize(
         "href",
         [
-            pytest.param("/maximo/oslc/os/mxasset/_QkVERk9SRC8xMDAw", id="relative"),
-            pytest.param(f"{_INTERNAL}/os/mxasset/_QkVERk9SRC8xMDAw?lean=1#x", id="query"),
-            pytest.param(f"{_INTERNAL}/os/MXASSET/_QkVERk9SRC8xMDAw", id="upper-case"),
+            pytest.param("/maximo/oslc/os/mxasset/_SElMTFRPUC8xMDAw", id="relative"),
+            pytest.param(f"{_INTERNAL}/os/mxasset/_SElMTFRPUC8xMDAw?lean=1#x", id="query"),
+            pytest.param(f"{_INTERNAL}/os/MXASSET/_SElMTFRPUC8xMDAw", id="upper-case"),
         ],
     )
     def test_the_rest_id_of_any_record_uri(self, href: str) -> None:
-        assert parse_asset({**_ASSET, "href": href}).metadata["rest_id"] == "_QkVERk9SRC8xMDAw"
+        assert parse_asset({**_ASSET, "href": href}).metadata["rest_id"] == "_SElMTFRPUC8xMDAw"
 
     def test_an_escaped_rest_id_is_decoded(self) -> None:
-        asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_QkVE%2DRk9S"})
-        assert asset.metadata["rest_id"] == "_QkVE-Rk9S"
+        asset = parse_asset({**_ASSET, "href": f"{_INTERNAL}/os/mxasset/_SElM%2DTFRP"})
+        assert asset.metadata["rest_id"] == "_SElM-TFRP"
 
     @pytest.mark.parametrize(
         "href",
@@ -405,7 +405,7 @@ class TestOslcKeysStayOutOfMetadata:
             pytest.param(f"{_INTERNAL}/os/mxasset", id="the-collection"),
             pytest.param(f"{_INTERNAL}/os/mxwo/{_REST_ID}/doclinks", id="a-child-collection"),
             pytest.param(f"{_INTERNAL}/script/X", id="not-an-object-structure"),
-            pytest.param("_QkVERk9SRC8xMDAw", id="no-path"),
+            pytest.param("_SElMTFRPUC8xMDAw", id="no-path"),
             pytest.param("http://[x", id="unparseable"),
             pytest.param(42, id="not-text"),
         ],
@@ -434,8 +434,8 @@ class TestParseSparePartOslcShape:
         assert part.stock_quantity == 7  # the sum of the bin balances
         assert part.reorder_point == 5  # minlevel
         assert part.unit_cost == 12.5  # avgcost of the first cost row
-        assert part.warehouse_location == "CENTRAL"
-        assert part.metadata == {"siteid": "BEDFORD", "rest_id": _REST_ID}
+        assert part.warehouse_location == "MAINSTR"
+        assert part.metadata == {"siteid": "HILLTOP", "rest_id": _REST_ID}
 
     def test_last_cost_when_there_is_no_average(self) -> None:
         part = parse_spare_part({**_INVENTORY, "invcost": [{"lastcost": 9.0}]})
