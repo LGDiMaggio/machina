@@ -3,7 +3,9 @@
 The weekly audit (.github/workflows/audit.yml) and the weekly litellm check
 (.github/workflows/litellm-compat.yml) only run on a schedule, on demand, or
 when their own files change, so a pull request that breaks one of their rules
-would otherwise go unnoticed until the next Monday.
+would otherwise go unnoticed until the next Monday. The distribution-evidence
+workflow (.github/workflows/dist-evidence.yml) runs only on demand or when its
+own files change, and must never be able to publish.
 """
 
 from __future__ import annotations
@@ -177,3 +179,160 @@ def test_litellm_check_contract_test_exists_and_is_not_skipped() -> None:
             isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
         ):
             assert not any(skip in ast.unparse(node.value) for skip in skips)
+
+
+# The distribution-evidence workflow builds the wheel and sdist, checks their
+# LICENSE and writes SBOMs and notices bundles as run artifacts. Its pull-request
+# trigger covers only its own files, and nothing in it may publish or release.
+DIST_EVIDENCE = WORKFLOWS / "dist-evidence.yml"
+DIST_EVIDENCE_PATHS = [
+    ".github/workflows/dist-evidence.yml",
+    "scripts/compliance/**",
+    "tests/unit/test_verify_dist.py",
+    "tests/unit/test_collect_notices.py",
+]
+# The install profiles of the compliance plan (KTD7), by label: extras.
+SBOM_PROFILES = {
+    "core": "",
+    "all": "all",
+    "docs-rag-pro": "docs-rag-pro",
+    "sql-jdbc": "sql-jdbc",
+    "deploy-image": "cmms-rest,mcp",
+    "template-image": "excel,litellm",
+}
+PUBLISHING = (
+    "twine",
+    "pypi",
+    "action-gh-release",
+    "github-script",
+    "gh release",
+    "gh api",
+    "git tag",
+    "git push",
+    "docker push",
+    "docker login",
+)
+# The only installs: the two pinned tools, and the built wheel into the profile venv.
+PINNED_INSTALL = re.compile(r'python -m pip install "(build|cyclonedx-bom)==\d+(\.\d+)+"')
+WHEEL_INSTALL = (
+    'python -m pip --python "$RUNNER_TEMP/profile/bin/python" install --no-cache-dir "$target"'
+)
+
+
+def _runs(path: Path) -> list[str]:
+    return [step["run"] for step in _steps(path) if "run" in step]
+
+
+def test_dist_evidence_permissions_are_read_only() -> None:
+    workflow = _load(DIST_EVIDENCE)
+    assert workflow.get("permissions") == {"contents": "read"}
+    for name, job in workflow["jobs"].items():
+        assert "permissions" not in job, f"job {name} widens the top-level permissions"
+    # secrets.X, secrets['X'] and toJSON(secrets) alike.
+    assert not re.search(r"\bsecrets\b", DIST_EVIDENCE.read_text(encoding="utf-8"))
+    for step in _steps(DIST_EVIDENCE):
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            assert step.get("with", {}).get("persist-credentials") is False
+
+
+def test_dist_evidence_triggers() -> None:
+    triggers = _load(DIST_EVIDENCE)[True]
+    assert set(triggers) == {"workflow_dispatch", "pull_request"}
+    assert not triggers["workflow_dispatch"], "manual runs take no inputs"
+    assert triggers["pull_request"] == {"paths": DIST_EVIDENCE_PATHS}
+
+
+def test_dist_evidence_tools_are_pinned() -> None:
+    # build makes the distributions and cyclonedx-bom the SBOMs: a new release
+    # of either could change the evidence without any change in this repo.
+    installs = [
+        line.strip()
+        for run in _runs(DIST_EVIDENCE)
+        for line in run.splitlines()
+        if re.search(r"\bpip\b.*\binstall\b", line)
+    ]
+    tools = set()
+    for line in installs:
+        if match := PINNED_INSTALL.fullmatch(line):
+            tools.add(match.group(1))
+        else:
+            assert line == WHEEL_INSTALL, f"unpinned or unexpected install: {line}"
+    assert tools == {"build", "cyclonedx-bom"}
+    sbom = [run for run in _runs(DIST_EVIDENCE) if "cyclonedx-py environment" in run]
+    assert len(sbom) == 1, "one step writes the SBOM"
+    for flag in (
+        "--pyproject pyproject.toml",
+        "--mc-type library",
+        "--sv 1.6",
+        "--gather-license-texts",
+        "--output-reproducible",
+    ):
+        assert flag in sbom[0], f"the SBOM command lacks {flag}"
+
+
+def test_dist_evidence_runs_both_checks() -> None:
+    jobs = _load(DIST_EVIDENCE)["jobs"]
+    verify = [
+        s for s in jobs["dist"]["steps"] if "scripts/compliance/verify_dist.py" in s.get("run", "")
+    ]
+    assert len(verify) == 1, "the dist job runs the LICENSE check once"
+    assert "--dist dist --license LICENSE" in verify[0]["run"]
+    assert verify[0].get("if") == "always()", "a failed build is reported by the check"
+    collect = [
+        s
+        for s in jobs["sbom"]["steps"]
+        if "scripts/compliance/collect_notices.py" in s.get("run", "")
+    ]
+    assert len(collect) == 1, "each profile collects its notices once"
+    assert "--site-packages" in collect[0]["run"]
+
+
+def test_every_dist_evidence_job_has_a_timeout() -> None:
+    for name, job in _load(DIST_EVIDENCE)["jobs"].items():
+        timeout = job.get("timeout-minutes")
+        assert isinstance(timeout, int) and 0 < timeout <= 60, f"job {name}: {timeout!r}"
+
+
+def test_dist_evidence_cannot_publish() -> None:
+    # Everything that can run (comments are not parsed), including with: and env:.
+    content = str(_load(DIST_EVIDENCE)).lower()
+    assert not [word for word in PUBLISHING if word in content]
+    for step in _steps(DIST_EVIDENCE):
+        uses = step.get("uses")
+        if uses:
+            assert re.fullmatch(r"actions/[\w-]+@v\d+", uses), (
+                f"{uses}: not a GitHub-owned action at a release tag"
+            )
+    for run in _runs(DIST_EVIDENCE):
+        # Expressions expanded into a script are an injection surface; GITHUB_ENV and
+        # GITHUB_PATH would change what later steps run.
+        assert "${{" not in run, run
+        assert "GITHUB_ENV" not in run and "GITHUB_PATH" not in run, run
+
+
+def test_dist_evidence_covers_the_planned_profiles() -> None:
+    sbom = _load(DIST_EVIDENCE)["jobs"]["sbom"]
+    assert sbom.get("needs") == "dist", "the SBOMs describe the wheel the dist job built"
+    assert sbom["strategy"].get("fail-fast") is False, "one failed profile must not stop the rest"
+    profiles = {
+        entry["profile"]: entry["extras"] for entry in sbom["strategy"]["matrix"]["include"]
+    }
+    assert profiles == SBOM_PROFILES
+
+
+def test_dist_evidence_uploads_keep_failure_evidence() -> None:
+    uploads = [
+        step
+        for step in _steps(DIST_EVIDENCE)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 2, "one upload per job"
+    for step in uploads:
+        assert step.get("if") == "always()", f"{step['name']} must run after a failed step"
+        assert step["with"].get("if-no-files-found") == "error"
+        assert step["with"].get("retention-days") == 90
+    # Only the distributions and the evidence, never the checkout or the runner's files.
+    assert sorted(step["with"]["path"].split() for step in uploads) == [
+        ["dist/", "evidence/"],
+        ["evidence/"],
+    ]

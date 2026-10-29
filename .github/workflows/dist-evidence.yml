@@ -1,0 +1,211 @@
+# Distribution evidence. Manual, and on pull requests that change this
+# workflow, its scripts or their tests.
+#
+# The dist job builds the sdist and the wheel and checks their LICENSE and
+# licence metadata (scripts/compliance/verify_dist.py). For each install
+# profile, the sbom job installs the wheel into a fresh venv and writes a
+# CycloneDX SBOM of that environment plus a bundle of the licence and notice
+# files its distributions ship (scripts/compliance/collect_notices.py).
+#
+# Everything ends up as run artifacts: nothing is committed, uploaded to a
+# package index, tagged or released, and no step references a secret.
+# tests/test_workflow_policy.py pins these rules.
+#
+# What the evidence does not cover:
+# - It is not a release check. Releases do not run it, so a packaging change
+#   elsewhere is checked only when someone runs it.
+# - The SBOMs are Linux x86_64 resolutions on the run date: evidence for that
+#   run, never committed files. hatchling is not pinned; the check records the
+#   version that built the wheel.
+# - SBOM licence data is what each distribution's metadata declares. Licence
+#   texts are embedded only where the metadata names a file; the notices bundle
+#   holds the files the distributions ship, and lists those that ship none.
+# - The image profiles approximate what the images install, not the images:
+#   the base image is not covered, the venvs leave out pip and setuptools, and
+#   the template image installs machina-ai from PyPI, not this wheel.
+name: Distribution evidence
+
+on:
+  # No inputs: an input would add a shell-injection surface.
+  workflow_dispatch:
+  # A change to the evidence tooling runs it before it merges.
+  pull_request:
+    paths:
+      - ".github/workflows/dist-evidence.yml"
+      - "scripts/compliance/**"
+      - "tests/unit/test_verify_dist.py"
+      - "tests/unit/test_collect_notices.py"
+
+permissions:
+  contents: read
+
+# A new push supersedes a pull request's run; manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  dist:
+    name: Build and check the distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      # No token left in .git/config for the code the later steps run.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The Python release.yml builds with, and the Docker images' base.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Build the sdist and the wheel
+        run: |
+          python -m pip install "build==1.6.1"
+          python -m build
+
+      # Runs after a failed build too: no distributions is a failure it reports.
+      - name: Check LICENSE and the licence metadata
+        if: always()
+        run: |
+          python scripts/compliance/verify_dist.py --dist dist --license LICENSE \
+            --report evidence/verify-dist.json
+
+      # What the evidence was made from: the SBOMs themselves carry no timestamp.
+      - name: Record the run
+        if: always()
+        run: |
+          mkdir -p evidence
+          {
+            echo "### Run"
+            echo "- date (UTC): $(date -u +%F)"
+            echo "- commit: $GITHUB_SHA"
+            echo "- platform: $(uname -sm), $(python -V)"
+            for artifact in dist/*; do
+              [ -f "$artifact" ] && echo "- $(sha256sum "$artifact" | sed 's#  dist/# #')"
+            done
+          } | tee evidence/run-facts.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the distributions and the check
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: |
+            dist/
+            evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  sbom:
+    name: SBOM and notices (${{ matrix.profile }})
+    needs: dist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { profile: core, extras: "" }
+          - { profile: all, extras: all }
+          - { profile: docs-rag-pro, extras: docs-rag-pro }
+          # Not part of all.
+          - { profile: sql-jdbc, extras: sql-jdbc }
+          # The deploy image's default MACHINA_EXTRAS (deploy/docker/Dockerfile).
+          - { profile: deploy-image, extras: "cmms-rest,mcp" }
+          # The extras templates/odl-generator-from-text/Dockerfile installs.
+          - { profile: template-image, extras: "excel,litellm" }
+    env:
+      PROFILE: ${{ matrix.profile }}
+      EXTRAS: ${{ matrix.extras }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download the distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: artifact
+
+      - name: Install the SBOM tool
+        run: python -m pip install "cyclonedx-bom==7.5.0"
+
+      # The venv gets no pip of its own: the runner's pip installs into it, so
+      # the SBOM lists the wheel and what the profile pulls in, not the tooling.
+      - name: Install the wheel with the profile's extras
+        id: install
+        run: |
+          python -m venv --without-pip "$RUNNER_TEMP/profile"
+          wheels=(artifact/dist/*.whl)
+          target="${wheels[0]}${EXTRAS:+[$EXTRAS]}"
+          python -m pip --python "$RUNNER_TEMP/profile/bin/python" install --no-cache-dir "$target"
+
+      - name: Write the SBOM
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          mkdir -p evidence
+          cyclonedx-py environment --pyproject pyproject.toml --mc-type library --sv 1.6 \
+            --gather-license-texts --output-reproducible \
+            -o "evidence/$PROFILE.cdx.json" "$RUNNER_TEMP/profile/bin/python"
+
+      - name: Collect the licence and notice files
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          python="$RUNNER_TEMP/profile/bin/python"
+          purelib="$("$python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          platlib="$("$python" -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+          if [ "$purelib" != "$platlib" ]; then
+            echo "::error::purelib and platlib differ, so the bundle would miss $platlib"
+            exit 1
+          fi
+          python scripts/compliance/collect_notices.py --site-packages "$purelib" \
+            --out "evidence/$PROFILE-notices"
+
+      # Facts for the run summary: the venv's size, the disk left, and how often
+      # machina-ai appears in the SBOM, as its root component and among the rest.
+      - name: Record disk use and the SBOM's machina-ai entries
+        if: always()
+        run: |
+          mkdir -p evidence
+          sbom="evidence/$PROFILE.cdx.json"
+          {
+            echo "### $PROFILE"
+            echo "- date (UTC): $(date -u +%F), commit $GITHUB_SHA"
+            echo "- platform: $(uname -sm), $(python -V)"
+            echo "- venv size: $(du -sh "$RUNNER_TEMP/profile" 2>/dev/null | cut -f1)"
+            echo "- disk available: $(df -h --output=avail / | tail -1 | tr -d ' ')"
+            if [ -f "$sbom" ]; then
+              echo "- root component: $(jq -r '.metadata.component | "\(.name) \(.version)"' "$sbom")"
+              echo "- components: $(jq '.components | length' "$sbom")"
+              echo "- components named machina-ai: $(jq '[.components[]? | select(.name == "machina-ai")] | length' "$sbom")"
+            else
+              echo "- no SBOM written"
+            fi
+          } | tee "evidence/$PROFILE-facts.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the SBOM and the notices
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-${{ matrix.profile }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
