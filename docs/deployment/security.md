@@ -416,11 +416,18 @@ pipdeptree --packages machina-ai
 ### Container Image
 
 The Docker image (`deploy/docker/Dockerfile`) uses a multi-stage build with
-`python:3.11-slim-bookworm` as the base. To pin the base image digest:
+`python:3.11-slim-bookworm` as the base. To pin the base image digest, pass
+it as the `PYTHON_BASE` build argument. It sets the base of both the build and
+the runtime stage, and the mock CMMS image takes the same argument:
 
-```dockerfile
-FROM python:3.11-slim-bookworm@sha256:<digest> AS build
+```bash
+docker buildx imagetools inspect python:3.11-slim-bookworm   # prints the current digest
+docker build -f deploy/docker/Dockerfile \
+  --build-arg PYTHON_BASE=python:3.11-slim-bookworm@sha256:<digest> -t machina:latest .
 ```
+
+See [Build Arguments](docker.md#build-arguments) for the other build-time
+pins.
 
 ### Vulnerability Scanning
 

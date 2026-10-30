@@ -1,6 +1,15 @@
-FROM python:3.11-slim-bookworm
+ARG PYTHON_BASE=python:3.11-slim-bookworm
 
-RUN pip install --no-cache-dir fastapi uvicorn
+FROM ${PYTHON_BASE}
+
+COPY constraints.txt ./
+# MACHINA_CONSTRAINTS=constraints.txt pins the install to the committed versions.
+ARG MACHINA_CONSTRAINTS=
+RUN if [ -n "$MACHINA_CONSTRAINTS" ]; then \
+        pip install --no-cache-dir -c "$MACHINA_CONSTRAINTS" fastapi uvicorn; \
+    else \
+        pip install --no-cache-dir fastapi uvicorn; \
+    fi
 
 COPY app.py /app/app.py
 WORKDIR /app

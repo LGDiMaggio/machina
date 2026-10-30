@@ -90,6 +90,7 @@ nav:
       - OdL Generator from Text: starter-kits/odl-generator-from-text.md
   - Deployment:
       - Docker: deployment/docker.md
+      - Redistributing Images: deployment/redistribution.md
       - On-Premise: deployment/on-premise.md
       - Secrets: deployment/secrets.md
       - Uptime & Resilience: deployment/uptime.md
