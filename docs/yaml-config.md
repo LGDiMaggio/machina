@@ -113,8 +113,11 @@ loader actually accepts.
 
 The `settings` dict is passed as keyword arguments to the connector
 constructor; nested objects such as `auth` and `pagination` are given as
-dicts selected by their `type`. Check each connector's documentation for
-available settings.
+dicts selected by their `type`. A key such a nested object does not know is
+refused with an error that names it, never its value. Some Generic CMMS
+blocks are still plain dicts, and unknown keys in them are still ignored:
+`endpoints`, `schema_mapping`, and the `pagination` of an endpoint in the
+YAML mapping. Check each connector's documentation for available settings.
 
 ### Channels
 
