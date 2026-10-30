@@ -95,6 +95,9 @@ The Dockerfile (`deploy/docker/Dockerfile`) uses a multi-stage build:
 - **Healthcheck:** `GET /health` every 30 s
 - **Entrypoint:** `machina mcp serve --transport streamable-http --host 0.0.0.0 --port 8000 --config /home/machina/config.yaml`
 
+An image you build contains third-party software. If you distribute it,
+see [Redistributing Images](redistribution.md) for what comes with it.
+
 ### Building Locally
 
 The build context is the repository root:
@@ -103,12 +106,69 @@ The build context is the repository root:
 docker build -f deploy/docker/Dockerfile -t machina:latest .
 ```
 
-### Pinning the Base Image
+### Build Arguments
 
-For production, pin the base image digests:
+Every build argument is optional. With none set, both images install
+exactly what they installed before these arguments existed.
 
-```dockerfile
-FROM python:3.11-slim-bookworm@sha256:<digest> AS build
+| Argument | Images | Default | Effect when set |
+|----------|--------|---------|-----------------|
+| `MACHINA_EXTRAS` | `machina` | `cmms-rest,mcp` | The extras installed with Machina |
+| `PYTHON_BASE` | both | `python:3.11-slim-bookworm` | The base image of every stage, for example one pinned by digest |
+| `MACHINA_CONSTRAINTS` | both | empty | A pip constraints file. `constraints.txt` pins every install to the versions committed next to the Dockerfile |
+| `TORCH_INDEX_URL` | `machina` | empty | Installs `torch` and `torchvision` from that index before the extras. For the RAG extras only |
+
+A `docker compose build --build-arg …` applies the argument to both
+services; a `docker build` applies it to the one image.
+
+**Pinned Python dependencies.** `deploy/docker/constraints.txt` and
+`deploy/docker/mock-cmms/constraints.txt` hold exact versions, so two builds
+on different days install the same packages:
+
+```bash
+docker compose build --build-arg MACHINA_CONSTRAINTS=constraints.txt
+```
+
+The machina file covers every runtime extra (`all` plus `sql-jdbc`), so
+whatever `MACHINA_EXTRAS` you choose is pinned. pip applies a constraint only
+to packages it installs; the rest of the file has no effect. Both files are
+resolved for Python 3.11 on every platform (amd64 and arm64 alike).
+
+**Pinned base image.** Pass a digest instead of a tag:
+
+```bash
+docker build -f deploy/docker/Dockerfile \
+  --build-arg PYTHON_BASE=python:3.11-slim-bookworm@sha256:<digest> -t machina:latest .
+```
+
+`docker buildx imagetools inspect python:3.11-slim-bookworm` prints the
+current digest. A base image with another Python version needs constraints
+files resolved for that version.
+
+**CPU-only torch.** On Linux, on both x86_64 and arm64, the RAG extras
+(`docs-rag-rerank`, `docs-rag-parsing`, `docs-rag-pro`, `all`) pull the CUDA
+build of `torch` and NVIDIA's CUDA wheels from PyPI. To leave them out, install `torch` and
+`torchvision` from the PyTorch CPU index:
+
+```bash
+docker build -f deploy/docker/Dockerfile \
+  --build-arg MACHINA_EXTRAS=cmms-rest,mcp,docs-rag-pro \
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu \
+  -t machina:rag-cpu .
+```
+
+Both packages come from that index alone (`--index-url`, never
+`--extra-index-url`, which could take the CUDA build or another package
+from the wrong index). They are installed without their dependencies, which
+then resolve from PyPI with the extras. They are installed together because
+torchvision's compiled operators are built for one torch variant.
+
+**Regenerating the constraints files.** uv records each file's command in
+its header. Run them from the repository root with uv 0.12.22:
+
+```bash
+uv pip compile --universal --python-version 3.11 --extra all --extra sql-jdbc pyproject.toml -o deploy/docker/constraints.txt
+printf 'fastapi\nuvicorn\n' | uv pip compile --universal --python-version 3.11 - -o deploy/docker/mock-cmms/constraints.txt
 ```
 
 ## Mock CMMS
