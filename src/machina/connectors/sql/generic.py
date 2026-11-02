@@ -564,7 +564,8 @@ class GenericSqlConnector:
         # Drop the reference before closing, on the connection's own thread,
         # so a call queued behind this one finds no connection, not a closed one.
         conn, self._conn = self._conn, None
-        if conn is not None:  # a concurrent disconnect() closed it first
+        # None if disconnect() stopped waiting and dropped it just as this started.
+        if conn is not None:  # pragma: no branch
             conn.close()
 
     def _validate_schemas(self) -> None:

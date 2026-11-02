@@ -401,6 +401,21 @@ class TestConnect:
         assert (await connector.health_check()).message == "Not connected"
 
     @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_mapping_query_that_fails_both_ways_is_a_schema_error(
+        self, mock_connect: MagicMock
+    ) -> None:
+        cursor = MagicMock()
+        cursor.execute = MagicMock(side_effect=RuntimeError("Invalid object name 'ASSETS'"))
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=5))
+
+        with pytest.raises(ConnectorSchemaError, match="Query for table mapping"):
+            await connector.connect()
+
+        assert cursor.execute.call_count == 2  # the probe, then the plain query
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "probe_fails_first", [False, True], ids=["probe-times-out", "fallback-times-out"]
     )
