@@ -123,3 +123,27 @@ class TestSqlConnectorConfig:
             },
         )
         assert cfg.capabilities == "read_write"
+
+
+def _asset_tables() -> dict[str, TableMapping]:
+    return {
+        "assets": TableMapping(
+            query="SELECT 1", entity="Asset", fields={"id": FieldMapping(column="ID")}
+        )
+    }
+
+
+class TestQueryTimeout:
+    def test_unset_by_default(self) -> None:
+        """Off unless configured: what a driver does with it varies (see sql.md)."""
+        cfg = SqlConnectorConfig(dsn="test", tables=_asset_tables())
+        assert cfg.query_timeout is None
+
+    def test_whole_seconds(self) -> None:
+        cfg = SqlConnectorConfig(dsn="test", tables=_asset_tables(), query_timeout=30)
+        assert cfg.query_timeout == 30
+
+    @pytest.mark.parametrize("value", [0, -5, 2.5])
+    def test_must_be_whole_seconds_of_at_least_one(self, value: float) -> None:
+        with pytest.raises(ValueError, match="query_timeout"):
+            SqlConnectorConfig(dsn="test", tables=_asset_tables(), query_timeout=value)

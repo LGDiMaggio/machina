@@ -37,7 +37,7 @@ class ConnectorLockedError(ConnectorError):
 
 
 class ConnectorTransientError(ConnectorError):
-    """A transient error (deadlock, timeout) that may succeed on retry."""
+    """A transient error (deadlock, lock timeout) that may succeed on retry."""
 
 
 class ConnectorDriverError(ConnectorError):
