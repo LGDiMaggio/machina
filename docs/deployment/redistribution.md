@@ -8,11 +8,14 @@ the evidence.
     On 2 November 2026, the three default Docker images were built and scanned
     on a GitHub Actions Linux amd64 runner using the `Image evidence` workflow
     ([run 41422273364](https://github.com/LGDiMaggio/machina/actions/runs/41422273364))
-    at commit `8e416ed1`. The two optional RAG variants, CUDA and CPU-only
-    (the Machina image with `docs-rag-pro` added to its default extras, built
-    with `MACHINA_CONSTRAINTS`), are Linux amd64 images that were built locally
-    from separately recorded build inputs and scanned locally with the Windows
-    build of syft. The GitHub Actions runner did not build or scan them.
+    at commit `8e416ed1`. The template image installs `machina-ai` 0.4.0 from
+    PyPI, so its evidence describes that release, not this commit. The two
+    optional RAG variants, CUDA and CPU-only (the Machina image with
+    `docs-rag-pro` added to its default extras, built with
+    `MACHINA_CONSTRAINTS`), are Linux amd64 images that were built locally on
+    29 October 2026 from separately recorded build inputs and scanned locally
+    on 30 October 2026 with the Windows build of syft 1.54.1. The GitHub Actions
+    runner did not build or scan them.
 
     For these five specific images, the installed Debian and Python package
     inventories were reconciled across the available syft SBOMs, Debian package
@@ -20,21 +23,23 @@ the evidence.
     package-inventory discrepancy remained.
 
     **The evidence is not a complete redistribution compliance assessment.**
-    Some third-party distributions lack collected licence files, and some
-    native libraries bundled inside wheels lack corresponding licence evidence
-    in the collected notices (see
+    For some third-party distributions the notices collector found no licence
+    file, and some native libraries bundled inside wheels are not named in the
+    licence files collected from those wheels (see
     [Licence evidence missing from collected package files](#licence-evidence-missing-from-collected-package-files)).
     Statically linked components, embedded third-party SBOMs and corresponding
-    source-code obligations have not been fully assessed. The CycloneDX 1.7
+    source-code obligations have not been assessed. The CycloneDX 1.7
     documents were successfully decoded by syft but not independently
     validated against the official schema.
 
     The findings apply only to the recorded builds, platforms and dependency
     resolutions: Linux amd64, base image
-    `python:3.11-slim-bookworm@sha256:94a8fee3…`, and the packages resolved on
-    those dates. Other platforms, optional configurations and future rebuilds
-    may contain different components. The workflow run's artifacts hold each
-    default image's SBOM, package lists and notices bundles for 90 days; the
+    `python:3.11-slim-bookworm@sha256:94a8fee3…`, and the packages resolved
+    when the images were built (29 October 2026 for the RAG variants, 2
+    November 2026 for the default images). Other platforms, optional
+    configurations and future rebuilds may contain different components. The
+    workflow run's artifacts hold each default image's SBOM, package lists and
+    notices bundles until 31 January 2027; the
     RAG scans and the reconciliation are kept in the maintainers' audit
     records, outside the repository.
 
@@ -81,24 +86,35 @@ a hundred Debian 12 packages, CPython, and the base image's own `pip`,
 
 Most other dependencies are under permissive licences (MIT, BSD, Apache-2.0,
 ISC, PSF-2.0). For those, shipping their licence texts and notices is enough.
-The notices bundle below collects the texts the installed distributions carry.
+The notices bundle below collects the licence and notice files it finds in
+each installed distribution; where it finds none, the text has to come from
+elsewhere.
 
 ## Licence evidence missing from collected package files
 
-The scans found licence evidence missing from the files the installed
-distributions ship, in two ways. This does not show that a licence text is
-absent everywhere in the image. Before distributing an image, identify the
-obligations that apply to these components and resolve the evidence gaps.
-The notices bundle lists the first group as "no licence file found"; it says
-nothing about the second.
+The notices collector reads two places in each installed distribution: its
+`.dist-info/licenses/` folder, and the files its `RECORD` lists under a
+licence- or notice-like name. In the scanned images, what it collected left
+two kinds of gap. These are gaps in the collected evidence. They do not show
+that a licence text is absent from the distribution or from the image: the
+text may sit in a file with another name, inside another file, or only in the
+package metadata. Before distributing an image, identify the obligations that
+apply to these components and resolve the evidence gaps. The notices bundle
+lists the first group as "no licence file found"; it says nothing about the
+second.
 
-- **Distributions in which no licence file was found:** `tokenizers` 0.23.3
-  (template and RAG images); in the RAG images, `docling` 2.145.0,
-  `flatbuffers` 25.12.19, `langchain-community` 0.4.2 and `latex2mathml`
-  3.81.1; in the CUDA image, `cuda-toolkit` 13.2.2, which also declares no
-  licence.
-- **Native libraries bundled inside a wheel whose collected licence files do
-  not name them** (RAG images):
+- **Distributions in which the collector found no licence file:**
+  `tokenizers` 0.23.3 (template and RAG images); in the RAG images, `docling`
+  2.145.0, `flatbuffers` 25.12.19, `langchain-community` 0.4.2 and
+  `latex2mathml` 3.81.1; in the CUDA image, `cuda-toolkit` 13.2.2. Except for
+  `cuda-toolkit`, each declares a licence in its metadata although no file
+  under a licence-like name was found: MIT for `docling`,
+  `langchain-community` and `latex2mathml`, Apache 2.0 for `flatbuffers`, and
+  the Apache Software License classifier for `tokenizers`. `cuda-toolkit`
+  declares no licence.
+- **Native libraries in a wheel's `*.libs` folder that the licence files
+  collected from that wheel do not name** (RAG images; searched by library
+  name):
     - `opencv-python-headless` 5.0.0.93: libgfortran, libquadmath, OpenBLAS
       and libdrm. Its `LICENSE-3RD-PARTY.txt` names other bundled libraries,
       FFmpeg and OpenSSL among them, but not these four.
@@ -108,27 +124,31 @@ nothing about the second.
     - `rtree` 1.4.1: libspatialindex.
 
 The versions are those of the scanned images; another build may resolve
-different ones. Code compiled statically into extension modules is not in
-these lists at all.
+different ones. Libraries a wheel ships outside a `*.libs` folder, and code
+compiled statically into extension modules, were not examined and are not in
+these lists.
 
 ## NVIDIA's terms (Linux images with RAG extras)
 
 On Linux, on both x86_64 and arm64, the RAG extras `docs-rag-rerank`,
 `docs-rag-parsing`, `docs-rag-pro` and `all` pull the CUDA build of `torch`
-from PyPI, and with it NVIDIA's CUDA wheels. These come under the
-[CUDA EULA](https://docs.nvidia.com/cuda/eula/index.html); cuDNN and
-cuSPARSELt come under NVIDIA's
+from PyPI, and with it NVIDIA's CUDA wheels. The `nvidia-*` wheels among them
+come under the [CUDA EULA](https://docs.nvidia.com/cuda/eula/index.html);
+cuDNN and cuSPARSELt come under NVIDIA's
 [software licence agreement](https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html).
-Each of these wheels carries its licence text, except the `cuda-toolkit`
-meta-package, in which no licence file was found and which declares no
-licence.
+In the scanned CUDA image, the `nvidia-*` wheels declare an NVIDIA proprietary
+licence in their metadata, while `cuda-bindings` and `cuda-pathfinder`, also
+pulled in, declare Apache-2.0. The notices collector found a licence file in
+each of these wheels except the `cuda-toolkit` meta-package, in which it found
+none and whose metadata declares no licence. Whether each file found is the
+complete agreement that applies was not checked.
 
-The CUDA wheels are not the only NVIDIA components in such an image. In the
-scanned CUDA image, the `torchvision` wheel also bundles NVIDIA's CUDA
-runtime (`libcudart`) and nvJPEG (`libnvjpeg`) libraries in
-`torchvision.libs`, and the licence file `torchvision` ships does not mention
-them. Which terms cover these copies, and what they require of a distributor,
-has not been determined.
+In the scanned CUDA image (Linux amd64), the CUDA wheels were not the only
+NVIDIA components: the `torchvision` wheel also bundles NVIDIA's CUDA runtime
+(`libcudart`) and nvJPEG (`libnvjpeg`) libraries in `torchvision.libs`, and
+the licence file collected from `torchvision` does not mention them. Which
+terms cover these copies, and what they require of a distributor, has not
+been determined.
 
 In summary, a distributor:
 - may redistribute only the files the CUDA EULA lists in its Attachment A, and cuDNN only under its own agreement;
@@ -138,8 +158,9 @@ In summary, a distributor:
 - must not place them under an open-source licence that requires source disclosure. Both agreements forbid this.
 
 Someone who runs `pip install` on their own machine accepts NVIDIA's terms
-directly. The distribution duties arise only for someone who ships an image
-that contains the wheels. To leave the wheels out, build with CPU-only torch
+directly. The distribution duties above arise for someone who ships an image
+that contains the wheels; for the NVIDIA libraries bundled in `torchvision`,
+see the previous paragraph. To leave the wheels out, build with CPU-only torch
 (`TORCH_INDEX_URL`, see [Build Arguments](docker.md#build-arguments)). The
 scanned CPU-only image contained neither the CUDA wheels nor those two
 libraries.
@@ -196,7 +217,9 @@ image, and are not scans of them.
 
 **The whole image, Debian packages included.** [syft](https://github.com/anchore/syft)
 writes a CycloneDX SBOM of a built image from the local Docker daemon, Debian and
-Python packages alike, with the licences their metadata declares. Download a
+Python packages alike, with the licences their metadata declares; in the
+scans, syft 1.54.1 left the licence empty for distributions that declare it
+only as a trove classifier, such as `tokenizers`. Download a
 release from its GitHub page and check it against the release's
 `checksums.txt` before running it. The repository's manual `Image evidence`
 workflow does this with syft 1.54.1 for the three default images, built with no
@@ -224,7 +247,7 @@ docker run --rm --entrypoint sh machina:latest -c \
 - Code compiled statically into extension modules, and the third-party SBOMs
   some wheels embed in their `.dist-info`: neither the scans nor the notices
   bundle read them.
-- Validation against the official CycloneDX schema: syft writes CycloneDX 1.7
-  and reads it back, which is not schema validation.
+- Validation against the official CycloneDX schema: syft 1.54.1 writes
+  CycloneDX 1.7 and reads it back, which is not schema validation.
 - What a scan cannot decide: whether an obligation is met, and the licence of
   a file that no package metadata describes.
