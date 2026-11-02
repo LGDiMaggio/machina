@@ -336,3 +336,135 @@ def test_dist_evidence_uploads_keep_failure_evidence() -> None:
         ["dist/", "evidence/"],
         ["evidence/"],
     ]
+
+
+# The image-evidence workflow builds the three default images as they are and
+# records what they contain. Like dist-evidence it must never be able to publish,
+# and the one tool it downloads, syft, must be checked before it runs.
+IMAGE_EVIDENCE = WORKFLOWS / "image-evidence.yml"
+DEFAULT_IMAGES = [
+    {"image": "machina", "dockerfile": "deploy/docker/Dockerfile", "context": "."},
+    {
+        "image": "mock-cmms",
+        "dockerfile": "deploy/docker/mock-cmms/Dockerfile",
+        "context": "deploy/docker/mock-cmms",
+    },
+    {
+        "image": "template",
+        "dockerfile": "templates/odl-generator-from-text/Dockerfile",
+        "context": "templates/odl-generator-from-text",
+    },
+]
+
+
+def test_image_evidence_permissions_are_read_only() -> None:
+    workflow = _load(IMAGE_EVIDENCE)
+    assert workflow.get("permissions") == {"contents": "read"}
+    for name, job in workflow["jobs"].items():
+        assert "permissions" not in job, f"job {name} widens the top-level permissions"
+    assert not re.search(r"\bsecrets\b", IMAGE_EVIDENCE.read_text(encoding="utf-8"))
+    for step in _steps(IMAGE_EVIDENCE):
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            assert step.get("with", {}).get("persist-credentials") is False
+
+
+def test_image_evidence_triggers() -> None:
+    triggers = _load(IMAGE_EVIDENCE)[True]
+    assert set(triggers) == {"workflow_dispatch", "pull_request"}
+    assert not triggers["workflow_dispatch"], "manual runs take no inputs"
+    assert triggers["pull_request"] == {"paths": [".github/workflows/image-evidence.yml"]}
+    concurrency = _load(IMAGE_EVIDENCE)["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}", (
+        "manual runs are never cancelled"
+    )
+
+
+def test_image_evidence_verifies_syft_before_running_it() -> None:
+    workflow = _load(IMAGE_EVIDENCE)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", workflow["env"]["SYFT_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", workflow["env"]["SYFT_SHA256"])
+    runs = _runs(IMAGE_EVIDENCE)
+    downloads = [run for run in runs if re.search(r"\b(curl|wget)\b", run)]
+    assert len(downloads) == 1, "syft is the only download"
+    install = downloads[0]
+    assert "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/" in install
+    assert not re.search(r"\|\s*(sh|bash)\b", install), "no install script is piped"
+    check = install.index('echo "$SYFT_SHA256  ')
+    assert "sha256sum --check --strict" in install[check:]
+    assert "||" not in install, "a failed check must stop the step"
+    assert check < install.index("tar -xzf")
+    scans = [run for run in runs if "syft" in run and run is not install]
+    assert scans and all('"$RUNNER_TEMP/syft/syft"' in run for run in scans)
+    for run in scans:
+        bare = run.replace('"$RUNNER_TEMP/syft/syft"', "")
+        assert not re.search(r"(^|[\s;&|(])syft\s+\w", bare, re.M), "only the verified syft runs"
+
+
+def test_image_evidence_builds_the_default_images_as_they_are() -> None:
+    job = _load(IMAGE_EVIDENCE)["jobs"]["image"]
+    assert job["strategy"].get("fail-fast") is False, "one failed image must not stop the rest"
+    assert job["strategy"]["matrix"]["include"] == DEFAULT_IMAGES
+    builds = [run for run in _runs(IMAGE_EVIDENCE) if re.search(r"\bdocker build\s", run)]
+    assert len(builds) == 1
+    assert 'docker build -f "$DOCKERFILE"' in builds[0] and '"$CONTEXT"' in builds[0]
+    assert "--build-arg" not in builds[0], "default builds take no build arguments"
+
+
+def test_image_evidence_records_the_base_the_dockerfiles_use() -> None:
+    base = _load(IMAGE_EVIDENCE)["env"]["BASE_IMAGE"]
+    root = WORKFLOWS.parents[1]
+    for image in DEFAULT_IMAGES:
+        dockerfile = (root / image["dockerfile"]).read_text(encoding="utf-8")
+        default = rf"^(FROM|ARG PYTHON_BASE=)\s*{re.escape(base)}\s*$"
+        assert re.search(default, dockerfile, re.M), f"{image['dockerfile']} is not on {base}"
+
+
+def test_every_image_evidence_job_has_a_timeout() -> None:
+    for name, job in _load(IMAGE_EVIDENCE)["jobs"].items():
+        timeout = job.get("timeout-minutes")
+        assert isinstance(timeout, int) and 0 < timeout <= 60, f"job {name}: {timeout!r}"
+
+
+def test_image_evidence_cannot_publish() -> None:
+    content = str(_load(IMAGE_EVIDENCE)).lower()
+    pushes = ("--push", "type=registry", "skopeo", "crane ", "oras ", "ghcr.io")
+    assert not [word for word in PUBLISHING + pushes if word in content]
+    for step in _steps(IMAGE_EVIDENCE):
+        uses = step.get("uses")
+        if uses:
+            assert re.fullmatch(r"actions/[\w-]+@v\d+", uses), (
+                f"{uses}: not a GitHub-owned action at a release tag"
+            )
+    for run in _runs(IMAGE_EVIDENCE):
+        assert "${{" not in run, run
+        assert "GITHUB_ENV" not in run and "GITHUB_PATH" not in run, run
+
+
+def test_image_evidence_records_each_kind_of_evidence() -> None:
+    runs = "\n".join(_runs(IMAGE_EVIDENCE))
+    assert re.search(r'syft" scan "docker:image-evidence/\$IMAGE" -o "cyclonedx-json=', runs)
+    assert "${source:Package}" in runs and "${source:Version}" in runs, "Debian source packages"
+    assert "ls /usr/share/doc/*/copyright" in runs, "Debian copyright files"
+    assert "scripts/compliance:/compliance:ro" in runs and "collect_notices.py" in runs
+    assert 'collect "$purelib" bundle' in runs, "the image's own Python distributions"
+    assert 'collect "$base_purelib"' in runs, "the base image's own Python, next to a venv"
+    assert re.search(r'-m pip freeze --all \\\s+> "evidence/\$IMAGE-pip-freeze-all.txt"', runs)
+    assert '-path "*.libs/*"' in runs, "native libraries bundled inside wheels"
+    assert "{{.Id}}" in runs and "RepoDigests" in runs, "image ID and base image digest"
+    assert '"$base_layers"*) ;;' in runs, "the recorded base image is the image's own base"
+    assert '> "evidence/$IMAGE-base-python-pip-freeze-all.txt"' in runs
+    assert "sha256sum > SHA256SUMS" in runs, "the evidence carries its own checksums"
+
+
+def test_image_evidence_uploads_keep_failure_evidence() -> None:
+    uploads = [
+        step
+        for step in _steps(IMAGE_EVIDENCE)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 1
+    step = uploads[0]
+    assert step.get("if") == "always()", "a failed step still leaves its evidence"
+    assert step["with"].get("if-no-files-found") == "error"
+    assert step["with"].get("retention-days") == 90
+    assert step["with"]["path"] == "evidence/"
