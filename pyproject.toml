@@ -37,7 +37,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pydantic>=2.0",
+    # >=2.4: settings validation and the Maximo record mapping call
+    # ValidationError.errors(include_input=False), which pydantic 2.0-2.3 do
+    # not accept (TypeError).
+    "pydantic>=2.4",
     "structlog>=26.1",
     "pyyaml>=6.0",
     "jmespath>=1.0",
