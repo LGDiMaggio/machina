@@ -10,8 +10,9 @@ the evidence.
     ([run 41422273364](https://github.com/LGDiMaggio/machina/actions/runs/41422273364))
     at commit `8e416ed1`. The two optional RAG variants, CUDA and CPU-only
     (the Machina image with `docs-rag-pro` added to its default extras, built
-    with `MACHINA_CONSTRAINTS`), were built and scanned locally, also on Linux
-    amd64, from separately recorded build inputs.
+    with `MACHINA_CONSTRAINTS`), are Linux amd64 images that were built locally
+    from separately recorded build inputs and scanned locally with the Windows
+    build of syft. The GitHub Actions runner did not build or scan them.
 
     For these five specific images, the installed Debian and Python package
     inventories were reconciled across the available syft SBOMs, Debian package
@@ -22,7 +23,7 @@ the evidence.
     Some third-party distributions lack collected licence files, and some
     native libraries bundled inside wheels lack corresponding licence evidence
     in the collected notices (see
-    [Licence texts the images do not carry](#licence-texts-the-images-do-not-carry)).
+    [Licence evidence missing from collected package files](#licence-evidence-missing-from-collected-package-files)).
     Statically linked components, embedded third-party SBOMs and corresponding
     source-code obligations have not been fully assessed. The CycloneDX 1.7
     documents were successfully decoded by syft but not independently
@@ -73,7 +74,7 @@ a hundred Debian 12 packages, CPython, and the base image's own `pip`,
 |-----------|---------------------|------------------------------|
 | Debian packages under GPL or LGPL (bash, coreutils, glibc, gnutls, …) | every image's base | Provide the corresponding source of the exact packages in the image, or a written offer for it. Keep `/usr/share/doc/*/copyright` in the image |
 | LGPL Python libraries: asyncua, python-telegram-bot, JayDeBeApi | the `opcua`, `telegram` and `sql-jdbc` extras (`all` includes the first two) | Ship the LGPL and GPL texts and keep the notices. Provide or offer the library's source. Keep it replaceable: an unmodified package in site-packages qualifies. Do not forbid reverse engineering for debugging the library |
-| LGPL native libraries inside wheels: FFmpeg in `opencv-python-headless`, GEOS in `shapely`, libquadmath in the Linux wheels of `opencv-python-headless`, `numpy` and `scipy` | the RAG parsing stack (`docs-rag-parsing`, `docs-rag-pro`, `all`); `numpy` and `scipy` come with every RAG extra | Ship the licence texts the wheels carry (for example `LICENSE_GEOS`). They do not cover every library a wheel bundles: libquadmath in `opencv-python-headless` is among those listed under [Licence texts the images do not carry](#licence-texts-the-images-do-not-carry). Offer the libraries' source, keep them replaceable, and do not forbid reverse engineering |
+| LGPL native libraries inside wheels: FFmpeg in `opencv-python-headless`, GEOS in `shapely`, libquadmath in the Linux wheels of `opencv-python-headless`, `numpy` and `scipy` | the RAG parsing stack (`docs-rag-parsing`, `docs-rag-pro`, `all`); `numpy` and `scipy` come with every RAG extra | Ship the licence texts the wheels carry (for example `LICENSE_GEOS`). The collected texts do not name every library a wheel bundles: libquadmath in `opencv-python-headless` is among those listed under [Licence evidence missing from collected package files](#licence-evidence-missing-from-collected-package-files). Offer the libraries' source, keep them replaceable, and do not forbid reverse engineering |
 | Files under MPL-2.0: `certifi` (in the default `machina` image), `tqdm`, `orjson`, the CA bundles inside `botocore` and `grpcio` | most network extras | Tell recipients where the source is. For unmodified packages, that is the package itself |
 | Apache-2.0 `NOTICE` files, for example `botocore`'s | the `litellm` and RAG extras | Pass the `NOTICE` files on with the image |
 | FreeType in `pillow`; OpenSSL 1.1 in the Linux wheels of `opencv-python-headless` | the RAG parsing stack | Credit "The FreeType Project" in the documentation of what you ship. Include the OpenSSL and SSLeay acknowledgements |
@@ -82,13 +83,16 @@ Most other dependencies are under permissive licences (MIT, BSD, Apache-2.0,
 ISC, PSF-2.0). For those, shipping their licence texts and notices is enough.
 The notices bundle below collects the texts the installed distributions carry.
 
-## Licence texts the images do not carry
+## Licence evidence missing from collected package files
 
-The scans found licence texts missing in two ways. A redistributor has to
-obtain these texts elsewhere. The notices bundle lists the first group as
-"no licence file found"; it says nothing about the second.
+The scans found licence evidence missing from the files the installed
+distributions ship, in two ways. This does not show that a licence text is
+absent everywhere in the image. Before distributing an image, identify the
+obligations that apply to these components and resolve the evidence gaps.
+The notices bundle lists the first group as "no licence file found"; it says
+nothing about the second.
 
-- **Distributions without a licence file of their own:** `tokenizers` 0.23.3
+- **Distributions in which no licence file was found:** `tokenizers` 0.23.3
   (template and RAG images); in the RAG images, `docling` 2.145.0,
   `flatbuffers` 25.12.19, `langchain-community` 0.4.2 and `latex2mathml`
   3.81.1; in the CUDA image, `cuda-toolkit` 13.2.2, which also declares no
@@ -96,8 +100,8 @@ obtain these texts elsewhere. The notices bundle lists the first group as
 - **Native libraries bundled inside a wheel whose collected licence files do
   not name them** (RAG images):
     - `opencv-python-headless` 5.0.0.93: libgfortran, libquadmath, OpenBLAS
-      and libdrm. Its `LICENSE-3RD-PARTY.txt` covers FFmpeg, OpenSSL and its
-      other bundled libraries.
+      and libdrm. Its `LICENSE-3RD-PARTY.txt` names other bundled libraries,
+      FFmpeg and OpenSSL among them, but not these four.
     - `torchvision` 0.29.2: libjpeg, libpng, libwebp, libsharpyuv and zlib; in
       the CUDA image also NVIDIA's libcudart and libnvjpeg (see
       [NVIDIA's terms](#nvidias-terms-linux-images-with-rag-extras)).
@@ -116,7 +120,8 @@ from PyPI, and with it NVIDIA's CUDA wheels. These come under the
 cuSPARSELt come under NVIDIA's
 [software licence agreement](https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html).
 Each of these wheels carries its licence text, except the `cuda-toolkit`
-meta-package, which carries no licence file and declares no licence.
+meta-package, in which no licence file was found and which declares no
+licence.
 
 The CUDA wheels are not the only NVIDIA components in such an image. In the
 scanned CUDA image, the `torchvision` wheel also bundles NVIDIA's CUDA
