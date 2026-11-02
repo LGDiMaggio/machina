@@ -1,0 +1,196 @@
+# Image evidence. Manual, and on pull requests that change this file. Releases
+# never run it.
+#
+# For each default image (the machina image, the mock CMMS and the
+# odl-generator template) it builds the Dockerfile as it is, with no build
+# arguments, into the runner's local Docker, and records what the image holds:
+# - a CycloneDX SBOM from syft: Debian and Python packages, with the licences
+#   their metadata declares;
+# - the Debian packages with their source packages and versions, and the
+#   copyright files under /usr/share/doc;
+# - pip freeze --all, and the licence and notice files the Python
+#   distributions ship (scripts/compliance/collect_notices.py);
+# - the native libraries bundled inside wheels (*.libs directories);
+# - the image ID, the base image digest, the commit and the tool versions.
+# Nothing is pushed, no registry is logged in to, and no step references a
+# secret.
+#
+# What the evidence does not cover:
+# - It is not a legal review and not a release check.
+# - Linux amd64 only, as of the run date: the base image and the dependencies
+#   resolve again on every run.
+# - The template image installs machina-ai 0.4.0 from PyPI, so it describes the
+#   published release, not this repository's source.
+# - The RAG variants (CUDA and CPU-only torch) are opt-in builds and are scanned
+#   locally, not here: the CUDA image alone is about 11 GB.
+# - Source packages are listed, not fetched. Models downloaded at run time are
+#   in no image.
+name: Image evidence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/image-evidence.yml"
+
+permissions:
+  contents: read
+
+# A new push supersedes a pull request's run; manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SYFT_VERSION: "1.54.1"
+  # The SHA-256 of the linux_amd64 tarball, as the release's checksums.txt lists it.
+  SYFT_SHA256: "c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47"
+  BASE_IMAGE: "python:3.11-slim-bookworm"
+
+jobs:
+  image:
+    name: Image evidence (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: machina
+            dockerfile: deploy/docker/Dockerfile
+            context: .
+          - image: mock-cmms
+            dockerfile: deploy/docker/mock-cmms/Dockerfile
+            context: deploy/docker/mock-cmms
+          - image: template
+            dockerfile: templates/odl-generator-from-text/Dockerfile
+            context: templates/odl-generator-from-text
+    env:
+      IMAGE: ${{ matrix.image }}
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      CONTEXT: ${{ matrix.context }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install syft, checked against its pinned digest
+        run: |
+          archive="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/$archive"
+          echo "$SYFT_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/syft"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/syft" syft
+          "$RUNNER_TEMP/syft/syft" version
+
+      - name: Build the image with its default arguments
+        run: |
+          mkdir -p evidence
+          docker pull "$BASE_IMAGE"
+          docker build -f "$DOCKERFILE" -t "image-evidence/$IMAGE" "$CONTEXT" 2>&1 \
+            | tee "evidence/$IMAGE-build.log"
+
+      - name: Record the image
+        run: |
+          # Each fact is captured first, so a command that fails stops the step
+          # instead of leaving an empty line.
+          image_id="$(docker image inspect --format '{{.Id}}' "image-evidence/$IMAGE")"
+          platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "image-evidence/$IMAGE")"
+          base_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$BASE_IMAGE")"
+          # The recorded base must be the image's own: its layers come first.
+          base_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$BASE_IMAGE" | tr -d ']')"
+          image_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "image-evidence/$IMAGE")"
+          case "$image_layers" in
+            "$base_layers"*) ;;
+            *) echo "image-evidence/$IMAGE is not built on $base_digest" >&2; exit 1 ;;
+          esac
+          docker_version="$(docker version --format '{{.Server.Version}}'), $(docker buildx version)"
+          syft_version="$("$RUNNER_TEMP/syft/syft" version | awk '/^Version:/ {print $2}')"
+          {
+            echo "### $IMAGE"
+            echo "- date (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- commit: $GITHUB_SHA"
+            echo "- dockerfile: $DOCKERFILE, context: $CONTEXT, build arguments: none (defaults)"
+            echo "- image id: $image_id"
+            echo "- platform: $platform"
+            echo "- base image: $base_digest (its layers begin the image's)"
+            echo "- docker: $docker_version"
+            echo "- syft: $syft_version, archive sha256 $SYFT_SHA256"
+            echo "- runner: $(uname -sm)"
+          } | tee "evidence/$IMAGE-facts.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write the SBOM
+        run: |
+          "$RUNNER_TEMP/syft/syft" scan "docker:image-evidence/$IMAGE" -o "cyclonedx-json=evidence/$IMAGE.cdx.json"
+          jq -r '[.components[] | ([(.properties // [])[] | select(.name == "syft:package:type") | .value][0] // .type)]
+            | group_by(.) | map("\(.[0]): \(length)") | "- SBOM components by type: " + join(", ")' \
+            "evidence/$IMAGE.cdx.json" | tee -a "evidence/$IMAGE-facts.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: List the Debian packages and their sources
+        run: |
+          docker run --rm --entrypoint dpkg-query "image-evidence/$IMAGE" -W \
+            -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\t${Architecture}\n' \
+            | sort > "evidence/$IMAGE-dpkg.tsv"
+          docker run --rm --entrypoint sh "image-evidence/$IMAGE" -c 'ls /usr/share/doc/*/copyright' \
+            | sort > "evidence/$IMAGE-copyright-files.txt"
+          echo "- Debian packages: $(wc -l < "evidence/$IMAGE-dpkg.tsv"), copyright files: $(wc -l < "evidence/$IMAGE-copyright-files.txt")" \
+            | tee -a "evidence/$IMAGE-facts.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: List the Python packages, their notices and bundled native libraries
+        run: |
+          purelib_of() {
+            docker run --rm --entrypoint "$1" "image-evidence/$IMAGE" \
+              -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+          }
+          purelib="$(purelib_of python)"
+          # Next to a virtual environment, the base image's own Python ships pip,
+          # setuptools, wheel and packaging too.
+          base_purelib="$(purelib_of /usr/local/bin/python)"
+          docker run --rm --entrypoint python "image-evidence/$IMAGE" -m pip freeze --all \
+            > "evidence/$IMAGE-pip-freeze-all.txt"
+          # The image's own user writes the bundle, so the mounted folder must be writable.
+          mkdir -p "evidence/$IMAGE-notices"
+          chmod 777 "evidence/$IMAGE-notices"
+          collect() {
+            docker run --rm --entrypoint python \
+              -v "$PWD/scripts/compliance:/compliance:ro" -v "$PWD/evidence/$IMAGE-notices:/out" \
+              "image-evidence/$IMAGE" /compliance/collect_notices.py --site-packages "$1" --out "/out/$2"
+          }
+          collect "$purelib" bundle
+          if [ "$base_purelib" != "$purelib" ]; then
+            docker run --rm --entrypoint /usr/local/bin/python "image-evidence/$IMAGE" -m pip freeze --all \
+              > "evidence/$IMAGE-base-python-pip-freeze-all.txt"
+            collect "$base_purelib" base-python
+          fi
+          docker run --rm --entrypoint sh "image-evidence/$IMAGE" \
+            -c 'find "$1" -path "*.libs/*" -name "*.so*" | sort' sh "$purelib" \
+            > "evidence/$IMAGE-bundled-libs.txt"
+          {
+            echo "- site-packages: $purelib"
+            echo "- base image Python site-packages: $base_purelib"
+            echo "- Python distributions (pip freeze --all): $(wc -l < "evidence/$IMAGE-pip-freeze-all.txt")"
+            if [ -f "evidence/$IMAGE-base-python-pip-freeze-all.txt" ]; then
+              echo "- base image Python distributions (pip freeze --all): $(wc -l < "evidence/$IMAGE-base-python-pip-freeze-all.txt")"
+            fi
+            echo "- bundled native libraries: $(wc -l < "evidence/$IMAGE-bundled-libs.txt")"
+          } | tee -a "evidence/$IMAGE-facts.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checksum the evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          cd evidence
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: image-evidence-${{ matrix.image }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90

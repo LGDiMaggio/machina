@@ -96,8 +96,12 @@ docker run --rm --user "$(id -u):$(id -g)" --entrypoint python \
 The bundle has one folder per distribution and an `INDEX.json`. It lists every
 distribution for which no licence file was found and supplies no missing text,
 so it is not a complete notice pack. For the mock CMMS image, use
-`--site-packages /usr/local/lib/python3.11/site-packages`. With another
-Python version in `PYTHON_BASE`, put that version in place of `python3.11`.
+`--site-packages /usr/local/lib/python3.11/site-packages`. The Machina and
+template images also keep the base image's own Python next to their virtual
+environment, with its `pip`, `setuptools`, `wheel` and `packaging`: run the
+command a second time with that path and `--out /out/notices-base-python`.
+With another Python version in `PYTHON_BASE`, put that version in place of
+`python3.11`.
 
 **A CycloneDX SBOM of the same packages.** The SBOM tool goes into its own
 temporary virtual environment, so it does not appear in the SBOM:
@@ -119,9 +123,32 @@ install profiles on a fresh Linux x86_64 environment. Two of the profiles use
 the images' default extras. They approximate the images, without the base
 image, and are not scans of them.
 
+**The whole image, Debian packages included.** [syft](https://github.com/anchore/syft)
+writes a CycloneDX SBOM of a built image from the local Docker daemon, Debian and
+Python packages alike, with the licences their metadata declares. Download a
+release from its GitHub page and check it against the release's
+`checksums.txt` before running it. The repository's manual `Image evidence`
+workflow does this with syft 1.54.1 for the three default images, built with no
+build arguments, on Linux amd64.
+
+```bash
+syft scan docker:machina:latest -o cyclonedx-json=evidence/sbom-image.cdx.json
+```
+
+The source packages behind the Debian packages, for a source offer, and the
+native libraries bundled inside Python wheels:
+
+```bash
+docker run --rm --entrypoint dpkg-query machina:latest -W \
+  -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' > evidence/debian.tsv
+docker run --rm --entrypoint sh machina:latest -c \
+  'find /opt/machina-venv/lib/python3.11/site-packages -path "*.libs/*" -name "*.so*"' \
+  > evidence/bundled-libs.txt
+```
+
 **Not covered:**
-- The base image's Debian packages: their copyright files are in
-  `/usr/share/doc/` inside the image.
+- The source of any package: the commands above list Debian source packages
+  and the bundle holds licence texts and notices; neither fetches source.
 - The models downloaded at run time.
-- The source of any library: the bundle holds texts and notices, not
-  source.
+- What a scan cannot decide: whether an obligation is met, and the licence of
+  a file that no package metadata describes.
