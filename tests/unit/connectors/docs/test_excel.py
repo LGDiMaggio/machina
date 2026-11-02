@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import ANY, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("openpyxl")
 
@@ -1811,6 +1812,49 @@ class TestCreateSeesUnreadableRows:
 
         assert again.asset_id == "P-201"  # the stored record, not the retry
         assert _ids_in_file(path) == ["WO-1", "WO-1"]  # the two rows typed by hand
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_row_without_an_id_blocks_no_create(self, tmp_path: Path) -> None:
+        path = tmp_path / "odl.csv"
+        conn = await _connector_over(path, ("", "P-201", "created", "2026-10-01T08:00:00"))
+
+        created = await conn.create_work_order(
+            WorkOrder(id="WO-9", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+        )
+
+        assert created.id == "WO-9"
+        assert _ids_in_file(path) == ["", "WO-9"]
+
+    @pytest.mark.asyncio
+    async def test_an_optional_cell_that_cannot_be_coerced_takes_its_default(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "odl.csv"
+        with path.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([_ODL_HEADER, ("WO-1", "P-201", "created", "not a date")])
+        conn = ExcelCsvConnector(
+            work_orders={
+                "path": str(path),
+                "columns": [
+                    {"column": "ID", "field": "id", "required": True},
+                    {"column": "Codice Asset", "field": "asset_id", "required": True},
+                    {"column": "Stato", "field": "status"},
+                    {
+                        "column": "Data creazione",
+                        "field": "created_at",
+                        "coerce": "datetime_parse",
+                    },
+                ],
+            }
+        )
+
+        with capture_logs() as logs:
+            await conn.connect()
+
+        assert [wo.id for wo in await conn.read_work_orders()] == ["WO-1"]
+        assert [e["column"] for e in logs if e["event"] == "optional_cell_coercion_failed"] == [
+            "Data creazione"
+        ]
 
 
 class TestRefresh:

@@ -30,6 +30,7 @@ from machina.domain.asset import AssetType, Criticality
 from machina.domain.work_order import WorkOrder, WorkOrderType
 from machina.exceptions import (
     ConnectorConfigError,
+    ConnectorError,
     ConnectorSchemaError,
     ConnectorTimeoutError,
     ConnectorTransientError,
@@ -380,6 +381,54 @@ class TestConnect:
         conn = GenericSqlConnector(config=config)
         with pytest.raises(ConnectorSchemaError, match="ASSET_ID"):
             await conn.connect()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_failed_schema_check_closes_the_connection(
+        self, mock_connect: MagicMock
+    ) -> None:
+        cursor = MagicMock()
+        cursor.description = [("WRONG_COL",)]
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=_basic_config())
+
+        with pytest.raises(ConnectorSchemaError):
+            await connector.connect()
+
+        await _drain_db_thread(connector)  # the close queued behind the check
+        conn_obj.close.assert_called_once()
+        assert (await connector.health_check()).message == "Not connected"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "probe_fails_first", [False, True], ids=["probe-times-out", "fallback-times-out"]
+    )
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_schema_check_timeout_is_a_timeout_error(
+        self, mock_connect: MagicMock, probe_fails_first: bool
+    ) -> None:
+        """Not a ConnectorSchemaError: a lock wait, not a wrong mapping."""
+
+        def _execute(query: str, params: Any = None) -> None:
+            if probe_fails_first and "WHERE 1=0" in query.upper():
+                raise RuntimeError("subquery alias not supported")  # falls back
+            raise _FakeOdbcError(*_SQLSERVER_TIMEOUT)
+
+        cursor = MagicMock()
+        cursor.execute = MagicMock(side_effect=_execute)
+        conn_obj = _make_conn(cursor)
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=5))
+
+        with capture_logs() as logs, pytest.raises(ConnectorTimeoutError, match="schema check"):
+            await connector.connect()
+
+        assert cursor.execute.call_count == (2 if probe_fails_first else 1)
+        [event] = [e for e in logs if e["event"] == "sql_statement_timeout"]
+        assert event["operation"] == "validate_schemas"
+        await _drain_db_thread(connector)
+        conn_obj.close.assert_called_once()
 
 
 class TestReadAssets:
@@ -935,6 +984,33 @@ class TestDisconnect:
         await connector.disconnect()
         conn_mock.close.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_concurrent_disconnects_close_the_connection_once(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn_mock = _make_conn(_make_smart_cursor())
+        mock_connect.return_value = conn_mock
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+
+        await asyncio.gather(connector.disconnect(), connector.disconnect())
+
+        conn_mock.close.assert_called_once()
+
+    def test_worker_functions_refuse_a_dropped_connection(self) -> None:
+        """disconnect() may drop the connection before a queued call runs."""
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        mapping = connector._find_mapping("WorkOrder")
+        assert mapping is not None
+
+        with pytest.raises(ConnectorError, match="Not connected"):
+            connector._execute_insert(mapping, {"id": "WO-1"})
+        with pytest.raises(ConnectorError, match="Not connected"):
+            connector._execute_scalar("SELECT 1")
+
 
 class TestQueryTimeout:
     """connect() hands query_timeout to the driver, which applies it per statement."""
@@ -1150,6 +1226,7 @@ class TestBusyConnection:
         mock_connect.return_value = conn_obj
         connector = GenericSqlConnector(config=_basic_config(query_timeout=1))
         await connector.connect()
+        old_thread = connector._db_thread
         stuck = asyncio.create_task(connector.read_work_orders())
         try:
             assert await asyncio.to_thread(started.wait, 5)
@@ -1161,7 +1238,8 @@ class TestBusyConnection:
             release.set()
             await stuck
 
-        await _drain_db_thread(connector)  # the close queued behind the read
+        assert connector._db_thread is not old_thread  # retired with the statement
+        await asyncio.to_thread(old_thread.shutdown, True)  # the close queued behind the read
         conn_obj.close.assert_called_once()
         [event] = [e for e in logs if e["event"] == "sql_disconnect_busy"]
         assert event["log_level"] == "warning"
@@ -1199,6 +1277,7 @@ class TestBusyConnection:
             config=_basic_config(capabilities="read_write", with_insert=True, query_timeout=1)
         )
         await connector.connect()
+        old_thread = connector._db_thread
         create = asyncio.create_task(
             connector.create_work_order(
                 WorkOrder(id="WO-5", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
@@ -1213,5 +1292,110 @@ class TestBusyConnection:
 
         assert created.id == "WO-5"
         conn_obj.commit.assert_called_once()
-        await _drain_db_thread(connector)  # the close queued behind the insert
+        await asyncio.to_thread(old_thread.shutdown, True)  # the close queued behind the insert
         conn_obj.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_reconnect_after_a_busy_disconnect_does_not_wait_for_the_statement(
+        self, mock_connect: MagicMock
+    ) -> None:
+        started, release = threading.Event(), threading.Event()
+        stuck_conn = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        fresh_conn = _make_conn(_make_smart_cursor())
+        mock_connect.side_effect = [stuck_conn, fresh_conn]
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=1))
+        await connector.connect()
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            await asyncio.wait_for(connector.disconnect(), timeout=5)
+            await asyncio.wait_for(connector.connect(), timeout=5)
+            health = await asyncio.wait_for(connector.health_check(), timeout=5)
+        finally:
+            release.set()
+            await stuck
+
+        assert health.message == "Database reachable"
+        fresh_conn.close.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_call_queued_behind_the_statement_at_disconnect_is_not_run(
+        self, mock_connect: MagicMock
+    ) -> None:
+        started, release = threading.Event(), threading.Event()
+        mock_connect.return_value = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=1))
+        await connector.connect()
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            queued = asyncio.create_task(connector.read_assets())
+            await asyncio.sleep(0.05)  # submitted behind the stuck read
+            await asyncio.wait_for(connector.disconnect(), timeout=5)
+        finally:
+            release.set()
+            await stuck
+
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await queued
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_cancelled_disconnect_still_drops_and_closes_the_connection(
+        self, mock_connect: MagicMock
+    ) -> None:
+        started, release = threading.Event(), threading.Event()
+        conn_obj = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=30))
+        await connector.connect()
+        old_thread = connector._db_thread
+        stuck = asyncio.create_task(connector.read_work_orders())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            disconnecting = asyncio.create_task(connector.disconnect())
+            await asyncio.sleep(0.05)
+            disconnecting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await disconnecting
+            assert (await connector.health_check()).message == "Not connected"
+        finally:
+            release.set()
+            await stuck
+
+        await asyncio.to_thread(old_thread.shutdown, True)
+        conn_obj.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_call_that_fails_after_its_caller_was_cancelled_is_logged(
+        self, mock_connect: MagicMock
+    ) -> None:
+        started, release = threading.Event(), threading.Event()
+        conn_obj = _make_stuck_conn(started, release, stuck_on="SELECT * FROM")
+        mock_connect.return_value = conn_obj
+        connector = GenericSqlConnector(config=_basic_config(query_timeout=30))
+        await connector.connect()
+        failing = conn_obj.cursor.return_value.execute.side_effect
+
+        def _fail_after_release(query: str, params: Any = None) -> None:
+            failing(query, params)  # blocks on the stuck statement until released
+            raise RuntimeError("connection reset")
+
+        conn_obj.cursor.return_value.execute.side_effect = _fail_after_release
+        reading = asyncio.create_task(connector.read_work_orders())
+        assert await asyncio.to_thread(started.wait, 5)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+
+        with capture_logs() as logs:
+            release.set()
+            await _drain_db_thread(connector)
+
+        [event] = [e for e in logs if e["event"] == "failed_after_cancel"]
+        assert event["log_level"] == "error"
+        assert event["operation"] == "read_sync"
+        assert event["error_type"] == "RuntimeError"

@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-from concurrent.futures import ThreadPoolExecutor
+import functools
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, TypeVarTuple
 
@@ -106,14 +107,36 @@ def _is_timeout(exc: Exception) -> bool:
 _FALLBACK_CONNECTION_WAIT = 30.0
 
 
-def _close_quietly(conn: Any) -> None:
-    """Close a connection disconnect() dropped while a call was using it.
+def _new_db_thread() -> ThreadPoolExecutor:
+    """The single worker thread every use of one connection runs on."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="machina-sql")
 
-    Runs on the connection's worker thread, after that call. The connector
-    has already let the connection go, so a failure to close it is ignored.
+
+def _close_quietly(conn: Any) -> None:
+    """Close a connection the connector let go while a call may still use it.
+
+    Runs on that connection's worker thread, after that call: a disconnect()
+    that stopped waiting for it, or a connect() whose schema check failed.
+    The connector has already let the connection go, so a failure to close
+    it is ignored.
     """
     with contextlib.suppress(Exception):
         conn.close()
+
+
+def _log_failure_after_cancel(operation: str, done: Future[Any]) -> None:
+    """Log a call that failed after its caller was cancelled: nobody else sees it."""
+    if done.cancelled():
+        return
+    exc = done.exception()
+    if exc is not None:
+        logger.error(
+            "failed_after_cancel",
+            connector="GenericSqlConnector",
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
 
 
 def _jitter() -> float:
@@ -226,9 +249,11 @@ class GenericSqlConnector:
         # connections are not safe to use from several threads at once:
         # every use of the connection runs on this one worker thread, one
         # call at a time (see _run_on_connection). _write_lock additionally
-        # holds the idempotency probe and the INSERT together.
-        self._db_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="machina-sql")
+        # holds the idempotency probe and the INSERT together, and
+        # _lifecycle_lock keeps connect() and disconnect() from interleaving.
+        self._db_thread = _new_db_thread()
         self._write_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
@@ -253,10 +278,21 @@ class GenericSqlConnector:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Open the database connection and validate schema mappings."""
-        self._conn = await asyncio.to_thread(self._open_connection)
-        await self._run_on_connection(self._validate_schemas)
-        self._connected = True
+        """Open the database connection and validate schema mappings.
+
+        If the schema check fails, the connection is closed again, once the
+        check is done with it, and the error is raised.
+        """
+        async with self._lifecycle_lock:
+            conn = await asyncio.to_thread(self._open_connection)
+            self._conn = conn
+            try:
+                await self._run_on_connection(self._validate_schemas)
+            except BaseException:
+                self._conn = None
+                self._db_thread.submit(_close_quietly, conn)
+                raise
+            self._connected = True
         logger.info(
             "connected",
             connector="GenericSqlConnector",
@@ -270,38 +306,39 @@ class GenericSqlConnector:
         Waits at most ``query_timeout`` seconds (30 when unset) for the calls
         still using the connection. Past that, it logs ``sql_disconnect_busy``
         and drops the connection without closing it, since closing it under a
-        running statement is not safe: the close is queued on the connection's
-        worker thread and runs as soon as that statement ends.
+        running statement is not safe (see :meth:`_abandon_connection`). A
+        disconnect() cancelled while it waits drops the connection the same
+        way before the cancellation propagates.
         """
-        if self._conn is not None:
-            try:
-                await asyncio.wait_for(
-                    self._run_on_connection(self._close_sync), timeout=self._connection_wait
-                )
-            except TimeoutError:
-                # wait_for dropped the queued close; queue the connection's
-                # close again, behind the call still holding it.
-                conn, self._conn = self._conn, None
-                # None if _close_sync started just as the wait ran out.
-                if conn is not None:  # pragma: no branch
-                    self._db_thread.submit(_close_quietly, conn)
-                logger.warning(
-                    "sql_disconnect_busy",
-                    connector="GenericSqlConnector",
-                    operation="disconnect",
-                    waited=self._connection_wait,
-                    hint="A statement is still running; the connection closes when it ends",
-                )
-            except Exception as exc:
-                # Closing a broken connection may fail; it is dropped anyway.
-                logger.debug(
-                    "sql_close_failed",
-                    connector="GenericSqlConnector",
-                    operation="disconnect",
-                    error_type=type(exc).__name__,
-                )
-            self._conn = None
-        self._connected = False
+        async with self._lifecycle_lock:
+            if self._conn is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._run_on_connection(self._close_sync), timeout=self._connection_wait
+                    )
+                except TimeoutError:
+                    self._abandon_connection()
+                    logger.warning(
+                        "sql_disconnect_busy",
+                        connector="GenericSqlConnector",
+                        operation="disconnect",
+                        waited=self._connection_wait,
+                        hint="A statement is still running; the connection closes when it ends",
+                    )
+                except asyncio.CancelledError:
+                    self._abandon_connection()
+                    self._connected = False
+                    raise
+                except Exception as exc:
+                    # Closing a broken connection may fail; it is dropped anyway.
+                    logger.debug(
+                        "sql_close_failed",
+                        connector="GenericSqlConnector",
+                        operation="disconnect",
+                        error_type=type(exc).__name__,
+                    )
+                self._conn = None
+            self._connected = False
 
     async def health_check(self) -> ConnectorHealth:
         """Test the database connection with a simple query.
@@ -508,6 +545,21 @@ class GenericSqlConnector:
         """Seconds health_check() and disconnect() wait for a busy connection."""
         return self._config.query_timeout or _FALLBACK_CONNECTION_WAIT
 
+    def _abandon_connection(self) -> None:
+        """Drop the connection a call is still using, and retire its worker thread.
+
+        Its close is queued on the old worker, behind that call, which then
+        shuts down; calls still queued there fail as not connected (see
+        :meth:`_run_on_connection`). A later connect() gets a new worker, so
+        it does not wait for the statement.
+        """
+        conn, self._conn = self._conn, None
+        old, self._db_thread = self._db_thread, _new_db_thread()
+        # None if _close_sync started just as the wait ran out.
+        if conn is not None:  # pragma: no branch
+            old.submit(_close_quietly, conn)
+        old.shutdown(wait=False)
+
     def _close_sync(self) -> None:
         # Drop the reference before closing, on the connection's own thread,
         # so a call queued behind this one finds no connection, not a closed one.
@@ -523,14 +575,18 @@ class GenericSqlConnector:
                 limited_query = f"SELECT * FROM ({mapping.query}) AS _machina_validate WHERE 1=0"
                 try:
                     cursor.execute(limited_query)
-                except Exception:
+                except Exception as exc:
+                    if _is_timeout(exc):
+                        raise self._schema_check_timeout(name, exc) from exc
                     # Fallback: some DBs don't support subquery aliasing
                     try:
                         cursor.execute(mapping.query)
-                    except Exception as exc:
+                    except Exception as fallback_exc:
+                        if _is_timeout(fallback_exc):
+                            raise self._schema_check_timeout(name, fallback_exc) from fallback_exc
                         raise ConnectorSchemaError(
-                            f"Query for table mapping '{name}' failed: {exc}"
-                        ) from exc
+                            f"Query for table mapping '{name}' failed: {fallback_exc}"
+                        ) from fallback_exc
 
                 result_columns = [desc[0] for desc in (cursor.description or [])]
                 for _field_name, field_mapping in mapping.fields.items():
@@ -556,10 +612,26 @@ class GenericSqlConnector:
         to their callers. A cancelled caller (an MCP request cancellation, a
         workflow step timeout) cannot stop a call that is already running, and
         the calls behind it wait for it; a call that has not started is dropped.
+        Nobody reads the outcome of a call that outlives its caller, so if that
+        call fails, the failure is logged as ``failed_after_cancel``. A call
+        still queued on a worker that disconnect() retired raises
+        ``ConnectorError`` instead of running.
         """
-        loop = asyncio.get_running_loop()
+        executor = self._db_thread
         context = contextvars.copy_context()  # as asyncio.to_thread does
-        return await loop.run_in_executor(self._db_thread, context.run, func, *args)
+
+        def call() -> _T:
+            if executor is not self._db_thread:
+                raise ConnectorError("Not connected — the connection was dropped by disconnect()")
+            return context.run(func, *args)
+
+        future = executor.submit(call)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            operation = getattr(func, "__name__", "call").strip("_")
+            future.add_done_callback(functools.partial(_log_failure_after_cancel, operation))
+            raise
 
     async def _execute_read(self, mapping: TableMapping) -> list[dict[str, Any]]:
         """Execute a read query with retry on transient errors."""
@@ -647,6 +719,11 @@ class GenericSqlConnector:
                 # Same contract as _execute_read: callers handle ConnectorError,
                 # so a raw driver exception must not escape a write either.
                 raise ConnectorError(f"SQL write failed: {exc}") from exc
+
+    def _schema_check_timeout(self, name: str, exc: Exception) -> ConnectorTimeoutError:
+        """The error for a schema-check statement stopped by a query timeout."""
+        self._log_timeout("validate_schemas", exc)
+        return ConnectorTimeoutError(f"SQL schema check for mapping '{name}' timed out: {exc}")
 
     def _log_timeout(self, operation: str, exc: Exception) -> None:
         # Logged here because callers such as the MCP tools return the error

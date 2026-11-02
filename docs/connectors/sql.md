@@ -177,24 +177,34 @@ It is unset by default because drivers apply it differently:
 
 A statement stopped by a query timeout (`query_timeout`, one set in the DSN or
 JDBC URL, or PostgreSQL's `statement_timeout`) raises `ConnectorTimeoutError`
-(a `ConnectorError`) and is logged as `sql_statement_timeout`. Lock-wait
-timeouts the database reports as errors of their own keep their usual
-handling: SQL0911 and SQL0913 are retried as transient, and PostgreSQL's
-`lock_timeout` raises a plain `ConnectorError`. Unlike deadlocks and the other errors
-`retry` covers, the connector does not retry it, for reads or writes: the
-retry would likely wait on the same lock and hold the connection that long
+(a `ConnectorError`) and is logged as `sql_statement_timeout`, including during
+`connect()`'s schema check. Unlike deadlocks and the other errors `retry`
+covers, the connector does not retry a statement timeout, for reads or writes:
+the retry would likely wait on the same lock and hold the connection that long
 again. Callers that retry reads, such as a workflow step with retries, still
 can. A timed-out `create_work_order` may or may not have stored its row,
 because the timeout can come during the commit. Calling it again with the same
-work order is safe: it checks for the ID before inserting.
+work order is safe: it checks for the ID before inserting. Lock-wait timeouts
+the database reports as errors of their own keep their usual handling: SQL0911
+and SQL0913 are retried as transient, and PostgreSQL's `lock_timeout` raises a
+plain `ConnectorError`.
 
-`health_check()` waits at most `query_timeout` seconds (30 when it is unset)
-for the connection, then reports it busy (`unhealthy`). `disconnect()` waits as
-long, then logs `sql_disconnect_busy` and drops the connection without closing
-it, since closing a connection under a running statement is not safe; the
-connector's database thread closes it as soon as that statement ends. If the
-driver never stops the statement, that thread keeps running, and the process
+`health_check()` sends its probe behind any calls already waiting for the
+connection and waits at most `query_timeout` seconds (30 when it is unset) for
+the answer; past that it reports the connection busy (`unhealthy`).
+`disconnect()` waits as long, then logs `sql_disconnect_busy` and drops the
+connection without closing it, since closing a connection under a running
+statement is not safe: the connector closes it on its database thread as soon
+as that statement ends, and gives itself a new thread, so a later `connect()`
+does not wait for the statement. Calls that were still queued behind the
+statement fail with a `ConnectorError` instead of running. A `disconnect()`
+that is cancelled while it waits drops the connection the same way. If the
+driver never stops the statement, its thread keeps running, and the process
 waits for it on exit.
+
+A call that fails after its caller was cancelled (an MCP request
+cancellation, a workflow step timeout) is logged as `failed_after_cancel`,
+since no caller receives its error.
 
 ## Use Cases
 
