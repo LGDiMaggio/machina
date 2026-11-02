@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import date
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -304,21 +306,6 @@ class TestYamlSettingsAndCallContract:
         # None means "no status filter", as the empty string does — not "None".
         assert len(await connector.read_work_orders(status=None)) == 3  # type: ignore[arg-type]
 
-    @pytest.mark.asyncio
-    @patch("machina.connectors.sql.generic.connect_odbc")
-    async def test_health_check_waits_for_the_shared_connection(
-        self, mock_connect: MagicMock
-    ) -> None:
-        """The health probe uses the same DB-API connection as reads and writes."""
-        mock_connect.return_value = _make_conn(_make_smart_cursor(read_rows=[]))
-        connector = GenericSqlConnector(config=_basic_config())
-        await connector.connect()
-        async with connector._db_lock:
-            probe = asyncio.create_task(connector.health_check())
-            await asyncio.sleep(0.05)
-            assert not probe.done()
-        await probe
-
     def test_read_write_declares_create_but_not_the_unimplemented_update(self) -> None:
         from machina.connectors.capabilities import Capability
 
@@ -584,6 +571,183 @@ class TestRetry:
         await connector.connect()
         with pytest.raises(ConnectorTransientError, match="1205"):
             await connector.read_assets()
+
+
+class _OverlapDetectingConnection:
+    """DB-API connection double that records use from two threads at once.
+
+    The connection is in use from ``cursor()`` until that cursor is closed.
+    ``execute`` lingers, so calls that are not serialized really do overlap;
+    a query containing ``hold`` waits for ``release`` instead, so a test can
+    act while that query is mid-flight on its worker thread.
+    """
+
+    def __init__(self, *, hold: str = "") -> None:
+        self.hold = hold
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.max_users = 0
+        self.work_orders: list[tuple[Any, ...]] = []
+        self._users = 0
+        self._guard = threading.Lock()
+
+    def cursor(self) -> _OverlapDetectingCursor:
+        with self._guard:
+            self._users += 1
+            self.max_users = max(self.max_users, self._users)
+        return _OverlapDetectingCursor(self)
+
+    def cursor_closed(self) -> None:
+        with self._guard:
+            self._users -= 1
+
+    def commit(self) -> None:
+        pass
+
+
+class _OverlapDetectingCursor:
+    def __init__(self, conn: _OverlapDetectingConnection) -> None:
+        self._conn = conn
+        self.description: list[tuple[str]] = []
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, query: str, params: Any = None) -> None:
+        q = query.upper()
+        if self._conn.hold and self._conn.hold in q:
+            self._conn.held.set()
+            self._conn.release.wait(timeout=5)
+        else:
+            time.sleep(0.02)
+        if q.startswith("INSERT"):
+            self._conn.work_orders.append(tuple(params))
+            return
+        if "WORK_ORDERS" in q:
+            self.description = _WO_COLS
+            self._rows = list(self._conn.work_orders)
+        else:
+            self.description = _ASSET_COLS
+            self._rows = [("P-001", "Pompa 1", "POM", "A")]
+        if "WHERE 1=0" in q:
+            self._rows = []
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def close(self) -> None:
+        self._conn.cursor_closed()
+
+
+class TestSharedConnection:
+    """One DB-API connection serves every caller, but never two threads at once.
+
+    pyodbc and jaydebeapi declare ``threadsafety = 1``: threads may share the
+    module, not a connection.
+    """
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_concurrent_reads_take_turns(self, mock_connect: MagicMock) -> None:
+        conn = _OverlapDetectingConnection()
+        mock_connect.return_value = conn
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+
+        results = await asyncio.gather(*(connector.read_assets() for _ in range(4)))
+
+        assert conn.max_users == 1
+        assert [len(assets) for assets in results] == [1, 1, 1, 1]
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_read_waits_for_an_insert_in_flight(self, mock_connect: MagicMock) -> None:
+        conn = _OverlapDetectingConnection(hold="INSERT")
+        mock_connect.return_value = conn
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+        wo = WorkOrder(id="WO-7", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+
+        create = asyncio.create_task(connector.create_work_order(wo))
+        assert await asyncio.to_thread(conn.held.wait, 5)  # the INSERT is running
+        read = asyncio.create_task(connector.read_assets())
+        await asyncio.sleep(0.05)
+        conn.release.set()
+        await create
+
+        assert len(await read) == 1
+        assert conn.max_users == 1
+        assert len(conn.work_orders) == 1
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_health_check_waits_for_a_read_in_flight(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _OverlapDetectingConnection()
+        mock_connect.return_value = conn
+        connector = GenericSqlConnector(config=_basic_config())
+        await connector.connect()
+        conn.hold = "FROM ASSETS"  # set after connect, which validates that query too
+
+        read = asyncio.create_task(connector.read_assets())
+        assert await asyncio.to_thread(conn.held.wait, 5)
+        probe = asyncio.create_task(connector.health_check())
+        await asyncio.sleep(0.05)
+        assert not probe.done()
+        conn.release.set()
+
+        assert (await probe).status.value == "healthy"
+        assert len(await read) == 1
+        assert conn.max_users == 1
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_cancelled_create_holds_the_connection_until_its_insert_ends(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Cancelling the caller cannot stop the INSERT's thread, so the retry
+        waits for it and then finds the row instead of inserting it twice."""
+        conn = _OverlapDetectingConnection(hold="INSERT")
+        mock_connect.return_value = conn
+        connector = GenericSqlConnector(
+            config=_basic_config(capabilities="read_write", with_insert=True)
+        )
+        await connector.connect()
+        wo = WorkOrder(id="WO-7", type=WorkOrderType.CORRECTIVE, asset_id="P-001")
+
+        first = asyncio.create_task(connector.create_work_order(wo))
+        assert await asyncio.to_thread(conn.held.wait, 5)
+        first.cancel()  # an MCP request cancellation, a workflow step timeout
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = asyncio.create_task(connector.create_work_order(wo))
+        await asyncio.sleep(0.05)
+        conn.release.set()
+        await retry
+
+        assert conn.max_users == 1
+        assert len(conn.work_orders) == 1
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_read_waits_for_schema_validation(self, mock_connect: MagicMock) -> None:
+        conn = _OverlapDetectingConnection(hold="WHERE 1=0")
+        mock_connect.return_value = conn
+        connector = GenericSqlConnector(config=_basic_config())
+
+        connecting = asyncio.create_task(connector.connect())
+        assert await asyncio.to_thread(conn.held.wait, 5)  # validating the mappings
+        read = asyncio.create_task(connector.read_assets())
+        await asyncio.sleep(0.05)
+        conn.release.set()
+        await connecting
+
+        assert len(await read) == 1
+        assert conn.max_users == 1
 
 
 class TestHealthCheck:
