@@ -51,9 +51,9 @@ connectors:
 ```
 
 Keep the DSN in the environment: it usually carries credentials. Connection
-errors and the connection log show it redacted. Unknown top-level settings
-keys are refused with an error that names them; a misspelled key inside a
-table or field mapping is ignored, so check those by hand.
+errors and the connection log show it redacted. Unknown settings keys are
+refused with an error that names them, at the top level and inside a table
+mapping, a field mapping or `retry`.
 
 ### Mapping reference
 

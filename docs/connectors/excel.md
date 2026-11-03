@@ -52,9 +52,8 @@ connectors:
 ```
 
 At least one of `asset_registry`, `work_orders` and `failure_modes` must be
-configured. Unknown top-level settings keys are refused with an error that
-names them; a misspelled key inside a sheet schema or a column mapping is
-ignored, so check those by hand.
+configured. Unknown settings keys are refused with an error that names them,
+at the top level and inside a sheet schema, a column mapping or `watcher`.
 The [starter kit](../starter-kits/odl-generator-from-text.md) ships a complete,
 runnable example.
 

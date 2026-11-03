@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ColumnMapping(BaseModel):
     """Mapping from one spreadsheet column to a domain entity field."""
+
+    model_config = ConfigDict(extra="forbid")
 
     column: str = Field(..., description="Spreadsheet column header name")
     field: str = Field(..., description="Target domain entity field name")
@@ -29,6 +31,8 @@ class ColumnMapping(BaseModel):
 
 class SheetSchema(BaseModel):
     """Schema for one worksheet or CSV file."""
+
+    model_config = ConfigDict(extra="forbid")
 
     path: str = Field(..., description="File path (local, UNC, or SMB URL)")
     sheet: str = Field(default="Sheet1", description="Worksheet name (ignored for CSV)")
@@ -51,6 +55,8 @@ class SheetSchema(BaseModel):
 class WatcherConfig(BaseModel):
     """Configuration for the file-system watcher."""
 
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(default=True)
     debounce_ms: int = Field(default=500, ge=100, le=10000)
     poll_fallback_sec: int = Field(default=30, ge=5, le=300)
@@ -58,6 +64,8 @@ class WatcherConfig(BaseModel):
 
 class ExcelConnectorConfig(BaseModel):
     """Top-level configuration for the ExcelCsvConnector."""
+
+    model_config = ConfigDict(extra="forbid")
 
     asset_registry: SheetSchema | None = Field(default=None)
     work_orders: SheetSchema | None = Field(default=None)
