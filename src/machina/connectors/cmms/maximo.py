@@ -718,6 +718,7 @@ class MaximoConnector:
             if body is None:
                 raise ConnectorError("the work order was not found at its URI")
             updated = maximo_mapper.parse_work_order(body)
+            read_back = maximo_mapper.status_code(body)
         except Exception as exc:
             logger.warning(
                 "work_order_update_not_read_back",
@@ -730,10 +731,12 @@ class MaximoConnector:
                 f"Maximo applied the update to work order {work_order_id}, but reading it "
                 "back failed — do not repeat the update; read the work order to check it"
             ) from None
-        # A status Maximo accepted but did not apply must not read as done.
-        if status is not None and updated.status != status:
+        # A status Maximo accepted but did not apply must not read as done. The
+        # code read back is compared with the code sent: a code the mapper does
+        # not know reads as CREATED and would pass for WAPPR.
+        if status is not None and read_back != payload["status"]:
             raise status_not_applied(
-                "MaximoConnector", work_order_id, status.value, updated.status.value
+                "MaximoConnector", work_order_id, payload["status"], read_back
             )
         return updated
 

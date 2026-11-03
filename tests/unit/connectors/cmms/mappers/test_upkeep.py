@@ -429,8 +429,26 @@ class TestReverseStatusFilter:
             assert reverse_status_filter(status.value.upper()) == reverse_status(status)
             assert reverse_status_filter(status) == reverse_status(status)
 
-    def test_upkeep_status_is_sent_unchanged(self) -> None:
-        assert reverse_status_filter("onHold") == "onHold"
+    @pytest.mark.parametrize(
+        ("value", "sent"),
+        [
+            ("onHold", "onHold"),
+            ("ONHOLD", "onHold"),
+            ("on hold", "onHold"),
+            ("inprogress", "inProgress"),
+            ("Open", "open"),
+            ("COMPLETE", "complete"),
+        ],
+    )
+    def test_upkeep_status_is_sent_as_upkeep_spells_it(self, value: str, sent: str) -> None:
+        assert reverse_status_filter(value) == sent
+
+    @pytest.mark.parametrize("value", ["paused", "REL", "", "done"])
+    def test_any_other_value_is_refused_without_repeating_it(self, value: str) -> None:
+        """UpKeep documents no other status, so the filter could only match nothing."""
+        with pytest.raises(ValueError, match="neither a Machina status nor") as exc_info:
+            reverse_status_filter(value)
+        assert value == "" or value not in str(exc_info.value)
 
     @pytest.mark.parametrize("status", [WorkOrderStatus.CANCELLED, "cancelled", "Cancelled"])
     def test_cancelled_is_refused(self, status: WorkOrderStatus | str) -> None:

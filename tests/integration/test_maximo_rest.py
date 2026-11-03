@@ -1190,13 +1190,26 @@ class TestUpdateWorkOrder:
             structlog.testing.capture_logs() as logs,
             pytest.raises(
                 ConnectorError,
-                match=r"reads back as 'assigned', not 'closed': the status change was not applied",
+                match=r"reads back as 'APPR', not 'CLOSE': the status change was not applied",
             ),
         ):
             await connector.close_work_order("WO-001")
         (event,) = [e for e in logs if e["event"] == "work_order_status_not_applied"]
         assert event["connector"] == "MaximoConnector"
         assert event["work_order_id"] == "WO-001"
+
+    @pytest.mark.asyncio
+    async def test_the_code_read_back_is_compared_not_its_mapping(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """WMATL is not in the mapper's table, so it reads as CREATED, like the
+        WAPPR sent; compared by mapped status, this unapplied update passed."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "WMATL")
+        with pytest.raises(ConnectorError, match=r"reads back as 'WMATL', not 'WAPPR'"):
+            await connector.update_work_order("WO-001", status=WorkOrderStatus.CREATED)
 
     @pytest.mark.asyncio
     async def test_an_update_without_a_status_does_not_check_it(

@@ -238,8 +238,9 @@ with an `x-method-override: PATCH` header. So `update_work_order`, and
    that the request does not repeat;
 4. read the order back from the same URI (`GET /maximo/oslc/os/mxwo/{rest id}`, with
    `lean=1` like the update) and return it. When the update set a status and the order
-   reads back with another one, `ConnectorError` says that the status change was not
-   applied, and the warning `work_order_status_not_applied` is logged.
+   reads back with another status code than the one sent, `ConnectorError` says that
+   the status change was not applied, and the warning `work_order_status_not_applied`
+   is logged.
 
 Only the rest id is taken from the URI Maximo returns. Its host is the one Maximo sees
 itself on (an internal name behind a proxy), so the update and the read-back go to the

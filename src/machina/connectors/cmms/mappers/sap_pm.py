@@ -28,6 +28,7 @@ __all__ = [
     "SAP_ORDER_TYPE_MAP",
     "SAP_PRIORITY_MAP",
     "SAP_STATUS_MAP",
+    "order_etag",
     "parse_asset",
     "parse_maintenance_plan",
     "parse_sap_datetime",
@@ -37,6 +38,7 @@ __all__ = [
     "reverse_priority",
     "reverse_status",
     "system_status_codes",
+    "system_status_text",
 ]
 
 
@@ -187,13 +189,35 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     )
 
 
-def system_status_codes(data: dict[str, Any]) -> frozenset[str]:
-    """Return the system status codes active on a SAP maintenance order.
+def system_status_text(data: dict[str, Any]) -> str:
+    """Return a SAP maintenance order's ``SystemStatusText``, ``""`` if it has none.
 
     ``API_MAINTENANCEORDER`` has no property holding one status: it reports
-    them all in ``SystemStatusText``, a line such as ``"REL  CNF  PRC  SETC"``.
+    the active system statuses in this one line, such as
+    ``"CRTD MACM ORAP PRC"``. SAP limits it to 40 characters; when the
+    statuses do not fit, it lists only those with the highest priority.
     """
-    return frozenset(str(data.get("SystemStatusText") or "").upper().split())
+    return str(data.get("SystemStatusText") or "")
+
+
+def system_status_codes(data: dict[str, Any]) -> frozenset[str]:
+    """Return the system status codes listed on a SAP maintenance order.
+
+    The codes of :func:`system_status_text`, which may leave out
+    lower-priority statuses that do not fit in its 40 characters.
+    """
+    return frozenset(system_status_text(data).upper().split())
+
+
+def order_etag(data: dict[str, Any]) -> str | None:
+    """Return the ETag of a maintenance order as an OData V2 read returns it.
+
+    OData V2's JSON format carries an entry's ETag in ``__metadata.etag``.
+    ``None`` when the entry has none.
+    """
+    metadata = data.get("__metadata")
+    etag = metadata.get("etag") if isinstance(metadata, dict) else None
+    return str(etag) if etag else None
 
 
 def parse_spare_part(data: dict[str, Any]) -> SparePart:
@@ -323,7 +347,7 @@ def _sap_criticality(abc_indicator: Any) -> Criticality:
 def _map_sap_status(sys_status: str) -> WorkOrderStatus:
     """Map SAP system status string to :class:`WorkOrderStatus`.
 
-    SAP system status is a compound string like ``"REL  CNF  PRC  SETC"``.
+    SAP system status is a compound string like ``"REL CNF PRC SETC"``.
     Tokens are checked in reverse lifecycle order so the most progressed
     state wins.
     """

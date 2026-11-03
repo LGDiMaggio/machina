@@ -21,15 +21,15 @@ logger = structlog.get_logger(__name__)
 def status_filter(status: WorkOrderStatus | str) -> WorkOrderStatus | None:
     """Return a status filter as a :class:`WorkOrderStatus`, or ``None`` for a vendor code.
 
-    The enum, or text equal to one of its values in any case (``"Closed"``),
-    is a Machina status. Any other text is a vendor status code. None of the
+    The enum, or text equal to one of its values in any case and without
+    surrounding spaces (``"Closed"``), is a Machina status. Any other text is a vendor status code. None of the
     codes the SAP PM, Maximo and UpKeep mappers know is spelled like a
     Machina value (``CLSD``, ``CLOSE`` and ``complete`` are not ``closed``).
     """
     if isinstance(status, WorkOrderStatus):
         return status
     try:
-        return WorkOrderStatus(status.lower())
+        return WorkOrderStatus(status.strip().lower())
     except ValueError:
         return None
 

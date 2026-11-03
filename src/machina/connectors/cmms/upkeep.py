@@ -34,7 +34,12 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -243,13 +248,14 @@ class UpKeepConnector:
             asset_id: Filter by UpKeep asset ID.
             status: Filter by status — a :class:`WorkOrderStatus` or one of its
                 values such as ``"in_progress"`` (reverse-mapped to UpKeep's
-                status), or any other string, sent to UpKeep as an UpKeep
-                status. ``completed`` and ``closed`` both select UpKeep's
-                ``complete``.
+                status), or one of UpKeep's own statuses in any case, sent as
+                UpKeep spells it (``"onHold"``). ``completed`` and ``closed``
+                both select UpKeep's ``complete``.
 
         Raises:
-            ConnectorError: If ``status`` is ``cancelled``, which UpKeep has
-                no status for, before any request.
+            ConnectorUnsupportedFilterError: Before any request, if ``status``
+                is ``cancelled``, which UpKeep has no status for, or any other
+                value that is neither a Machina status nor an UpKeep one.
         """
         self._ensure_connected()
         params: dict[str, str] = {}
@@ -259,7 +265,7 @@ class UpKeepConnector:
             try:
                 params["status"] = upkeep_mapper.reverse_status_filter(status)
             except ValueError as exc:
-                raise ConnectorError(str(exc)) from None
+                raise ConnectorUnsupportedFilterError(f"read_work_orders: {exc}") from None
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
         return [upkeep_mapper.parse_work_order(item) for item in raw]
 
@@ -353,8 +359,10 @@ class UpKeepConnector:
         Raises:
             ConnectorError: If no field is given; if ``status`` is
                 ``CANCELLED``, which UpKeep has no status for, before any
-                request; if UpKeep rejects the update; or if the work order
-                reads back with another status than the one sent.
+                request; if UpKeep rejects the update; if the work order cannot
+                be read back after it, in which case the message says the
+                update was applied and must not be repeated; or if it reads
+                back with another status than the one sent.
         """
         self._ensure_connected()
         httpx = _require_httpx()
@@ -388,13 +396,29 @@ class UpKeepConnector:
             operation="update_work_order",
             work_order_id=work_order_id,
         )
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
-            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        # Read the work order back. The update has been applied by now: whatever
+        # goes wrong next must not look like a failed update, or a caller would
+        # send it again.
+        try:
+            updated = await self.get_work_order(work_order_id)
+            if updated is None:
+                raise ConnectorError("the work order was not found")
+        except Exception as exc:
+            logger.warning(
+                "work_order_update_not_read_back",
+                connector="UpKeepConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
+            )
+            raise ConnectorError(
+                f"UpKeep applied the update to work order {work_order_id}, but reading it "
+                "back failed — do not repeat the update; read the work order to check it"
+            ) from None
         if "status" in payload:
             # The status UpKeep reports for the value sent: CLOSED reads back
             # as COMPLETED, since both are UpKeep's "complete".
-            sent = upkeep_mapper.UPKEEP_STATUS_MAP[payload["status"].lower()]
+            sent = upkeep_mapper.map_status(payload["status"])
             if updated.status != sent:
                 raise status_not_applied(
                     "UpKeepConnector", work_order_id, sent.value, updated.status.value

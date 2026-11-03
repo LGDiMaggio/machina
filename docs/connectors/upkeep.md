@@ -41,7 +41,7 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read all assets (`/api/v2/assets`) |
-| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value in any case (`"completed"`) is mapped to UpKeep's status; any other string is sent as an UpKeep status (`"onHold"`). `cancelled` is refused (see [Work-order status](#work-order-status)) |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value in any case (`"completed"`) is mapped to UpKeep's status, and one of UpKeep's own statuses in any case is sent as UpKeep spells it (`"onhold"` as `onHold`). `cancelled` and any other value are refused (see [Work-order status](#work-order-status)) |
 | `get_work_order` | Fetch a single work order by ID |
 | `create_work_order` | Create a new work order |
 | `update_work_order` | Update status, assignee, or description via PATCH; the order is read back, and a status UpKeep did not apply is an error (see [Work-order status](#work-order-status)) |
@@ -162,12 +162,21 @@ work orders.
 
 UpKeep has no cancelled state. Putting the work order on hold in its place, as
 earlier versions did, reported a cancellation while the order read back as
-assigned. So `update_work_order(status=CANCELLED)`, `cancel_work_order` and a
-`cancelled` filter now raise `ConnectorError` before any request.
+assigned. So `update_work_order(status=CANCELLED)` and `cancel_work_order`
+now raise `ConnectorError` before any request.
 
-After a status update the work order is read back. If its status is not the one
-UpKeep reports for the value sent, `ConnectorError` says the status change was not
-applied, and the warning `work_order_status_not_applied` is logged.
+A status filter accepts a Machina status value or one of UpKeep's four
+statuses, each in any case. `cancelled`, or any other value, raises
+`ConnectorUnsupportedFilterError` before any request: UpKeep would match
+nothing, which would read as "no such work orders".
+
+After an update the work order is read back:
+
+- If the read fails, `ConnectorError` says the update was applied and must not
+  be repeated, and the warning `work_order_update_not_read_back` is logged.
+- If its status is not the one UpKeep reports for the value sent,
+  `ConnectorError` says the status change was not applied, and the warning
+  `work_order_status_not_applied` is logged.
 
 ## Resilience
 

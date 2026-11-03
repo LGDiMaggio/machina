@@ -136,6 +136,9 @@ _STATUS_FUNCTION_IMPORTS: dict[str, str] = {
     "DLFL": "SetMaintOrdStsToMrkdForDeltn",
 }
 
+# SAP limits an order's SystemStatusText to this many characters.
+_SYSTEM_STATUS_TEXT_LENGTH = 40
+
 
 class SapPmConnector:
     """Connector for SAP Plant Maintenance (S/4HANA).
@@ -441,10 +444,11 @@ class SapPmConnector:
         ``CNF`` from time confirmations — so they are refused before any
         request.
 
-        The function import needs the order's ETag in ``If-Match``, so the
-        order is read first, after the PATCH, which changes it. The order is
-        read again afterwards, and the update succeeds only if its
-        ``SystemStatusText`` lists the system status that was set.
+        The order is read first, after the PATCH, which changes it: one that
+        already has ``status`` is left as it is, and otherwise the function
+        import carries the order's ETag in ``If-Match``. The order is read
+        again afterwards, and the update succeeds only if it has ``status``
+        (see :meth:`_check_system_status`).
 
         Args:
             work_order_id: SAP maintenance order number.
@@ -459,8 +463,10 @@ class SapPmConnector:
         Raises:
             ConnectorError: If nothing is to be updated, ``status`` is one SAP
                 sets itself, the order is not found or has no ETag, SAP
-                rejects a request, or the order does not show the system
-                status afterwards.
+                rejects a request (after a PATCH, the message says the PATCH
+                was applied), the order cannot be read back (the message says
+                the update was applied and must not be repeated), or the order
+                does not show the status afterwards.
         """
         self._ensure_connected()
         function_import = ""
@@ -490,8 +496,22 @@ class SapPmConnector:
                 raise ConnectorError(
                     f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
                 )
-        if function_import:
-            await self._set_system_status(work_order_id, function_import)
+        if status is not None:
+            try:
+                await self._set_system_status(work_order_id, status, function_import)
+            except ConnectorError as exc:
+                if not payload:
+                    raise
+                fields = [
+                    name
+                    for name, value in (("assigned_to", assigned_to), ("description", description))
+                    if value is not None
+                ]
+                # Keep the type (an auth failure stays ConnectorAuthError).
+                raise type(exc)(
+                    f"{exc}. The {' and '.join(fields)} update sent before it was applied; "
+                    "only the status was not set"
+                ) from None
         logger.info(
             "work_order_updated",
             connector="SapPmConnector",
@@ -499,35 +519,105 @@ class SapPmConnector:
             work_order_id=work_order_id,
             status=status.value if status is not None else None,
         )
-        # Re-fetch the updated entity to return the full work order.
-        raw = await self._read_order(work_order_id)
-        if raw is None:
-            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        # Read back the order just written. The update has been applied by now:
+        # whatever goes wrong next must not look like a failed update, or a
+        # caller would send it again.
+        try:
+            raw = await self._read_order(work_order_id)
+            if raw is None:
+                raise ConnectorError("the work order was not found")
+            updated = sap_mapper.parse_work_order(raw)
+        except Exception as exc:
+            logger.warning(
+                "work_order_update_not_read_back",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
+            )
+            raise ConnectorError(
+                f"SAP PM applied the update to work order {work_order_id}, but reading it "
+                "back failed — do not repeat the update; read the work order to check it"
+            ) from None
         if status is not None:
-            # A function import SAP answered with 200 but did not apply must
-            # not read as done. SystemStatusText holds at most 40 characters,
-            # SAP's highest-priority statuses, which REL, TECO and DLFL are.
-            sap_code = sap_mapper.reverse_status(status)
-            if sap_code not in sap_mapper.system_status_codes(raw):
-                raise status_not_applied(
-                    "SapPmConnector",
-                    work_order_id,
-                    sap_code,
-                    str(raw.get("SystemStatusText") or ""),
-                )
-        return sap_mapper.parse_work_order(raw)
+            self._check_system_status(work_order_id, status, raw)
+        return updated
 
-    async def _set_system_status(self, work_order_id: str, function_import: str) -> None:
+    @staticmethod
+    def _status_is_set(order: dict[str, Any], status: WorkOrderStatus) -> bool:
+        """Whether an order read from SAP already has ``status``.
+
+        It does when it lists the system status that sets it, or when its
+        status maps to ``status`` anyway: an order closed for business
+        (``CLSD``) is closed, so closing it again needs no technical
+        completion.
+        """
+        if sap_mapper.reverse_status(status) in sap_mapper.system_status_codes(order):
+            return True
+        return sap_mapper.parse_work_order(order).status == status
+
+    @classmethod
+    def _check_system_status(
+        cls, work_order_id: str, status: WorkOrderStatus, raw: dict[str, Any]
+    ) -> None:
+        """Raise unless the order read back has ``status``, the status just set.
+
+        SAP answered the function import with 200; an order that does not show
+        the status must not be returned as updated. ``SystemStatusText`` holds
+        at most 40 characters of the highest-priority statuses, and SAP does not
+        say which those are. So when the line is too full for another code to
+        fit, a missing code proves nothing, and the result is reported as
+        unknown rather than as not applied.
+        """
+        if cls._status_is_set(raw, status):
+            return
+        sap_code = sap_mapper.reverse_status(status)
+        text = sap_mapper.system_status_text(raw)
+        # Full: no room left for a separator and one more four-letter code.
+        if len(text.strip()) > _SYSTEM_STATUS_TEXT_LENGTH - 5:
+            logger.warning(
+                "work_order_status_unconfirmed",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                wanted_status=sap_code,
+                actual_status=text,
+            )
+            raise ConnectorError(
+                f"SAP PM accepted the status change of work order {work_order_id} to "
+                f"{sap_code}, but its SystemStatusText ({text!r}) is at SAP's "
+                f"40-character limit and does not list {sap_code}, so whether it was "
+                "applied cannot be read back. Check the order in SAP before repeating "
+                "the update."
+            )
+        raise status_not_applied("SapPmConnector", work_order_id, sap_code, text)
+
+    async def _set_system_status(
+        self, work_order_id: str, status: WorkOrderStatus, function_import: str
+    ) -> None:
         """POST a status function import for one order, with the order's ETag in ``If-Match``.
 
-        SAP requires the ETag, taken from the order's ``LastChangeDateTime`` as
-        a read returns it; an OData V2 read returns it in ``__metadata.etag``.
-        A ``412`` means the order changed after it was read.
+        The order is read first. One that already has ``status`` is left as it
+        is, so a repeated close or cancel (after a lost response, say) sends
+        nothing SAP would refuse. Otherwise SAP requires the ETag, taken from
+        the order's ``LastChangeDateTime`` as a read returns it; it is read
+        from the order's OData V2 ``__metadata``
+        (:func:`~machina.connectors.cmms.mappers.sap_pm.order_etag`). A
+        ``412`` means the order changed after it was read.
         """
         order = await self._read_order(work_order_id)
         if order is None:
             raise ConnectorError(f"Work order {work_order_id} not found")
-        etag = (order.get("__metadata") or {}).get("etag")
+        if self._status_is_set(order, status):
+            logger.info(
+                "work_order_status_already_set",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                status=status.value,
+            )
+            return
+        etag = sap_mapper.order_etag(order)
         if not etag:
             raise ConnectorError(
                 f"SAP PM returned no ETag for work order {work_order_id}; "
@@ -537,7 +627,7 @@ class SapPmConnector:
             "POST",
             f"{self.url}/API_MAINTENANCEORDER/{function_import}",
             params={"MaintenanceOrder": _odata_string(work_order_id)},
-            if_match=str(etag),
+            if_match=etag,
         )
         if resp.status_code == 401:
             raise ConnectorAuthError("SAP PM authentication failed")
@@ -626,9 +716,9 @@ class SapPmConnector:
 
         The equipment's orders are read and kept when their system status maps
         to completed (``CNF``) or closed (``TECO``, ``CLSD``). SAP cannot
-        filter on ``SystemStatusText``, and the process phase it suggests
-        filtering on instead (``MaintOrdProcessPhaseCode``, SAP KBA 3614100)
-        is set only on orders of phase-enabled order types.
+        filter on ``SystemStatusText`` (SAP KBA 3614100), and an order outside
+        SAP's process-phase model may carry no ``MaintOrdProcessPhaseCode``,
+        the field the KBA suggests filtering on instead.
 
         Raises:
             ConnectorError: If ``asset_id`` is missing or blank. Without an
@@ -638,7 +728,8 @@ class SapPmConnector:
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
-        work_orders = await self.read_work_orders(asset_id=asset_id)
+        # As text: read_work_orders reads a falsy ID (the number 0) as no filter.
+        work_orders = await self.read_work_orders(asset_id=str(asset_id))
         return [
             wo
             for wo in work_orders

@@ -193,11 +193,12 @@ with no filter, work without it. When `bom_equipment_field` is set, an
 | `MaintPriority` | `WorkOrder.priority` (1→Emergency, 2→High, 3→Medium, 4→Low) |
 | `SystemStatusText` | `WorkOrder.status` — the most advanced of DLFL, CLSD, TECO, CNF, PCNF, REL, CRTD on the line (see [Work-order status](#work-order-status)) |
 | `MaintenanceActivityType` | `WorkOrder.failure_mode` |
-| `MaintenanceCause` / `MaintNotifCause` | `WorkOrder.failure_cause` |
+| `MaintenanceCause` / `MaintNotifCause` | `WorkOrder.failure_cause` (empty for `API_MAINTENANCEORDER` orders, see below) |
 
 `API_MAINTENANCEORDER`'s order has no `CreationDate`, `MaintenanceCause` or
-`MaintNotifCause` property. So `WorkOrder.created_at` is the order's basic start
-date (`MaintOrdBasicStartDate`), and `failure_cause` stays empty for orders read
+`MaintNotifCause` property (none is in SAP's generated client for it). So
+`WorkOrder.created_at` is the order's basic start date
+(`MaintOrdBasicStartDate`), and `failure_cause` stays empty for orders read
 from it.
 
 ## Work-order status
@@ -221,13 +222,15 @@ line:
 | `CRTD` | created |
 
 `UserStatusText`, `MaintOrdProcessPhaseCode` and `MaintOrdProcessSubPhaseCode`
-are kept in `WorkOrder.metadata`.
+are kept in `WorkOrder.metadata`. An order closed with SAP's *Do Not Execute*
+(`NCMP` with `CLSD`) reads as closed, not cancelled.
 
-**Filtering.** `SystemStatusText` cannot be filtered on: SAP answers such a
-query with "Query operation … not implemented"
-([KBA 3614100](https://userapps.support.sap.com/sap/support/knowledge/en/3614100)).
-So `read_work_orders` filters by `Equipment` on the server and applies `status`
-to the orders it reads, and `read_maintenance_history` keeps the equipment's
+**Filtering.** `SystemStatusText` cannot be filtered on. On SAP S/4HANA Cloud
+Public Edition, SAP answers such a query with "Query operation … not
+implemented" ([KBA 3614100](https://userapps.support.sap.com/sap/support/knowledge/en/3614100)),
+and the connector does not rely on another edition behaving otherwise. So
+`read_work_orders` filters by `Equipment` on the server and applies `status` to
+the orders it reads, and `read_maintenance_history` keeps the equipment's
 orders whose status is completed or closed.
 
 A system status code such as `REL` or `MANC` matches only when SAP lists it in
@@ -251,15 +254,33 @@ status, after the PATCH of `assigned_to` / `description` when those are given:
 | `CLOSED` | `SetMaintOrdToTechCompleted` | `TECO` (technical completion; business completion, `CLSD`, is not set) |
 | `CANCELLED` | `SetMaintOrdStsToMrkdForDeltn` | `DLFL` |
 
-SAP requires the order's ETag in an `If-Match` header on these calls. The ETag
-comes from the order's `LastChangeDateTime` as a read returns it. So the
-connector reads the order just before the call, and takes the ETag from the
-read's `__metadata.etag`. An order without one is refused with
-`ConnectorError` before the call. SAP answers `412` when the order changed in
-between; the error says so, and the update can be retried.
+The connector reads the order just before the call.
 
-The order is then read again. The update fails with `ConnectorError` unless
-`SystemStatusText` lists the system status that was set.
+- **Already set.** If the order already has the status, nothing is sent. A
+  repeated close or cancel therefore succeeds instead of failing on SAP's
+  refusal, and an order closed for business (`CLSD`) counts as closed.
+- **ETag.** Otherwise SAP requires the order's ETag in an `If-Match` header.
+  The ETag comes from the order's `LastChangeDateTime` as a read returns it.
+  The connector takes it from the read's `__metadata.etag`, where the OData V2
+  JSON format puts an entry's ETag. That SAP fills it there for this API has
+  not been checked against a live system. An order without one is refused with
+  `ConnectorError` before the call.
+- **412.** SAP answers `412` when the order changed in between. The error says
+  so, and the update can be retried.
+- **Release first.** SAP sets `TECO` only on a released order. Otherwise it
+  refuses the call, and the error carries the HTTP status.
+
+The order is then read again, and the update succeeds only if the order has the
+status. `SystemStatusText` holds only 40 characters, though. When the line is
+full and does not list the system status that was set, the update cannot be
+confirmed. `ConnectorError` then says so and asks for the order to be checked
+in SAP; the warning `work_order_status_unconfirmed` is logged. When the line has
+room and still lacks it, the error says the status change was not applied.
+
+If the PATCH of `assigned_to` / `description` was sent before a status step
+that fails, the error says the PATCH was applied. If the order cannot be read
+back after the update, the error says the update was applied and must not be
+repeated.
 
 SAP sets `CRTD` on create, and `PCNF` / `CNF` from time confirmations. So
 `CREATED`, `IN_PROGRESS` and `COMPLETED` are refused with `ConnectorError`

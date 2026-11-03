@@ -59,6 +59,7 @@ __all__ = [
     "reverse_status",
     "reverse_status_filter",
     "reverse_worktype",
+    "status_code",
 ]
 
 
@@ -267,6 +268,11 @@ def parse_asset(
     )
 
 
+def status_code(data: dict[str, Any]) -> str:
+    """Return a Maximo work order's ``status`` code, upper-cased (``""`` if none)."""
+    return str(data.get("status", "")).upper()
+
+
 def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert a Maximo MXWO JSON object to a :class:`WorkOrder`."""
     raw_priority = data.get("wopriority", 3)
@@ -276,8 +282,7 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
         prio_int = 3
     priority = MAXIMO_PRIORITY_MAP.get(prio_int, Priority.MEDIUM)
 
-    raw_status = str(data.get("status", "")).upper()
-    status = MAXIMO_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
+    status = MAXIMO_STATUS_MAP.get(status_code(data), WorkOrderStatus.CREATED)
 
     raw_type = str(data.get("worktype", "")).upper()
     wo_type = MAXIMO_WORKTYPE_MAP.get(raw_type, WorkOrderType.CORRECTIVE)

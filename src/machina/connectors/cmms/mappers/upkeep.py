@@ -26,6 +26,7 @@ __all__ = [
     "UPKEEP_CATEGORY_MAP",
     "UPKEEP_PRIORITY_MAP",
     "UPKEEP_STATUS_MAP",
+    "map_status",
     "parse_asset",
     "parse_asset_part_ids",
     "parse_datetime",
@@ -82,6 +83,11 @@ REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
     # happen (see reverse_status).
 }
 
+# UpKeep's statuses as it spells them, by their lower-case form without spaces.
+_UPKEEP_STATUS_SPELLING: dict[str, str] = {
+    value.lower(): value for value in ("open", "onHold", "inProgress", "complete")
+}
+
 UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {
     "Rotating Equipment": AssetType.ROTATING_EQUIPMENT,
     "Static Equipment": AssetType.STATIC_EQUIPMENT,
@@ -129,12 +135,19 @@ def parse_asset(data: dict[str, Any]) -> Asset:
     )
 
 
+def map_status(value: object) -> WorkOrderStatus:
+    """Map an UpKeep work-order status to a :class:`WorkOrderStatus`, in any case.
+
+    A value UpKeep does not document reads as ``CREATED``.
+    """
+    return UPKEEP_STATUS_MAP.get(str(value).lower(), WorkOrderStatus.CREATED)
+
+
 def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert an UpKeep work-order JSON object to a :class:`WorkOrder`."""
     raw_priority = data.get("priority", 1)
     priority = UPKEEP_PRIORITY_MAP.get(int(raw_priority), Priority.MEDIUM)
-    raw_status = str(data.get("status", "open")).lower()
-    status = UPKEEP_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
+    status = map_status(data.get("status", "open"))
     wo_type = (
         WorkOrderType.PREVENTIVE
         if data.get("category") == "preventive"
@@ -355,17 +368,26 @@ def reverse_status_filter(status: WorkOrderStatus | str) -> str:
     """Map a ``read_work_orders`` status filter to the UpKeep status to send.
 
     A :class:`WorkOrderStatus`, or a string equal to one of its values in any
-    case such as ``"in_progress"``, is reverse-mapped. Any other string is
-    taken as an UpKeep status and sent unchanged.
+    case such as ``"in_progress"``, is reverse-mapped. One of UpKeep's own
+    statuses, in any case and with or without a space (``"on hold"``), is
+    sent as UpKeep spells it (``"onHold"``).
 
     Raises:
         ValueError: For ``cancelled``, which UpKeep has no status for (see
-            :func:`reverse_status`).
+            :func:`reverse_status`), and for any other value: UpKeep
+            documents no other status, so it could only match nothing. The
+            message does not repeat the value.
     """
     machina_status = status_filter(status)
-    if machina_status is None:
-        return status
-    return reverse_status(machina_status)
+    if machina_status is not None:
+        return reverse_status(machina_status)
+    try:
+        return _UPKEEP_STATUS_SPELLING[status.replace(" ", "").lower()]
+    except KeyError:
+        raise ValueError(
+            "the status filter is neither a Machina status nor one of UpKeep's "
+            "work-order statuses (open, onHold, inProgress, complete)"
+        ) from None
 
 
 # ---------------------------------------------------------------------------

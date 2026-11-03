@@ -14,7 +14,12 @@ from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import Workflow
@@ -248,9 +253,36 @@ class TestReadWorkOrders:
         held work orders, which read as assigned, for a cancelled filter."""
         await _connect(httpx_mock, connector)
         sent = len(httpx_mock.get_requests())
-        with pytest.raises(ConnectorError, match="UpKeep has no 'cancelled' status"):
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match="UpKeep has no 'cancelled' status"
+        ):
             await connector.read_work_orders(status=status)
         assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_a_status_upkeep_does_not_have_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Sent as typed, it could only match nothing, which reads as "no such work orders"."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match=r"^read_work_orders: the status"
+        ):
+            await connector.read_work_orders(status="paused")
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_an_upkeep_status_in_another_case_is_sent_as_upkeep_spells_it(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status=onHold",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status="ONHOLD") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1441,6 +1473,31 @@ class TestUpdateWorkOrder:
         assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
             "work_order_status_not_applied"
         ]
+
+    @pytest.mark.parametrize(
+        "reread",
+        [
+            pytest.param({"status_code": 500}, id="read-fails"),
+            pytest.param({"status_code": 404}, id="work-order-gone"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_failed_read_back_says_the_update_was_applied(
+        self, httpx_mock, connector: UpKeepConnector, reread: dict
+    ) -> None:
+        """Reported as a failed update, it would be sent again."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "complete", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(method="GET", url=f"{BASE}/api/v2/work-orders/wo1", **reread)
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match="do not repeat the update"),
+        ):
+            await connector.close_work_order("wo1")
+        assert "work_order_update_not_read_back" in [e["event"] for e in logs]
 
 
 # ---------------------------------------------------------------------------
