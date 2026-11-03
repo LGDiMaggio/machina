@@ -145,7 +145,7 @@ def _map_work_orders(records: list[Any], operation: str, **log_context: Any) -> 
         advice += "; a work order on hold can be read again once it is resumed in UpKeep"
     raise ConnectorSchemaError(
         f"UpKeep returned work orders that no Machina status describes: {'; '.join(found)}. "
-        f"Reading them as another status would misreport them, so no work orders are "
+        "Reading them as another status would misreport them, so no work orders are "
         f"returned. {advice}."
     )
 
@@ -288,8 +288,8 @@ class UpKeepConnector:
             asset_id: Filter by UpKeep asset ID.
             status: Filter by status — a :class:`WorkOrderStatus` or one of its
                 values such as ``"in_progress"`` (reverse-mapped to UpKeep's
-                status), or one of UpKeep's own statuses in any case, sent as
-                UpKeep spells it (``"onHold"``). ``completed`` and ``closed``
+                status), or ``open``, ``inProgress`` or ``complete`` in any
+                case, sent as UpKeep spells it (``"inProgress"``). ``completed`` and ``closed``
                 both select UpKeep's ``complete``.
 
         Raises:
@@ -499,7 +499,8 @@ class UpKeepConnector:
                 raise status_not_applied(
                     "UpKeepConnector", work_order_id, sent.value, updated.status.value
                 )
-        if assigned_to is not None and updated.assigned_to != assigned_to:
+        # As WorkOrder stores it: stripped, and an empty assignee as none.
+        if assigned_to is not None and updated.assigned_to != (assigned_to.strip() or None):
             # An assignee UpKeep accepted but did not set must not read as done.
             logger.warning(
                 "work_order_assignee_not_applied",

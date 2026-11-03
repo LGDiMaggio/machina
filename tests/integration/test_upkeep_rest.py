@@ -250,6 +250,8 @@ class TestReadWorkOrders:
             await connector.read_work_orders(asset_id="a1")
         message = str(exc_info.value)
         assert "Read the others by status" in message
+        # The resume advice only when a work order is on hold.
+        assert ("resumed in UpKeep" in message) == ("on hold" in found)
         assert "wo0" not in message and "wo1" not in message  # counts, never IDs
         (event,) = [e for e in logs if e["event"] == "upkeep_work_orders_refused"]
         assert event["operation"] == "read_work_orders"
@@ -1619,6 +1621,32 @@ class TestUpdateWorkOrder:
         ):
             await connector.update_work_order("wo1", assigned_to="tech-1")
         assert "work_order_assignee_not_applied" in [e["event"] for e in logs]
+
+    @pytest.mark.parametrize(
+        ("sent", "read_back"),
+        [
+            pytest.param(" tech-1 ", {"assignedToUser": "tech-1"}, id="padded"),
+            pytest.param("", {}, id="empty"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_assignee_is_compared_as_a_work_order_stores_it(
+        self, httpx_mock, connector: UpKeepConnector, sent: str, read_back: dict
+    ) -> None:
+        """WorkOrder strips text and stores an empty assignee as none: neither is a
+        failed assignment."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/wo1",
+            json={"result": result | read_back},
+        )
+        updated = await connector.update_work_order("wo1", assigned_to=sent)
+        assert updated.assigned_to == (sent.strip() or None)
 
     @pytest.mark.asyncio
     async def test_an_update_that_reads_back_on_hold_is_not_reported_as_unreadable_only(
