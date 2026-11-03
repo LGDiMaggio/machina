@@ -78,11 +78,13 @@ as given: the Excel/CSV and SQL connectors and the Generic CMMS in local mode
 compare it with the values above, and the Generic CMMS in REST mode sends it as
 the `status` query parameter; Maximo and UpKeep map one of those values, in
 any case, to their own status code (`in_progress` becomes `INPRG` on Maximo);
-Maximo sends any other value as one of its codes, while UpKeep also accepts its
-own four statuses (`open`, `onHold`, `inProgress`, `complete`) and refuses any
-other value; SAP PM
-accepts one of them or its own system status code (for example `REL`). UpKeep
-has no `cancelled` status, so a filter or an update with it is refused. On SAP PM,
+Maximo sends any other value as one of its codes, while UpKeep also accepts
+`open`, `inProgress` and `complete` and refuses any other value; SAP PM accepts
+one of them or its own system status code (for example `REL`). UpKeep has no
+`assigned` or `cancelled` status (it records the assignee as `assignedToId`,
+set through `assigned_to`), so a filter or an update with either is refused.
+An UpKeep read that meets a work order on hold is refused too: no Machina
+status describes it, and the error says to read the others by status. On SAP PM,
 `machina_update_work_order` can set only `assigned`, `closed` and `cancelled`;
 SAP sets the other statuses itself. On SAP PM, Maximo and UpKeep, an update
 whose status the CMMS accepted but did not apply ends in an error that says so,

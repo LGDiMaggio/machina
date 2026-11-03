@@ -20,6 +20,7 @@ from machina.connectors.cmms.mappers.upkeep import (
     reverse_priority,
     reverse_status,
     reverse_status_filter,
+    status_refusal,
 )
 from machina.domain.asset import AssetType, Criticality
 from machina.domain.maintenance_plan import Interval
@@ -62,26 +63,25 @@ class TestParseAssetPublicAPI:
 class TestParseWorkOrderPublicAPI:
     def test_priority_0_is_low(self) -> None:
         """UpKeep uses 0-indexed priority (0 = lowest)."""
-        wo = parse_work_order({"id": "1", "priority": 0})
+        wo = parse_work_order({"id": "1", "status": "open", "priority": 0})
         assert wo.priority == Priority.LOW
 
     def test_priority_3_is_emergency(self) -> None:
-        wo = parse_work_order({"id": "2", "priority": 3})
+        wo = parse_work_order({"id": "2", "status": "open", "priority": 3})
         assert wo.priority == Priority.EMERGENCY
 
     def test_category_preventive_maps_to_preventive_type(self) -> None:
-        wo = parse_work_order({"id": "3", "category": "preventive"})
+        wo = parse_work_order({"id": "3", "status": "open", "category": "preventive"})
         assert wo.type == WorkOrderType.PREVENTIVE
 
     def test_default_category_maps_to_corrective(self) -> None:
-        wo = parse_work_order({"id": "4"})
+        wo = parse_work_order({"id": "4", "status": "open"})
         assert wo.type == WorkOrderType.CORRECTIVE
 
     @pytest.mark.parametrize(
         ("upkeep_status", "expected"),
         [
             ("open", WorkOrderStatus.CREATED),
-            ("onHold", WorkOrderStatus.ASSIGNED),
             ("inProgress", WorkOrderStatus.IN_PROGRESS),
             ("complete", WorkOrderStatus.COMPLETED),
         ],
@@ -90,17 +90,34 @@ class TestParseWorkOrderPublicAPI:
         wo = parse_work_order({"id": "5", "status": upkeep_status})
         assert wo.status == expected
 
+    def test_spaced_in_progress_label_still_maps(self) -> None:
+        """Not an API value, but the spaced form this mapper once expected still maps."""
+        wo = parse_work_order({"id": "6", "status": "in progress"})
+        assert wo.status == WorkOrderStatus.IN_PROGRESS
+
+    @pytest.mark.parametrize("label", ["onHold", "ONHOLD", "On Hold"])
+    def test_on_hold_is_never_read_as_assigned(self, label: str) -> None:
+        """A paused work order is not an assigned one: the assignee is assignedToId."""
+        assert status_refusal(label) == "on_hold"
+        with pytest.raises(ValueError, match="on hold has no Machina status"):
+            parse_work_order({"id": "7", "status": label, "assignedToId": "tech-1"})
+
     @pytest.mark.parametrize(
-        ("label", "expected"),
+        "record",
         [
-            ("in progress", WorkOrderStatus.IN_PROGRESS),
-            ("On Hold", WorkOrderStatus.ASSIGNED),
+            pytest.param({"id": "8", "status": "paused"}, id="undocumented"),
+            pytest.param({"id": "8", "status": ""}, id="empty"),
+            pytest.param({"id": "8", "status": None}, id="null"),
+            pytest.param({"id": "8"}, id="missing"),
         ],
     )
-    def test_spaced_status_labels_still_map(self, label: str, expected: WorkOrderStatus) -> None:
-        """Not API values, but the spaced forms this mapper once expected still map."""
-        wo = parse_work_order({"id": "6", "status": label})
-        assert wo.status == expected
+    def test_a_status_upkeep_does_not_document_is_not_read_as_created(
+        self, record: dict[str, Any]
+    ) -> None:
+        """Nothing in the record says the work order is open, so it is not reported so."""
+        assert status_refusal(record.get("status")) == "undocumented"
+        with pytest.raises(ValueError, match="no status UpKeep documents"):
+            parse_work_order(record)
 
 
 class TestParseSparePartSku:
@@ -424,7 +441,7 @@ class TestParseDatetime:
 class TestReverseStatusFilter:
     def test_status_value_is_sent_like_the_enum(self) -> None:
         """``"in_progress"`` filters on the UpKeep value of ``IN_PROGRESS``."""
-        for status in set(WorkOrderStatus) - {WorkOrderStatus.CANCELLED}:
+        for status in set(WorkOrderStatus) - {WorkOrderStatus.CANCELLED, WorkOrderStatus.ASSIGNED}:
             assert reverse_status_filter(status.value) == reverse_status(status)
             assert reverse_status_filter(status.value.upper()) == reverse_status(status)
             assert reverse_status_filter(status) == reverse_status(status)
@@ -432,16 +449,26 @@ class TestReverseStatusFilter:
     @pytest.mark.parametrize(
         ("value", "sent"),
         [
-            ("onHold", "onHold"),
-            ("ONHOLD", "onHold"),
-            ("on hold", "onHold"),
             ("inprogress", "inProgress"),
+            ("in progress", "inProgress"),
             ("Open", "open"),
             ("COMPLETE", "complete"),
         ],
     )
     def test_upkeep_status_is_sent_as_upkeep_spells_it(self, value: str, sent: str) -> None:
         assert reverse_status_filter(value) == sent
+
+    @pytest.mark.parametrize("status", [WorkOrderStatus.ASSIGNED, "assigned", "Assigned"])
+    def test_assigned_is_refused_not_sent_as_on_hold(self, status: WorkOrderStatus | str) -> None:
+        """Filtering on onHold instead returned paused work orders as assigned ones."""
+        with pytest.raises(ValueError, match="UpKeep has no 'assigned' status"):
+            reverse_status_filter(status)
+
+    @pytest.mark.parametrize("value", ["onHold", "ONHOLD", "on hold"])
+    def test_on_hold_is_refused(self, value: str) -> None:
+        """Its work orders have no Machina status to be read with."""
+        with pytest.raises(ValueError, match="onHold work orders cannot be read"):
+            reverse_status_filter(value)
 
     @pytest.mark.parametrize("value", ["paused", "REL", "", "done"])
     def test_any_other_value_is_refused_without_repeating_it(self, value: str) -> None:
@@ -478,12 +505,21 @@ class TestReverseMaps:
 
     def test_reverse_status_uses_camel_case_values(self) -> None:
         assert reverse_status(WorkOrderStatus.IN_PROGRESS) == "inProgress"
-        assert reverse_status(WorkOrderStatus.ASSIGNED) == "onHold"
+
+    def test_reverse_status_refuses_assigned(self) -> None:
+        """UpKeep has no ASSIGNED state; it records the assignee as assignedToId.
+        Sending 'onHold' in its place paused the work order instead."""
+        with pytest.raises(ValueError, match=r"no 'assigned' status.*set assigned_to"):
+            reverse_status(WorkOrderStatus.ASSIGNED)
 
     def test_every_status_has_a_documented_upkeep_value(self) -> None:
-        """The status filter and the PATCH body only ever send values UpKeep accepts."""
-        assert set(REVERSE_UPKEEP_STATUS) == set(WorkOrderStatus) - {WorkOrderStatus.CANCELLED}
-        assert set(REVERSE_UPKEEP_STATUS.values()) <= UPKEEP_STATUSES
+        """The status filter and the PATCH body only ever send values UpKeep accepts,
+        and never onHold, which no Machina status means."""
+        assert set(REVERSE_UPKEEP_STATUS) == set(WorkOrderStatus) - {
+            WorkOrderStatus.CANCELLED,
+            WorkOrderStatus.ASSIGNED,
+        }
+        assert set(REVERSE_UPKEEP_STATUS.values()) <= UPKEEP_STATUSES - {"onHold"}
 
     def test_every_status_sent_reads_back_as_itself_or_completed(self) -> None:
         """The read-back check compares with the status UpKeep reports for the

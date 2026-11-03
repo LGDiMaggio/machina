@@ -41,10 +41,10 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read all assets (`/api/v2/assets`) |
-| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value in any case (`"completed"`) is mapped to UpKeep's status, and one of UpKeep's own statuses in any case is sent as UpKeep spells it (`"onhold"` as `onHold`). `cancelled` and any other value are refused (see [Work-order status](#work-order-status)) |
-| `get_work_order` | Fetch a single work order by ID |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value in any case (`"completed"`) is mapped to UpKeep's status, and `open`, `inProgress` or `complete` in any case is sent as UpKeep spells it. `assigned`, `cancelled`, `onHold` and any other value are refused, and so is a read that meets a work order on hold (see [Work-order status](#work-order-status)) |
+| `get_work_order` | Fetch a single work order by ID (refused for one on hold) |
 | `create_work_order` | Create a new work order |
-| `update_work_order` | Update status, assignee, or description via PATCH; the order is read back, and a status UpKeep did not apply is an error (see [Work-order status](#work-order-status)) |
+| `update_work_order` | Update status, assignee (`assignedToId`), or description via PATCH; the order is read back, and a status UpKeep did not apply is an error (see [Work-order status](#work-order-status)) |
 | `read_spare_parts` | Read the parts inventory (`/api/v2/parts`), or with `asset_id` only the parts that asset lists (the asset, then each listed part); `sku` narrows either in memory — prefers `partNumber` / `barcode` as SKU |
 | `read_maintenance_plans` | Read PM templates with their schedules (`/api/v2/pm`) — one plan per PM schedule |
 | `read_maintenance_history` | Read an asset's completed work orders (`/api/v2/work-orders`, status `complete`) |
@@ -111,8 +111,8 @@ from machina.domain.work_order import WorkOrderStatus
 
 updated = await connector.update_work_order(
     "wo-123",
-    status=WorkOrderStatus.COMPLETED,
-    assigned_to="tech-user-id",
+    status=WorkOrderStatus.IN_PROGRESS,
+    assigned_to="tech-user-id",  # UpKeep's assignedToId; no status needed to assign
 )
 await connector.close_work_order("wo-123")
 ```
@@ -131,7 +131,8 @@ await connector.close_work_order("wo-123")
 | `id` (work order) | `WorkOrder.id` |
 | `title` | `WorkOrder.description` |
 | `priority` (0-3) | `WorkOrder.priority` (0→Low, 1→Medium, 2→High, 3→Emergency) |
-| `status` | `WorkOrder.status` (open→Created, inProgress→InProgress, onHold→Assigned, complete→Completed; filters and updates send the same values, with Closed as complete; see [Work-order status](#work-order-status)) |
+| `status` | `WorkOrder.status` (open→Created, inProgress→InProgress, complete→Completed; onHold and undocumented statuses are refused; filters and updates send the same values, with Closed as complete; see [Work-order status](#work-order-status)) |
+| `assignedToId` | `WorkOrder.assigned_to` (set by `update_work_order(assigned_to=...)`) |
 | `partNumber` / `barcode` / `id` | `SparePart.sku` (prefers physical identifier, falls back to record ID) |
 | `name` (part) | `SparePart.name` |
 | `quantity` | `SparePart.stock_quantity` |
@@ -146,29 +147,53 @@ await connector.close_work_order("wo-123")
 ## Work-order status
 
 UpKeep documents four work-order statuses: `open`, `onHold`, `inProgress` and
-`complete`. A status filter or update maps a `WorkOrderStatus` to one of them:
+`complete`. A `WorkOrderStatus` is mapped only where UpKeep has the same state:
 
 | `WorkOrderStatus` | UpKeep status |
 |---|---|
 | `CREATED` | `open` |
-| `ASSIGNED` | `onHold` |
 | `IN_PROGRESS` | `inProgress` |
 | `COMPLETED`, `CLOSED` | `complete`, UpKeep's one finished state |
-| `CANCELLED` | none: refused with `ConnectorError` before any request |
+| `ASSIGNED` | none: UpKeep records the assignee apart, as `assignedToId` |
+| `CANCELLED` | none |
+| none | `onHold`: a paused work order |
 
 `complete` reads back as `COMPLETED`. A work order closed through Machina
 therefore reads as completed, and a `closed` filter returns UpKeep's complete
 work orders.
 
-UpKeep has no cancelled state. Putting the work order on hold in its place, as
-earlier versions did, reported a cancellation while the order read back as
-assigned. So `update_work_order(status=CANCELLED)` and `cancel_work_order`
-now raise `ConnectorError` before any request.
+**Assigning.** Assign a technician with `update_work_order(assigned_to=...)`,
+which sets `assignedToId` and leaves the status alone. An update with
+`status=ASSIGNED` is refused with `ConnectorError` before any request, even
+with `assigned_to`, so nothing is half-applied; the message says to pass
+`assigned_to` alone. Earlier versions sent `onHold` for it, which paused the
+work order.
 
-A status filter accepts a Machina status value or one of UpKeep's four
-statuses, each in any case. `cancelled`, or any other value, raises
-`ConnectorUnsupportedFilterError` before any request: UpKeep would match
-nothing, which would read as "no such work orders".
+**Cancelling.** UpKeep has no cancelled state. Putting the work order on hold
+in its place, as earlier versions did, reported a cancellation while the order
+read back as assigned. So `update_work_order(status=CANCELLED)` and
+`cancel_work_order` raise `ConnectorError` before any request.
+
+**On hold.** No `WorkOrderStatus` means "paused", and earlier versions read
+`onHold` as `ASSIGNED`. A work order is not reported under a status that is not
+its own, and it is not silently left out. So a read that meets a work order on
+hold, or one whose status UpKeep does not document (or that has none), raises
+`ConnectorSchemaError` and returns no work orders. This applies to
+`read_work_orders` and `get_work_order`. The message gives the counts, never
+work-order IDs, and says what to do: read the others by status (`created`,
+`in_progress`, `completed` or `closed`, which UpKeep filters on its side), or
+resume the work order in UpKeep. The warning `upkeep_work_orders_refused` is
+logged with the counts.
+
+**Filters.** A status filter accepts a Machina status value, or `open`,
+`inProgress` or `complete`, each in any case. `assigned`, `cancelled`,
+`onHold` and any other value raise `ConnectorUnsupportedFilterError` before
+any request.
+
+**After a create.** If the response to a create cannot be mapped, such as one
+without a documented status, `ConnectorError` says the work order was created
+and the create must not be repeated. The warning `work_order_create_not_read`
+is logged.
 
 After an update the work order is read back:
 

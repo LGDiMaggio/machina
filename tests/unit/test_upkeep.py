@@ -149,8 +149,9 @@ class TestParseWorkOrder:
         wo = _parse_work_order(raw)
         assert wo.status == WorkOrderStatus.IN_PROGRESS
 
-    def test_on_hold_status_mapping(self) -> None:
-        """UpKeep reports the status as ``onHold``."""
+    def test_on_hold_status_is_not_read_as_assigned(self) -> None:
+        """UpKeep reports a paused work order as ``onHold``; no WorkOrderStatus
+        means that, and ASSIGNED would misreport it (the assignee is assignedToId)."""
         raw = {
             "id": "wo-4",
             "title": "Awaiting parts",
@@ -158,8 +159,8 @@ class TestParseWorkOrder:
             "status": "onHold",
             "assetId": "a",
         }
-        wo = _parse_work_order(raw)
-        assert wo.status == WorkOrderStatus.ASSIGNED
+        with pytest.raises(ValueError, match="on hold has no Machina status"):
+            _parse_work_order(raw)
 
 
 class TestParseSparePart:

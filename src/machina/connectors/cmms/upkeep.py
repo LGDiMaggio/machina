@@ -110,6 +110,44 @@ def _map_spare_part(record: Any, message: str, **log_context: Any) -> SparePart:
     raise ConnectorSchemaError(message)
 
 
+def _map_work_orders(records: list[Any], operation: str, **log_context: Any) -> list[WorkOrder]:
+    """Map UpKeep work orders, refusing the read when one has no Machina status.
+
+    A work order on hold, or one without a status UpKeep documents, cannot be
+    returned with a status that is not its own (an on-hold one read as
+    ASSIGNED, an unknown one as CREATED), and leaving it out would hide it. So
+    the whole read is refused; the message and the log give counts, never IDs.
+    """
+    refused = {"on_hold": 0, "undocumented": 0}
+    for record in records:
+        reason = upkeep_mapper.status_refusal(
+            record.get("status") if isinstance(record, dict) else None
+        )
+        if reason is not None:
+            refused[reason] += 1
+    if not any(refused.values()):
+        return [upkeep_mapper.parse_work_order(record) for record in records]
+    logger.warning(
+        "upkeep_work_orders_refused",
+        connector="UpKeepConnector",
+        operation=operation,
+        on_hold=refused["on_hold"],
+        undocumented_status=refused["undocumented"],
+        **log_context,
+    )
+    found = []
+    if refused["on_hold"]:
+        found.append(f"{refused['on_hold']} on hold (onHold), which Machina has no status for")
+    if refused["undocumented"]:
+        found.append(f"{refused['undocumented']} without a status UpKeep documents")
+    raise ConnectorSchemaError(
+        f"UpKeep returned work orders that no Machina status describes: {'; '.join(found)}. "
+        "Reading them as another status would misreport them, so no work orders are "
+        "returned. Read the others by status (created, in_progress, completed or closed); "
+        "a work order on hold can be read again once it is resumed in UpKeep."
+    )
+
+
 class UpKeepConnector:
     """Connector for UpKeep CMMS.
 
@@ -254,8 +292,13 @@ class UpKeepConnector:
 
         Raises:
             ConnectorUnsupportedFilterError: Before any request, if ``status``
-                is ``cancelled``, which UpKeep has no status for, or any other
-                value that is neither a Machina status nor an UpKeep one.
+                is ``assigned`` or ``cancelled``, which UpKeep has no status
+                for, ``onHold``, whose work orders have no Machina status, or
+                any other value that is neither a Machina status nor an
+                UpKeep one.
+            ConnectorSchemaError: If UpKeep returns a work order on hold, or
+                one without a status UpKeep documents: none is returned, as no
+                Machina status describes it (see :func:`_map_work_orders`).
         """
         self._ensure_connected()
         params: dict[str, str] = {}
@@ -267,7 +310,7 @@ class UpKeepConnector:
             except ValueError as exc:
                 raise ConnectorUnsupportedFilterError(f"read_work_orders: {exc}") from None
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
-        return [upkeep_mapper.parse_work_order(item) for item in raw]
+        return _map_work_orders(raw, "read_work_orders", asset_id=asset_id or None)
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single work order by ID."""
@@ -286,7 +329,7 @@ class UpKeepConnector:
             raise ConnectorError(f"UpKeep GET work order failed: HTTP {resp.status_code}")
         body = resp.json()
         result = body.get("result", body)
-        return upkeep_mapper.parse_work_order(result)
+        return _map_work_orders([result], "get_work_order", work_order_id=work_order_id)[0]
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -328,7 +371,25 @@ class UpKeepConnector:
             work_order_id=result.get("id"),
             asset_id=work_order.asset_id,
         )
-        return upkeep_mapper.parse_work_order(result)
+        # The work order exists by now: a response that cannot be mapped (no
+        # status UpKeep documents, say) must not look like a failed create, or a
+        # caller would create it again.
+        try:
+            return upkeep_mapper.parse_work_order(result)
+        except (ValueError, TypeError) as exc:
+            error_type = type(exc).__name__
+        logger.warning(
+            "work_order_create_not_read",
+            connector="UpKeepConnector",
+            operation="create_work_order",
+            asset_id=work_order.asset_id,
+            error_type=error_type,
+        )
+        # Raised outside the except block: a mapping error can quote the vendor value.
+        raise ConnectorError(
+            "UpKeep created the work order, but its response could not be read — do not "
+            "repeat the create; find the work order in UpKeep"
+        )
 
     @sandbox_aware
     async def update_work_order(
@@ -349,8 +410,10 @@ class UpKeepConnector:
             work_order_id: UpKeep work order ID.
             status: New status (reverse-mapped to UpKeep string). ``CLOSED``
                 sets ``complete``, UpKeep's one finished state, so the work
-                order reads back as ``COMPLETED``.
-            assigned_to: New ``assignedToId``.
+                order reads back as ``COMPLETED``. ``ASSIGNED`` and
+                ``CANCELLED`` have no UpKeep status and are refused.
+            assigned_to: New ``assignedToId``: assigning a technician, which
+                UpKeep keeps apart from the status.
             description: New title.
 
         Returns:
@@ -358,8 +421,9 @@ class UpKeepConnector:
 
         Raises:
             ConnectorError: If no field is given; if ``status`` is
-                ``CANCELLED``, which UpKeep has no status for, before any
-                request; if UpKeep rejects the update; if the work order cannot
+                ``ASSIGNED`` or ``CANCELLED``, which UpKeep has no status for,
+                before any request and with no field sent; if UpKeep rejects
+                the update; if the work order cannot
                 be read back after it, in which case the message says the
                 update was applied and must not be repeated; or if it reads
                 back with another status than the one sent.
