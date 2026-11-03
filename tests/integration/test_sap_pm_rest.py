@@ -1255,7 +1255,7 @@ class TestUpdateWorkOrder:
         with pytest.raises(
             ConnectorError,
             match=r"HTTP 400\. The assigned_to and description update sent before it was "
-            r"applied; only the status was not set",
+            r"applied; only the status step failed",
         ):
             await connector.update_work_order(
                 "4000001", status=WorkOrderStatus.CLOSED, assigned_to="TECH", description="x"
@@ -1312,6 +1312,34 @@ class TestUpdateWorkOrder:
         ):
             await connector.update_work_order("4000001", status=WorkOrderStatus.ASSIGNED)
         assert "work_order_update_not_read_back" in [e["event"] for e in logs]
+
+    @pytest.mark.asyncio
+    async def test_a_field_update_without_a_status_patches_and_reads_back(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """No function import, no ETag read: the order is only read back."""
+        await _connect(httpx_mock, connector)
+        self._mock_csrf(httpx_mock)
+        httpx_mock.add_response(
+            method="PATCH",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
+            status_code=204,
+        )
+        self._mock_read(httpx_mock, "REL MANC")
+        updated = await connector.update_work_order("4000001", assigned_to="TECH")
+        assert updated.status == WorkOrderStatus.ASSIGNED
+        writes = [r for r in httpx_mock.get_requests() if r.method in ("PATCH", "POST")]
+        assert [r.method for r in writes] == ["PATCH"]
+        assert json.loads(writes[0].content) == {"MaintOrdPersonResponsible": "TECH"}
+
+    @pytest.mark.asyncio
+    async def test_an_update_with_nothing_to_set_is_refused_before_any_request(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        with pytest.raises(ConnectorError, match="requires at least one field to update"):
+            await connector.update_work_order("4000001")
+        assert len(httpx_mock.get_requests()) == 1  # only the connect handshake
 
     @pytest.mark.asyncio
     async def test_a_patch_rejected_for_auth_raises_before_the_status(

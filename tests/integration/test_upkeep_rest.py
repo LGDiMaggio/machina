@@ -1474,6 +1474,21 @@ class TestUpdateWorkOrder:
             "work_order_status_not_applied"
         ]
 
+    @pytest.mark.asyncio
+    async def test_an_update_without_a_status_does_not_check_it(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Replace seal", "status": "onHold", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        updated = await connector.update_work_order("wo1", description="Replace seal")
+        assert updated.description == "Replace seal"
+
     @pytest.mark.parametrize(
         "reread",
         [

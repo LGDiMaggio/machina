@@ -510,7 +510,7 @@ class SapPmConnector:
                 # Keep the type (an auth failure stays ConnectorAuthError).
                 raise type(exc)(
                     f"{exc}. The {' and '.join(fields)} update sent before it was applied; "
-                    "only the status was not set"
+                    "only the status step failed"
                 ) from None
         logger.info(
             "work_order_updated",
