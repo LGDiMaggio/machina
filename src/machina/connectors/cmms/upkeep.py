@@ -28,12 +28,18 @@ from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
+from machina.connectors.cmms.status import status_not_applied
 from machina.domain.work_order import (
     WorkOrder,
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 
 if TYPE_CHECKING:
     from machina.domain.asset import Asset
@@ -102,6 +108,46 @@ def _map_spare_part(record: Any, message: str, **log_context: Any) -> SparePart:
     # Raised outside the except block: the mapping error's message quotes the
     # vendor value, and `from None` would still keep it as __context__.
     raise ConnectorSchemaError(message)
+
+
+def _map_work_orders(records: list[Any], operation: str, **log_context: Any) -> list[WorkOrder]:
+    """Map UpKeep work orders, refusing the read when one has no Machina status.
+
+    A work order on hold, or one without a status UpKeep documents, cannot be
+    returned with a status that is not its own (an on-hold one read as
+    ASSIGNED, an unknown one as CREATED), and leaving it out would hide it. So
+    the whole read is refused; the message and the log give counts, never IDs.
+    """
+    refused = {"on_hold": 0, "undocumented": 0}
+    for record in records:
+        reason = upkeep_mapper.status_refusal(
+            record.get("status") if isinstance(record, dict) else None
+        )
+        if reason is not None:
+            refused[reason] += 1
+    if not any(refused.values()):
+        return [upkeep_mapper.parse_work_order(record) for record in records]
+    logger.warning(
+        "upkeep_work_orders_refused",
+        connector="UpKeepConnector",
+        operation=operation,
+        on_hold=refused["on_hold"],
+        undocumented_status=refused["undocumented"],
+        **log_context,
+    )
+    found = []
+    if refused["on_hold"]:
+        found.append(f"{refused['on_hold']} on hold (onHold), which Machina has no status for")
+    if refused["undocumented"]:
+        found.append(f"{refused['undocumented']} without a status UpKeep documents")
+    advice = "Read the others by status (created, in_progress, completed or closed)"
+    if refused["on_hold"]:
+        advice += "; a work order on hold can be read again once it is resumed in UpKeep"
+    raise ConnectorSchemaError(
+        f"UpKeep returned work orders that no Machina status describes: {'; '.join(found)}. "
+        "Reading them as another status would misreport them, so no work orders are "
+        f"returned. {advice}."
+    )
 
 
 class UpKeepConnector:
@@ -240,23 +286,33 @@ class UpKeepConnector:
 
         Args:
             asset_id: Filter by UpKeep asset ID.
-            status: Filter by status — accepts a :class:`WorkOrderStatus`
-                enum (reverse-mapped to UpKeep's string) or a raw UpKeep
-                status string for backward compatibility.
+            status: Filter by status — a :class:`WorkOrderStatus` or one of its
+                values such as ``"in_progress"`` (reverse-mapped to UpKeep's
+                status), or ``open``, ``inProgress`` or ``complete`` in any
+                case, sent as UpKeep spells it (``"inProgress"``). ``completed`` and ``closed``
+                both select UpKeep's ``complete``.
+
+        Raises:
+            ConnectorUnsupportedFilterError: Before any request, if ``status``
+                is ``assigned`` or ``cancelled``, which UpKeep has no status
+                for, ``onHold``, whose work orders have no Machina status, or
+                any other value that is neither a Machina status nor an
+                UpKeep one.
+            ConnectorSchemaError: If UpKeep returns a work order on hold, or
+                one without a status UpKeep documents: none is returned, as no
+                Machina status describes it (see :func:`_map_work_orders`).
         """
         self._ensure_connected()
         params: dict[str, str] = {}
         if asset_id:
             params["asset"] = asset_id
         if status:
-            upkeep_status = (
-                upkeep_mapper.REVERSE_UPKEEP_STATUS.get(status, status.value)
-                if isinstance(status, WorkOrderStatus)
-                else status
-            )
-            params["status"] = upkeep_status
+            try:
+                params["status"] = upkeep_mapper.reverse_status_filter(status)
+            except ValueError as exc:
+                raise ConnectorUnsupportedFilterError(f"read_work_orders: {exc}") from None
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
-        return [upkeep_mapper.parse_work_order(item) for item in raw]
+        return _map_work_orders(raw, "read_work_orders", asset_id=asset_id or None)
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single work order by ID."""
@@ -275,7 +331,7 @@ class UpKeepConnector:
             raise ConnectorError(f"UpKeep GET work order failed: HTTP {resp.status_code}")
         body = resp.json()
         result = body.get("result", body)
-        return upkeep_mapper.parse_work_order(result)
+        return _map_work_orders([result], "get_work_order", work_order_id=work_order_id)[0]
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -317,7 +373,25 @@ class UpKeepConnector:
             work_order_id=result.get("id"),
             asset_id=work_order.asset_id,
         )
-        return upkeep_mapper.parse_work_order(result)
+        # The work order exists by now: a response that cannot be mapped (no
+        # status UpKeep documents, say) must not look like a failed create, or a
+        # caller would create it again.
+        try:
+            return upkeep_mapper.parse_work_order(result)
+        except (ValueError, TypeError) as exc:
+            error_type = type(exc).__name__
+        logger.warning(
+            "work_order_create_not_read",
+            connector="UpKeepConnector",
+            operation="create_work_order",
+            asset_id=work_order.asset_id,
+            error_type=error_type,
+        )
+        # Raised outside the except block: a mapping error can quote the vendor value.
+        raise ConnectorError(
+            "UpKeep created the work order, but its response could not be read — do not "
+            "repeat the create; find the work order in UpKeep"
+        )
 
     @sandbox_aware
     async def update_work_order(
@@ -330,24 +404,43 @@ class UpKeepConnector:
     ) -> WorkOrder:
         """Update an existing work order in UpKeep via PATCH.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        Only non-``None`` fields are included in the PATCH payload. The work
+        order is read back afterwards, and a status UpKeep did not apply is
+        an error, not a success.
 
         Args:
             work_order_id: UpKeep work order ID.
-            status: New status (reverse-mapped to UpKeep string).
-            assigned_to: New ``assignedToId``.
+            status: New status (reverse-mapped to UpKeep string). ``CLOSED``
+                sets ``complete``, UpKeep's one finished state, so the work
+                order reads back as ``COMPLETED``. ``ASSIGNED`` and
+                ``CANCELLED`` have no UpKeep status and are refused.
+            assigned_to: The ID of the user to assign, sent as
+                ``assignedToUser``, the field UpKeep documents for it: assigning
+                a technician, which UpKeep keeps apart from the status.
             description: New title.
 
         Returns:
             The updated work order.
+
+        Raises:
+            ConnectorError: If no field is given; if ``status`` is
+                ``ASSIGNED`` or ``CANCELLED``, which UpKeep has no status for,
+                before any request and with no field sent; if UpKeep rejects
+                the update; if the work order cannot be read back after it, in
+                which case the message says the update was applied and must
+                not be repeated; or if it reads back with another status, or
+                another assignee, than the one sent.
         """
         self._ensure_connected()
         httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
-            payload["status"] = upkeep_mapper.reverse_status(status)
+            try:
+                payload["status"] = upkeep_mapper.reverse_status(status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from None
         if assigned_to is not None:
-            payload["assignedToId"] = assigned_to
+            payload["assignedToUser"] = assigned_to
         if description is not None:
             payload["title"] = description
         if not payload:
@@ -370,9 +463,56 @@ class UpKeepConnector:
             operation="update_work_order",
             work_order_id=work_order_id,
         )
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
-            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        # Read the work order back. The update has been applied by now: whatever
+        # goes wrong next must not look like a failed update, or a caller would
+        # send it again.
+        try:
+            updated = await self.get_work_order(work_order_id)
+            if updated is None:
+                raise ConnectorError("the work order was not found")
+        except Exception as exc:
+            logger.warning(
+                "work_order_update_not_read_back",
+                connector="UpKeepConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
+            )
+            if isinstance(exc, ConnectorSchemaError):
+                # Read back on hold, or with an undocumented status: reading it
+                # again would be refused the same way, so do not suggest it.
+                raise ConnectorError(
+                    f"UpKeep accepted the update of work order {work_order_id}, but the work "
+                    "order now has a status no Machina status describes (on hold, for "
+                    "instance), so it is not returned and the update cannot be confirmed "
+                    "— do not repeat the update; check the work order in UpKeep"
+                ) from None
+            raise ConnectorError(
+                f"UpKeep applied the update to work order {work_order_id}, but reading it "
+                "back failed — do not repeat the update; read the work order to check it"
+            ) from None
+        if "status" in payload:
+            # The status UpKeep reports for the value sent: CLOSED reads back
+            # as COMPLETED, since both are UpKeep's "complete".
+            sent = upkeep_mapper.map_status(payload["status"])
+            if updated.status != sent:
+                raise status_not_applied(
+                    "UpKeepConnector", work_order_id, sent.value, updated.status.value
+                )
+        # As WorkOrder stores it: stripped, and an empty assignee as none.
+        if assigned_to is not None and updated.assigned_to != (assigned_to.strip() or None):
+            # An assignee UpKeep accepted but did not set must not read as done.
+            logger.warning(
+                "work_order_assignee_not_applied",
+                connector="UpKeepConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+            )
+            raise ConnectorError(
+                f"UpKeep accepted the update of work order {work_order_id}, but its assignee "
+                "(assignedToUser) does not read back as the one sent: the assignment was not "
+                "applied. Read the work order before repeating the update."
+            )
         return updated
 
     @sandbox_aware
@@ -382,7 +522,12 @@ class UpKeepConnector:
 
     @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
-        """Transition a work order to CANCELLED (maps to 'onHold' in UpKeep)."""
+        """Refuse: UpKeep has no cancelled status.
+
+        Raises:
+            ConnectorError: Always, before any request (see
+                :meth:`update_work_order`).
+        """
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_spare_parts(

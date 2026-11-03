@@ -52,6 +52,7 @@ from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.paths import checked_path_id
 from machina.connectors.cmms.retry import request_with_retry
+from machina.connectors.cmms.status import status_filter, status_not_applied
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorAuthError,
@@ -122,6 +123,21 @@ def _is_csrf_challenge(resp: Any) -> bool:
     and retrying the write once is safe and cannot duplicate the order.
     """
     return bool(resp.headers.get("x-csrf-token", "").lower() == "required")
+
+
+# API_MAINTENANCEORDER has no writable status property: a status is set by
+# POSTing the function import for the system status it maps to, with the order
+# as its ``MaintenanceOrder`` parameter and the order's ETag in If-Match. SAP
+# sets the other statuses itself — CRTD on create, PCNF and CNF from time
+# confirmations.
+_STATUS_FUNCTION_IMPORTS: dict[str, str] = {
+    "REL": "ReleaseMaintenanceOrder",
+    "TECO": "SetMaintOrdToTechCompleted",
+    "DLFL": "SetMaintOrdStsToMrkdForDeltn",
+}
+
+# SAP limits an order's SystemStatusText to this many characters.
+_SYSTEM_STATUS_TEXT_LENGTH = 40
 
 
 class SapPmConnector:
@@ -315,42 +331,53 @@ class SapPmConnector:
     ) -> list[WorkOrder]:
         """Read maintenance orders from SAP PM.
 
+        ``asset_id`` is filtered server-side; ``status`` is applied to the
+        orders read. An order's system statuses are only in
+        ``SystemStatusText``, which ``API_MAINTENANCEORDER`` cannot filter on
+        (SAP KBA 3614100) — so on a large system pass ``asset_id`` with
+        ``status``: a read by status alone fetches every order.
+
         Args:
             asset_id: Filter by equipment number.
-            status: Filter by status — accepts a :class:`WorkOrderStatus`
-                enum (automatically reverse-mapped to the SAP code) or a
-                raw SAP status string like ``"REL"`` for backward
-                compatibility.
+            status: Filter by status — a :class:`WorkOrderStatus`, or its
+                value such as ``"closed"``, keeps the orders whose mapped
+                status matches. Any other string is a raw SAP system status
+                code such as ``"REL"``, kept where it is active on the order.
         """
         self._ensure_connected()
-        filters: list[str] = []
-        if asset_id:
-            filters.append(f"Equipment eq {_odata_string(asset_id)}")
-        if status:
-            sap_status = (
-                sap_mapper.REVERSE_SAP_STATUS.get(status, status.value)
-                if isinstance(status, WorkOrderStatus)
-                else status
-            )
-            filters.append(f"MaintenanceOrderSystemStatus eq {_odata_string(sap_status)}")
-        odata_filter = " and ".join(filters) if filters else ""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
-            odata_filter=odata_filter,
+            odata_filter=f"Equipment eq {_odata_string(asset_id)}" if asset_id else "",
         )
-        return [sap_mapper.parse_work_order(item) for item in raw]
+        work_orders = [sap_mapper.parse_work_order(item) for item in raw]
+        if not status:
+            return work_orders
+        wanted = status_filter(status)
+        if wanted is not None:
+            return [wo for wo in work_orders if wo.status == wanted]
+        sap_code = status.upper()
+        return [
+            wo
+            for item, wo in zip(raw, work_orders, strict=True)
+            if sap_code in sap_mapper.system_status_codes(item)
+        ]
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single maintenance order by number."""
         self._ensure_connected()
+        raw = await self._read_order(work_order_id)
+        return sap_mapper.parse_work_order(raw) if raw is not None else None
+
+    async def _read_order(self, work_order_id: str) -> dict[str, Any] | None:
+        """Read one maintenance order as SAP returns it, or ``None`` if there is none."""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
             odata_filter=f"MaintenanceOrder eq {_odata_string(work_order_id)}",
             top=1,
         )
-        return sap_mapper.parse_work_order(raw[0]) if raw else None
+        return raw[0] if raw else None
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -404,49 +431,213 @@ class SapPmConnector:
     ) -> WorkOrder:
         """Update an existing maintenance order in SAP PM.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        ``assigned_to`` and ``description`` are PATCHed onto the order; only
+        non-``None`` fields are sent. The order has no writable status, so a
+        ``status`` is set afterwards through the ``API_MAINTENANCEORDER``
+        function import for the SAP system status it maps to:
+
+        * ``ASSIGNED`` — ``ReleaseMaintenanceOrder`` (``REL``)
+        * ``CLOSED`` — ``SetMaintOrdToTechCompleted`` (``TECO``)
+        * ``CANCELLED`` — ``SetMaintOrdStsToMrkdForDeltn`` (``DLFL``)
+
+        SAP sets the other statuses itself — ``CRTD`` on create, ``PCNF`` and
+        ``CNF`` from time confirmations — so they are refused before any
+        request.
+
+        The order is read first, after the PATCH, which changes it: one that
+        already has ``status`` is left as it is, and otherwise the function
+        import carries the order's ETag in ``If-Match``. The order is read
+        again afterwards, and the update succeeds only if it has ``status``
+        (see :meth:`_check_system_status`).
 
         Args:
             work_order_id: SAP maintenance order number.
-            status: New :class:`WorkOrderStatus` (reverse-mapped to SAP code).
+            status: New :class:`WorkOrderStatus` — ``ASSIGNED``, ``CLOSED`` or
+                ``CANCELLED``.
             assigned_to: New responsible person.
             description: New order description.
 
         Returns:
             The updated work order.
+
+        Raises:
+            ConnectorError: If nothing is to be updated, ``status`` is one SAP
+                sets itself, the order is not found or has no ETag, SAP
+                rejects a request (after a PATCH, the message says the PATCH
+                was applied), the order cannot be read back (the message says
+                the update was applied and must not be repeated), or the order
+                does not show the status afterwards.
         """
         self._ensure_connected()
-        payload: dict[str, Any] = {}
+        function_import = ""
         if status is not None:
-            payload["MaintenanceOrderSystemStatus"] = sap_mapper.reverse_status(status)
+            function_import = _STATUS_FUNCTION_IMPORTS.get(sap_mapper.reverse_status(status), "")
+            if not function_import:
+                raise ConnectorError(
+                    f"SAP PM cannot set status {status.value!r}: SAP sets it itself. "
+                    "Settable statuses: assigned, closed, cancelled"
+                )
+        payload: dict[str, Any] = {}
         if assigned_to is not None:
             payload["MaintOrdPersonResponsible"] = assigned_to
         if description is not None:
             payload["MaintenanceOrderDesc"] = description
-        if not payload:
+        if not payload and not function_import:
             raise ConnectorError("update_work_order requires at least one field to update")
-        resp = await self._write_with_csrf(
-            "PATCH",
-            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({_odata_key(work_order_id)})",
-            payload,
-        )
-        if resp.status_code == 401:
-            raise ConnectorAuthError("SAP PM authentication failed")
-        if resp.status_code not in (200, 204):
-            raise ConnectorError(
-                f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
+        if payload:
+            resp = await self._write_with_csrf(
+                "PATCH",
+                f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({_odata_key(work_order_id)})",
+                payload,
             )
+            if resp.status_code == 401:
+                raise ConnectorAuthError("SAP PM authentication failed")
+            if resp.status_code not in (200, 204):
+                raise ConnectorError(
+                    f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
+                )
+        if status is not None:
+            try:
+                await self._set_system_status(work_order_id, status, function_import)
+            except ConnectorError as exc:
+                if not payload:
+                    raise
+                fields = [
+                    name
+                    for name, value in (("assigned_to", assigned_to), ("description", description))
+                    if value is not None
+                ]
+                # Keep the type (an auth failure stays ConnectorAuthError).
+                raise type(exc)(
+                    f"{exc}. The {' and '.join(fields)} update sent before it was applied; "
+                    "only the status step failed"
+                ) from None
         logger.info(
             "work_order_updated",
             connector="SapPmConnector",
             operation="update_work_order",
             work_order_id=work_order_id,
+            status=status.value if status is not None else None,
         )
-        # Re-fetch the updated entity to return the full work order.
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
-            raise ConnectorError(f"Work order {work_order_id} not found after update")
+        # Read back the order just written. The update has been applied by now:
+        # whatever goes wrong next must not look like a failed update, or a
+        # caller would send it again.
+        try:
+            raw = await self._read_order(work_order_id)
+            if raw is None:
+                raise ConnectorError("the work order was not found")
+            updated = sap_mapper.parse_work_order(raw)
+        except Exception as exc:
+            logger.warning(
+                "work_order_update_not_read_back",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
+            )
+            raise ConnectorError(
+                f"SAP PM applied the update to work order {work_order_id}, but reading it "
+                "back failed — do not repeat the update; read the work order to check it"
+            ) from None
+        if status is not None:
+            self._check_system_status(work_order_id, status, raw)
         return updated
+
+    @staticmethod
+    def _status_is_set(order: dict[str, Any], status: WorkOrderStatus) -> bool:
+        """Whether an order read from SAP already has ``status``.
+
+        It does when it lists the system status that sets it, or when its
+        status maps to ``status`` anyway: an order closed for business
+        (``CLSD``) is closed, so closing it again needs no technical
+        completion.
+        """
+        if sap_mapper.reverse_status(status) in sap_mapper.system_status_codes(order):
+            return True
+        return sap_mapper.parse_work_order(order).status == status
+
+    @classmethod
+    def _check_system_status(
+        cls, work_order_id: str, status: WorkOrderStatus, raw: dict[str, Any]
+    ) -> None:
+        """Raise unless the order read back has ``status``, the status just set.
+
+        SAP answered the function import with 200; an order that does not show
+        the status must not be returned as updated. ``SystemStatusText`` holds
+        at most 40 characters of the highest-priority statuses, and SAP does not
+        say which those are. So when the line is too full for another code to
+        fit, a missing code proves nothing, and the result is reported as
+        unknown rather than as not applied.
+        """
+        if cls._status_is_set(raw, status):
+            return
+        sap_code = sap_mapper.reverse_status(status)
+        text = sap_mapper.system_status_text(raw)
+        # Full: no room left for a separator and one more four-letter code.
+        if len(text.strip()) > _SYSTEM_STATUS_TEXT_LENGTH - 5:
+            logger.warning(
+                "work_order_status_unconfirmed",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                wanted_status=sap_code,
+                actual_status=text,
+            )
+            raise ConnectorError(
+                f"SAP PM accepted the status change of work order {work_order_id} to "
+                f"{sap_code}, but its SystemStatusText ({text!r}) is at SAP's "
+                f"40-character limit and does not list {sap_code}, so whether it was "
+                "applied cannot be read back. Check the order in SAP before repeating "
+                "the update."
+            )
+        raise status_not_applied("SapPmConnector", work_order_id, sap_code, text)
+
+    async def _set_system_status(
+        self, work_order_id: str, status: WorkOrderStatus, function_import: str
+    ) -> None:
+        """POST a status function import for one order, with the order's ETag in ``If-Match``.
+
+        The order is read first. One that already has ``status`` is left as it
+        is, so a repeated close or cancel (after a lost response, say) sends
+        nothing SAP would refuse. Otherwise SAP requires the ETag, taken from
+        the order's ``LastChangeDateTime`` as a read returns it; it is read
+        from the order's OData V2 ``__metadata``
+        (:func:`~machina.connectors.cmms.mappers.sap_pm.order_etag`). A
+        ``412`` means the order changed after it was read.
+        """
+        order = await self._read_order(work_order_id)
+        if order is None:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        if self._status_is_set(order, status):
+            logger.info(
+                "work_order_status_already_set",
+                connector="SapPmConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+                status=status.value,
+            )
+            return
+        etag = sap_mapper.order_etag(order)
+        if not etag:
+            raise ConnectorError(
+                f"SAP PM returned no ETag for work order {work_order_id}; "
+                f"{function_import} needs it in If-Match"
+            )
+        resp = await self._write_with_csrf(
+            "POST",
+            f"{self.url}/API_MAINTENANCEORDER/{function_import}",
+            params={"MaintenanceOrder": _odata_string(work_order_id)},
+            if_match=etag,
+        )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("SAP PM authentication failed")
+        if resp.status_code == 412:
+            raise ConnectorError(
+                f"SAP PM {function_import} failed: HTTP 412, work order {work_order_id} "
+                "changed after it was read; read it again before retrying"
+            )
+        if resp.status_code not in (200, 204):
+            raise ConnectorError(f"SAP PM {function_import} failed: HTTP {resp.status_code}")
 
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
@@ -523,26 +714,27 @@ class SapPmConnector:
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed maintenance orders for an asset.
 
+        The equipment's orders are read and kept when their system status maps
+        to completed (``CNF``) or closed (``TECO``, ``CLSD``). SAP cannot
+        filter on ``SystemStatusText`` (SAP KBA 3614100), and an order outside
+        SAP's process-phase model may carry no ``MaintOrdProcessPhaseCode``,
+        the field the KBA suggests filtering on instead.
+
         Raises:
-            ConnectorError: If ``asset_id`` is missing or blank.
-                ``Equipment eq ''`` would match every order that has no
-                equipment, and a missing ID would be matched as ``'None'``.
+            ConnectorError: If ``asset_id`` is missing or blank. Without an
+                ``Equipment`` filter the read would fetch every order, and a
+                missing ID would be matched as ``'None'``.
         """
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
-        odata_filter = (
-            f"Equipment eq {_odata_string(asset_id)} and "
-            "(MaintenanceOrderSystemStatus eq 'CNF' or "
-            "MaintenanceOrderSystemStatus eq 'TECO' or "
-            "MaintenanceOrderSystemStatus eq 'CLSD')"
-        )
-        raw = await self._odata_get(
-            "API_MAINTENANCEORDER",
-            "MaintenanceOrder",
-            odata_filter=odata_filter,
-        )
-        return [sap_mapper.parse_work_order(item) for item in raw]
+        # As text: read_work_orders reads a falsy ID (the number 0) as no filter.
+        work_orders = await self.read_work_orders(asset_id=str(asset_id))
+        return [
+            wo
+            for wo in work_orders
+            if wo.status in (WorkOrderStatus.COMPLETED, WorkOrderStatus.CLOSED)
+        ]
 
     # ------------------------------------------------------------------
     # Internal: OData REST helpers
@@ -560,13 +752,25 @@ class SapPmConnector:
             raise ConnectorError("Not connected — call connect() first")
 
     @sandbox_aware
-    async def _write_with_csrf(self, method: str, url: str, payload: dict[str, Any]) -> Any:
+    async def _write_with_csrf(
+        self,
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        params: dict[str, str] | None = None,
+        if_match: str | None = None,
+    ) -> Any:
         """Execute a write request (POST/PATCH) with CSRF token.
 
         SAP OData services require a CSRF token tied to the HTTP
         session cookie. This helper performs the token fetch and the
         write within a **single** ``httpx.AsyncClient`` context so that
         the session cookies are shared.
+
+        ``payload`` is sent as the JSON body. A function import has no body:
+        it takes its parameters as query ``params``. ``if_match`` is sent as
+        the ``If-Match`` header, an ETag the entity must still have.
 
         On a stale-token rejection (HTTP 403 with a CSRF challenge — the write
         did NOT apply) the token is re-fetched and the write retried exactly
@@ -588,9 +792,10 @@ class SapPmConnector:
         # relies on this check, as it does on the sandbox guard.
         self._ensure_connected()
         httpx = _require_httpx()
+        headers = {"If-Match": if_match} if if_match is not None else {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             token = await self._fetch_csrf_token(client)
-            resp = await self._csrf_write(client, method, url, payload, token)
+            resp = await self._csrf_write(client, method, url, payload, params, headers, token)
             if resp.status_code == 403 and _is_csrf_challenge(resp):
                 logger.warning(
                     "sap_csrf_token_refresh",
@@ -598,7 +803,7 @@ class SapPmConnector:
                     method=method,
                 )
                 token = await self._fetch_csrf_token(client)
-                resp = await self._csrf_write(client, method, url, payload, token)
+                resp = await self._csrf_write(client, method, url, payload, params, headers, token)
             return resp
 
     async def _fetch_csrf_token(self, client: Any) -> str:
@@ -619,15 +824,22 @@ class SapPmConnector:
         return str(token)
 
     async def _csrf_write(
-        self, client: Any, method: str, url: str, payload: dict[str, Any], token: str
+        self,
+        client: Any,
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None,
+        params: dict[str, str] | None,
+        extra_headers: dict[str, str],
+        token: str,
     ) -> Any:
         """Issue the write with the session's CSRF token (same client/cookies)."""
-        headers = {
-            **self._headers(),
-            "Content-Type": "application/json",
-            "X-CSRF-Token": token,
-        }
-        return await request_with_retry(client, method, url, headers=headers, json=payload)
+        headers = {**self._headers(), **extra_headers, "X-CSRF-Token": token}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        return await request_with_retry(
+            client, method, url, headers=headers, params=params, json=payload
+        )
 
     async def _odata_get(
         self,

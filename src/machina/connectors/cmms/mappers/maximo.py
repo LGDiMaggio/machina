@@ -28,6 +28,7 @@ from decimal import Decimal, localcontext
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from machina.connectors.cmms.status import status_filter
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -56,7 +57,9 @@ __all__ = [
     "resolve_asset_type",
     "reverse_priority",
     "reverse_status",
+    "reverse_status_filter",
     "reverse_worktype",
+    "status_code",
 ]
 
 
@@ -265,6 +268,11 @@ def parse_asset(
     )
 
 
+def status_code(data: dict[str, Any]) -> str:
+    """Return a Maximo work order's ``status`` code, upper-cased (``""`` if none)."""
+    return str(data.get("status", "")).upper()
+
+
 def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert a Maximo MXWO JSON object to a :class:`WorkOrder`."""
     raw_priority = data.get("wopriority", 3)
@@ -274,8 +282,7 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
         prio_int = 3
     priority = MAXIMO_PRIORITY_MAP.get(prio_int, Priority.MEDIUM)
 
-    raw_status = str(data.get("status", "")).upper()
-    status = MAXIMO_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
+    status = MAXIMO_STATUS_MAP.get(status_code(data), WorkOrderStatus.CREATED)
 
     raw_type = str(data.get("worktype", "")).upper()
     wo_type = MAXIMO_WORKTYPE_MAP.get(raw_type, WorkOrderType.CORRECTIVE)
@@ -440,6 +447,19 @@ def reverse_worktype(wo_type: WorkOrderType) -> str:
 def reverse_status(status: WorkOrderStatus) -> str:
     """Map Machina work-order status to Maximo status code."""
     return REVERSE_MAXIMO_STATUS.get(status, "WAPPR")
+
+
+def reverse_status_filter(status: WorkOrderStatus | str) -> str:
+    """Map a ``read_work_orders`` status filter to the Maximo status code to send.
+
+    A :class:`WorkOrderStatus`, or a string equal to one of its values in any
+    case such as ``"in_progress"``, is reverse-mapped. Any other string is
+    taken as a Maximo status code and only upper-cased.
+    """
+    machina_status = status_filter(status)
+    if machina_status is None:
+        return status.upper()
+    return REVERSE_MAXIMO_STATUS[machina_status]
 
 
 # ---------------------------------------------------------------------------

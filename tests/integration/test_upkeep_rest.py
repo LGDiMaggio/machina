@@ -5,6 +5,8 @@ All HTTP traffic is intercepted by pytest-httpx — no real UpKeep API calls.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import structlog.testing
 
@@ -14,7 +16,12 @@ from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError, ConnectorSchemaError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
 from machina.workflows.engine import WorkflowEngine
 from machina.workflows.models import Workflow
@@ -188,7 +195,7 @@ class TestReadWorkOrders:
     async def test_read_work_orders_maps_documented_statuses(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
-        """UpKeep reports ``onHold`` and ``inProgress``; neither may read as CREATED."""
+        """UpKeep reports ``inProgress``; it may not read as CREATED."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
@@ -196,7 +203,6 @@ class TestReadWorkOrders:
             json={
                 "results": [
                     {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"},
-                    {"id": "wo2", "title": "Fix pump", "status": "onHold", "assetId": "a1"},
                     {"id": "wo3", "title": "Fix pump", "status": "inProgress", "assetId": "a1"},
                     {"id": "wo4", "title": "Fix pump", "status": "complete", "assetId": "a1"},
                 ],
@@ -205,31 +211,86 @@ class TestReadWorkOrders:
         wos = await connector.read_work_orders()
         assert [wo.status for wo in wos] == [
             WorkOrderStatus.CREATED,
-            WorkOrderStatus.ASSIGNED,
             WorkOrderStatus.IN_PROGRESS,
             WorkOrderStatus.COMPLETED,
         ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("statuses", "found"),
+        [
+            pytest.param(["open", "onHold"], "1 on hold (onHold)", id="on-hold"),
+            pytest.param(
+                ["open", "paused"], "1 without a status UpKeep documents", id="undocumented"
+            ),
+            pytest.param([None, "onHold", "onHold"], "2 on hold (onHold)", id="both"),
+        ],
+    )
+    async def test_a_work_order_no_machina_status_describes_refuses_the_read(
+        self, httpx_mock, connector: UpKeepConnector, statuses: list, found: str
+    ) -> None:
+        """An on-hold work order used to read as ASSIGNED, an undocumented status
+        as CREATED. Neither is returned under a status that is not its own, and
+        none is silently left out: the read is refused."""
+        await _connect(httpx_mock, connector)
+        records = [
+            {"id": f"wo{n}", "title": "Fix pump", "assetId": "a1", "assignedToUser": "tech-1"}
+            | ({"status": status} if status is not None else {})
+            for n, status in enumerate(statuses)
+        ]
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&asset=a1",
+            json={"results": records},
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorSchemaError, match=rf"{re.escape(found)}") as exc_info,
+        ):
+            await connector.read_work_orders(asset_id="a1")
+        message = str(exc_info.value)
+        assert "Read the others by status" in message
+        # The resume advice only when a work order is on hold.
+        assert ("resumed in UpKeep" in message) == ("on hold" in found)
+        assert "wo0" not in message and "wo1" not in message  # counts, never IDs
+        (event,) = [e for e in logs if e["event"] == "upkeep_work_orders_refused"]
+        assert event["operation"] == "read_work_orders"
+        assert event["asset_id"] == "a1"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_on_hold_is_refused_not_read_as_assigned(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/wo2",
+            json={"result": {"id": "wo2", "title": "Fix pump", "status": "onHold"}},
+        )
+        with pytest.raises(ConnectorSchemaError, match="on hold"):
+            await connector.get_work_order("wo2")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("status", "upkeep_status"),
         [
             (WorkOrderStatus.CREATED, "open"),
-            (WorkOrderStatus.ASSIGNED, "onHold"),
             (WorkOrderStatus.IN_PROGRESS, "inProgress"),
             (WorkOrderStatus.COMPLETED, "complete"),
             (WorkOrderStatus.CLOSED, "complete"),
-            (WorkOrderStatus.CANCELLED, "onHold"),
+            ("in_progress", "inProgress"),
+            ("Closed", "complete"),
         ],
     )
     async def test_status_filter_sends_documented_value(
         self,
         httpx_mock,
         connector: UpKeepConnector,
-        status: WorkOrderStatus,
+        status: WorkOrderStatus | str,
         upkeep_status: str,
     ) -> None:
-        """The ``status`` filter accepts only open, onHold, inProgress and complete."""
+        """The ``status`` filter accepts only open, onHold, inProgress and complete,
+        and onHold is never sent: no Machina status means it."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
             method="GET",
@@ -237,6 +298,60 @@ class TestReadWorkOrders:
             json={"results": []},
         )
         assert await connector.read_work_orders(status=status) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [
+            pytest.param(
+                WorkOrderStatus.CANCELLED, "UpKeep has no 'cancelled' status", id="cancelled"
+            ),
+            pytest.param("cancelled", "UpKeep has no 'cancelled' status", id="cancelled-text"),
+            # Sent as onHold, it returned paused work orders as assigned ones.
+            pytest.param(
+                WorkOrderStatus.ASSIGNED, "UpKeep has no 'assigned' status", id="assigned"
+            ),
+            pytest.param("assigned", "UpKeep has no 'assigned' status", id="assigned-text"),
+            pytest.param("onHold", "onHold work orders cannot be read", id="on-hold"),
+        ],
+    )
+    async def test_a_status_without_a_faithful_mapping_is_refused_before_any_request(
+        self,
+        httpx_mock,
+        connector: UpKeepConnector,
+        status: WorkOrderStatus | str,
+        message: str,
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorUnsupportedFilterError, match=message):
+            await connector.read_work_orders(status=status)
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_a_status_upkeep_does_not_have_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Sent as typed, it could only match nothing, which reads as "no such work orders"."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(
+            ConnectorUnsupportedFilterError, match=r"^read_work_orders: the status"
+        ):
+            await connector.read_work_orders(status="paused")
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_an_upkeep_status_in_another_case_is_sent_as_upkeep_spells_it(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status=inProgress",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status="INPROGRESS") == []
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +383,28 @@ class TestReadWorkOrdersErrors:
         )
         with pytest.raises(ConnectorError, match="GET /api/v2/work-orders failed"):
             await connector.read_work_orders()
+
+
+class TestReadWorkOrdersStatusFilter:
+    """A WorkOrderStatus value is sent as UpKeep's status; any other string is UpKeep's."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "upkeep_status"),
+        # The filter takes open, onHold, inProgress or complete:
+        # https://developers.onupkeep.com/#get-all-work-orders
+        [("created", "open"), ("completed", "complete"), ("inProgress", "inProgress")],
+    )
+    async def test_status_filter_sends_upkeep_value(
+        self, httpx_mock, connector: UpKeepConnector, status: str, upkeep_status: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders?limit=100&offset=0&status={upkeep_status}",
+            json={"results": []},
+        )
+        assert await connector.read_work_orders(status=status) == []
 
 
 class TestCreateWorkOrder:
@@ -311,6 +448,37 @@ class TestCreateWorkOrder:
 
         payload = json.loads(req.content)
         assert payload["priority"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_created_work_order_whose_response_cannot_be_read_is_not_a_failed_create(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """The work order exists: reported as a failed create, it would be created again."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/api/v2/work-orders",
+            status_code=201,
+            json={"result": {"id": "wo-new", "title": "Replace bearing", "assetId": "a1"}},
+        )
+        from datetime import UTC, datetime
+
+        wo = WorkOrder(
+            id="TEMP",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="a1",
+            description="Replace bearing",
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match="do not repeat the create"),
+        ):
+            await connector.create_work_order(wo)
+        (event,) = [e for e in logs if e["event"] == "work_order_create_not_read"]
+        assert event["error_type"] == "ValueError"
 
     @pytest.mark.asyncio
     async def test_create_work_order_auth_failure(
@@ -1335,10 +1503,8 @@ class TestUpdateWorkOrder:
     @pytest.mark.parametrize(
         ("status", "upkeep_status", "read_back"),
         [
-            (WorkOrderStatus.ASSIGNED, "onHold", WorkOrderStatus.ASSIGNED),
+            (WorkOrderStatus.CREATED, "open", WorkOrderStatus.CREATED),
             (WorkOrderStatus.IN_PROGRESS, "inProgress", WorkOrderStatus.IN_PROGRESS),
-            # UpKeep has no cancelled state: the order is put on hold and reads back so.
-            (WorkOrderStatus.CANCELLED, "onHold", WorkOrderStatus.ASSIGNED),
         ],
     )
     async def test_update_work_order_sends_documented_status(
@@ -1364,6 +1530,207 @@ class TestUpdateWorkOrder:
 
         assert json.loads(patch_req.content) == {"status": upkeep_status}
         assert updated.status == read_back
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["update", "cancel_work_order"])
+    async def test_cancelled_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector, method: str
+    ) -> None:
+        """UpKeep has no cancelled state. Putting the work order on hold instead
+        reported a cancellation while it read back as assigned."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="UpKeep has no 'cancelled' status"):
+            if method == "update":
+                await connector.update_work_order(
+                    "wo1", status=WorkOrderStatus.CANCELLED, description="x"
+                )
+            else:
+                await connector.cancel_work_order("wo1")
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("assigned_to", [None, "tech-1"])
+    async def test_assigned_is_refused_not_sent_as_on_hold(
+        self, httpx_mock, connector: UpKeepConnector, assigned_to: str | None
+    ) -> None:
+        """UpKeep has no assigned state. Sending onHold paused the work order and
+        reported an assignment; with an assignee, nothing is half-applied."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match=r"no 'assigned' status.*set assigned_to"):
+            await connector.update_work_order(
+                "wo1", status=WorkOrderStatus.ASSIGNED, assigned_to=assigned_to
+            )
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_an_assignee_is_set_through_assigned_to_user_without_a_status(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Assigning a technician needs no status: it is UpKeep's assignedToUser,
+        the field UpKeep documents in the update body and in its responses."""
+        await _connect(httpx_mock, connector)
+        result = {
+            "id": "wo1",
+            "title": "Fix pump",
+            "status": "open",
+            "assetId": "a1",
+            "assignedToUser": "tech-1",
+        }
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        updated = await connector.update_work_order("wo1", assigned_to="tech-1")
+        patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
+        import json
+
+        assert json.loads(patch_req.content) == {"assignedToUser": "tech-1"}
+        assert updated.status == WorkOrderStatus.CREATED
+        assert updated.assigned_to == "tech-1"
+
+    @pytest.mark.parametrize(
+        "read_back",
+        [
+            pytest.param({}, id="no-assignee"),
+            pytest.param({"assignedToUser": "tech-2"}, id="another-assignee"),
+            # The field the connector used to send: not UpKeep's, so not read.
+            pytest.param({"assignedToId": "tech-1"}, id="undocumented-field"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_assignee_upkeep_did_not_set_is_an_error(
+        self, httpx_mock, connector: UpKeepConnector, read_back: dict
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/wo1",
+            json={"result": result | read_back},
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match="the assignment was not applied"),
+        ):
+            await connector.update_work_order("wo1", assigned_to="tech-1")
+        assert "work_order_assignee_not_applied" in [e["event"] for e in logs]
+
+    @pytest.mark.parametrize(
+        ("sent", "read_back"),
+        [
+            pytest.param(" tech-1 ", {"assignedToUser": "tech-1"}, id="padded"),
+            pytest.param("", {}, id="empty"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_the_assignee_is_compared_as_a_work_order_stores_it(
+        self, httpx_mock, connector: UpKeepConnector, sent: str, read_back: dict
+    ) -> None:
+        """WorkOrder strips text and stores an empty assignee as none: neither is a
+        failed assignment."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/wo1",
+            json={"result": result | read_back},
+        )
+        updated = await connector.update_work_order("wo1", assigned_to=sent)
+        assert updated.assigned_to == (sent.strip() or None)
+
+    @pytest.mark.asyncio
+    async def test_an_update_that_reads_back_on_hold_is_not_reported_as_unreadable_only(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Reading it again would be refused the same way, so the message points
+        to UpKeep, not to another read."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Replace seal", "status": "onHold", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        with pytest.raises(ConnectorError, match="check the work order in UpKeep") as exc_info:
+            await connector.update_work_order("wo1", description="Replace seal")
+        assert "cannot be confirmed" in str(exc_info.value)
+        assert "read the work order to check it" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_a_status_upkeep_did_not_apply_is_an_error(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """UpKeep answered the PATCH with 200, but the work order is still open."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(
+                ConnectorError,
+                match=r"reads back as 'created', not 'completed': the status change was not applied",
+            ),
+        ):
+            await connector.close_work_order("wo1")
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+            "work_order_status_not_applied"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_update_without_a_status_does_not_check_it(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Replace seal", "status": "inProgress", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        updated = await connector.update_work_order("wo1", description="Replace seal")
+        assert updated.description == "Replace seal"
+
+    @pytest.mark.parametrize(
+        "reread",
+        [
+            pytest.param({"status_code": 500}, id="read-fails"),
+            pytest.param({"status_code": 404}, id="work-order-gone"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_failed_read_back_says_the_update_was_applied(
+        self, httpx_mock, connector: UpKeepConnector, reread: dict
+    ) -> None:
+        """Reported as a failed update, it would be sent again."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "complete", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(method="GET", url=f"{BASE}/api/v2/work-orders/wo1", **reread)
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match="do not repeat the update"),
+        ):
+            await connector.close_work_order("wo1")
+        assert "work_order_update_not_read_back" in [e["event"] for e in logs]
 
 
 # ---------------------------------------------------------------------------

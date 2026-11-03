@@ -74,9 +74,21 @@ repeats it. `channel` in `machina_send_message` is the chat ID (Telegram), the
 channel name (Slack) or the e-mail address (Email).
 
 The `status` filter of `machina_list_work_orders` is passed to the connector
-as given: the Generic CMMS, Excel/CSV and SQL connectors compare it with the
-values above, while SAP PM, Maximo and UpKeep expect their own status codes
-(for example `REL` on SAP PM).
+as given: the Excel/CSV and SQL connectors and the Generic CMMS in local mode
+compare it with the values above, and the Generic CMMS in REST mode sends it as
+the `status` query parameter; Maximo and UpKeep map one of those values, in
+any case, to their own status code (`in_progress` becomes `INPRG` on Maximo);
+Maximo sends any other value as one of its codes, while UpKeep also accepts
+`open`, `inProgress` and `complete` and refuses any other value; SAP PM accepts
+one of them or its own system status code (for example `REL`). UpKeep has no
+`assigned` or `cancelled` status (it records the assignee as `assignedToUser`,
+set through `assigned_to`), so a filter or an update with either is refused.
+An UpKeep read that meets a work order on hold is refused too: no Machina
+status describes it, and the error says to read the others by status. On SAP PM,
+`machina_update_work_order` can set only `assigned`, `closed` and `cancelled`;
+SAP sets the other statuses itself. On SAP PM, Maximo and UpKeep, an update
+whose status the CMMS accepted but did not apply ends in an error that says so,
+not in the work order.
 
 The MCP server has no human-in-the-loop confirmation: a write tool runs when
 the client calls it, and which calls happen is up to the MCP client and its

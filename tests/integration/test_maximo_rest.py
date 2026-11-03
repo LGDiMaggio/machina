@@ -335,6 +335,26 @@ class TestReadWorkOrders:
         assert wos == []
 
 
+class TestReadWorkOrdersStatusFilter:
+    """A WorkOrderStatus value is sent as its Maximo code; any other string is a Maximo code."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "maximo_status"),
+        [("in_progress", "INPRG"), ("cancelled", "CAN"), ("WMATL", "WMATL")],
+    )
+    async def test_status_filter_sends_maximo_code(
+        self, httpx_mock, connector: MaximoConnector, status: str, maximo_status: str
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxwo", **{"oslc.where": f'status="{maximo_status}"'}),
+            json={"member": [], "responseInfo": {}},
+        )
+        assert await connector.read_work_orders(status=status) == []
+
+
 # ---------------------------------------------------------------------------
 # Create work order
 # ---------------------------------------------------------------------------
@@ -1154,6 +1174,53 @@ class TestUpdateWorkOrder:
         assert post.headers["x-method-override"] == "PATCH"
         assert post.headers["patchtype"] == "MERGE"
         assert json.loads(post.content) == {"status": maximo_status}
+
+    @pytest.mark.asyncio
+    async def test_a_status_maximo_did_not_apply_is_an_error(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Maximo answered the update with 204, but the order is still approved.
+        Returning it as the result of a close would report a close that did
+        not happen."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "APPR")
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(
+                ConnectorError,
+                match=r"reads back as 'APPR', not 'CLOSE': the status change was not applied",
+            ),
+        ):
+            await connector.close_work_order("WO-001")
+        (event,) = [e for e in logs if e["event"] == "work_order_status_not_applied"]
+        assert event["connector"] == "MaximoConnector"
+        assert event["work_order_id"] == "WO-001"
+
+    @pytest.mark.asyncio
+    async def test_the_code_read_back_is_compared_not_its_mapping(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """WMATL is not in the mapper's table, so it reads as CREATED, like the
+        WAPPR sent; compared by mapped status, this unapplied update passed."""
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "WMATL")
+        with pytest.raises(ConnectorError, match=r"reads back as 'WMATL', not 'WAPPR'"):
+            await connector.update_work_order("WO-001", status=WorkOrderStatus.CREATED)
+
+    @pytest.mark.asyncio
+    async def test_an_update_without_a_status_does_not_check_it(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        _add_reread(httpx_mock, "APPR")
+        updated = await connector.update_work_order("WO-001", description="Replace seal")
+        assert updated.status == WorkOrderStatus.ASSIGNED
 
     @pytest.mark.parametrize(
         "write",

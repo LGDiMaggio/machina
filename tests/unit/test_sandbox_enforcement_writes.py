@@ -24,6 +24,7 @@ from machina.connectors.comms.email import EmailConnector
 from machina.connectors.comms.slack import SlackConnector
 from machina.connectors.comms.telegram import TelegramConnector
 from machina.connectors.iot.mqtt import MqttConnector
+from machina.domain.work_order import WorkOrderStatus
 from machina.exceptions import SandboxViolationError
 
 
@@ -154,6 +155,12 @@ class TestVendorCmmsUpdatesBlockedInSandbox:
         "write",
         [
             pytest.param(lambda c, i: c.update_work_order(i, description="x"), id="update"),
+            # A status update reads the order first (SAP: for its ETag); the
+            # read is the first half of the write, so it is not sent either.
+            pytest.param(
+                lambda c, i: c.update_work_order(i, status=WorkOrderStatus.ASSIGNED),
+                id="update-status",
+            ),
             pytest.param(lambda c, i: c.close_work_order(i), id="close"),
             pytest.param(lambda c, i: c.cancel_work_order(i), id="cancel"),
         ],
@@ -203,6 +210,25 @@ class TestVendorWriteHelpersBlockedInSandbox:
         with pytest.raises(SandboxViolationError):
             await conn._write_with_csrf(
                 "POST", f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification", {}
+            )
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.asyncio
+    async def test_sap_status_function_import_sends_nothing(self, httpx_mock) -> None:
+        """The body-less form a status function import takes, with its ETag."""
+        from machina.connectors.cmms.auth import BasicAuth
+        from machina.connectors.cmms.sap_pm import SapPmConnector
+
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+        with pytest.raises(SandboxViolationError):
+            await conn._write_with_csrf(
+                "POST",
+                f"{conn.url}/API_MAINTENANCEORDER/SetMaintOrdToTechCompleted",
+                params={"MaintenanceOrder": "'4000001'"},
+                if_match='W/"etag"',
             )
         assert httpx_mock.get_requests() == []
 

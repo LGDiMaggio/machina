@@ -69,7 +69,7 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read asset records (`mxasset` object structure) |
-| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw Maximo code) |
+| `read_work_orders` | Read work orders — filter by `asset_id` and/or `status`: a `WorkOrderStatus` or its value (`"in_progress"`) is mapped to the Maximo code; any other string is sent, upper-cased, as a Maximo code (`"WMATL"`) |
 | `get_work_order` | Fetch a single work order by `wonum` |
 | `create_work_order` | Create new work orders |
 | `update_work_order` | Update status, assignee, or description — see [How updates are sent](#how-updates-are-sent) |
@@ -237,7 +237,10 @@ with an `x-method-override: PATCH` header. So `update_work_order`, and
    `patchtype: MERGE`, Maximo deletes the child objects of a listed child collection
    that the request does not repeat;
 4. read the order back from the same URI (`GET /maximo/oslc/os/mxwo/{rest id}`, with
-   `lean=1` like the update) and return it.
+   `lean=1` like the update) and return it. When the update set a status and the order
+   reads back with another status code than the one sent, `ConnectorError` says that
+   the status change was not applied, and the warning `work_order_status_not_applied`
+   is logged.
 
 Only the rest id is taken from the URI Maximo returns. Its host is the one Maximo sees
 itself on (an internal name behind a proxy), so the update and the read-back go to the
@@ -342,7 +345,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
   - *Inventory child objects.* `read_spare_parts` expects `MXINVENTORY` to expose the balances and costs as the child objects `invbalances` and `invcost`, and the item as the related object `item`. If it does not and Maximo leaves them out of its answer rather than refusing the query, every spare part reads with no stock, no cost and no name.
   - *Next-page links.* Next pages are requested at the `nextPage` link Maximo returns, which IBM documents as repeating the query. Whether that link keeps `oslc.select` has not been checked: a page that lost it ends the read with `ConnectorSchemaError`, not a shorter list.
 - **Custom frequency units**: a PM with no `frequnit`, or one that is not DAYS, WEEKS, MONTHS or YEARS (a site-defined synonym, say), gets an empty interval, so it is reported as having no calendar due date. A month counts as 30 days in `Interval.total_days`, so a yearly PM's interval is 360 days.
-- **Status changes**: a status update is sent as the plain `status` attribute. IBM's REST API guide shows status changes only through actions that call `changeStatus` and does not say whether `mxwo` applies the attribute directly; this has not been checked against a live Maximo. A rejected update raises `ConnectorError` with the HTTP status.
+- **Status changes**: a status update is sent as the plain `status` attribute. IBM's REST API guide shows status changes only through actions that call `changeStatus` and does not say whether `mxwo` applies the attribute directly; this has not been checked against a live Maximo. A rejected update raises `ConnectorError` with the HTTP status. An update Maximo accepts without applying the status raises `ConnectorError` too, because the order reads back with its old status; it is not returned as a success.
 - **Pagination**: Follows the OSLC `responseInfo.nextPage.href` link of each page (a bare URL or a relative link is followed too). Each page is requested with the connector's credentials, so a link to another scheme, host or port than the configured `url`, or one with user info in it, raises `ConnectorError` and logs `maximo_next_page_refused` with the link's scheme and host: Maximo builds its links from its own configured address, so behind a proxy check that it returns the address Machina uses. A `nextPage` with no usable URL, a link the server already returned, more than 50,000 rows in one read, or more pages than those rows fill also raise `ConnectorError` instead of ending the read early or growing without bound. `get_asset` and `get_work_order` read only the first page: they use the first match. Very large result sets may benefit from server-side `oslc.where` filtering.
 
 ## API Reference

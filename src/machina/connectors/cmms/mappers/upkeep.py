@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from machina.connectors.cmms.status import status_filter
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -25,6 +26,7 @@ __all__ = [
     "UPKEEP_CATEGORY_MAP",
     "UPKEEP_PRIORITY_MAP",
     "UPKEEP_STATUS_MAP",
+    "map_status",
     "parse_asset",
     "parse_asset_part_ids",
     "parse_datetime",
@@ -34,6 +36,8 @@ __all__ = [
     "parse_work_order",
     "reverse_priority",
     "reverse_status",
+    "reverse_status_filter",
+    "status_refusal",
 ]
 
 
@@ -54,15 +58,16 @@ UPKEEP_PRIORITY_MAP: dict[int, Priority] = {
 UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
     # Per the UpKeep REST API v2, a work-order status is one of open, onHold,
     # inProgress or complete. Keys are lowercase because parse_work_order
-    # lowercases the payload value; the spaced forms are not API values and
-    # stay only so that such payloads still map. See:
+    # lowercases the payload value; the spaced form is not an API value and
+    # stays only so that such payloads still map. See:
     # https://developers.onupkeep.com/#get-all-work-orders
     "open": WorkOrderStatus.CREATED,
     "inprogress": WorkOrderStatus.IN_PROGRESS,
     "in progress": WorkOrderStatus.IN_PROGRESS,
-    "onhold": WorkOrderStatus.ASSIGNED,
-    "on hold": WorkOrderStatus.ASSIGNED,
     "complete": WorkOrderStatus.COMPLETED,
+    # onHold has no entry: a work order on hold is paused, and no
+    # WorkOrderStatus says so. It is not ASSIGNED, which UpKeep records apart,
+    # as assignedToUser. Reading it is refused (see status_refusal).
 }
 
 REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
@@ -70,11 +75,22 @@ REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
     # documented values, spelled exactly as UpKeep does. See:
     # https://developers.onupkeep.com/#update-a-specific-work-order
     WorkOrderStatus.CREATED: "open",
-    WorkOrderStatus.ASSIGNED: "onHold",
     WorkOrderStatus.IN_PROGRESS: "inProgress",
     WorkOrderStatus.COMPLETED: "complete",
-    WorkOrderStatus.CLOSED: "complete",  # UpKeep has no distinct closed state
-    WorkOrderStatus.CANCELLED: "onHold",  # UpKeep has no distinct cancelled state
+    # UpKeep's one finished state: it has no separate closed state.
+    WorkOrderStatus.CLOSED: "complete",
+    # ASSIGNED and CANCELLED have no entry: UpKeep has neither state. Sending
+    # onHold in their place paused the work order and reported an assignment
+    # or a cancellation that did not happen (see reverse_status).
+}
+
+# A work order on hold, in the lower-case forms parse_work_order compares.
+_ON_HOLD = frozenset({"onhold", "on hold"})
+
+# UpKeep's statuses that have a Machina status, as UpKeep spells them, by their
+# lower-case form without spaces.
+_UPKEEP_STATUS_SPELLING: dict[str, str] = {
+    value.lower(): value for value in ("open", "inProgress", "complete")
 }
 
 UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {
@@ -124,12 +140,41 @@ def parse_asset(data: dict[str, Any]) -> Asset:
     )
 
 
+def status_refusal(value: object) -> str | None:
+    """Return why an UpKeep work-order status has no :class:`WorkOrderStatus`, or ``None``.
+
+    ``"on_hold"`` for ``onHold``: the work order is paused, which no
+    ``WorkOrderStatus`` says, and reading it as another status would misreport
+    it. ``"undocumented"`` for a status UpKeep does not document, or none at
+    all: nothing in the record says what state the work order is in.
+    """
+    text = str(value).lower() if isinstance(value, str) else ""
+    if text in UPKEEP_STATUS_MAP:
+        return None
+    return "on_hold" if text in _ON_HOLD else "undocumented"
+
+
+def map_status(value: object) -> WorkOrderStatus:
+    """Map an UpKeep work-order status to a :class:`WorkOrderStatus`, in any case.
+
+    Raises:
+        ValueError: For a status with no ``WorkOrderStatus``: ``onHold``, an
+            undocumented status or none (see :func:`status_refusal`). The
+            message does not repeat the value.
+    """
+    reason = status_refusal(value)
+    if reason == "on_hold":
+        raise ValueError("an UpKeep work order on hold has no Machina status")
+    if reason is not None:
+        raise ValueError("the UpKeep work order has no status UpKeep documents")
+    return UPKEEP_STATUS_MAP[str(value).lower()]
+
+
 def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert an UpKeep work-order JSON object to a :class:`WorkOrder`."""
     raw_priority = data.get("priority", 1)
     priority = UPKEEP_PRIORITY_MAP.get(int(raw_priority), Priority.MEDIUM)
-    raw_status = str(data.get("status", "open")).lower()
-    status = UPKEEP_STATUS_MAP.get(raw_status, WorkOrderStatus.CREATED)
+    status = map_status(data.get("status"))
     wo_type = (
         WorkOrderType.PREVENTIVE
         if data.get("category") == "preventive"
@@ -145,7 +190,9 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
         status=status,
         asset_id=str(data.get("assetId") or data.get("asset", "")),
         description=str(data.get("title", "")),
-        assigned_to=data.get("assignedToId"),
+        # UpKeep documents the assignee as assignedToUser, the user's ID, in
+        # work-order responses and in the update body.
+        assigned_to=data.get("assignedToUser"),
         created_at=parse_datetime(created) if created else now,
         updated_at=parse_datetime(updated) if updated else now,
         metadata={
@@ -162,7 +209,7 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
                 "assetId",
                 "asset",
                 "title",
-                "assignedToId",
+                "assignedToUser",
             }
         },
     )
@@ -330,8 +377,67 @@ def reverse_priority(priority: Priority) -> int:
 
 
 def reverse_status(status: WorkOrderStatus) -> str:
-    """Map Machina work-order status to UpKeep status string."""
-    return REVERSE_UPKEEP_STATUS.get(status, "open")
+    """Map Machina work-order status to UpKeep status string.
+
+    Raises:
+        ValueError: For ``ASSIGNED`` and ``CANCELLED``: UpKeep has neither
+            status, and sending another one in its place would report an
+            assignment or a cancellation that did not happen. The
+            ``ASSIGNED`` message points to the assignee, which UpKeep keeps
+            apart from the status.
+    """
+    try:
+        return REVERSE_UPKEEP_STATUS[status]
+    except KeyError:
+        if status is WorkOrderStatus.ASSIGNED:
+            raise ValueError(
+                "UpKeep has no 'assigned' status: it records the assignee apart from "
+                "the status, so set assigned_to (UpKeep's assignedToUser) without a status"
+            ) from None
+        raise ValueError(
+            f"UpKeep has no {status.value!r} status; its work-order statuses are "
+            "open, onHold, inProgress and complete"
+        ) from None
+
+
+def reverse_status_filter(status: WorkOrderStatus | str) -> str:
+    """Map a ``read_work_orders`` status filter to the UpKeep status to send.
+
+    A :class:`WorkOrderStatus`, or a string equal to one of its values in any
+    case such as ``"in_progress"``, is reverse-mapped. One of UpKeep's own
+    statuses that has a Machina status, in any case and with or without a
+    space (``"in progress"``), is sent as UpKeep spells it (``"inProgress"``).
+
+    Raises:
+        ValueError: For ``assigned`` and ``cancelled``, which UpKeep has no
+            status for (see :func:`reverse_status`); for ``onHold``, whose
+            work orders have no Machina status to be read with (see
+            :func:`status_refusal`); and for any other value: UpKeep documents
+            no other status, so it could only match nothing. The message does
+            not repeat the value.
+    """
+    machina_status = status_filter(status)
+    if machina_status is WorkOrderStatus.ASSIGNED:
+        raise ValueError(
+            "UpKeep has no 'assigned' status, so work orders cannot be filtered by it; "
+            "filter by created, in_progress, completed or closed and check each work "
+            "order's assigned_to"
+        )
+    if machina_status is not None:
+        return reverse_status(machina_status)
+    key = status.replace(" ", "").lower()
+    if key in _ON_HOLD:
+        raise ValueError(
+            "UpKeep's onHold work orders cannot be read: Machina has no on-hold status, "
+            "and reading them as another status would misreport them"
+        )
+    try:
+        return _UPKEEP_STATUS_SPELLING[key]
+    except KeyError:
+        raise ValueError(
+            "the status filter is neither a Machina status nor one of UpKeep's "
+            "work-order statuses (open, inProgress, complete; onHold cannot be read)"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
