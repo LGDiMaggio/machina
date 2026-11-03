@@ -234,7 +234,7 @@ class TestReadWorkOrders:
         none is silently left out: the read is refused."""
         await _connect(httpx_mock, connector)
         records = [
-            {"id": f"wo{n}", "title": "Fix pump", "assetId": "a1", "assignedToId": "tech-1"}
+            {"id": f"wo{n}", "title": "Fix pump", "assetId": "a1", "assignedToUser": "tech-1"}
             | ({"status": status} if status is not None else {})
             for n, status in enumerate(statuses)
         ]
@@ -1563,17 +1563,18 @@ class TestUpdateWorkOrder:
         assert len(httpx_mock.get_requests()) == sent
 
     @pytest.mark.asyncio
-    async def test_an_assignee_is_set_through_assigned_to_id_without_a_status(
+    async def test_an_assignee_is_set_through_assigned_to_user_without_a_status(
         self, httpx_mock, connector: UpKeepConnector
     ) -> None:
-        """Assigning a technician needs no status: it is UpKeep's assignedToId."""
+        """Assigning a technician needs no status: it is UpKeep's assignedToUser,
+        the field UpKeep documents in the update body and in its responses."""
         await _connect(httpx_mock, connector)
         result = {
             "id": "wo1",
             "title": "Fix pump",
             "status": "open",
             "assetId": "a1",
-            "assignedToId": "tech-1",
+            "assignedToUser": "tech-1",
         }
         httpx_mock.add_response(
             method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
@@ -1585,8 +1586,58 @@ class TestUpdateWorkOrder:
         patch_req = next(r for r in httpx_mock.get_requests() if r.method == "PATCH")
         import json
 
-        assert json.loads(patch_req.content) == {"assignedToId": "tech-1"}
+        assert json.loads(patch_req.content) == {"assignedToUser": "tech-1"}
         assert updated.status == WorkOrderStatus.CREATED
+        assert updated.assigned_to == "tech-1"
+
+    @pytest.mark.parametrize(
+        "read_back",
+        [
+            pytest.param({}, id="no-assignee"),
+            pytest.param({"assignedToUser": "tech-2"}, id="another-assignee"),
+            # The field the connector used to send: not UpKeep's, so not read.
+            pytest.param({"assignedToId": "tech-1"}, id="undocumented-field"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_assignee_upkeep_did_not_set_is_an_error(
+        self, httpx_mock, connector: UpKeepConnector, read_back: dict
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/api/v2/work-orders/wo1",
+            json={"result": result | read_back},
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorError, match="the assignment was not applied"),
+        ):
+            await connector.update_work_order("wo1", assigned_to="tech-1")
+        assert "work_order_assignee_not_applied" in [e["event"] for e in logs]
+
+    @pytest.mark.asyncio
+    async def test_an_update_that_reads_back_on_hold_is_not_reported_as_unreadable_only(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """Reading it again would be refused the same way, so the message points
+        to UpKeep, not to another read."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Replace seal", "status": "onHold", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        with pytest.raises(ConnectorError, match="check the work order in UpKeep") as exc_info:
+            await connector.update_work_order("wo1", description="Replace seal")
+        assert "cannot be confirmed" in str(exc_info.value)
+        assert "read the work order to check it" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_a_status_upkeep_did_not_apply_is_an_error(

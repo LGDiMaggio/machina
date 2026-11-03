@@ -139,7 +139,8 @@ async def machina_list_work_orders(
         asset_id: Filter by asset identifier.
         status: Filter by work order status (created | assigned | in_progress |
             completed | closed | cancelled); any other value is passed to the
-            CMMS as one of its own status codes.
+            CMMS as one of its own status codes. A CMMS that has no such status
+            refuses the filter with an error that says so.
     """
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()

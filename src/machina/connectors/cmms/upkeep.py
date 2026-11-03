@@ -140,11 +140,13 @@ def _map_work_orders(records: list[Any], operation: str, **log_context: Any) -> 
         found.append(f"{refused['on_hold']} on hold (onHold), which Machina has no status for")
     if refused["undocumented"]:
         found.append(f"{refused['undocumented']} without a status UpKeep documents")
+    advice = "Read the others by status (created, in_progress, completed or closed)"
+    if refused["on_hold"]:
+        advice += "; a work order on hold can be read again once it is resumed in UpKeep"
     raise ConnectorSchemaError(
         f"UpKeep returned work orders that no Machina status describes: {'; '.join(found)}. "
-        "Reading them as another status would misreport them, so no work orders are "
-        "returned. Read the others by status (created, in_progress, completed or closed); "
-        "a work order on hold can be read again once it is resumed in UpKeep."
+        f"Reading them as another status would misreport them, so no work orders are "
+        f"returned. {advice}."
     )
 
 
@@ -412,8 +414,9 @@ class UpKeepConnector:
                 sets ``complete``, UpKeep's one finished state, so the work
                 order reads back as ``COMPLETED``. ``ASSIGNED`` and
                 ``CANCELLED`` have no UpKeep status and are refused.
-            assigned_to: New ``assignedToId``: assigning a technician, which
-                UpKeep keeps apart from the status.
+            assigned_to: The ID of the user to assign, sent as
+                ``assignedToUser``, the field UpKeep documents for it: assigning
+                a technician, which UpKeep keeps apart from the status.
             description: New title.
 
         Returns:
@@ -423,10 +426,10 @@ class UpKeepConnector:
             ConnectorError: If no field is given; if ``status`` is
                 ``ASSIGNED`` or ``CANCELLED``, which UpKeep has no status for,
                 before any request and with no field sent; if UpKeep rejects
-                the update; if the work order cannot
-                be read back after it, in which case the message says the
-                update was applied and must not be repeated; or if it reads
-                back with another status than the one sent.
+                the update; if the work order cannot be read back after it, in
+                which case the message says the update was applied and must
+                not be repeated; or if it reads back with another status, or
+                another assignee, than the one sent.
         """
         self._ensure_connected()
         httpx = _require_httpx()
@@ -437,7 +440,7 @@ class UpKeepConnector:
             except ValueError as exc:
                 raise ConnectorError(str(exc)) from None
         if assigned_to is not None:
-            payload["assignedToId"] = assigned_to
+            payload["assignedToUser"] = assigned_to
         if description is not None:
             payload["title"] = description
         if not payload:
@@ -475,6 +478,15 @@ class UpKeepConnector:
                 work_order_id=work_order_id,
                 error_type=type(exc).__name__,
             )
+            if isinstance(exc, ConnectorSchemaError):
+                # Read back on hold, or with an undocumented status: reading it
+                # again would be refused the same way, so do not suggest it.
+                raise ConnectorError(
+                    f"UpKeep accepted the update of work order {work_order_id}, but the work "
+                    "order now has a status no Machina status describes (on hold, for "
+                    "instance), so it is not returned and the update cannot be confirmed "
+                    "— do not repeat the update; check the work order in UpKeep"
+                ) from None
             raise ConnectorError(
                 f"UpKeep applied the update to work order {work_order_id}, but reading it "
                 "back failed — do not repeat the update; read the work order to check it"
@@ -487,6 +499,19 @@ class UpKeepConnector:
                 raise status_not_applied(
                     "UpKeepConnector", work_order_id, sent.value, updated.status.value
                 )
+        if assigned_to is not None and updated.assigned_to != assigned_to:
+            # An assignee UpKeep accepted but did not set must not read as done.
+            logger.warning(
+                "work_order_assignee_not_applied",
+                connector="UpKeepConnector",
+                operation="update_work_order",
+                work_order_id=work_order_id,
+            )
+            raise ConnectorError(
+                f"UpKeep accepted the update of work order {work_order_id}, but its assignee "
+                "(assignedToUser) does not read back as the one sent: the assignment was not "
+                "applied. Read the work order before repeating the update."
+            )
         return updated
 
     @sandbox_aware

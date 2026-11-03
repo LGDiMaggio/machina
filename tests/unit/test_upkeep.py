@@ -151,7 +151,7 @@ class TestParseWorkOrder:
 
     def test_on_hold_status_is_not_read_as_assigned(self) -> None:
         """UpKeep reports a paused work order as ``onHold``; no WorkOrderStatus
-        means that, and ASSIGNED would misreport it (the assignee is assignedToId)."""
+        means that, and ASSIGNED would misreport it (the assignee is assignedToUser)."""
         raw = {
             "id": "wo-4",
             "title": "Awaiting parts",

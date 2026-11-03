@@ -105,7 +105,7 @@ async def upkeep_on_hold(httpx_mock) -> UpKeepConnector:
                     "title": "Awaiting parts",
                     "status": "onHold",
                     "assetId": "a1",
-                    "assignedToId": "tech-1",
+                    "assignedToUser": "tech-1",
                 },
             ]
         },

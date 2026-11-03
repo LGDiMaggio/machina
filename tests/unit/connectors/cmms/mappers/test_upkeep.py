@@ -90,6 +90,13 @@ class TestParseWorkOrderPublicAPI:
         wo = parse_work_order({"id": "5", "status": upkeep_status})
         assert wo.status == expected
 
+    def test_the_assignee_is_upkeeps_assigned_to_user(self) -> None:
+        """UpKeep documents assignedToUser (a user ID) on work orders, not assignedToId."""
+        wo = parse_work_order({"id": "9", "status": "open", "assignedToUser": "u-7"})
+        assert wo.assigned_to == "u-7"
+        stale = parse_work_order({"id": "9", "status": "open", "assignedToId": "u-7"})
+        assert stale.assigned_to is None
+
     def test_spaced_in_progress_label_still_maps(self) -> None:
         """Not an API value, but the spaced form this mapper once expected still maps."""
         wo = parse_work_order({"id": "6", "status": "in progress"})
@@ -97,10 +104,10 @@ class TestParseWorkOrderPublicAPI:
 
     @pytest.mark.parametrize("label", ["onHold", "ONHOLD", "On Hold"])
     def test_on_hold_is_never_read_as_assigned(self, label: str) -> None:
-        """A paused work order is not an assigned one: the assignee is assignedToId."""
+        """A paused work order is not an assigned one: the assignee is assignedToUser."""
         assert status_refusal(label) == "on_hold"
         with pytest.raises(ValueError, match="on hold has no Machina status"):
-            parse_work_order({"id": "7", "status": label, "assignedToId": "tech-1"})
+            parse_work_order({"id": "7", "status": label, "assignedToUser": "tech-1"})
 
     @pytest.mark.parametrize(
         "record",
@@ -460,9 +467,12 @@ class TestReverseStatusFilter:
 
     @pytest.mark.parametrize("status", [WorkOrderStatus.ASSIGNED, "assigned", "Assigned"])
     def test_assigned_is_refused_not_sent_as_on_hold(self, status: WorkOrderStatus | str) -> None:
-        """Filtering on onHold instead returned paused work orders as assigned ones."""
-        with pytest.raises(ValueError, match="UpKeep has no 'assigned' status"):
+        """Filtering on onHold instead returned paused work orders as assigned ones.
+        The message is a reader's: what to filter by, not how to assign."""
+        with pytest.raises(ValueError, match="UpKeep has no 'assigned' status") as exc_info:
             reverse_status_filter(status)
+        assert "check each work order's assigned_to" in str(exc_info.value)
+        assert "set assigned_to" not in str(exc_info.value)
 
     @pytest.mark.parametrize("value", ["onHold", "ONHOLD", "on hold"])
     def test_on_hold_is_refused(self, value: str) -> None:
@@ -507,7 +517,7 @@ class TestReverseMaps:
         assert reverse_status(WorkOrderStatus.IN_PROGRESS) == "inProgress"
 
     def test_reverse_status_refuses_assigned(self) -> None:
-        """UpKeep has no ASSIGNED state; it records the assignee as assignedToId.
+        """UpKeep has no ASSIGNED state; it records the assignee as assignedToUser.
         Sending 'onHold' in its place paused the work order instead."""
         with pytest.raises(ValueError, match=r"no 'assigned' status.*set assigned_to"):
             reverse_status(WorkOrderStatus.ASSIGNED)

@@ -67,7 +67,7 @@ UPKEEP_STATUS_MAP: dict[str, WorkOrderStatus] = {
     "complete": WorkOrderStatus.COMPLETED,
     # onHold has no entry: a work order on hold is paused, and no
     # WorkOrderStatus says so. It is not ASSIGNED, which UpKeep records apart,
-    # as assignedToId. Reading it is refused (see status_refusal).
+    # as assignedToUser. Reading it is refused (see status_refusal).
 }
 
 REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
@@ -190,7 +190,9 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
         status=status,
         asset_id=str(data.get("assetId") or data.get("asset", "")),
         description=str(data.get("title", "")),
-        assigned_to=data.get("assignedToId"),
+        # UpKeep documents the assignee as assignedToUser, the user's ID, in
+        # work-order responses and in the update body.
+        assigned_to=data.get("assignedToUser"),
         created_at=parse_datetime(created) if created else now,
         updated_at=parse_datetime(updated) if updated else now,
         metadata={
@@ -207,7 +209,7 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
                 "assetId",
                 "asset",
                 "title",
-                "assignedToId",
+                "assignedToUser",
             }
         },
     )
@@ -390,7 +392,7 @@ def reverse_status(status: WorkOrderStatus) -> str:
         if status is WorkOrderStatus.ASSIGNED:
             raise ValueError(
                 "UpKeep has no 'assigned' status: it records the assignee apart from "
-                "the status, so set assigned_to (UpKeep's assignedToId) without a status"
+                "the status, so set assigned_to (UpKeep's assignedToUser) without a status"
             ) from None
         raise ValueError(
             f"UpKeep has no {status.value!r} status; its work-order statuses are "
@@ -415,6 +417,12 @@ def reverse_status_filter(status: WorkOrderStatus | str) -> str:
             not repeat the value.
     """
     machina_status = status_filter(status)
+    if machina_status is WorkOrderStatus.ASSIGNED:
+        raise ValueError(
+            "UpKeep has no 'assigned' status, so work orders cannot be filtered by it; "
+            "filter by created, in_progress, completed or closed and check each work "
+            "order's assigned_to"
+        )
     if machina_status is not None:
         return reverse_status(machina_status)
     key = status.replace(" ", "").lower()

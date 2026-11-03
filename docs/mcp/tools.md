@@ -81,7 +81,7 @@ any case, to their own status code (`in_progress` becomes `INPRG` on Maximo);
 Maximo sends any other value as one of its codes, while UpKeep also accepts
 `open`, `inProgress` and `complete` and refuses any other value; SAP PM accepts
 one of them or its own system status code (for example `REL`). UpKeep has no
-`assigned` or `cancelled` status (it records the assignee as `assignedToId`,
+`assigned` or `cancelled` status (it records the assignee as `assignedToUser`,
 set through `assigned_to`), so a filter or an update with either is refused.
 An UpKeep read that meets a work order on hold is refused too: no Machina
 status describes it, and the error says to read the others by status. On SAP PM,
