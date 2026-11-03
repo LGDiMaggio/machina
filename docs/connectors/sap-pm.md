@@ -71,13 +71,13 @@ pip install machina-ai[cmms-rest]
 | Capability | Description |
 |---|---|
 | `read_assets` | Read equipment master records (`API_EQUIPMENT/Equipment`) |
-| `read_work_orders` | Read maintenance orders — filter by `asset_id` and/or `status` (accepts `WorkOrderStatus` enum or raw SAP code) |
+| `read_work_orders` | Read maintenance orders — `asset_id` is filtered server-side; `status` (a `WorkOrderStatus`, its value such as `closed` in any case, or a SAP system status code such as `REL`) is applied to the orders read (see [Work-order status](#work-order-status)) |
 | `get_work_order` | Fetch a single maintenance order by number |
 | `create_work_order` | Create maintenance orders (CSRF token handled automatically) |
-| `update_work_order` | Update status, assignee, or description via PATCH (CSRF-safe) |
+| `update_work_order` | Update assignee or description via PATCH, and set `assigned`, `closed` or `cancelled` through the status's function import (CSRF-safe; see [Work-order status](#work-order-status)) |
 | `read_spare_parts` | Read BOM / material data (configurable endpoint, default `API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem`). Filters by `sku`, and by `asset_id` only when `bom_equipment_field` is configured; otherwise an `asset_id` filter is refused with `ConnectorUnsupportedFilterError` |
 | `read_maintenance_plans` | Read preventive-maintenance plans (`API_MAINTENANCEPLAN/MaintenancePlan`) |
-| `read_maintenance_history` | Read an asset's confirmed, technically completed or closed maintenance orders (`API_MAINTENANCEORDER/MaintenanceOrder` filtered by `Equipment`, status `CNF`, `TECO` or `CLSD`) |
+| `read_maintenance_history` | Read an asset's confirmed, technically completed or closed maintenance orders (system status `CNF`, `TECO` or `CLSD`), selected from the orders `API_MAINTENANCEORDER/MaintenanceOrder` returns for its `Equipment` |
 
 ### Convenience methods
 
@@ -85,8 +85,8 @@ These methods are available but are **not** declared as agent-discoverable capab
 
 | Method | Description |
 |---|---|
-| `close_work_order(id)` | Transition to CLOSED (SAP `TECO`) via `update_work_order` |
-| `cancel_work_order(id)` | Transition to CANCELLED (SAP `DLFL`) via `update_work_order` |
+| `close_work_order(id)` | Transition to CLOSED — technical completion (`SetMaintOrdToTechCompleted`, SAP `TECO`) — via `update_work_order` |
+| `cancel_work_order(id)` | Transition to CANCELLED — deletion flag (`SetMaintOrdStsToMrkdForDeltn`, SAP `DLFL`) — via `update_work_order` |
 
 ## Usage Examples
 
@@ -105,7 +105,7 @@ from machina.domain.work_order import WorkOrderStatus
 
 wos = await connector.read_work_orders(
     asset_id="10000001",
-    status=WorkOrderStatus.IN_PROGRESS,  # auto-mapped to SAP "PCNF"
+    status=WorkOrderStatus.IN_PROGRESS,  # orders whose system status maps to it (PCNF)
 )
 ```
 
@@ -141,10 +141,10 @@ print(f"Created: {created.id}")
 ```python
 from machina.domain.work_order import WorkOrderStatus
 
-# Update specific fields
+# Assign the order, then release it (ReleaseMaintenanceOrder → REL)
 updated = await connector.update_work_order(
     "4000001",
-    status=WorkOrderStatus.COMPLETED,
+    status=WorkOrderStatus.ASSIGNED,
     assigned_to="TECH_SMITH",
 )
 
@@ -191,9 +191,92 @@ with no filter, work without it. When `bom_equipment_field` is set, an
 | `MaintenanceOrder` | `WorkOrder.id` |
 | `MaintenanceOrderType` | `WorkOrder.type` (PM01→Corrective, PM02→Preventive, PM03→Predictive, PM04→Improvement) |
 | `MaintPriority` | `WorkOrder.priority` (1→Emergency, 2→High, 3→Medium, 4→Low) |
-| `MaintenanceOrderSystemStatus` | `WorkOrder.status` (CRTD, REL, PCNF, CNF, TECO, CLSD, DLFL) |
+| `SystemStatusText` | `WorkOrder.status` — the most advanced of DLFL, CLSD, TECO, CNF, PCNF, REL, CRTD on the line (see [Work-order status](#work-order-status)) |
 | `MaintenanceActivityType` | `WorkOrder.failure_mode` |
 | `MaintenanceCause` / `MaintNotifCause` | `WorkOrder.failure_cause` |
+
+`API_MAINTENANCEORDER`'s order has no `CreationDate`, `MaintenanceCause` or
+`MaintNotifCause` property. So `WorkOrder.created_at` is the order's basic start
+date (`MaintOrdBasicStartDate`), and `failure_cause` stays empty for orders read
+from it.
+
+## Work-order status
+
+`API_MAINTENANCEORDER` has no property that holds one status. It lists an
+order's active system statuses in `SystemStatusText`, for example
+`CRTD MACM ORAP PRC`, and changes a status only through function imports. The
+field holds at most 40 characters. When the active statuses do not fit, SAP
+lists only those with the highest priority.
+
+**Reading.** `WorkOrder.status` is the most advanced lifecycle status on the
+line:
+
+| System status | `WorkOrderStatus` |
+|---|---|
+| `DLFL` | cancelled |
+| `CLSD` or `TECO` | closed |
+| `CNF` | completed |
+| `PCNF` | in progress |
+| `REL` | assigned |
+| `CRTD` | created |
+
+`UserStatusText`, `MaintOrdProcessPhaseCode` and `MaintOrdProcessSubPhaseCode`
+are kept in `WorkOrder.metadata`.
+
+**Filtering.** `SystemStatusText` cannot be filtered on: SAP answers such a
+query with "Query operation … not implemented"
+([KBA 3614100](https://userapps.support.sap.com/sap/support/knowledge/en/3614100)).
+So `read_work_orders` filters by `Equipment` on the server and applies `status`
+to the orders it reads, and `read_maintenance_history` keeps the equipment's
+orders whose status is completed or closed.
+
+A system status code such as `REL` or `MANC` matches only when SAP lists it in
+the 40 characters of `SystemStatusText`.
+
+The KBA suggests filtering on `MaintOrdProcessPhaseCode` instead. The connector
+does not, because process phases belong to SAP's phase model for maintenance
+orders
+([Maintenance Process Phases](https://help.sap.com/docs/SAP_S4HANA_CLOUD/2dfa044a255f49e89a3050daf3c61c11/57372b93c62943718032b05fe5551733.html)),
+and an order outside it may carry no phase, which a phase filter would miss.
+
+A `status` filter without `asset_id` reads every order, up to the 50,000-row
+safety cap. On a large system, pass `asset_id` with it.
+
+**Setting.** `update_work_order(status=...)` calls the function import for the
+status, after the PATCH of `assigned_to` / `description` when those are given:
+
+| `WorkOrderStatus` | Function import | SAP system status |
+|---|---|---|
+| `ASSIGNED` | `ReleaseMaintenanceOrder` | `REL` |
+| `CLOSED` | `SetMaintOrdToTechCompleted` | `TECO` (technical completion; business completion, `CLSD`, is not set) |
+| `CANCELLED` | `SetMaintOrdStsToMrkdForDeltn` | `DLFL` |
+
+SAP requires the order's ETag in an `If-Match` header on these calls. The ETag
+comes from the order's `LastChangeDateTime` as a read returns it. So the
+connector reads the order just before the call, and takes the ETag from the
+read's `__metadata.etag`. An order without one is refused with
+`ConnectorError` before the call. SAP answers `412` when the order changed in
+between; the error says so, and the update can be retried.
+
+The order is then read again. The update fails with `ConnectorError` unless
+`SystemStatusText` lists the system status that was set.
+
+SAP sets `CRTD` on create, and `PCNF` / `CNF` from time confirmations. So
+`CREATED`, `IN_PROGRESS` and `COMPLETED` are refused with `ConnectorError`
+before any request.
+
+Property names, function imports and their parameters are taken from:
+
+- the documentation of the API on the SAP Help Portal, for SAP S/4HANA Cloud
+  Public Edition 2608 and SAP S/4HANA 2025 FPS02;
+- SAP's generated client for the service
+  (`@sap/cloud-sdk-vdm-maintenance-order-service` 2.1.0).
+
+They have not been tested against a live system.
+
+SAP has deprecated `API_MAINTENANCEORDER`, in SAP S/4HANA Cloud 2308 and
+SAP S/4HANA 2023, in favour of Maintenance Order (Version 2),
+`API_MAINTENANCEORDER_0002`. The connector does not use that service yet.
 
 ## Resilience
 
@@ -218,6 +301,7 @@ paged reads and startup.
 - **OData v2 vs v4**: The connector handles both response formats (`d.results` and `value`). Your SAP system may use either depending on the service version.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
+- **Status filters**: applied to the orders read, not on the server (see [Work-order status](#work-order-status)). Combine `status` with `asset_id` on a large system.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.
 - **Spare parts by asset**: `read_spare_parts` can filter by `asset_id` only through `bom_equipment_field` (see [Configurable BOM Endpoint](#configurable-bom-endpoint)). While it is unset (the default), a non-empty `asset_id` raises `ConnectorUnsupportedFilterError` before any request, even when a `sku` is also given. The connector never answers `[]` for an asset it could not filter, and never drops the asset filter to return the whole BOM or a bare `sku` match. Look the part up by `sku` without an asset, or configure `bom_equipment_field`.
 - **Filter values and keys**: equipment, order and material numbers and statuses reach `$filter` as OData string literals with any `'` doubled, so a value cannot close its literal and add a clause; a number is sent as its digits. The `MaintenanceOrder(...)` key of `update_work_order` is also percent-encoded (`/`, `?`, `#`, `%`, `(`, `)`), so it stays one path segment, and a key that is empty or has an empty, `.` or `..` part between `/` or `\` separators is refused with `ConnectorError` before any request.

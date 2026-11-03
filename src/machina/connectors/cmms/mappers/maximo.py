@@ -28,6 +28,7 @@ from decimal import Decimal, localcontext
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from machina.connectors.cmms.status import status_filter
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -446,15 +447,14 @@ def reverse_status(status: WorkOrderStatus) -> str:
 def reverse_status_filter(status: WorkOrderStatus | str) -> str:
     """Map a ``read_work_orders`` status filter to the Maximo status code to send.
 
-    A :class:`WorkOrderStatus`, or a string equal to one of its values such as
-    ``"in_progress"``, is reverse-mapped. Any other string is taken as a
-    Maximo status code and only upper-cased.
+    A :class:`WorkOrderStatus`, or a string equal to one of its values in any
+    case such as ``"in_progress"``, is reverse-mapped. Any other string is
+    taken as a Maximo status code and only upper-cased.
     """
-    try:
-        machina_status = WorkOrderStatus(status)
-    except ValueError:
+    machina_status = status_filter(status)
+    if machina_status is None:
         return status.upper()
-    return REVERSE_MAXIMO_STATUS.get(machina_status, machina_status.value.upper())
+    return REVERSE_MAXIMO_STATUS[machina_status]
 
 
 # ---------------------------------------------------------------------------

@@ -219,14 +219,15 @@ class TestReadWorkOrders:
             (WorkOrderStatus.IN_PROGRESS, "inProgress"),
             (WorkOrderStatus.COMPLETED, "complete"),
             (WorkOrderStatus.CLOSED, "complete"),
-            (WorkOrderStatus.CANCELLED, "onHold"),
+            ("in_progress", "inProgress"),
+            ("Closed", "complete"),
         ],
     )
     async def test_status_filter_sends_documented_value(
         self,
         httpx_mock,
         connector: UpKeepConnector,
-        status: WorkOrderStatus,
+        status: WorkOrderStatus | str,
         upkeep_status: str,
     ) -> None:
         """The ``status`` filter accepts only open, onHold, inProgress and complete."""
@@ -237,6 +238,19 @@ class TestReadWorkOrders:
             json={"results": []},
         )
         assert await connector.read_work_orders(status=status) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [WorkOrderStatus.CANCELLED, "cancelled"])
+    async def test_cancelled_filter_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector, status: WorkOrderStatus | str
+    ) -> None:
+        """UpKeep has no cancelled state; filtering on onHold instead returned
+        held work orders, which read as assigned, for a cancelled filter."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="UpKeep has no 'cancelled' status"):
+            await connector.read_work_orders(status=status)
+        assert len(httpx_mock.get_requests()) == sent
 
 
 # ---------------------------------------------------------------------------
@@ -1359,8 +1373,6 @@ class TestUpdateWorkOrder:
         [
             (WorkOrderStatus.ASSIGNED, "onHold", WorkOrderStatus.ASSIGNED),
             (WorkOrderStatus.IN_PROGRESS, "inProgress", WorkOrderStatus.IN_PROGRESS),
-            # UpKeep has no cancelled state: the order is put on hold and reads back so.
-            (WorkOrderStatus.CANCELLED, "onHold", WorkOrderStatus.ASSIGNED),
         ],
     )
     async def test_update_work_order_sends_documented_status(
@@ -1386,6 +1398,49 @@ class TestUpdateWorkOrder:
 
         assert json.loads(patch_req.content) == {"status": upkeep_status}
         assert updated.status == read_back
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["update", "cancel_work_order"])
+    async def test_cancelled_is_refused_before_any_request(
+        self, httpx_mock, connector: UpKeepConnector, method: str
+    ) -> None:
+        """UpKeep has no cancelled state. Putting the work order on hold instead
+        reported a cancellation while it read back as assigned."""
+        await _connect(httpx_mock, connector)
+        sent = len(httpx_mock.get_requests())
+        with pytest.raises(ConnectorError, match="UpKeep has no 'cancelled' status"):
+            if method == "update":
+                await connector.update_work_order(
+                    "wo1", status=WorkOrderStatus.CANCELLED, description="x"
+                )
+            else:
+                await connector.cancel_work_order("wo1")
+        assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_a_status_upkeep_did_not_apply_is_an_error(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """UpKeep answered the PATCH with 200, but the work order is still open."""
+        await _connect(httpx_mock, connector)
+        result = {"id": "wo1", "title": "Fix pump", "status": "open", "assetId": "a1"}
+        httpx_mock.add_response(
+            method="PATCH", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        httpx_mock.add_response(
+            method="GET", url=f"{BASE}/api/v2/work-orders/wo1", json={"result": result}
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(
+                ConnectorError,
+                match=r"reads back as 'created', not 'completed': the status change was not applied",
+            ),
+        ):
+            await connector.close_work_order("wo1")
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+            "work_order_status_not_applied"
+        ]
 
 
 # ---------------------------------------------------------------------------

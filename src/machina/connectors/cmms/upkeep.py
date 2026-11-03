@@ -28,6 +28,7 @@ from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import upkeep as upkeep_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
+from machina.connectors.cmms.status import status_not_applied
 from machina.domain.work_order import (
     WorkOrder,
     WorkOrderStatus,
@@ -243,14 +244,22 @@ class UpKeepConnector:
             status: Filter by status — a :class:`WorkOrderStatus` or one of its
                 values such as ``"in_progress"`` (reverse-mapped to UpKeep's
                 status), or any other string, sent to UpKeep as an UpKeep
-                status.
+                status. ``completed`` and ``closed`` both select UpKeep's
+                ``complete``.
+
+        Raises:
+            ConnectorError: If ``status`` is ``cancelled``, which UpKeep has
+                no status for, before any request.
         """
         self._ensure_connected()
         params: dict[str, str] = {}
         if asset_id:
             params["asset"] = asset_id
         if status:
-            params["status"] = upkeep_mapper.reverse_status_filter(status)
+            try:
+                params["status"] = upkeep_mapper.reverse_status_filter(status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from None
         raw = await self._paginated_get("/api/v2/work-orders", params=params)
         return [upkeep_mapper.parse_work_order(item) for item in raw]
 
@@ -326,22 +335,35 @@ class UpKeepConnector:
     ) -> WorkOrder:
         """Update an existing work order in UpKeep via PATCH.
 
-        Only non-``None`` fields are included in the PATCH payload.
+        Only non-``None`` fields are included in the PATCH payload. The work
+        order is read back afterwards, and a status UpKeep did not apply is
+        an error, not a success.
 
         Args:
             work_order_id: UpKeep work order ID.
-            status: New status (reverse-mapped to UpKeep string).
+            status: New status (reverse-mapped to UpKeep string). ``CLOSED``
+                sets ``complete``, UpKeep's one finished state, so the work
+                order reads back as ``COMPLETED``.
             assigned_to: New ``assignedToId``.
             description: New title.
 
         Returns:
             The updated work order.
+
+        Raises:
+            ConnectorError: If no field is given; if ``status`` is
+                ``CANCELLED``, which UpKeep has no status for, before any
+                request; if UpKeep rejects the update; or if the work order
+                reads back with another status than the one sent.
         """
         self._ensure_connected()
         httpx = _require_httpx()
         payload: dict[str, Any] = {}
         if status is not None:
-            payload["status"] = upkeep_mapper.reverse_status(status)
+            try:
+                payload["status"] = upkeep_mapper.reverse_status(status)
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from None
         if assigned_to is not None:
             payload["assignedToId"] = assigned_to
         if description is not None:
@@ -369,6 +391,14 @@ class UpKeepConnector:
         updated = await self.get_work_order(work_order_id)
         if updated is None:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
+        if "status" in payload:
+            # The status UpKeep reports for the value sent: CLOSED reads back
+            # as COMPLETED, since both are UpKeep's "complete".
+            sent = upkeep_mapper.UPKEEP_STATUS_MAP[payload["status"].lower()]
+            if updated.status != sent:
+                raise status_not_applied(
+                    "UpKeepConnector", work_order_id, sent.value, updated.status.value
+                )
         return updated
 
     @sandbox_aware
@@ -378,7 +408,12 @@ class UpKeepConnector:
 
     @sandbox_aware
     async def cancel_work_order(self, work_order_id: str) -> WorkOrder:
-        """Transition a work order to CANCELLED (maps to 'onHold' in UpKeep)."""
+        """Refuse: UpKeep has no cancelled status.
+
+        Raises:
+            ConnectorError: Always, before any request (see
+                :meth:`update_work_order`).
+        """
         return await self.update_work_order(work_order_id, status=WorkOrderStatus.CANCELLED)  # type: ignore[no-any-return]
 
     async def read_spare_parts(

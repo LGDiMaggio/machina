@@ -49,6 +49,7 @@ from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
 from machina.connectors.cmms.paths import path_segment
 from machina.connectors.cmms.retry import request_with_retry
+from machina.connectors.cmms.status import status_not_applied
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorAuthError,
@@ -678,7 +679,8 @@ class MaximoConnector:
                 written; if Maximo rejects the update; or if Maximo accepted
                 the update but the order could not be read back, in which case
                 the message says the update was applied and must not be
-                repeated.
+                repeated; or if the order reads back with another status
+                than ``status`` (see :func:`status_not_applied`).
             ConnectorAuthError: If Maximo answers the lookup or the update
                 with 401.
             httpx.HTTPError: A transport error from the lookup (after its
@@ -715,7 +717,7 @@ class MaximoConnector:
             body = await self._read_resource("mxwo", rest_id)
             if body is None:
                 raise ConnectorError("the work order was not found at its URI")
-            return maximo_mapper.parse_work_order(body)
+            updated = maximo_mapper.parse_work_order(body)
         except Exception as exc:
             logger.warning(
                 "work_order_update_not_read_back",
@@ -728,6 +730,12 @@ class MaximoConnector:
                 f"Maximo applied the update to work order {work_order_id}, but reading it "
                 "back failed — do not repeat the update; read the work order to check it"
             ) from None
+        # A status Maximo accepted but did not apply must not read as done.
+        if status is not None and updated.status != status:
+            raise status_not_applied(
+                "MaximoConnector", work_order_id, status.value, updated.status.value
+            )
+        return updated
 
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:

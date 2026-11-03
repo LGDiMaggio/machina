@@ -1049,9 +1049,13 @@ class TestGetWorkOrder:
 # ---------------------------------------------------------------------------
 
 
+_ETAG = "W/\"datetimeoffset'2026-10-01T08%3A00%3A00.0000000Z'\""
+
+
 class TestUpdateWorkOrder:
     """The order has no writable status property: a status is set through the
-    API_MAINTENANCEORDER function import for it, never PATCHed."""
+    API_MAINTENANCEORDER function import for it, never PATCHed. SAP documents
+    that the import needs the order's ETag in If-Match."""
 
     @staticmethod
     def _mock_csrf(httpx_mock, token: str = "csrf-upd") -> None:
@@ -1074,7 +1078,11 @@ class TestUpdateWorkOrder:
         )
 
     @staticmethod
-    def _mock_refetch(httpx_mock, system_status: str) -> None:
+    def _mock_read(httpx_mock, system_status: str, etag: str | None = _ETAG) -> None:
+        """One read of order 4000001: before the status import (its ETag) or after it."""
+        order: dict[str, object] = dict(_order("4000001", system_status))
+        if etag is not None:
+            order["__metadata"] = {"etag": etag}
         httpx_mock.add_response(
             method="GET",
             url=_odata_url(
@@ -1082,7 +1090,7 @@ class TestUpdateWorkOrder:
                 "MaintenanceOrder",
                 **{"$top": "1", "$filter": "MaintenanceOrder eq '4000001'"},
             ),
-            json={"d": {"results": [_order("4000001", system_status)]}},
+            json={"d": {"results": [order]}},
         )
 
     @pytest.mark.parametrize(
@@ -1098,17 +1106,77 @@ class TestUpdateWorkOrder:
         self, httpx_mock, connector: SapPmConnector, status, function_import, system_status
     ) -> None:
         await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "REL  MANC PRC  SETC")
         self._mock_csrf(httpx_mock)
         self._mock_action(httpx_mock, function_import)
-        self._mock_refetch(httpx_mock, system_status)
+        self._mock_read(httpx_mock, system_status)
         updated = await connector.update_work_order("4000001", status=status)
         assert updated.status == status
         requests = httpx_mock.get_requests()
         assert not any(r.method == "PATCH" for r in requests)
         post = next(r for r in requests if r.method == "POST")
         assert post.headers["X-CSRF-Token"] == "csrf-upd"
+        assert post.headers["If-Match"] == _ETAG
         assert post.content == b""  # the parameter travels in the query string
         assert "Content-Type" not in post.headers
+
+    @pytest.mark.asyncio
+    async def test_an_order_without_an_etag_is_refused_before_the_import(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """SAP requires If-Match on the import; without the ETag it is not sent."""
+        await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "REL  MANC", etag=None)
+        with pytest.raises(ConnectorError, match="no ETag for work order 4000001"):
+            await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
+        assert not any(r.method == "POST" for r in httpx_mock.get_requests())
+
+    @pytest.mark.asyncio
+    async def test_a_missing_order_is_refused_before_any_write(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_MAINTENANCEORDER",
+                "MaintenanceOrder",
+                **{"$top": "1", "$filter": "MaintenanceOrder eq '4000001'"},
+            ),
+            json={"d": {"results": []}},
+        )
+        with pytest.raises(ConnectorError, match="Work order 4000001 not found"):
+            await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
+        assert {r.method for r in httpx_mock.get_requests()} == {"GET"}
+
+    @pytest.mark.asyncio
+    async def test_an_order_changed_since_it_was_read_is_reported(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "REL  MANC")
+        self._mock_csrf(httpx_mock)
+        self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted", status_code=412)
+        with pytest.raises(ConnectorError, match="HTTP 412, work order 4000001 changed"):
+            await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
+
+    @pytest.mark.asyncio
+    async def test_a_status_sap_did_not_apply_is_an_error(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """SAP answered the import with 200, but the order does not show TECO."""
+        await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "REL  CNF  PRC")
+        self._mock_csrf(httpx_mock)
+        self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted")
+        self._mock_read(httpx_mock, "REL  CNF  PRC")
+        with (
+            capture_logs() as logs,
+            pytest.raises(ConnectorError, match=r"not 'TECO': the status change was not applied"),
+        ):
+            await connector.update_work_order("4000001", status=WorkOrderStatus.CLOSED)
+        (event,) = [e for e in logs if e["event"] == "work_order_status_not_applied"]
+        assert event["actual_status"] == "REL  CNF  PRC"
 
     @pytest.mark.parametrize(
         "status",
@@ -1136,9 +1204,11 @@ class TestUpdateWorkOrder:
             url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
             status_code=204,
         )
+        # The PATCH changed the order, so its ETag is read after it.
+        self._mock_read(httpx_mock, "REL  CNF  PRC  SETC", etag='W/"after-patch"')
         self._mock_csrf(httpx_mock, "csrf-2")
         self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted")
-        self._mock_refetch(httpx_mock, "TECO CNF  PRC  SETC")
+        self._mock_read(httpx_mock, "TECO CNF  PRC  SETC")
         updated = await connector.update_work_order(
             "4000001", status=WorkOrderStatus.CLOSED, description="Bearing replaced"
         )
@@ -1146,7 +1216,9 @@ class TestUpdateWorkOrder:
         assert [r.method for r in writes] == ["PATCH", "POST"]
         assert json.loads(writes[0].content) == {"MaintenanceOrderDesc": "Bearing replaced"}
         assert writes[0].headers["X-CSRF-Token"] == "csrf-1"
+        assert "If-Match" not in writes[0].headers
         assert writes[1].headers["X-CSRF-Token"] == "csrf-2"
+        assert writes[1].headers["If-Match"] == 'W/"after-patch"'
         assert updated.status == WorkOrderStatus.CLOSED
 
     @pytest.mark.asyncio
@@ -1154,6 +1226,7 @@ class TestUpdateWorkOrder:
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
         await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "REL  MANC")
         self._mock_csrf(httpx_mock)
         self._mock_action(httpx_mock, "SetMaintOrdToTechCompleted", status_code=400)
         with pytest.raises(ConnectorError, match="SetMaintOrdToTechCompleted failed: HTTP 400"):
@@ -1164,6 +1237,7 @@ class TestUpdateWorkOrder:
         self, httpx_mock, connector: SapPmConnector
     ) -> None:
         await _connect(httpx_mock, connector)
+        self._mock_read(httpx_mock, "CRTD MANC")
         self._mock_csrf(httpx_mock)
         self._mock_action(httpx_mock, "SetMaintOrdStsToMrkdForDeltn", status_code=401)
         with pytest.raises(ConnectorAuthError, match="authentication failed"):
@@ -1347,3 +1421,42 @@ class TestFilterValuesStayLiteral:
                 "1')/../../API_EQUIPMENT/Equipment('10000001", description="x"
             )
         assert len(httpx_mock.get_requests()) == sent
+
+    @pytest.mark.asyncio
+    async def test_status_function_import_parameter_is_one_literal(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The order reaches the function import as one ``MaintenanceOrder``
+        literal: ``'`` is doubled and ``&`` cannot start another parameter."""
+        hostile = "4000'1&MaintenanceOrder='2"
+        read_url = _odata_url(
+            "API_MAINTENANCEORDER",
+            "MaintenanceOrder",
+            **{"$top": "1", "$filter": "MaintenanceOrder eq '4000''1&MaintenanceOrder=''2'"},
+        )
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=read_url,
+            json={
+                "d": {"results": [{**_order(hostile, "REL  MANC"), "__metadata": {"etag": _ETAG}}]}
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+            headers={"x-csrf-token": "csrf-tok"},
+            json={"d": {"results": []}},
+        )
+        httpx_mock.add_response(method="POST", json={"d": {"IsInvalid": False}})
+        httpx_mock.add_response(
+            method="GET",
+            url=read_url,
+            json={"d": {"results": [_order(hostile, "TECO CNF")]}},
+        )
+        await connector.update_work_order(hostile, status=WorkOrderStatus.CLOSED)
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        assert post.url.path.endswith("/API_MAINTENANCEORDER/SetMaintOrdToTechCompleted")
+        assert post.url.params.multi_items() == [
+            ("MaintenanceOrder", "'4000''1&MaintenanceOrder=''2'")
+        ]

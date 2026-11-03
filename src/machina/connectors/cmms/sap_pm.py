@@ -52,6 +52,7 @@ from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
 from machina.connectors.cmms.paths import checked_path_id
 from machina.connectors.cmms.retry import request_with_retry
+from machina.connectors.cmms.status import status_filter, status_not_applied
 from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorAuthError,
@@ -126,25 +127,14 @@ def _is_csrf_challenge(resp: Any) -> bool:
 
 # API_MAINTENANCEORDER has no writable status property: a status is set by
 # POSTing the function import for the system status it maps to, with the order
-# as its ``MaintenanceOrder`` parameter. SAP sets the other statuses itself —
-# CRTD on create, PCNF and CNF from time confirmations.
+# as its ``MaintenanceOrder`` parameter and the order's ETag in If-Match. SAP
+# sets the other statuses itself — CRTD on create, PCNF and CNF from time
+# confirmations.
 _STATUS_FUNCTION_IMPORTS: dict[str, str] = {
     "REL": "ReleaseMaintenanceOrder",
     "TECO": "SetMaintOrdToTechCompleted",
     "DLFL": "SetMaintOrdStsToMrkdForDeltn",
 }
-
-
-def _work_order_status(status: WorkOrderStatus | str) -> WorkOrderStatus | None:
-    """Return ``status`` as a :class:`WorkOrderStatus`, or ``None`` if it is not one.
-
-    A status filter arrives as the enum or — from LLM and MCP-client input — as
-    its value (``"closed"``). Any other string is a raw SAP status code.
-    """
-    try:
-        return WorkOrderStatus(status.lower())
-    except ValueError:
-        return None
 
 
 class SapPmConnector:
@@ -360,7 +350,7 @@ class SapPmConnector:
         work_orders = [sap_mapper.parse_work_order(item) for item in raw]
         if not status:
             return work_orders
-        wanted = _work_order_status(status)
+        wanted = status_filter(status)
         if wanted is not None:
             return [wo for wo in work_orders if wo.status == wanted]
         sap_code = status.upper()
@@ -373,13 +363,18 @@ class SapPmConnector:
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single maintenance order by number."""
         self._ensure_connected()
+        raw = await self._read_order(work_order_id)
+        return sap_mapper.parse_work_order(raw) if raw is not None else None
+
+    async def _read_order(self, work_order_id: str) -> dict[str, Any] | None:
+        """Read one maintenance order as SAP returns it, or ``None`` if there is none."""
         raw = await self._odata_get(
             "API_MAINTENANCEORDER",
             "MaintenanceOrder",
             odata_filter=f"MaintenanceOrder eq {_odata_string(work_order_id)}",
             top=1,
         )
-        return sap_mapper.parse_work_order(raw[0]) if raw else None
+        return raw[0] if raw else None
 
     @sandbox_aware
     async def create_work_order(self, work_order: WorkOrder) -> WorkOrder:
@@ -446,6 +441,11 @@ class SapPmConnector:
         ``CNF`` from time confirmations — so they are refused before any
         request.
 
+        The function import needs the order's ETag in ``If-Match``, so the
+        order is read first, after the PATCH, which changes it. The order is
+        read again afterwards, and the update succeeds only if its
+        ``SystemStatusText`` lists the system status that was set.
+
         Args:
             work_order_id: SAP maintenance order number.
             status: New :class:`WorkOrderStatus` — ``ASSIGNED``, ``CLOSED`` or
@@ -458,7 +458,9 @@ class SapPmConnector:
 
         Raises:
             ConnectorError: If nothing is to be updated, ``status`` is one SAP
-                sets itself, or SAP rejects a request.
+                sets itself, the order is not found or has no ETag, SAP
+                rejects a request, or the order does not show the system
+                status afterwards.
         """
         self._ensure_connected()
         function_import = ""
@@ -489,15 +491,7 @@ class SapPmConnector:
                     f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
                 )
         if function_import:
-            resp = await self._write_with_csrf(
-                "POST",
-                f"{self.url}/API_MAINTENANCEORDER/{function_import}",
-                params={"MaintenanceOrder": _odata_string(work_order_id)},
-            )
-            if resp.status_code == 401:
-                raise ConnectorAuthError("SAP PM authentication failed")
-            if resp.status_code not in (200, 204):
-                raise ConnectorError(f"SAP PM {function_import} failed: HTTP {resp.status_code}")
+            await self._set_system_status(work_order_id, function_import)
         logger.info(
             "work_order_updated",
             connector="SapPmConnector",
@@ -506,10 +500,54 @@ class SapPmConnector:
             status=status.value if status is not None else None,
         )
         # Re-fetch the updated entity to return the full work order.
-        updated = await self.get_work_order(work_order_id)
-        if updated is None:
+        raw = await self._read_order(work_order_id)
+        if raw is None:
             raise ConnectorError(f"Work order {work_order_id} not found after update")
-        return updated
+        if status is not None:
+            # A function import SAP answered with 200 but did not apply must
+            # not read as done. SystemStatusText holds at most 40 characters,
+            # SAP's highest-priority statuses, which REL, TECO and DLFL are.
+            sap_code = sap_mapper.reverse_status(status)
+            if sap_code not in sap_mapper.system_status_codes(raw):
+                raise status_not_applied(
+                    "SapPmConnector",
+                    work_order_id,
+                    sap_code,
+                    str(raw.get("SystemStatusText") or ""),
+                )
+        return sap_mapper.parse_work_order(raw)
+
+    async def _set_system_status(self, work_order_id: str, function_import: str) -> None:
+        """POST a status function import for one order, with the order's ETag in ``If-Match``.
+
+        SAP requires the ETag, taken from the order's ``LastChangeDateTime`` as
+        a read returns it; an OData V2 read returns it in ``__metadata.etag``.
+        A ``412`` means the order changed after it was read.
+        """
+        order = await self._read_order(work_order_id)
+        if order is None:
+            raise ConnectorError(f"Work order {work_order_id} not found")
+        etag = (order.get("__metadata") or {}).get("etag")
+        if not etag:
+            raise ConnectorError(
+                f"SAP PM returned no ETag for work order {work_order_id}; "
+                f"{function_import} needs it in If-Match"
+            )
+        resp = await self._write_with_csrf(
+            "POST",
+            f"{self.url}/API_MAINTENANCEORDER/{function_import}",
+            params={"MaintenanceOrder": _odata_string(work_order_id)},
+            if_match=str(etag),
+        )
+        if resp.status_code == 401:
+            raise ConnectorAuthError("SAP PM authentication failed")
+        if resp.status_code == 412:
+            raise ConnectorError(
+                f"SAP PM {function_import} failed: HTTP 412, work order {work_order_id} "
+                "changed after it was read; read it again before retrying"
+            )
+        if resp.status_code not in (200, 204):
+            raise ConnectorError(f"SAP PM {function_import} failed: HTTP {resp.status_code}")
 
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
@@ -630,6 +668,7 @@ class SapPmConnector:
         payload: dict[str, Any] | None = None,
         *,
         params: dict[str, str] | None = None,
+        if_match: str | None = None,
     ) -> Any:
         """Execute a write request (POST/PATCH) with CSRF token.
 
@@ -639,7 +678,8 @@ class SapPmConnector:
         the session cookies are shared.
 
         ``payload`` is sent as the JSON body. A function import has no body:
-        it takes its parameters as query ``params``.
+        it takes its parameters as query ``params``. ``if_match`` is sent as
+        the ``If-Match`` header, an ETag the entity must still have.
 
         On a stale-token rejection (HTTP 403 with a CSRF challenge — the write
         did NOT apply) the token is re-fetched and the write retried exactly
@@ -661,9 +701,10 @@ class SapPmConnector:
         # relies on this check, as it does on the sandbox guard.
         self._ensure_connected()
         httpx = _require_httpx()
+        headers = {"If-Match": if_match} if if_match is not None else {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             token = await self._fetch_csrf_token(client)
-            resp = await self._csrf_write(client, method, url, payload, params, token)
+            resp = await self._csrf_write(client, method, url, payload, params, headers, token)
             if resp.status_code == 403 and _is_csrf_challenge(resp):
                 logger.warning(
                     "sap_csrf_token_refresh",
@@ -671,7 +712,7 @@ class SapPmConnector:
                     method=method,
                 )
                 token = await self._fetch_csrf_token(client)
-                resp = await self._csrf_write(client, method, url, payload, params, token)
+                resp = await self._csrf_write(client, method, url, payload, params, headers, token)
             return resp
 
     async def _fetch_csrf_token(self, client: Any) -> str:
@@ -698,10 +739,11 @@ class SapPmConnector:
         url: str,
         payload: dict[str, Any] | None,
         params: dict[str, str] | None,
+        extra_headers: dict[str, str],
         token: str,
     ) -> Any:
         """Issue the write with the session's CSRF token (same client/cookies)."""
-        headers = {**self._headers(), "X-CSRF-Token": token}
+        headers = {**self._headers(), **extra_headers, "X-CSRF-Token": token}
         if payload is not None:
             headers["Content-Type"] = "application/json"
         return await request_with_retry(

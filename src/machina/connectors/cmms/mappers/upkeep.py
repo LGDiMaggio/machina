@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from machina.connectors.cmms.status import status_filter
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
@@ -74,8 +75,11 @@ REVERSE_UPKEEP_STATUS: dict[WorkOrderStatus, str] = {
     WorkOrderStatus.ASSIGNED: "onHold",
     WorkOrderStatus.IN_PROGRESS: "inProgress",
     WorkOrderStatus.COMPLETED: "complete",
-    WorkOrderStatus.CLOSED: "complete",  # UpKeep has no distinct closed state
-    WorkOrderStatus.CANCELLED: "onHold",  # UpKeep has no distinct cancelled state
+    # UpKeep's one finished state: it has no separate closed state.
+    WorkOrderStatus.CLOSED: "complete",
+    # CANCELLED has no entry: UpKeep has no cancelled state, and putting the
+    # work order on hold instead would report a cancellation that did not
+    # happen (see reverse_status).
 }
 
 UPKEEP_CATEGORY_MAP: dict[str, AssetType] = {
@@ -331,22 +335,37 @@ def reverse_priority(priority: Priority) -> int:
 
 
 def reverse_status(status: WorkOrderStatus) -> str:
-    """Map Machina work-order status to UpKeep status string."""
-    return REVERSE_UPKEEP_STATUS.get(status, "open")
+    """Map Machina work-order status to UpKeep status string.
+
+    Raises:
+        ValueError: For ``CANCELLED``: UpKeep has no cancelled status, and
+            sending another one in its place would report a cancellation
+            that did not happen.
+    """
+    try:
+        return REVERSE_UPKEEP_STATUS[status]
+    except KeyError:
+        raise ValueError(
+            f"UpKeep has no {status.value!r} status; its work-order statuses are "
+            "open, onHold, inProgress and complete"
+        ) from None
 
 
 def reverse_status_filter(status: WorkOrderStatus | str) -> str:
     """Map a ``read_work_orders`` status filter to the UpKeep status to send.
 
-    A :class:`WorkOrderStatus`, or a string equal to one of its values such as
-    ``"in_progress"``, is reverse-mapped. Any other string is taken as an
-    UpKeep status and sent unchanged.
+    A :class:`WorkOrderStatus`, or a string equal to one of its values in any
+    case such as ``"in_progress"``, is reverse-mapped. Any other string is
+    taken as an UpKeep status and sent unchanged.
+
+    Raises:
+        ValueError: For ``cancelled``, which UpKeep has no status for (see
+            :func:`reverse_status`).
     """
-    try:
-        machina_status = WorkOrderStatus(status)
-    except ValueError:
+    machina_status = status_filter(status)
+    if machina_status is None:
         return status
-    return REVERSE_UPKEEP_STATUS.get(machina_status, machina_status.value)
+    return reverse_status(machina_status)
 
 
 # ---------------------------------------------------------------------------

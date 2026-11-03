@@ -9,6 +9,7 @@ import pytest
 
 from machina.connectors.cmms.mappers.upkeep import (
     REVERSE_UPKEEP_STATUS,
+    UPKEEP_STATUS_MAP,
     parse_asset,
     parse_asset_part_ids,
     parse_datetime,
@@ -423,12 +424,19 @@ class TestParseDatetime:
 class TestReverseStatusFilter:
     def test_status_value_is_sent_like_the_enum(self) -> None:
         """``"in_progress"`` filters on the UpKeep value of ``IN_PROGRESS``."""
-        for status in WorkOrderStatus:
+        for status in set(WorkOrderStatus) - {WorkOrderStatus.CANCELLED}:
             assert reverse_status_filter(status.value) == reverse_status(status)
+            assert reverse_status_filter(status.value.upper()) == reverse_status(status)
             assert reverse_status_filter(status) == reverse_status(status)
 
     def test_upkeep_status_is_sent_unchanged(self) -> None:
         assert reverse_status_filter("onHold") == "onHold"
+
+    @pytest.mark.parametrize("status", [WorkOrderStatus.CANCELLED, "cancelled", "Cancelled"])
+    def test_cancelled_is_refused(self, status: WorkOrderStatus | str) -> None:
+        """Filtering on onHold instead would return held orders as cancelled ones."""
+        with pytest.raises(ValueError, match="UpKeep has no 'cancelled' status"):
+            reverse_status_filter(status)
 
 
 class TestReverseMaps:
@@ -444,9 +452,11 @@ class TestReverseMaps:
         assert reverse_status(WorkOrderStatus.COMPLETED) == "complete"
         assert reverse_status(WorkOrderStatus.CLOSED) == "complete"
 
-    def test_reverse_status_cancelled_maps_to_on_hold(self) -> None:
-        """UpKeep has no distinct CANCELLED state — maps to 'onHold'."""
-        assert reverse_status(WorkOrderStatus.CANCELLED) == "onHold"
+    def test_reverse_status_refuses_cancelled(self) -> None:
+        """UpKeep has no CANCELLED state. Sending 'onHold' in its place reported a
+        cancellation while the work order read back as ASSIGNED."""
+        with pytest.raises(ValueError, match="UpKeep has no 'cancelled' status"):
+            reverse_status(WorkOrderStatus.CANCELLED)
 
     def test_reverse_status_uses_camel_case_values(self) -> None:
         assert reverse_status(WorkOrderStatus.IN_PROGRESS) == "inProgress"
@@ -454,5 +464,15 @@ class TestReverseMaps:
 
     def test_every_status_has_a_documented_upkeep_value(self) -> None:
         """The status filter and the PATCH body only ever send values UpKeep accepts."""
-        assert set(REVERSE_UPKEEP_STATUS) == set(WorkOrderStatus)
+        assert set(REVERSE_UPKEEP_STATUS) == set(WorkOrderStatus) - {WorkOrderStatus.CANCELLED}
         assert set(REVERSE_UPKEEP_STATUS.values()) <= UPKEEP_STATUSES
+
+    def test_every_status_sent_reads_back_as_itself_or_completed(self) -> None:
+        """The read-back check compares with the status UpKeep reports for the
+        value sent; only CLOSED changes, to COMPLETED (both are "complete")."""
+        for status, sent in REVERSE_UPKEEP_STATUS.items():
+            read_back = UPKEEP_STATUS_MAP[sent.lower()]
+            assert read_back == status or (status, read_back) == (
+                WorkOrderStatus.CLOSED,
+                WorkOrderStatus.COMPLETED,
+            )
