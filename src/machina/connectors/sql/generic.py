@@ -254,6 +254,10 @@ class GenericSqlConnector:
         self._db_thread = _new_db_thread()
         self._write_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
+        # INSERTs whose caller was cancelled while they still ran: a later
+        # create waits for them before its ID probe, even on a new connection
+        # after disconnect() retired their worker (see create_work_order).
+        self._orphan_inserts: set[Future[Any]] = set()
 
         caps: set[Capability] = set(self._BASE_CAPABILITIES)
         if config.capabilities == "read_write":
@@ -287,10 +291,12 @@ class GenericSqlConnector:
             conn = await asyncio.to_thread(self._open_connection)
             self._conn = conn
             try:
-                await self._run_on_connection(self._validate_schemas)
+                await self._run_on_connection(self._validate_schemas, conn)
             except BaseException:
-                self._conn = None
-                self._db_thread.submit(_close_quietly, conn)
+                # The check may still be running (a cancelled connect()), so
+                # close the connection behind it and give the next connect()
+                # a new worker.
+                self._abandon_connection()
                 raise
             self._connected = True
         logger.info(
@@ -476,6 +482,12 @@ class GenericSqlConnector:
         if not mapping.insert_columns:
             raise ConnectorConfigError("No insert_columns configured for WorkOrder mapping")
         async with self._write_lock:
+            if self._orphan_inserts:
+                # An INSERT whose caller was cancelled may still commit, on a
+                # connection disconnect() already let go: wait for it, or this
+                # probe could miss its row and insert the work order twice.
+                # asyncio.wait, so cancelling this caller leaves it running.
+                await asyncio.wait([asyncio.wrap_future(f) for f in self._orphan_inserts])
             # Probe the mapped rows by ID rather than building every row into
             # a WorkOrder: one legacy row with an unmapped status must not
             # block every create.
@@ -568,9 +580,9 @@ class GenericSqlConnector:
         if conn is not None:  # pragma: no branch
             conn.close()
 
-    def _validate_schemas(self) -> None:
-        """Check that mapped columns exist in query results."""
-        cursor = self._conn.cursor()
+    def _validate_schemas(self, conn: Any) -> None:
+        """Check that mapped columns exist in query results, on ``conn``."""
+        cursor = conn.cursor()
         try:
             for name, mapping in self._config.tables.items():
                 limited_query = f"SELECT * FROM ({mapping.query}) AS _machina_validate WHERE 1=0"
@@ -632,6 +644,11 @@ class GenericSqlConnector:
         except asyncio.CancelledError:
             operation = getattr(func, "__name__", "call").strip("_")
             future.add_done_callback(functools.partial(_log_failure_after_cancel, operation))
+            is_insert = getattr(func, "__func__", None) is type(self)._execute_insert
+            if is_insert and not future.done():
+                # Still running: the next create waits for it (create_work_order).
+                self._orphan_inserts.add(future)
+                future.add_done_callback(self._orphan_inserts.discard)
             raise
 
     async def _execute_read(self, mapping: TableMapping) -> list[dict[str, Any]]:

@@ -192,15 +192,19 @@ plain `ConnectorError`.
 `health_check()` sends its probe behind any calls already waiting for the
 connection and waits at most `query_timeout` seconds (30 when it is unset) for
 the answer; past that it reports the connection busy (`unhealthy`).
-`disconnect()` waits as long, then logs `sql_disconnect_busy` and drops the
-connection without closing it, since closing a connection under a running
-statement is not safe: the connector closes it on its database thread as soon
-as that statement ends, and gives itself a new thread, so a later `connect()`
-does not wait for the statement. Calls that were still queued behind the
-statement fail with a `ConnectorError` instead of running. A `disconnect()`
-that is cancelled while it waits drops the connection the same way. If the
+`disconnect()` first waits for a `connect()` in progress, then waits as long
+for the calls using the connection. Past that, it logs `sql_disconnect_busy`
+and drops the connection without closing it, since closing a connection under
+a running statement is not safe: the connector closes it on its database
+thread as soon as that statement ends, and gives itself a new thread, so a
+later `connect()` does not wait for the statement. Calls that were still
+queued behind the statement fail with a `ConnectorError` instead of running.
+A `disconnect()` that is cancelled while it waits, and a `connect()` whose
+schema check fails or is cancelled, drop the connection the same way. If the
 driver never stops the statement, its thread keeps running, and the process
-waits for it on exit.
+waits for it on exit. A `create_work_order` whose INSERT was still running
+when its caller was cancelled may yet commit, so the next `create_work_order`
+waits for that INSERT before it checks for the ID, also after a reconnect.
 
 A call that fails after its caller was cancelled (an MCP request
 cancellation, a workflow step timeout) is logged as `failed_after_cancel`,
