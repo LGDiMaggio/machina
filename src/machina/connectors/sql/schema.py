@@ -111,6 +111,16 @@ class SqlConnectorConfig(BaseModel):
         default="cp037",
         description="EBCDIC codepage for strip_ebcdic coercer",
     )
+    query_timeout: int | None = Field(
+        default=None,
+        ge=1,
+        le=3600,
+        description=(
+            "Seconds one SQL statement may run before the driver stops it (ODBC query "
+            "timeout, JDBC Statement.setQueryTimeout). Unset keeps the driver's own "
+            "setting, usually no limit; what a driver does with it varies"
+        ),
+    )
     retry: SqlRetryConfig = Field(default_factory=SqlRetryConfig)
 
     @model_validator(mode="after")

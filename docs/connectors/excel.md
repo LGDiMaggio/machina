@@ -129,6 +129,9 @@ since then count. A work-order row whose values do not make a valid work order
   the file's own column order; columns the schema does not map stay empty. It
   is idempotent on the work-order ID: creating a work order whose ID is already
   in the sheet returns the existing record instead of adding a duplicate row.
+  If that ID is only on a row skipped on read (an empty or unreadable required
+  cell, an invalid value), create raises `ConnectorError` naming the row and
+  the problem, and writes nothing: fix or remove that row first.
   A missing work-order file or sheet is created on the first write, with the
   schema's header row.
 - **Update** applies only legal status transitions (an illegal one, or an
@@ -142,6 +145,17 @@ since then count. A work-order row whose values do not make a valid work order
   work-order field, or a change of `id`, is refused too. A CSV keeps its UTF-8
   BOM, which Excel on Windows needs to read accented text. Without a
   `write_mode`, `update_work_order()` changes the in-memory copy only.
+- Writes run one at a time, on a worker thread of the connector's own; the
+  sheet reads of `connect()` and `refresh()` run there too, in turn with the
+  writes, so a read never holds a file open while a write saves it, and
+  `connect()` does not block the event loop (for `refresh()`, see
+  [File Watcher](#file-watcher)). Cancelling a write (an MCP request
+  cancellation, a workflow step timeout) does not stop it once it has
+  started: it still finishes, the cached records follow its outcome, and the
+  next write waits for it, so a retried create finds the row instead of
+  adding it again. If it fails, no caller is left to receive the error, so it
+  is logged as `failed_after_cancel`. `disconnect()` waits for it too, for up
+  to 5 seconds.
 - A file that is open in another program, or that the process may not write,
   raises `ConnectorLockedError`.
 - `write_mode` accepts `append` or `overwrite`; either one makes the sheet
@@ -173,6 +187,11 @@ The connector reads its files on `connect()` and does not watch them by
 itself. To pick up edits made while the agent runs, start a `FileWatcher`
 with the connector's `refresh()` as callback; `refresh()` reloads every sheet
 all-or-nothing, so a file caught mid-save leaves the previous data in place.
+A refresh waits for a write in progress, and a write waits for a refresh
+(see [Writes](#writes)); `refresh()` returns once the sheets are reloaded, so
+`FileWatcher.stop()` can wait for a refresh in progress. Until then it blocks
+its caller: from async code, call it with
+`await asyncio.to_thread(connector.refresh)`.
 
 ```python
 from machina.connectors.docs.watcher import FileWatcher
