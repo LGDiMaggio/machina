@@ -309,7 +309,8 @@ class GenericSqlConnector:
     async def disconnect(self) -> None:
         """Close the database connection.
 
-        Waits at most ``query_timeout`` seconds (30 when unset) for the calls
+        First waits for a connect() in progress, then waits at most
+        ``query_timeout`` seconds (30 when unset) for the calls
         still using the connection. Past that, it logs ``sql_disconnect_busy``
         and drops the connection without closing it, since closing it under a
         running statement is not safe (see :meth:`_abandon_connection`). A
@@ -486,8 +487,9 @@ class GenericSqlConnector:
                 # An INSERT whose caller was cancelled may still commit, on a
                 # connection disconnect() already let go: wait for it, or this
                 # probe could miss its row and insert the work order twice.
-                # asyncio.wait, so cancelling this caller leaves it running.
-                await asyncio.wait([asyncio.wrap_future(f) for f in self._orphan_inserts])
+                # asyncio.wait, so cancelling this caller leaves it running. A
+                # copy: the worker thread discards each INSERT as it finishes.
+                await asyncio.wait([asyncio.wrap_future(f) for f in list(self._orphan_inserts)])
             # Probe the mapped rows by ID rather than building every row into
             # a WorkOrder: one legacy row with an unmapped status must not
             # block every create.
