@@ -8,6 +8,7 @@ traffic is intercepted by pytest-httpx — no real Maximo API calls.
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from unittest.mock import MagicMock
 
 import httpx
@@ -15,6 +16,7 @@ import pytest
 
 from machina.agent.runtime import Agent
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth
+from machina.connectors.cmms.mappers.maximo import WORK_ORDER_SELECT
 from machina.connectors.cmms.maximo import MaximoConnector
 from machina.runtime import MachinaRuntime
 
@@ -24,7 +26,12 @@ OSLC = f"{BASE}/maximo/oslc"
 # INPRG is Maximo's code for Machina's ``in_progress``.
 IN_PROGRESS_QUERY = httpx.URL(
     f"{OSLC}/os/mxwo",
-    params={"lean": "1", "oslc.pageSize": "100", "oslc.where": 'status="INPRG"'},
+    params={
+        "lean": "1",
+        "oslc.pageSize": "100",
+        "oslc.where": 'status="INPRG"',
+        "oslc.select": WORK_ORDER_SELECT,
+    },
 )
 IN_PROGRESS_WORK_ORDER = {
     "wonum": "WO-7",
@@ -59,9 +66,13 @@ async def test_agent_read_work_orders_sends_maximo_code(maximo: MaximoConnector)
     assert [(wo["id"], wo["status"]) for wo in result] == [("WO-7", "in_progress")]
 
 
+# A skip mark, not importorskip in the body: skipping after the fixture has
+# registered its mock fails pytest-httpx's unused-response check at teardown.
+@pytest.mark.skipif(
+    find_spec("mcp") is None, reason="MCP SDK not installed (pip install machina-ai[mcp])"
+)
 @pytest.mark.asyncio
 async def test_mcp_list_work_orders_sends_maximo_code(maximo: MaximoConnector) -> None:
-    pytest.importorskip("mcp", reason="MCP SDK not installed (pip install machina-ai[mcp])")
     from machina.mcp.tools import machina_list_work_orders
 
     ctx = MagicMock()
