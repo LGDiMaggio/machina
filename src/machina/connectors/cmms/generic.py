@@ -12,6 +12,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from urllib.parse import parse_qsl
 
 if TYPE_CHECKING:
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
@@ -23,6 +24,7 @@ from pydantic import Field, ValidationError
 from machina.connectors._settings import validate_setting, validate_settings
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._http_errors import rest_errors, write_outcome_unknown
 from machina.connectors.cmms.auth import (
     ApiKeyHeaderAuth,
     BasicAuth,
@@ -36,6 +38,7 @@ from machina.connectors.cmms.generic_coercers import (
 from machina.connectors.cmms.generic_coercers import resolve_path
 from machina.connectors.cmms.pagination import (
     CursorPagination,
+    MalformedPageError,
     NoPagination,
     OffsetLimitPagination,
     PageNumberPagination,
@@ -53,7 +56,12 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorConfigError,
+    ConnectorError,
+    ConnectorSchemaError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -111,9 +119,15 @@ class GenericCmmsConnector:
             (``none``, ``offset_limit``, ``page_number``, ``cursor``).
             Defaults to :class:`NoPagination` (single-shot GET) which
             preserves the behaviour of earlier versions.
-        endpoints: Optional REST endpoints that enable optional
-            capabilities (e.g. ``get_work_order``, ``update_work_order``,
-            ``read_maintenance_plans``).
+        endpoints: Optional REST endpoints, keyed by operation, each a dict
+            with a ``path`` relative to ``url`` (a query string in it is
+            kept). A configured key declares the matching capability in REST
+            mode: ``get_work_order`` and ``update_work_order`` (``{id}`` in
+            the path; update also takes ``method`` and ``field_map``),
+            ``read_maintenance_plans``, ``read_spare_parts``, and
+            ``read_maintenance_history`` (``{asset_id}`` in the path or its
+            query string, else an ``asset_id`` query param). Unused in local
+            mode, which serves every capability from the JSON files.
         yaml_mapping: Declarative field mapping between the CMMS REST
             payloads and Machina entities — a
             :class:`~machina.connectors.cmms.generic_schema.GenericCmmsYamlConfig`
@@ -168,8 +182,6 @@ class GenericCmmsConnector:
             Capability.READ_ASSETS,
             Capability.READ_WORK_ORDERS,
             Capability.CREATE_WORK_ORDER,
-            Capability.READ_SPARE_PARTS,
-            Capability.READ_MAINTENANCE_HISTORY,
         }
     )
 
@@ -180,6 +192,8 @@ class GenericCmmsConnector:
         Capability.CLOSE_WORK_ORDER: "update_work_order",
         Capability.CANCEL_WORK_ORDER: "update_work_order",
         Capability.READ_MAINTENANCE_PLANS: "read_maintenance_plans",
+        Capability.READ_SPARE_PARTS: "read_spare_parts",
+        Capability.READ_MAINTENANCE_HISTORY: "read_maintenance_history",
     }
 
     @property
@@ -284,9 +298,12 @@ class GenericCmmsConnector:
         """Establish connection or load local data files.
 
         Raises:
-            ConnectorError: If neither ``url`` nor ``data_dir`` is provided.
+            ConnectorError: If neither ``url`` nor ``data_dir`` is provided,
+                or the REST health check fails.
             ConnectorAuthError: In REST mode, if no authentication strategy
-                was supplied.
+                was supplied or the CMMS rejects it (HTTP 401/403).
+            ConnectorTimeoutError: If the REST health check times out.
+            ConnectorConfigError: If ``url`` is malformed.
         """
         if self._data_dir and self._data_dir.exists():
             await self._load_local_data()
@@ -424,14 +441,22 @@ class GenericCmmsConnector:
         asset_id: str = "",
         sku: str = "",
     ) -> list[SparePart]:
-        """Read spare parts, optionally filtered.
+        """Read spare parts, optionally filtered by compatible asset or SKU.
+
+        In local mode filters the parts loaded from ``spare_parts.json``.
+        In REST mode reads the configured ``read_spare_parts`` endpoint (see
+        :meth:`_rest_read_spare_parts`).
 
         Raises:
             ConnectorError: If a filter is neither ``""`` nor an ID (see
-                :func:`~machina.connectors.cmms.filters.spare_part_filters`).
+                :func:`~machina.connectors.cmms.filters.spare_part_filters`),
+                or, in REST mode, if the ``read_spare_parts`` endpoint is not
+                configured or the call fails.
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
+        if not self._data_dir:
+            return await self._rest_read_spare_parts(asset_id=asset_id, sku=sku)
         results = self._spare_parts
         if asset_id:
             results = [sp for sp in results if asset_id in sp.compatible_assets]
@@ -443,18 +468,27 @@ class GenericCmmsConnector:
         self,
         asset_id: str,
     ) -> list[WorkOrder]:
-        """Return completed work orders for an asset (maintenance history).
+        """Return an asset's maintenance history (its completed work orders).
+
+        In local mode returns the asset's completed and closed work orders.
+        In REST mode reads the configured ``read_maintenance_history``
+        endpoint (see :meth:`_rest_read_maintenance_history`).
 
         Raises:
             ConnectorError: If ``asset_id`` is missing or blank, as on the
                 vendor connectors: an empty history would read as "never
-                repaired".
+                repaired". In REST mode, also if the asset ID is ``.`` or
+                ``..``, the ``read_maintenance_history`` endpoint is not
+                configured, the call fails, or the CMMS answers with records
+                of other assets.
         """
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
         # Asset IDs are stored as text; a numeric ID would match nothing.
         wanted = str(asset_id)
+        if not self._data_dir:
+            return await self._rest_read_maintenance_history(wanted)
         return [
             wo
             for wo in self._work_orders
@@ -794,16 +828,43 @@ class GenericCmmsConnector:
         """Join the base URL and path parts, stripping trailing slashes."""
         return "/".join([self.url.rstrip("/"), *parts])
 
+    @staticmethod
+    def _split_endpoint_path(path: str, operation: str) -> tuple[str, dict[str, str]]:
+        """Split a configured endpoint path into its path and query params.
+
+        httpx replaces a URL's query string whenever ``params`` are passed,
+        and every pagination strategy passes them, so a query configured on
+        the path (``work_orders?status=closed``) is lifted into params that
+        the call's own filters then extend.
+
+        Raises:
+            ConnectorConfigError: If the query gives a parameter more than
+                once: the params are a dict, so all but one value would be
+                dropped without a word.
+        """
+        base, _, query = path.partition("?")
+        pairs = parse_qsl(query, keep_blank_values=True)
+        params = dict(pairs)
+        if len(params) < len(pairs):
+            raise ConnectorConfigError(
+                f"The '{operation}' endpoint path gives a query parameter more than once, "
+                "which cannot be sent; give each parameter once."
+            )
+        return base, params
+
     async def _verify_rest_connection(self) -> None:
         """Verify that the REST API is reachable via a health check."""
         if self._auth is None:
             raise ConnectorAuthError("API key or auth strategy is required for REST mode")
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                self._rest_url("health"),
-                headers=self._rest_headers(),
-            )
+        with rest_errors("CMMS", "health check"):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    self._rest_url("health"),
+                    headers=self._rest_headers(),
+                )
+                resp.raise_for_status()
+        # raise_for_status() lets any 2xx through; the contract asks for 200.
         if resp.status_code != 200:
             raise ConnectorError(f"CMMS health check failed: HTTP {resp.status_code}")
         logger.info(
@@ -826,19 +887,44 @@ class GenericCmmsConnector:
         headers = self._rest_headers()
         if asset_id is not None:
             url = self._rest_url("assets", path_segment(asset_id))
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 404:
-                    return []
-                resp.raise_for_status()
-            return [_parse_asset(self._apply_mapping("assets", resp.json()))]
+            with rest_errors("CMMS", "get asset"):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 404:
+                        return []
+                    resp.raise_for_status()
+                    body = resp.json()
+            return [_parse_asset(self._apply_mapping("assets", body))]
 
-        url = self._rest_url("assets")
-        results: list[Asset] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, url, headers):
-                results.append(_parse_asset(self._apply_mapping("assets", raw)))
-        return results
+        raw_items = await self._rest_read_pages("read assets", self._rest_url("assets"), {})
+        return [_parse_asset(self._apply_mapping("assets", raw)) for raw in raw_items]
+
+    async def _rest_read_pages(
+        self, operation: str, url: str, params: dict[str, str]
+    ) -> list[dict[str, Any]]:
+        """GET every page of a list endpoint, mapping a failure to a connector error.
+
+        Returns the raw records, unmapped: they are mapped and parsed after the
+        call, so an error there (a plugin coercer's included) is not reported
+        as a failed call (see :func:`rest_errors`).
+
+        Raises:
+            ConnectorSchemaError: If a page answered with a success status
+                holds no list of records where the pagination expects one, or
+                a record that is not an object: such a page must not read as
+                an empty one (see :class:`MalformedPageError`).
+        """
+        httpx = _require_httpx()
+        headers = self._rest_headers()
+        raw_items: list[dict[str, Any]] = []
+        try:
+            with rest_errors("CMMS", operation):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    async for raw in self._pagination.iterate(client, url, headers, params=params):
+                        raw_items.append(raw)
+        except MalformedPageError as exc:
+            raise ConnectorSchemaError(f"CMMS {operation} failed: {exc}") from exc
+        return raw_items
 
     async def _rest_read_work_orders(
         self,
@@ -851,36 +937,66 @@ class GenericCmmsConnector:
         Query params ``asset_id`` and ``status`` are forwarded to the server
         when set. Iteration uses the configured pagination strategy.
         """
-        httpx = _require_httpx()
-        headers = self._rest_headers()
         params: dict[str, str] = {}
         if asset_id:
             params["asset_id"] = asset_id
         if status:
             params["status"] = status
 
-        url = self._rest_url("work_orders")
-        results: list[WorkOrder] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, url, headers, params=params):
-                results.append(_parse_work_order(self._apply_mapping("work_orders", raw)))
-        return results
+        raw_items = await self._rest_read_pages(
+            "read work orders", self._rest_url("work_orders"), params
+        )
+        return [_parse_work_order(self._apply_mapping("work_orders", raw)) for raw in raw_items]
 
     async def _rest_create_work_order(self, work_order: WorkOrder) -> WorkOrder:
-        """Submit a new work order to the REST API."""
+        """Submit a new work order to the REST API.
+
+        A failure says whether the CMMS may have created the work order (see
+        :func:`~machina.connectors.cmms._http_errors.rest_errors`), including
+        one to map the response of a create the CMMS answered with a success
+        status (see :meth:`_map_write_response`).
+        """
         httpx = _require_httpx()
         headers = {**self._rest_headers(), "Content-Type": "application/json"}
         payload = work_order.model_dump(mode="json")
         if self._yaml_mapping is not None:
             payload = self._yaml_reverse_map("work_order", payload)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                self._rest_url("work_orders"),
-                headers=headers,
-                json=payload,
+        with rest_errors("CMMS", "create work order", write=True):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    self._rest_url("work_orders"),
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        return self._map_write_response("create work order", work_order.id, body)
+
+    def _map_write_response(self, operation: str, work_order_id: str, body: Any) -> WorkOrder:
+        """Map the decoded response of a write the CMMS answered with a success status.
+
+        A failure here (a status or type the domain does not know, a record
+        the mapping cannot read) is not the CMMS's: the write may well have
+        been applied, so it is reported as a write whose outcome is unknown,
+        never as a failed write a caller might send again. The mapping error
+        stays chained as ``__cause__`` and its type is logged.
+        """
+        try:
+            return _parse_work_order(self._apply_mapping("work_orders", body))
+        except Exception as exc:
+            logger.warning(
+                "work_order_write_response_not_mapped",
+                connector="GenericCmmsConnector",
+                operation=operation.replace(" ", "_"),
+                work_order_id=work_order_id,
+                error_type=type(exc).__name__,
             )
-            resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+            raise write_outcome_unknown(
+                "CMMS",
+                operation,
+                "was answered with a success status, but the response could not be mapped "
+                "to a work order",
+            ) from exc
 
     async def _rest_get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Fetch a single work order from the REST API."""
@@ -888,12 +1004,14 @@ class GenericCmmsConnector:
         httpx = _require_httpx()
         path = config["path"].replace("{id}", path_segment(work_order_id))
         headers = self._rest_headers()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(self._rest_url(path), headers=headers)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-        return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+        with rest_errors("CMMS", "get work order"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(self._rest_url(path), headers=headers)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                body = resp.json()
+        return _parse_work_order(self._apply_mapping("work_orders", body))
 
     async def _rest_update_work_order(
         self,
@@ -903,7 +1021,15 @@ class GenericCmmsConnector:
         assigned_to: str | None = None,
         description: str | None = None,
     ) -> WorkOrder:
-        """Update a work order via the REST API and re-fetch."""
+        """Update a work order via the REST API and re-fetch.
+
+        A failure says whether the CMMS may have applied the update (see
+        :func:`~machina.connectors.cmms._http_errors.rest_errors`). Once the
+        CMMS has answered with a success status, a failure to read the work
+        order back (or to decode or map the response that replaces that read)
+        is reported as an update whose outcome is unknown, never as a failed
+        update a caller might repeat.
+        """
         config = self._require_endpoint("update_work_order")
         httpx = _require_httpx()
         path = config["path"].replace("{id}", path_segment(work_order_id))
@@ -923,11 +1049,12 @@ class GenericCmmsConnector:
             payload = {field_map.get(k, k): v for k, v in payload.items()}
 
         headers = {**self._rest_headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.request(
-                method, self._rest_url(path), headers=headers, json=payload
-            )
-            resp.raise_for_status()
+        with rest_errors("CMMS", "update work order", write=True):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.request(
+                    method, self._rest_url(path), headers=headers, json=payload
+                )
+                resp.raise_for_status()
 
         logger.info(
             "work_order_updated",
@@ -939,12 +1066,30 @@ class GenericCmmsConnector:
         # PATCH response directly so update works without a separate GET
         # endpoint.
         if "get_work_order" in self._endpoints:
-            updated = await self.get_work_order(work_order_id)
-            if updated is None:
-                raise ConnectorError(f"Work order {work_order_id} not found after update")
+            try:
+                updated = await self.get_work_order(work_order_id)
+                if updated is None:
+                    raise ConnectorError("the work order was not found")
+            except Exception as exc:
+                # Any failure here (HTTP or transport, a body the mapping
+                # cannot parse, a 404) follows a success status for the update.
+                logger.warning(
+                    "work_order_update_not_read_back",
+                    connector="GenericCmmsConnector",
+                    operation="update_work_order",
+                    work_order_id=work_order_id,
+                    error_type=type(exc).__name__,
+                )
+                raise write_outcome_unknown(
+                    "CMMS",
+                    "update work order",
+                    "was answered with a success status, but reading the work order back failed",
+                ) from exc
             return updated
         if resp.content:
-            return _parse_work_order(self._apply_mapping("work_orders", resp.json()))
+            with rest_errors("CMMS", "update work order", write=True):
+                body = resp.json()
+            return self._map_write_response("update work order", work_order_id, body)
         # No response body and no get endpoint — return a minimal WO
         return WorkOrder(
             id=work_order_id,
@@ -956,16 +1101,156 @@ class GenericCmmsConnector:
     async def _rest_read_maintenance_plans(self) -> list[MaintenancePlan]:
         """Fetch maintenance plans from the REST API."""
         config = self._require_endpoint("read_maintenance_plans")
-        httpx = _require_httpx()
-        path = config["path"]
-        headers = self._rest_headers()
-        results: list[MaintenancePlan] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async for raw in self._pagination.iterate(client, self._rest_url(path), headers):
-                results.append(
-                    _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
+        path, params = self._split_endpoint_path(config["path"], "read_maintenance_plans")
+        raw_items = await self._rest_read_pages(
+            "read maintenance plans", self._rest_url(path), params
+        )
+        return [
+            _parse_maintenance_plan(self._apply_mapping("maintenance_plans", raw))
+            for raw in raw_items
+        ]
+
+    async def _rest_read_spare_parts(self, *, asset_id: str, sku: str) -> list[SparePart]:
+        """Fetch spare parts from the configured ``read_spare_parts`` endpoint.
+
+        ``asset_id`` and ``sku`` are sent as query params for the CMMS to
+        filter on, then checked again on the records it returns: a CMMS that
+        ignores unknown params returns its whole catalog, which must not reach
+        the caller as one asset's parts. A part whose SKU differs is dropped.
+        A part listing no compatible assets is kept, since the CMMS may filter
+        on a relation it does not return. That keeps an uncertainty: the
+        absence of contradictory metadata is not proof of compatibility, so a
+        CMMS that ignores ``asset_id`` and lists no compatibility answers with
+        its whole catalog as the asset's parts. A part whose ``compatible_assets``
+        list excludes the asset shows that the CMMS did not filter by asset:
+        it is dropped, and the read is refused if no part lists the asset or
+        some list no compatible assets, since those cannot be attributed.
+        Iteration uses the configured pagination strategy.
+
+        Raises:
+            ConnectorError: If the endpoint is not configured, the call fails,
+                or the CMMS answers with parts listed for other assets and
+                none listed for the asset, or with parts listed for other
+                assets and parts that list none.
+        """
+        config = self._require_endpoint("read_spare_parts")
+        path, params = self._split_endpoint_path(config["path"], "read_spare_parts")
+        if asset_id:
+            params["asset_id"] = asset_id
+        if sku:
+            params["sku"] = sku
+        raw_items = await self._rest_read_pages("read spare parts", self._rest_url(path), params)
+        served = [_parse_spare_part(self._apply_mapping("spare_parts", raw)) for raw in raw_items]
+        parts = [sp for sp in served if not sku or sp.sku == sku]
+        unlisted = [sp for sp in parts if not sp.compatible_assets]
+        listed = [sp for sp in parts if asset_id in sp.compatible_assets] if asset_id else parts
+        other_assets = len(parts) - len(unlisted) - len(listed) if asset_id else 0
+        if len(parts) < len(served) or other_assets:
+            logger.warning(
+                "spare_parts_contradicting_filters_dropped",
+                connector="GenericCmmsConnector",
+                operation="read_spare_parts",
+                asset_id=asset_id,
+                dropped=len(served) - len(parts) + other_assets,
+                unattributed=len(unlisted) if other_assets else 0,
+            )
+        if not other_assets:
+            return parts
+        if unlisted or not listed:
+            raise ConnectorError(
+                "CMMS read spare parts: the CMMS answered with parts listed for other assets, "
+                "so the asset's parts could not be verified. Check that the 'read_spare_parts' "
+                "endpoint filters by asset."
+            )
+        return listed
+
+    async def _rest_read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
+        """Fetch an asset's history from the configured ``read_maintenance_history`` endpoint.
+
+        The asset ID goes through
+        :func:`~machina.connectors.cmms.paths.path_segment`, so it can neither
+        address another resource nor, empty, read as "no filter".
+        ``{asset_id}`` may sit in the path or its query string; without it the
+        ID is sent as the ``asset_id`` query param. Records are read through
+        the work-order mapping and returned as served, without status
+        filtering, so point the endpoint at the CMMS's history view.
+        Iteration uses the configured pagination strategy.
+
+        A record whose asset ID differs from the requested one is dropped. A
+        record without an asset ID is kept: an endpoint scoped to the asset
+        commonly omits it. When the CMMS answers with records of other
+        assets, it did not filter by asset, so records without an asset ID
+        cannot be attributed and an answer with no record of the asset cannot
+        stand for an empty history: both are refused. So is an answer in
+        which no record names its asset when the asset ID was sent in the
+        query string, which a CMMS may ignore, rather than in the path.
+
+        Raises:
+            ConnectorError: If the endpoint is not configured, the asset ID is
+                ``.`` or ``..``, the call fails, or the answer cannot be
+                attributed to the asset (see above).
+            ConnectorConfigError: If the endpoint path gives a query
+                parameter more than once.
+        """
+        config = self._require_endpoint("read_maintenance_history")
+        segment = path_segment(asset_id)
+        template: str = config["path"]
+        # A CMMS must route a request by its path, but may ignore a query param.
+        path_scoped = "{asset_id}" in template.partition("?")[0]
+        if "{asset_id}" in template:
+            # Splitting after the substitution decodes the ID again inside the
+            # query string, where httpx re-encodes it as a param value.
+            path, params = self._split_endpoint_path(
+                template.replace("{asset_id}", segment), "read_maintenance_history"
+            )
+        else:
+            path, params = self._split_endpoint_path(template, "read_maintenance_history")
+            params["asset_id"] = asset_id
+        raw_items = await self._rest_read_pages(
+            "read maintenance history", self._rest_url(path), params
+        )
+        records = [self._apply_mapping("work_orders", raw) for raw in raw_items]
+        kept: list[dict[str, Any]] = []
+        unattributed = other_assets = 0
+        for record in records:
+            record_asset = record.get("asset_id")
+            if record_asset is None or not str(record_asset).strip():
+                unattributed += 1
+                kept.append(record)
+            elif str(record_asset) == asset_id:
+                kept.append(record)
+            else:
+                other_assets += 1
+        if other_assets:
+            logger.warning(
+                "maintenance_history_other_assets_dropped",
+                connector="GenericCmmsConnector",
+                operation="read_maintenance_history",
+                asset_id=asset_id,
+                dropped=other_assets,
+                unattributed=unattributed,
+            )
+            if unattributed or not kept:
+                raise ConnectorError(
+                    "CMMS read maintenance history: the CMMS answered with records of other "
+                    "assets, so the asset's history could not be verified. Check that the "
+                    "'read_maintenance_history' endpoint filters by asset."
                 )
-        return results
+        elif kept and unattributed == len(kept) and not path_scoped:
+            logger.warning(
+                "maintenance_history_unattributed",
+                connector="GenericCmmsConnector",
+                operation="read_maintenance_history",
+                asset_id=asset_id,
+                unattributed=unattributed,
+            )
+            raise ConnectorError(
+                "CMMS read maintenance history: no record names its asset, and the asset ID "
+                "was sent as a query parameter, which the CMMS may have ignored, so the "
+                "asset's history could not be verified. Map the records' asset ID, or put "
+                "{asset_id} in the endpoint path."
+            )
+        return [_parse_work_order(record) for record in kept]
 
     # ------------------------------------------------------------------
     # Endpoint configuration helpers
@@ -987,7 +1272,7 @@ class GenericCmmsConnector:
             )
             raise ConnectorError(
                 f"{operation} is not configured for this CMMS. "
-                f"Add an '{operation}' entry to the 'endpoints' parameter."
+                f"Add '{operation}' under the 'endpoints' parameter."
             )
         return config
 
@@ -1057,7 +1342,8 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
             if data.get("status") is not None
             else WorkOrderStatus.CREATED
         ),
-        asset_id=str(data.get("asset_id", "")),
+        # A null asset ID reads as missing, not as the asset 'None'.
+        asset_id=str(data["asset_id"]) if data.get("asset_id") is not None else "",
         description=str(data.get("description", "")),
         failure_mode=data.get("failure_mode"),
         assigned_to=data.get("assigned_to"),
@@ -1071,18 +1357,40 @@ def _parse_work_order(data: dict[str, Any]) -> WorkOrder:
 
 
 def _parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Parse a dict into a SparePart."""
+    """Parse a dict into a SparePart, tolerating missing and null fields."""
+    # ``or`` defaults so an explicit ``null``, common in REST payloads, is
+    # treated like a missing field: ``int(None)`` would raise, and ``str(None)``
+    # would mint the SKU 'None' where a null SKU must instead fail SparePart's
+    # empty-SKU validation.
     return SparePart(
-        sku=str(data.get("sku", "")),
-        name=str(data.get("name", "")),
-        manufacturer=str(data.get("manufacturer", "")),
-        compatible_assets=data.get("compatible_assets", []),
-        stock_quantity=int(data.get("stock_quantity", 0)),
-        reorder_point=int(data.get("reorder_point", 0)),
-        lead_time_days=int(data.get("lead_time_days", 0)),
-        unit_cost=float(data.get("unit_cost", 0.0)),
-        warehouse_location=str(data.get("warehouse_location", "")),
+        sku=str(data.get("sku") or ""),
+        name=str(data.get("name") or ""),
+        manufacturer=str(data.get("manufacturer") or ""),
+        # Asset IDs are matched as text; a CMMS may list numeric ones.
+        compatible_assets=_text_items(data.get("compatible_assets")),
+        stock_quantity=int(data.get("stock_quantity") or 0),
+        reorder_point=int(data.get("reorder_point") or 0),
+        lead_time_days=int(data.get("lead_time_days") or 0),
+        unit_cost=float(data.get("unit_cost") or 0.0),
+        warehouse_location=str(data.get("warehouse_location") or ""),
     )
+
+
+def _text_items(value: Any) -> Any:
+    """Return a list's whole-number and text items as text; anything else as is.
+
+    ``None`` reads as an empty list. A value that is not a list, or a list
+    with an item of another type, is returned unchanged for the domain model
+    to validate (and refuse).
+    """
+    if value is None:
+        return []
+    if isinstance(value, list) and all(
+        isinstance(item, str) or (isinstance(item, int) and not isinstance(item, bool))
+        for item in value
+    ):
+        return [str(item) for item in value]
+    return value
 
 
 def _parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:

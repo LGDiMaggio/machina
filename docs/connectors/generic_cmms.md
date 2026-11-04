@@ -38,23 +38,96 @@ with an empty, `.` or `..` part between `/` or `\` separators, is refused with
 record does not exist: `get_asset()` and `get_work_order()` return `None`. A create sends the
 work order with Machina's work-order ID; with a `yaml_mapping` that has
 `reverse_fields`, only the mapped fields are sent, so map `id` there to keep
-it. Three more
-operations are available when you configure their `endpoints` (paths relative
-to `url`, `{id}` replaced by the work-order ID):
+it. Five more operations are available when you configure their `endpoints`
+(paths relative to `url`; a query string in the path is kept):
 
 | `endpoints` key | Enables | Example |
 |-----------------|---------|---------|
 | `get_work_order` | `get_work_order` | `{path: "work_orders/{id}"}` |
 | `update_work_order` | `update_work_order`, `close_work_order`, `cancel_work_order` | `{path: "work_orders/{id}", method: PATCH, field_map: {status: state}}` |
 | `read_maintenance_plans` | `read_maintenance_plans` | `{path: "maintenance_plans"}` |
+| `read_spare_parts` | `read_spare_parts` | `{path: "spare_parts"}` |
+| `read_maintenance_history` | `read_maintenance_history` | `{path: "assets/{asset_id}/history"}` |
 
-An update sends `{"status": …, "assigned_to": …, "description": …}` (only the
+`{id}` is replaced by the work-order ID and `{asset_id}` by the asset ID. An
+update sends `{"status": …, "assigned_to": …, "description": …}` (only the
 fields given, renamed through `field_map`) and re-reads the work order when
 `get_work_order` is configured. Maintenance plans are read with an `interval`
 of either a number of days or `{days, weeks, months, hours}`.
 
-REST mode reads no spare parts and no maintenance history: those methods
-return empty lists. Calls are single attempts, without retries.
+Spare parts are read with the `asset_id` and `sku` filters sent as query
+parameters for the CMMS to apply, and checked again on the records it returns,
+so a CMMS that ignores the parameters cannot pass its whole catalog off as one
+asset's parts. A part with a different SKU is dropped. A part with no
+`compatible_assets` list is kept, since the CMMS may filter on a relation it
+does not return (a bill of materials, say). Such a part is not shown to fit
+the asset: the absence of contradictory metadata is not proof of
+compatibility, and a CMMS that ignores the `asset_id` parameter and lists no
+compatibility answers with its whole catalog as the asset's parts. Check that
+the endpoint filters by asset. A part whose `compatible_assets` list excludes the asset is
+dropped, and it shows that the CMMS did not filter by asset: the read is then
+refused with `ConnectorError` if no part lists the asset, or if some parts
+list none and cannot be attributed. Asset IDs in `compatible_assets` are
+compared as text, so numeric ones match.
+
+Maintenance history is read per asset: `{asset_id}` can sit in the path or the
+query string (`history?equipment={asset_id}`), and without it the ID is sent
+as `?asset_id=`. Point this endpoint at the CMMS's history view (the asset's
+completed work orders): the records are read as work orders and returned as
+served, without status filtering. A record whose `asset_id` names another
+asset is dropped, and a record without an `asset_id` is kept, since an
+endpoint scoped to the asset commonly omits it. The read is refused with
+`ConnectorError` when the answer cannot be attributed to the asset:
+
+- the CMMS answered with records of other assets (it did not filter by
+  asset), and none of the records is the asset's, or some have no `asset_id`;
+- no record has an `asset_id`, and the asset ID was sent in the query string,
+  which a CMMS may ignore. Map the records' asset ID, or use an endpoint that
+  takes `{asset_id}` in its path.
+
+An empty answer is an empty history; a failed request (a 404 included) raises
+`ConnectorError`. Without their endpoints REST mode declares neither
+capability, and calling either method raises `ConnectorError` instead of
+returning an empty list. An endpoint path that gives a query parameter more
+than once is refused with `ConnectorConfigError`, since only one value could
+be sent. Calls are single attempts, without retries.
+
+### Errors
+
+A failed call raises `ConnectorError`, never an httpx exception. The message
+names the operation and the HTTP status or the kind of failure, never the URL
+or the response body; the original exception is chained as `__cause__`.
+
+| Failure | Raises | Message |
+|---------|--------|---------|
+| HTTP 401/403 | `ConnectorAuthError` | `CMMS read assets failed: HTTP 401` |
+| Other error status | `ConnectorError` | `CMMS read assets failed: HTTP 500` |
+| Timeout | `ConnectorTimeoutError` | `CMMS read assets timed out` |
+| Other transport failure | `ConnectorError` | `CMMS read assets failed: ConnectError` |
+| Malformed `url` or endpoint path | `ConnectorConfigError` | `CMMS read assets failed: invalid URL (check 'url' and the endpoint paths)` |
+| A credential or other header value that is not ASCII | `ConnectorConfigError` | `CMMS read assets failed: a request header is not ASCII (check the credentials)` |
+| A body or query value httpx cannot encode as UTF-8 (an unpaired surrogate) | `ConnectorError` | `CMMS read spare parts failed: a request value cannot be encoded as UTF-8` |
+| 2xx body that is not JSON (an HTML login page from a proxy, say) | `ConnectorError` | `CMMS read assets failed: response is not JSON` |
+| 2xx list response without a list of records where the pagination expects one (an error envelope, or a wrapped list read without `items_path`), or with a record that is not an object | `ConnectorSchemaError` | `CMMS read assets failed: response is not a JSON list of records (set the pagination 'items_path' if the list is wrapped in an object)` |
+
+The body is read as UTF-8 whatever charset the response declares, so JSON in
+another encoding fails with `response is not UTF-8`. A 404 on a single-record
+`GET` still means the record does not exist.
+
+A failed create or update also says whether the CMMS may have applied it:
+
+| Failure | Message ends with |
+|---------|-------------------|
+| Before the request was sent (connection refused, connect or pool timeout, unsupported URL scheme, malformed URL, a value httpx cannot encode) | `No request was sent to the CMMS.` (`CMMS create work order failed: ConnectError. No request was sent to the CMMS.`) |
+| HTTP 4xx | nothing more: the CMMS refused the write (`CMMS create work order failed: HTTP 422`) |
+| Any other error status (a 5xx, or a 3xx: redirects are not followed, and 303 See Other can answer an applied write), a timeout or a broken connection after sending began, a 2xx response that is not JSON or that cannot be mapped to a work order, or, after an accepted update, a failed re-read | `The write operation's outcome is unknown. It may have been applied. Check the CMMS before retrying.` |
+
+For example, `CMMS create work order was answered with HTTP 502. The write
+operation's outcome is unknown. It may have been applied. Check the CMMS
+before retrying.` These are logged as `rest_write_outcome_unknown`. A create
+must return the created record and an update without `get_work_order` returns
+the CMMS's response (which may also be empty), so their responses must be
+JSON.
 
 ### YAML Configuration
 
@@ -70,6 +143,8 @@ connectors:
         get_work_order: {path: "work_orders/{id}"}
         update_work_order: {path: "work_orders/{id}", method: PATCH}
         read_maintenance_plans: {path: "maintenance_plans"}
+        read_spare_parts: {path: "spare_parts"}
+        read_maintenance_history: {path: "assets/{asset_id}/history"}
 ```
 
 [`deploy/docker/`](../deployment/docker.md) runs this configuration against a
@@ -103,7 +178,11 @@ with an error that names the problem, never the secret.
 
 Every strategy accepts `items_path`, a JMESPath expression that extracts the
 item list from a wrapped response (e.g. `data`); the cursor strategy defaults
-it to `items`.
+it to `items`. Only a JSON list of objects, at `items_path` when one is set,
+reads as a page of records, and only an empty list as an empty page. A page
+without that list (an error envelope, a missing or `null` path) or with an
+item that is not an object raises `MalformedPageError`, a
+`ConnectorSchemaError`, instead of reading as empty or shorter.
 
 ### Field Mapping
 
@@ -157,7 +236,11 @@ The request paths always come from the REST contract above: the mapping's
 `endpoint`, `create_endpoint` and `root` entries are validated but not used to
 build requests. For simple renames, the Python-only `schema_mapping` parameter
 also accepts `{"assets": {"asset_id": "id"}}` or JMESPath extraction
-(`{"assets": {"_fields": {"id": "equipment.id"}}}`).
+(`{"assets": {"_fields": {"id": "equipment.id"}}}`). Maintenance-history
+records go through the `work_order` mapping. Spare parts have no
+`yaml_mapping` entry: their records need Machina's field names (`sku`, `name`,
+`stock_quantity`, `compatible_assets`, …) or a `schema_mapping` under
+`spare_parts`.
 
 ### Python
 
@@ -197,11 +280,11 @@ exists returns the existing record.
 | `read_assets` | Yes | Yes |
 | `read_work_orders` | Yes | Yes |
 | `create_work_order` | Yes | Yes |
-| `read_spare_parts` | Declared, but returns `[]` | Yes |
-| `read_maintenance_history` | Declared, but returns `[]` | Yes (completed and closed work orders) |
 | `get_work_order` | With the `get_work_order` endpoint | Yes |
 | `update_work_order`, `close_work_order`, `cancel_work_order` | With the `update_work_order` endpoint | Yes |
 | `read_maintenance_plans` | With the `read_maintenance_plans` endpoint | Yes |
+| `read_spare_parts` | With the `read_spare_parts` endpoint | Yes |
+| `read_maintenance_history` | With the `read_maintenance_history` endpoint | Yes (completed and closed work orders) |
 | `read_failure_modes` | No | When `failure_modes.json` exists |
 
 Capabilities are computed per instance, from the mode and the configured
