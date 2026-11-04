@@ -22,7 +22,9 @@ connectors:
       # Optional REST endpoints (paths relative to url). Each one adds tools:
       # get_work_order → machina_get_work_order; update_work_order →
       # machina_update/close/cancel_work_order; read_maintenance_plans →
-      # machina_get_maintenance_plan.
+      # machina_get_maintenance_plan; read_spare_parts →
+      # machina_list_spare_parts; read_maintenance_history →
+      # machina_get_maintenance_history.
       endpoints:
         get_work_order:
           path: "work_orders/{id}"
@@ -31,6 +33,10 @@ connectors:
           method: PATCH
         read_maintenance_plans:
           path: "maintenance_plans"
+        read_spare_parts:
+          path: "spare_parts"
+        read_maintenance_history:
+          path: "assets/{asset_id}/history"
 
 # Writes are logged and answered with a [SANDBOX] result until you set
 # MACHINA_SANDBOX_MODE=false.

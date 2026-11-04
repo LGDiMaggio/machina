@@ -716,6 +716,8 @@ class TestDynamicCapabilities:
         assert "cancel_work_order" in caps
         assert "get_work_order" in caps
         assert "read_maintenance_plans" in caps
+        assert "read_spare_parts" in caps
+        assert "read_maintenance_history" in caps
 
     def test_rest_mode_base_only(self) -> None:
         conn = GenericCmmsConnector(url="http://example.com/api", api_key="k")
@@ -725,6 +727,29 @@ class TestDynamicCapabilities:
         assert "update_work_order" not in caps
         assert "get_work_order" not in caps
         assert "read_maintenance_plans" not in caps
+        # No REST source for these reads without their endpoints: declaring
+        # them would offer tools that answer every call with an empty list.
+        assert "read_spare_parts" not in caps
+        assert "read_maintenance_history" not in caps
+
+    @pytest.mark.parametrize(
+        ("endpoint", "absent"),
+        [
+            ("read_spare_parts", "read_maintenance_history"),
+            ("read_maintenance_history", "read_spare_parts"),
+        ],
+    )
+    def test_rest_mode_read_endpoint_declares_only_its_capability(
+        self, endpoint: str, absent: str
+    ) -> None:
+        conn = GenericCmmsConnector(
+            url="http://example.com/api",
+            api_key="k",
+            endpoints={endpoint: {"path": "anything"}},
+        )
+        caps = conn.capabilities
+        assert endpoint in caps
+        assert absent not in caps
 
     def test_rest_mode_with_endpoints(self) -> None:
         conn = GenericCmmsConnector(
@@ -1187,6 +1212,135 @@ class TestPaginationStrategies:
         items = [item async for item in strategy.iterate(client, "http://x", {})]
         assert [item["id"] for item in items] == ["A"]
         assert len(client.calls) == 1
+
+
+_LIST_STRATEGIES = ["NoPagination", "OffsetLimitPagination", "PageNumberPagination"]
+_ALL_STRATEGIES = [*_LIST_STRATEGIES, "CursorPagination"]
+
+
+def _strategy(name: str, **kwargs: object) -> object:
+    import machina.connectors.cmms as cmms
+
+    return getattr(cmms, name)(**kwargs)
+
+
+class TestMalformedPages:
+    """A page answered with 2xx that holds no list of records is an error.
+
+    Only a JSON list (at ``items_path`` when one is set) reads as the page's
+    records, and only an empty list as an empty page: an error envelope, a
+    wrapped list without its ``items_path`` or a record that is not an
+    object must not pass for an empty or shorter collection.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _LIST_STRATEGIES)
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"error": "session expired"}, id="error-envelope"),
+            pytest.param({"data": [{"id": "A"}]}, id="wrapped-list"),
+            pytest.param("OK", id="string"),
+            pytest.param(None, id="null"),
+        ],
+    )
+    async def test_body_that_is_not_a_list_is_malformed(self, name: str, body: object) -> None:
+        from machina.connectors.cmms.pagination import MalformedPageError
+
+        client = _FakeClient(responses=[_FakeResponse(200, body)])
+        with pytest.raises(MalformedPageError) as exc_info:
+            _ = [item async for item in _strategy(name).iterate(client, "http://x", {})]  # type: ignore[attr-defined]
+        assert str(exc_info.value) == (
+            "response is not a JSON list of records (set the pagination 'items_path' "
+            "if the list is wrapped in an object)"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _ALL_STRATEGIES)
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"error": "session expired"}, id="missing"),
+            pytest.param({"data": None}, id="null"),
+            pytest.param({"data": {"id": "A"}}, id="object"),
+            pytest.param([{"id": "A"}], id="bare-list"),
+        ],
+    )
+    async def test_items_path_without_a_list_is_malformed(self, name: str, body: object) -> None:
+        from machina.connectors.cmms.pagination import MalformedPageError
+
+        client = _FakeClient(responses=[_FakeResponse(200, body)])
+        strategy = _strategy(name, items_path="data")
+        with pytest.raises(MalformedPageError) as exc_info:
+            _ = [item async for item in strategy.iterate(client, "http://x", {})]  # type: ignore[attr-defined]
+        assert str(exc_info.value) == (
+            "response has no list of records at the pagination 'items_path'"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _LIST_STRATEGIES)
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(["P-201", "P-202"], id="ids-only"),
+            pytest.param([{"id": "A"}, None], id="null-item"),
+            pytest.param([{"id": "A"}, [{"id": "B"}]], id="nested-list"),
+        ],
+    )
+    async def test_record_that_is_not_an_object_is_malformed(
+        self, name: str, body: object
+    ) -> None:
+        """Dropping it would return a shorter (or empty) collection without a word."""
+        from machina.connectors.cmms.pagination import MalformedPageError
+
+        client = _FakeClient(responses=[_FakeResponse(200, body)])
+        with pytest.raises(
+            MalformedPageError, match=r"^response lists a record that is not a JSON object$"
+        ):
+            _ = [item async for item in _strategy(name).iterate(client, "http://x", {})]  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "kwargs", "body"),
+        [
+            pytest.param("NoPagination", {}, [], id="none"),
+            pytest.param("NoPagination", {"items_path": "data"}, {"data": []}, id="none-path"),
+            pytest.param("OffsetLimitPagination", {}, [], id="offset"),
+            pytest.param(
+                "PageNumberPagination", {"items_path": "d.rows"}, {"d": {"rows": []}}, id="page"
+            ),
+            pytest.param("CursorPagination", {}, {"items": [], "next_cursor": None}, id="cursor"),
+        ],
+    )
+    async def test_an_empty_list_is_an_empty_page(
+        self, name: str, kwargs: dict[str, object], body: object
+    ) -> None:
+        client = _FakeClient(responses=[_FakeResponse(200, body)])
+        strategy = _strategy(name, **kwargs)
+        assert [item async for item in strategy.iterate(client, "http://x", {})] == []  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_later_page_is_an_error_not_the_end(self) -> None:
+        from machina.connectors.cmms import OffsetLimitPagination
+        from machina.connectors.cmms.pagination import MalformedPageError
+
+        client = _FakeClient(
+            responses=[
+                _FakeResponse(200, [{"id": "A"}, {"id": "B"}]),
+                _FakeResponse(200, {"error": "rate limited"}),
+            ]
+        )
+        seen: list[object] = []
+        with pytest.raises(MalformedPageError):
+            async for item in OffsetLimitPagination(page_size=2).iterate(client, "http://x", {}):
+                seen.append(item["id"])
+        assert seen == ["A", "B"]
+
+    def test_malformed_page_is_a_connector_schema_error(self) -> None:
+        from machina.connectors.cmms.pagination import MalformedPageError
+        from machina.exceptions import ConnectorSchemaError
+
+        assert issubclass(MalformedPageError, ConnectorSchemaError)
 
 
 class TestNestedSchemaMapping:

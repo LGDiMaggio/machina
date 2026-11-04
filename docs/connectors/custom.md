@@ -113,6 +113,9 @@ pagination = CursorPagination(
 All strategies accept an optional `items_path` (JMESPath) for extracting
 the list from a wrapped response like `{"data": [...], "meta": {...}}`.
 `CursorPagination` requires it because it always walks a wrapped object.
+A page that holds no list of objects there (or, without `items_path`, a body
+that is not a list of objects) raises `MalformedPageError`, a
+`ConnectorSchemaError`, rather than reading as an empty page.
 
 ### Schema mapping
 
@@ -391,6 +394,8 @@ REST mocking or VCR for recorded responses.
 ::: machina.connectors.cmms.pagination.PageNumberPagination
 
 ::: machina.connectors.cmms.pagination.CursorPagination
+
+::: machina.connectors.cmms.pagination.MalformedPageError
 
 ### Document store
 

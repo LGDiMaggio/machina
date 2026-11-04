@@ -183,7 +183,7 @@
         {
           "capability": "read_maintenance_history",
           "method": "read_maintenance_history",
-          "configurable": false
+          "configurable": true
         },
         {
           "capability": "read_maintenance_plans",
@@ -193,7 +193,7 @@
         {
           "capability": "read_spare_parts",
           "method": "read_spare_parts",
-          "configurable": false
+          "configurable": true
         },
         {
           "capability": "read_work_orders",
@@ -671,12 +671,13 @@
       "value": "read_maintenance_history",
       "method": "read_maintenance_history",
       "provided_by": [
-        "generic_cmms",
         "maximo",
         "sap_pm",
         "upkeep"
       ],
-      "configurable_in": [],
+      "configurable_in": [
+        "generic_cmms"
+      ],
       "orphaned": false,
       "orphan_note": ""
     },
@@ -718,12 +719,13 @@
       "value": "read_spare_parts",
       "method": "read_spare_parts",
       "provided_by": [
-        "generic_cmms",
         "maximo",
         "sap_pm",
         "upkeep"
       ],
-      "configurable_in": [],
+      "configurable_in": [
+        "generic_cmms"
+      ],
       "orphaned": false,
       "orphan_note": ""
     },

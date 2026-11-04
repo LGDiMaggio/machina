@@ -86,6 +86,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,excel,calendar,litellm,mcp]"
+          # FastAPI, at the mock CMMS image's pin, for the mock-CMMS contract
+          # test. The assignment fails the step if the pin is missing.
+          fastapi_pin="$(grep -E '^fastapi==[0-9.]+$' deploy/docker/mock-cmms/constraints.txt)"
+          pip install "$fastapi_pin"
 
       - name: Tests (incl. previously-skipped optional-dep suites)
         run: pytest tests/ -v --cov=machina --cov-report=xml

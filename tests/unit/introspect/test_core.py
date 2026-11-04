@@ -243,6 +243,31 @@ def test_excel_writes_are_configurable_not_guaranteed(spine: Spine) -> None:
         assert not (guaranteed & configurable)
 
 
+def test_generic_cmms_optional_capabilities_are_configurable_not_guaranteed(
+    spine: Spine,
+) -> None:
+    """generic_cmms guarantees only its base set; every optional cap is configurable.
+
+    An ``_OPTIONAL_CAPABILITIES`` entry is declared only in local mode or when
+    its REST endpoint is configured, so a config-less ``describe()`` must
+    annotate it "configurable". Comparing against the connector's own map also
+    pins the core's hard-coded configurable set: an optional capability the
+    core forgets would silently drop out of the spine.
+    """
+    from machina.connectors.cmms.generic import GenericCmmsConnector
+
+    info = next(c for c in spine.connectors if c.type == "generic_cmms")
+    guaranteed = {cc.capability for cc in info.capabilities if not cc.configurable}
+    configurable = {cc.capability for cc in info.capabilities if cc.configurable}
+    assert guaranteed == {c.value for c in GenericCmmsConnector._BASE_CAPABILITIES}
+    assert configurable == {c.value for c in GenericCmmsConnector._OPTIONAL_CAPABILITIES} | {
+        Capability.READ_FAILURE_MODES.value
+    }
+    # No REST source for these reads unless their endpoint is configured.
+    assert Capability.READ_SPARE_PARTS.value in configurable
+    assert Capability.READ_MAINTENANCE_HISTORY.value in configurable
+
+
 def test_calendar_nonical_backend_yields_full_capabilities_at_runtime() -> None:
     """The class-level base is the minimum, but a writable backend still gets
     the FULL set at runtime — introspection must not have weakened behavior.

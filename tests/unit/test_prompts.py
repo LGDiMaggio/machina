@@ -146,8 +146,7 @@ class TestFormatSpareParts:
         """A successful lookup that found nothing, distinct from "not checked".
 
         It reports what the lookup returned rather than what the CMMS holds: a
-        connector can answer ``[]`` without asking the CMMS (Generic CMMS in
-        REST mode reads no spare parts).
+        connector can answer ``[]`` for parts the CMMS does have.
         """
         assert format_spare_parts_context([]) == (
             "**Spare Parts:** the spare-parts lookup for this asset returned none."

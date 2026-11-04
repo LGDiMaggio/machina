@@ -248,8 +248,8 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     An empty list is worded apart from a lookup that never ran or failed (see
     ``spare_parts_unchecked`` in :func:`build_context_message`). It says what
     the lookup returned, not what the CMMS holds: a connector can return
-    ``[]`` without asking the CMMS (Generic CMMS in REST mode reads no spare
-    parts).
+    ``[]`` for parts the CMMS does have (a Generic CMMS list endpoint whose
+    pagination ``items_path`` matches nothing in the response reads as empty).
 
     Args:
         parts: List of spare parts.

@@ -7,8 +7,8 @@ YAML/JSON in the future.
 
 Strategies cover the three common pagination patterns found in CMMS APIs:
 
-* :class:`NoPagination` — single-shot request, response is a JSON list or a
-  dict wrapping a list.
+* :class:`NoPagination` — single-shot request, response is a JSON list, or a
+  dict wrapping a list at :attr:`items_path`.
 * :class:`OffsetLimitPagination` — ``?offset=X&limit=Y`` query params (UpKeep,
   Limble, and many REST APIs).
 * :class:`PageNumberPagination` — ``?page=N&per_page=M`` query params
@@ -28,10 +28,25 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 import jmespath
 from pydantic import BaseModel, Field
 
+from machina.exceptions import ConnectorSchemaError
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     import httpx
+
+
+class MalformedPageError(ConnectorSchemaError):
+    """A successful page whose body does not hold the list of records expected.
+
+    Raised by every strategy's ``iterate`` instead of reading the page as
+    empty: an error envelope (``{"error": ...}``), a wrapped list without the
+    matching ``items_path``, or a record that is not an object would
+    otherwise pass for an empty or shorter collection. Only a JSON list,
+    at ``items_path`` when one is set, reads as the page's records, and an
+    empty list as an empty page. The message describes the shape, never
+    the body.
+    """
 
 
 def _extract_items(data: Any, items_path: str | None) -> list[dict[str, Any]]:
@@ -40,17 +55,28 @@ def _extract_items(data: Any, items_path: str | None) -> list[dict[str, Any]]:
     When ``items_path`` is provided, it is interpreted as a JMESPath
     expression against the full response body. When absent, the response
     body itself is expected to be a JSON list.
+
+    Raises:
+        MalformedPageError: If there is no list where one is expected (the
+            path is missing or ``null`` included), or the list holds an item
+            that is not an object.
     """
     if items_path:
-        result = jmespath.search(items_path, data)
-        if result is None:
-            return []
-        if isinstance(result, list):
-            return [item for item in result if isinstance(item, dict)]
-        return []
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    return []
+        items = jmespath.search(items_path, data)
+        if not isinstance(items, list):
+            raise MalformedPageError(
+                "response has no list of records at the pagination 'items_path'"
+            )
+    elif isinstance(data, list):
+        items = data
+    else:
+        raise MalformedPageError(
+            "response is not a JSON list of records (set the pagination 'items_path' "
+            "if the list is wrapped in an object)"
+        )
+    if not all(isinstance(item, dict) for item in items):
+        raise MalformedPageError("response lists a record that is not a JSON object")
+    return items
 
 
 class NoPagination(BaseModel):
