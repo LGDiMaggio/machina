@@ -15,6 +15,14 @@ A 4xx status is the CMMS refusing the request. Any other failure happens
 after sending began, and the write may have been applied, so the message says
 its outcome is unknown instead of reporting a failure that invites a
 duplicating retry.
+
+The vendor connectors (SAP PM, Maximo, UpKeep) check most statuses
+themselves instead of calling ``raise_for_status()``; :func:`status_error`
+builds the same error for them. Some of their writes send a read first (SAP
+PM's CSRF token fetch, Maximo's work-order lookup), after which "no request
+was sent" would be untrue, so every write of theirs says
+:data:`WRITE_REQUEST_NOT_SENT` for a failure before the write request
+(:func:`write_not_sent` for one in such a read), never :data:`WRITE_NOT_SENT`.
 """
 
 from __future__ import annotations
@@ -46,6 +54,10 @@ WRITE_OUTCOME_UNKNOWN = (
 #: How the message of every write that failed before its request was sent ends.
 WRITE_NOT_SENT = "No request was sent to the CMMS."
 
+#: How it ends instead for the vendor connectors, some of whose writes send a
+#: read first (a token fetch, a lookup).
+WRITE_REQUEST_NOT_SENT = "The write request was not sent to the CMMS."
+
 _INVALID_URL = "invalid URL (check 'url' and the endpoint paths)"
 _NOT_ASCII = "a request header is not ASCII (check the credentials)"
 _NOT_UTF8 = "a request value cannot be encoded as UTF-8"
@@ -76,8 +88,62 @@ def write_outcome_unknown(
     return error_type(f"{vendor} {operation} {what_happened}. {WRITE_OUTCOME_UNKNOWN}")
 
 
+def status_error(
+    vendor: str, operation: str, status: int, *, write: bool = False
+) -> ConnectorError:
+    """Build the error for an HTTP error status, as :func:`rest_errors` raises it.
+
+    For a ``write``, a status other than 4xx (a 3xx, which redirects are not
+    followed to, or a 5xx) leaves the outcome unknown
+    (:func:`write_outcome_unknown`). Otherwise the message names the status
+    (``CMMS read assets failed: HTTP 500``), as
+    :class:`~machina.exceptions.ConnectorAuthError` for 401/403.
+
+    Args:
+        vendor: Label that opens the message, e.g. ``"Maximo"``.
+        operation: The request, e.g. ``"create work order"``.
+        status: The HTTP status code.
+        write: Whether the request may have changed the CMMS.
+
+    Returns:
+        The error, for the caller to raise.
+    """
+    # Only a 4xx refuses a write. A 3xx can follow an applied write (303 See
+    # Other is how POST-redirect-GET answers one) and a 5xx can come after the
+    # CMMS committed it.
+    if write and not 400 <= status < 500:
+        return write_outcome_unknown(vendor, operation, f"was answered with HTTP {status}")
+    message = f"{vendor} {operation} failed: HTTP {status}"
+    if status in (401, 403):
+        return ConnectorAuthError(message)
+    return ConnectorError(message)
+
+
+def write_not_sent(exc: ConnectorError) -> ConnectorError:
+    """Restate a failure before a write request was sent, as the same error type.
+
+    For a read that a write sends first, such as a token fetch or a lookup:
+    the message gains :data:`WRITE_REQUEST_NOT_SENT`, so the caller knows the
+    write cannot have been applied.
+
+    Args:
+        exc: The read's error. Its message must not carry the URL or a
+            response body (every error :func:`rest_errors` raises qualifies).
+
+    Returns:
+        The restated error, for the caller to raise ``from exc``.
+    """
+    return type(exc)(f"{str(exc).rstrip('.')}. {WRITE_REQUEST_NOT_SENT}")
+
+
 @contextmanager
-def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator[None]:
+def rest_errors(
+    vendor: str,
+    operation: str,
+    *,
+    write: bool = False,
+    not_sent: str = WRITE_NOT_SENT,
+) -> Iterator[None]:
     """Re-raise an httpx failure or an undecodable body as a connector error.
 
     For a read (the default):
@@ -108,10 +174,11 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
     * a failure before the request was sent (``ConnectError``,
       ``ConnectTimeout``, ``PoolTimeout``, ``UnsupportedProtocol``, a
       malformed URL, a value httpx cannot encode) reads as for a read and
-      ends with :data:`WRITE_NOT_SENT`. This holds only if the block sends
-      one request: a failure to open the connection for a second request
-      says nothing about the first, so a ``write`` block must not wrap more
-      than the write's own request;
+      ends with ``not_sent``. This holds only if the block sends one
+      request: a failure to open the connection for a second request says
+      nothing about the first, so a ``write`` block must not wrap more than
+      the write's own request (SAP PM's re-send after a CSRF challenge, and
+      a retry after a 429, follow a request the CMMS refused unprocessed);
     * a 4xx status is the CMMS refusing the request, and reads as for a
       read (``CMMS create work order failed: HTTP 422``);
     * any other error status (a 3xx, which redirects are not followed to,
@@ -134,6 +201,9 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
         vendor: Label that opens the message, e.g. ``"CMMS"``.
         operation: What the wrapped code does, e.g. ``"create work order"``.
         write: Whether the wrapped request may change the CMMS.
+        not_sent: The sentence a ``write`` that failed before its request
+            was sent ends with: :data:`WRITE_REQUEST_NOT_SENT` where the
+            operation sent a read first.
 
     Example:
         ```python
@@ -153,7 +223,7 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
     # connect_unix_socket, start_tls: the failures its own connection retries
     # cover), PoolTimeout while it waits for a pooled connection, and
     # UnsupportedProtocol before it picks one.
-    not_sent = (
+    before_sending = (
         httpx.ConnectError,
         httpx.ConnectTimeout,
         httpx.PoolTimeout,
@@ -162,18 +232,7 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
     try:
         yield
     except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        # Only a 4xx refuses a write. A 3xx can follow an applied write (303
-        # See Other is how POST-redirect-GET answers one) and a 5xx can come
-        # after the CMMS committed it.
-        if write and not 400 <= status < 500:
-            raise write_outcome_unknown(
-                vendor, operation, f"was answered with HTTP {status}"
-            ) from exc
-        message = f"{vendor} {operation} failed: HTTP {status}"
-        if status in (401, 403):
-            raise ConnectorAuthError(message) from exc
-        raise ConnectorError(message) from exc
+        raise status_error(vendor, operation, exc.response.status_code, write=write) from exc
     except httpx.HTTPError as exc:
         timeout = isinstance(exc, httpx.TimeoutException)
         error_type = ConnectorTimeoutError if timeout else ConnectorError
@@ -181,14 +240,14 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
         message = f"{vendor} {operation} " + ("timed out" if timeout else f"failed: {kind}")
         if not write:
             raise error_type(message) from exc
-        if isinstance(exc, not_sent):
-            raise error_type(f"{message}. {WRITE_NOT_SENT}") from exc
+        if isinstance(exc, before_sending):
+            raise error_type(f"{message}. {not_sent}") from exc
         when = "after sending began"
         failure = f"timed out {when}" if timeout else f"was interrupted {when}: {kind}"
         raise write_outcome_unknown(vendor, operation, failure, error_type=error_type) from exc
     except httpx.InvalidURL as exc:
         message = f"{vendor} {operation} failed: {_INVALID_URL}"
-        raise ConnectorConfigError(f"{message}. {WRITE_NOT_SENT}" if write else message) from exc
+        raise ConnectorConfigError(f"{message}. {not_sent}" if write else message) from exc
     except UnicodeEncodeError as exc:
         # httpx encodes while it builds the request, so nothing was sent:
         # header values as ASCII, a JSON body and query params as UTF-8 (which
@@ -198,7 +257,7 @@ def rest_errors(vendor: str, operation: str, *, write: bool = False) -> Iterator
         problem = _NOT_ASCII if exc.encoding == "ascii" else _NOT_UTF8
         message = f"{vendor} {operation} failed: {problem}"
         error = ConnectorConfigError if exc.encoding == "ascii" else ConnectorError
-        raise error(f"{message}. {WRITE_NOT_SENT}" if write else message) from None
+        raise error(f"{message}. {not_sent}" if write else message) from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         problem = "not UTF-8" if isinstance(exc, UnicodeDecodeError) else "not JSON"
         if write:

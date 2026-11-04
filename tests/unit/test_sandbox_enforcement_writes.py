@@ -209,7 +209,10 @@ class TestVendorWriteHelpersBlockedInSandbox:
         )
         with pytest.raises(SandboxViolationError):
             await conn._write_with_csrf(
-                "POST", f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification", {}
+                "POST",
+                f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
+                {},
+                operation="create maintenance notification",
             )
         assert httpx_mock.get_requests() == []
 
@@ -229,6 +232,7 @@ class TestVendorWriteHelpersBlockedInSandbox:
                 f"{conn.url}/API_MAINTENANCEORDER/SetMaintOrdToTechCompleted",
                 params={"MaintenanceOrder": "'4000001'"},
                 if_match='W/"etag"',
+                operation="SetMaintOrdToTechCompleted",
             )
         assert httpx_mock.get_requests() == []
 
@@ -242,5 +246,7 @@ class TestVendorWriteHelpersBlockedInSandbox:
             auth=ApiKeyHeaderAuth(header_name="apikey", value="k"),
         )
         with pytest.raises(SandboxViolationError):
-            await conn._patch_resource("mxwo", "WO-1", {"status": "COMP"})
+            await conn._patch_resource(
+                "mxwo", "WO-1", {"status": "COMP"}, operation="update work order"
+            )
         assert httpx_mock.get_requests() == []

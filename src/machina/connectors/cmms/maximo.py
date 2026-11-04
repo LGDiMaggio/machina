@@ -44,6 +44,13 @@ from pydantic import Field, ValidationError
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._http_errors import (
+    WRITE_REQUEST_NOT_SENT,
+    rest_errors,
+    status_error,
+    write_not_sent,
+    write_outcome_unknown,
+)
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth, BearerAuth
 from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import maximo as maximo_mapper
@@ -466,16 +473,19 @@ class MaximoConnector:
 
         Raises:
             ConnectorAuthError: If credentials are invalid.
+            ConnectorTimeoutError: If the server does not answer in time.
+            ConnectorConfigError: If ``url`` is malformed.
             ConnectorError: If the server is unreachable.
         """
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/maximo/oslc/whoami",
-                headers=self._headers(),
-            )
+        with rest_errors("Maximo", "health check"):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/maximo/oslc/whoami",
+                    headers=self._headers(),
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code != 200:
@@ -613,6 +623,17 @@ class MaximoConnector:
 
         Returns:
             The created work order with the server-assigned ``wonum``.
+
+        Raises:
+            ConnectorAuthError: If Maximo answers 401 or 403.
+            ConnectorError: If Maximo refuses the create (another 4xx), or it
+                fails before the request is sent (the message says the write
+                request was not sent). Any other failure (a 3xx or 5xx, a
+                timeout or a broken connection after sending began, a success
+                response that is not JSON or cannot be mapped to a work
+                order) leaves the outcome unknown, and the message says to
+                check Maximo before retrying; a timeout is a
+                :class:`~machina.exceptions.ConnectorTimeoutError`.
         """
         self._ensure_connected()
         httpx = _require_httpx()
@@ -625,26 +646,39 @@ class MaximoConnector:
         if work_order.assigned_to:
             payload["lead"] = work_order.assigned_to
         headers = {**self._headers(), "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "POST",
-                f"{self.url}/maximo/oslc/os/mxwo",
-                headers=headers,
-                json=payload,
-            )
-        if resp.status_code == 401:
-            raise ConnectorAuthError("Maximo authentication failed")
-        if resp.status_code not in (200, 201):
-            raise ConnectorError(f"Maximo create work order failed: HTTP {resp.status_code}")
-        body = resp.json()
+        operation = "create work order"
+        with rest_errors("Maximo", operation, write=True, not_sent=WRITE_REQUEST_NOT_SENT):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "POST",
+                    f"{self.url}/maximo/oslc/os/mxwo",
+                    headers=headers,
+                    json=payload,
+                )
+            if resp.status_code == 401:
+                raise ConnectorAuthError("Maximo authentication failed")
+            if resp.status_code not in (200, 201):
+                raise status_error("Maximo", operation, resp.status_code, write=True)
+            body = resp.json()
+        # Maximo accepted the create: a body that cannot be mapped must not
+        # read as a failed create, and its values must not reach the message.
+        try:
+            created = maximo_mapper.parse_work_order(body)
+        except Exception as exc:
+            raise write_outcome_unknown(
+                "Maximo",
+                operation,
+                "was answered with a success status, but the response could not be mapped "
+                "to a work order",
+            ) from exc
         logger.info(
             "work_order_created",
             connector="MaximoConnector",
-            work_order_id=body.get("wonum"),
+            work_order_id=created.id,
             asset_id=work_order.asset_id,
         )
-        return maximo_mapper.parse_work_order(body)
+        return created
 
     @sandbox_aware
     async def update_work_order(
@@ -675,16 +709,19 @@ class MaximoConnector:
 
         Raises:
             ConnectorError: If no field is given; if the lookup refuses the
-                ``wonum`` (see :meth:`_work_order_rest_id`), before anything is
-                written; if Maximo rejects the update; or if Maximo accepted
-                the update but the order could not be read back, in which case
-                the message says the update was applied and must not be
-                repeated; or if the order reads back with another status
-                than ``status`` (see :func:`status_not_applied`).
+                ``wonum`` or fails (see :meth:`_work_order_rest_id`), before
+                anything is written; if Maximo rejects the update (a 4xx) or
+                it fails before the update request is sent; if the outcome
+                of the update is unknown (a 3xx or 5xx, a timeout or a broken
+                connection after sending began, which is not retried), in
+                which case the message says to check Maximo before retrying;
+                if Maximo accepted the update but the order could not be read
+                back, in which case the message says the update was applied
+                and must not be repeated; or if the order reads back with
+                another status than ``status`` (see
+                :func:`status_not_applied`).
             ConnectorAuthError: If Maximo answers the lookup or the update
-                with 401.
-            httpx.HTTPError: A transport error from the lookup (after its
-                retries) or from the update, which is not retried.
+                with 401, or the update with 403.
         """
         self._ensure_connected()
         payload: dict[str, Any] = {}
@@ -697,11 +734,12 @@ class MaximoConnector:
         if not payload:
             raise ConnectorError("update_work_order requires at least one field to update")
         rest_id = await self._work_order_rest_id(work_order_id)
-        resp = await self._patch_resource("mxwo", rest_id, payload)
+        operation = "update work order"
+        resp = await self._patch_resource("mxwo", rest_id, payload, operation=operation)
         if resp.status_code == 401:
             raise ConnectorAuthError("Maximo authentication failed")
         if resp.status_code not in (200, 204):
-            raise ConnectorError(f"Maximo update work order failed: HTTP {resp.status_code}")
+            raise status_error("Maximo", operation, resp.status_code, write=True)
         logger.info(
             "work_order_updated",
             connector="MaximoConnector",
@@ -882,7 +920,9 @@ class MaximoConnector:
             ``first_page_only`` or ``max_rows`` stops the read early.
 
         Raises:
-            ConnectorError: On an HTTP error, a next-page link that cannot be
+            ConnectorError: On an HTTP error or a transport failure that
+                outlasts the retries (a timeout as ``ConnectorTimeoutError``),
+                a body that is not JSON, a next-page link that cannot be
                 followed or repeats an earlier one, more than
                 :attr:`_MAX_OSLC_ROWS` rows, or more pages than that many rows
                 fill.
@@ -901,50 +941,51 @@ class MaximoConnector:
         followed: set[str] = set()
         max_pages = self._MAX_OSLC_ROWS // size + 1
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while url is not None:
-                resp = await request_with_retry(
-                    client,
-                    "GET",
-                    url,
-                    headers=self._headers(),
-                    params=params,
-                )
-                if resp.status_code == 401:
-                    raise ConnectorAuthError("Maximo authentication failed")
-                if resp.status_code != 200:
-                    raise ConnectorError(
-                        f"Maximo GET {object_structure} failed: HTTP {resp.status_code}"
+        with rest_errors("Maximo", f"GET {object_structure}"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                while url is not None:
+                    resp = await request_with_retry(
+                        client,
+                        "GET",
+                        url,
+                        headers=self._headers(),
+                        params=params,
                     )
-                body = resp.json()
-                members = body.get("member", [])
-                all_items.extend(members)
-                if len(all_items) > self._MAX_OSLC_ROWS:
-                    raise ConnectorError(
-                        f"Maximo GET {object_structure} exceeded the "
-                        f"{self._MAX_OSLC_ROWS}-row safety cap — refusing to load an "
-                        "unbounded result set into memory. Narrow the query with oslc.where."
-                    )
-                if first_page_only or (max_rows is not None and len(all_items) >= max_rows):
-                    break
-                # Follow the OSLC next-page link. It repeats the query, so the
-                # first request's params are not sent again.
-                url = _next_page_url((body.get("responseInfo") or {}).get("nextPage"), url)
-                if url is not None:
-                    if url in followed:
+                    if resp.status_code == 401:
+                        raise ConnectorAuthError("Maximo authentication failed")
+                    if resp.status_code != 200:
                         raise ConnectorError(
-                            f"Maximo GET {object_structure} returned a nextPage link it had "
-                            "already returned — refusing to read the same page again"
+                            f"Maximo GET {object_structure} failed: HTTP {resp.status_code}"
                         )
-                    # Pages that keep linking on without adding rows never
-                    # reach the row cap, so the page count is capped too.
-                    if len(followed) + 1 >= max_pages:
+                    body = resp.json()
+                    members = body.get("member", [])
+                    all_items.extend(members)
+                    if len(all_items) > self._MAX_OSLC_ROWS:
                         raise ConnectorError(
-                            f"Maximo GET {object_structure} exceeded the {max_pages}-page "
-                            "safety cap — refusing to keep paging"
+                            f"Maximo GET {object_structure} exceeded the "
+                            f"{self._MAX_OSLC_ROWS}-row safety cap — refusing to load an "
+                            "unbounded result set into memory. Narrow the query with oslc.where."
                         )
-                    followed.add(url)
-                params = None
+                    if first_page_only or (max_rows is not None and len(all_items) >= max_rows):
+                        break
+                    # Follow the OSLC next-page link. It repeats the query, so the
+                    # first request's params are not sent again.
+                    url = _next_page_url((body.get("responseInfo") or {}).get("nextPage"), url)
+                    if url is not None:
+                        if url in followed:
+                            raise ConnectorError(
+                                f"Maximo GET {object_structure} returned a nextPage link it "
+                                "had already returned — refusing to read the same page again"
+                            )
+                        # Pages that keep linking on without adding rows never
+                        # reach the row cap, so the page count is capped too.
+                        if len(followed) + 1 >= max_pages:
+                            raise ConnectorError(
+                                f"Maximo GET {object_structure} exceeded the {max_pages}-page "
+                                "safety cap — refusing to keep paging"
+                            )
+                        followed.add(url)
+                    params = None
         logger.debug(
             "oslc_get",
             connector="MaximoConnector",
@@ -968,28 +1009,27 @@ class MaximoConnector:
         Raises:
             ConnectorError: If the ``wonum`` is refused by :func:`_oslc_eq`
                 (before any request); if the lookup fails as any
-                :meth:`_oslc_get` read can (an HTTP error status, a next-page
-                link that cannot be followed); or, logged as
-                ``maximo_update_refused``, if it matches no work order, matches
-                work orders in more than one site, the one match does not name
-                that ``wonum``, or it carries no work-order URI or a rest id
-                that could leave its path segment. No message repeats a value
-                Maximo returned.
+                :meth:`_oslc_get` read can (an HTTP error status, a transport
+                failure, a next-page link that cannot be followed), in which
+                case the message ends by saying the write request was not
+                sent; or, logged as ``maximo_update_refused``, if it matches
+                no work order, matches work orders in more than one site, the
+                one match does not name that ``wonum``, or it carries no
+                work-order URI or a rest id that could leave its path segment.
+                No message repeats a value Maximo returned.
             ConnectorAuthError: If Maximo answers the lookup with 401.
-            httpx.HTTPError: A transport error that outlasts the lookup's
-                retries.
         """
+        where = _oslc_eq("wonum", work_order_id)
         # Two rows tell one match from several, so the read stops there. It
         # follows nextPage until then: a server that serves fewer rows per
         # page than asked cannot hide a second site, and one that ignores the
         # filter cannot make the lookup page through every work order.
-        members = await self._oslc_get(
-            "mxwo",
-            oslc_where=_oslc_eq("wonum", work_order_id),
-            oslc_select="wonum,siteid",
-            page_size=2,
-            max_rows=2,
-        )
+        try:
+            members = await self._oslc_get(
+                "mxwo", oslc_where=where, oslc_select="wonum,siteid", page_size=2, max_rows=2
+            )
+        except ConnectorError as exc:
+            raise write_not_sent(exc) from exc
         if not members:
             raise _update_refused(
                 work_order_id, "not_found", f"Work order {work_order_id} not found"
@@ -1046,35 +1086,42 @@ class MaximoConnector:
                 :func:`_oslc_resource_path`, on any status other than 200 or
                 404, or if the body is not a JSON object.
             ConnectorAuthError: On 401.
-            ValueError: If the body is not JSON.
-            httpx.HTTPError: A transport error that outlasts the GET's retries.
+            ConnectorTimeoutError: If the GET still times out after its
+                retries; any other transport failure, or a body that is not
+                JSON, is a ``ConnectorError``.
         """
         url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await request_with_retry(
-                client,
-                "GET",
-                url,
-                headers=self._headers(),
-                params={"lean": "1"} if self._lean else None,
-            )
-        if resp.status_code == 401:
-            raise ConnectorAuthError("Maximo authentication failed")
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            raise ConnectorError(
-                f"Maximo GET {object_structure} resource failed: HTTP {resp.status_code}"
-            )
-        body = resp.json()
+        with rest_errors("Maximo", f"GET {object_structure} resource"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    url,
+                    headers=self._headers(),
+                    params={"lean": "1"} if self._lean else None,
+                )
+            if resp.status_code == 401:
+                raise ConnectorAuthError("Maximo authentication failed")
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                raise ConnectorError(
+                    f"Maximo GET {object_structure} resource failed: HTTP {resp.status_code}"
+                )
+            body = resp.json()
         if not isinstance(body, dict):
             raise ConnectorError(f"Maximo GET {object_structure} resource returned no JSON object")
         return body
 
     @sandbox_aware
     async def _patch_resource(
-        self, object_structure: str, resource_id: str, attributes: dict[str, Any]
+        self,
+        object_structure: str,
+        resource_id: str,
+        attributes: dict[str, Any],
+        *,
+        operation: str,
     ) -> Any:
         """Update attributes of one resource of an OSLC object structure.
 
@@ -1097,17 +1144,22 @@ class MaximoConnector:
             object_structure: OSLC object-structure name, such as ``mxwo``.
             resource_id: Rest ID of the resource, the last segment of its href.
             attributes: Attribute names and new values, sent as the JSON body.
+            operation: Names the write in error messages, e.g.
+                ``"update work order"``.
 
         Returns:
-            The final httpx response, unchecked, for the caller to report.
+            The final httpx response, its status unchecked, for the caller to
+            report.
 
         Raises:
             SandboxViolationError: In sandbox mode, before anything else.
             ConnectorError: If the connector is not connected, or
                 ``object_structure`` or ``resource_id`` is refused by
-                :func:`_oslc_resource_path`; both before any request.
-            httpx.HTTPError: A transport error from the write, re-raised
-                without a retry.
+                :func:`_oslc_resource_path`; both before any request. A
+                transport failure, which is not retried, is mapped by
+                :func:`~machina.connectors.cmms._http_errors.rest_errors`: before
+                the request was sent, the message says the write request was
+                not sent; after sending began, it says the outcome is unknown.
         """
         self._ensure_connected()
         url = f"{self.url}{_oslc_resource_path(object_structure, resource_id)}"
@@ -1118,12 +1170,13 @@ class MaximoConnector:
             "x-method-override": "PATCH",
             "patchtype": "MERGE",
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            return await request_with_retry(
-                client,
-                "POST",
-                url,
-                headers=headers,
-                params={"lean": "1"} if self._lean else None,
-                json=attributes,
-            )
+        with rest_errors("Maximo", operation, write=True, not_sent=WRITE_REQUEST_NOT_SENT):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                return await request_with_retry(
+                    client,
+                    "POST",
+                    url,
+                    headers=headers,
+                    params={"lean": "1"} if self._lean else None,
+                    json=attributes,
+                )

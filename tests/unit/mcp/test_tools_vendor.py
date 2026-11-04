@@ -10,6 +10,7 @@ import pytest
 import structlog.testing
 
 from machina.connectors.base import set_sandbox_mode
+from machina.connectors.cmms._http_errors import WRITE_OUTCOME_UNKNOWN
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
 from machina.connectors.cmms.sap_pm import SapPmConnector
@@ -373,26 +374,59 @@ class TestMaximoRawUpdateHttpFailures:
         )
 
     @pytest.mark.asyncio
-    async def test_network_error_is_an_error_entry_without_a_replay(self, httpx_mock) -> None:
+    async def test_failure_before_sending_says_the_write_request_was_not_sent(
+        self, httpx_mock
+    ) -> None:
         httpx_mock.add_exception(httpx.ConnectError("connection refused"), url=self._URL)
         result = await self._update()
-        assert result == {"error": "maximo_raw_attribute_update failed: ConnectError"}
+        assert result == {
+            "error": "Maximo update resource attributes failed: ConnectError. "
+            "The write request was not sent to the CMMS."
+        }
         assert len(httpx_mock.get_requests()) == 1
 
+    @pytest.mark.parametrize(
+        ("exc", "what_happened"),
+        [
+            pytest.param(httpx.ReadTimeout(""), "timed out after sending began", id="timeout"),
+            pytest.param(
+                httpx.ReadError(""),
+                "was interrupted after sending began: ReadError",
+                id="read-error",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_non_json_body_keeps_the_status(self, httpx_mock) -> None:
-        """A proxy's error page is not an error entry: the write may have applied."""
+    async def test_failure_after_sending_is_not_replayed_and_may_have_applied(
+        self, httpx_mock, exc: httpx.HTTPError, what_happened: str
+    ) -> None:
+        httpx_mock.add_exception(exc, url=self._URL)
+        result = await self._update()
+        assert result == {
+            "error": f"Maximo update resource attributes {what_happened}. {WRITE_OUTCOME_UNKNOWN}"
+        }
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 500, 502, 503, 504])
+    @pytest.mark.asyncio
+    async def test_redirect_or_5xx_is_not_replayed_and_may_have_applied(
+        self, httpx_mock, status_code: int
+    ) -> None:
+        """A redirect does not mean the update was not applied (303 See Other
+        can answer an applied write), and neither does a 5xx. The vendor's
+        body (a proxy's page, an error with internal URLs) is not returned."""
         httpx_mock.add_response(
-            method="POST", url=self._URL, status_code=502, text="<html>Bad Gateway</html>"
+            method="POST",
+            url=self._URL,
+            status_code=status_code,
+            text="<html>Bad Gateway from maximo-internal:9080</html>",
         )
         result = await self._update()
-        assert result == {"status_code": 502, "body": {}}
-
-    @pytest.mark.asyncio
-    async def test_503_is_reported_without_a_replay(self, httpx_mock) -> None:
-        httpx_mock.add_response(method="POST", url=self._URL, status_code=503)
-        result = await self._update()
-        assert result == {"status_code": 503, "body": {}}
+        assert result == {
+            "status_code": status_code,
+            "error": f"Maximo update resource attributes was answered with HTTP "
+            f"{status_code}. {WRITE_OUTCOME_UNKNOWN}",
+        }
         assert len(httpx_mock.get_requests()) == 1
 
     @pytest.mark.asyncio
@@ -403,13 +437,68 @@ class TestMaximoRawUpdateHttpFailures:
         assert result == {"status_code": 204, "body": {}}
         assert len(httpx_mock.get_requests()) == 2
 
+    @pytest.mark.parametrize("status_code", [400, 403, 404, 409])
     @pytest.mark.asyncio
-    async def test_vendor_error_is_returned_as_sent(self, httpx_mock) -> None:
-        body = {"Error": {"reasonCode": "BMXAA4214E", "statusCode": "400"}}
-        httpx_mock.add_response(method="POST", url=self._URL, status_code=400, json=body)
+    async def test_vendor_refusal_is_an_error_without_the_body(
+        self, httpx_mock, status_code: int
+    ) -> None:
+        body = {
+            "Error": {
+                "reasonCode": "BMXAA4214E",
+                "message": "WO-1 SECRET-VALUE",
+                "extendedError": {"moreInfo": {"href": "http://maximo-internal:9080/x"}},
+            }
+        }
+        httpx_mock.add_response(method="POST", url=self._URL, status_code=status_code, json=body)
         result = await self._update()
-        assert result == {"status_code": 400, "body": body}
+        assert result == {
+            "status_code": status_code,
+            "error": f"Maximo update resource attributes failed: HTTP {status_code}",
+        }
         assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_success_with_a_body_that_is_not_json_may_have_applied(self, httpx_mock) -> None:
+        """A proxy's sign-in page can answer 200 without the update reaching Maximo."""
+        httpx_mock.add_response(
+            method="POST", url=self._URL, status_code=200, text="<html>Sign in</html>"
+        )
+        result = await self._update()
+        assert result == {
+            "status_code": 200,
+            "error": "Maximo update resource attributes was answered with a success status, "
+            f"but the response is not JSON. {WRITE_OUTCOME_UNKNOWN}",
+        }
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+    @pytest.mark.parametrize("sandbox_mode", [False, True], ids=["live", "sandbox"])
+    @pytest.mark.asyncio
+    async def test_attributes_without_a_json_form_are_refused_before_any_request(
+        self, httpx_mock, value: float, sandbox_mode: bool
+    ) -> None:
+        """httpx would refuse them only while building the request, which the
+        tool could not tell from a failure after sending."""
+        try:
+            result = await maximo_raw_attribute_update(
+                _maximo_ctx(sandbox_mode=sandbox_mode),
+                resource_type="mxwo",
+                resource_id="WO-1",
+                attributes={"estdur": value},
+            )
+        finally:
+            set_sandbox_mode(False)
+        assert result == {
+            "error": "Invalid attributes: every value must have a JSON form (NaN and infinity "
+            "have none), so the update was not sent"
+        }
+        assert httpx_mock.get_requests() == []
+
+    def test_description_does_not_call_a_redirect_not_applied(self) -> None:
+        doc = " ".join((maximo_raw_attribute_update.__doc__ or "").split())
+        assert "redirect means it was not applied" not in doc
+        assert "or a redirect means" not in doc
+        assert "a redirect or another 3xx, a 5xx" in doc
+        assert "it may have been applied: read the resource before trying again" in doc
 
 
 class TestVendorWritesGuardedPastTheToolCheck:
@@ -492,25 +581,143 @@ class TestVendorWriteOutcomes:
     async def test_machina_error_keeps_its_message(self, httpx_mock) -> None:
         httpx_mock.add_response(method="GET", status_code=401)
         result = await _sap_notify()
-        assert result == {"error": "SAP PM authentication failed during CSRF token fetch"}
+        assert result == {
+            "error": "SAP PM authentication failed during CSRF token fetch. "
+            "The write request was not sent to the CMMS."
+        }
         assert len(httpx_mock.get_requests()) == 1
 
     @pytest.mark.parametrize(
-        ("write", "operation"),
+        ("write", "error"),
         [
-            (_maximo_patch, "maximo_raw_attribute_update"),
-            (_sap_notify, "sap_pm_raw_iw38_notification"),
+            pytest.param(
+                _maximo_patch,
+                "Maximo update resource attributes was interrupted after sending began: "
+                f"LocalProtocolError. {WRITE_OUTCOME_UNKNOWN}",
+                id="maximo",
+            ),
+            pytest.param(
+                _sap_notify,
+                # The token fetch, which goes first, is refused.
+                "SAP PM CSRF token fetch failed: LocalProtocolError. "
+                "The write request was not sent to the CMMS.",
+                id="sap",
+            ),
         ],
     )
     @pytest.mark.asyncio
     async def test_foreign_exception_text_never_reaches_the_client(
-        self, httpx_mock, write, operation: str
+        self, httpx_mock, write, error: str
     ) -> None:
         """h11 refuses an API key with a stray newline and quotes it back."""
         httpx_mock.add_exception(httpx.LocalProtocolError("Illegal header value b'TOPSECRET\n'"))
         result = await write()
-        assert result == {"error": f"{operation} failed: LocalProtocolError"}
+        assert result == {"error": error}
         assert "TOPSECRET" not in str(result)
+
+    @pytest.mark.parametrize(
+        ("write", "helper", "vendor", "action"),
+        [
+            pytest.param(
+                _maximo_patch,
+                "_patch_resource",
+                "Maximo",
+                "update resource attributes",
+                id="maximo",
+            ),
+            pytest.param(
+                _sap_notify,
+                "_write_with_csrf",
+                "SAP PM",
+                "create maintenance notification",
+                id="sap",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_leaves_the_outcome_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, write, helper: str, vendor: str, action: str
+    ) -> None:
+        """Where an unmapped exception was raised, before or after the request
+        went out, is not known: the write may have been applied."""
+
+        async def _raise(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("TOPSECRET https://maximo-internal:9080/")
+
+        cls = MaximoConnector if vendor == "Maximo" else SapPmConnector
+        monkeypatch.setattr(cls, helper, _raise)
+        with structlog.testing.capture_logs() as logs:
+            result = await write()
+        assert result == {
+            "error": f"{vendor} {action} raised RuntimeError. {WRITE_OUTCOME_UNKNOWN}"
+        }
+        assert "TOPSECRET" not in repr(logs)
+        assert "rest_write_outcome_unknown" in [e["event"] for e in logs]
+
+    @pytest.mark.parametrize(
+        ("exc", "error"),
+        [
+            pytest.param(
+                httpx.ConnectError(""),
+                "SAP PM create maintenance notification failed: ConnectError. "
+                "The write request was not sent to the CMMS.",
+                id="not-sent",
+            ),
+            pytest.param(
+                httpx.ReadTimeout(f"timed out on {_SAP_NOTIFICATION_URL}"),
+                "SAP PM create maintenance notification timed out after sending began. "
+                f"{WRITE_OUTCOME_UNKNOWN}",
+                id="timeout",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sap_transport_failure_says_whether_the_notification_was_sent(
+        self, httpx_mock, exc: httpx.HTTPError, error: str
+    ) -> None:
+        httpx_mock.add_response(method="GET", headers={"x-csrf-token": "TOK1"})
+        httpx_mock.add_exception(exc, method="POST", url=_SAP_NOTIFICATION_URL)
+        assert await _sap_notify() == {"error": error}
+        assert len(httpx_mock.get_requests(method="POST")) == 1
+
+    @pytest.mark.parametrize(
+        ("status_code", "error"),
+        [
+            pytest.param(
+                400,
+                "SAP PM create maintenance notification failed: HTTP 400",
+                id="refused",
+            ),
+            pytest.param(
+                303,
+                "SAP PM create maintenance notification was answered with HTTP 303. "
+                f"{WRITE_OUTCOME_UNKNOWN}",
+                id="redirect",
+            ),
+            pytest.param(
+                500,
+                "SAP PM create maintenance notification was answered with HTTP 500. "
+                f"{WRITE_OUTCOME_UNKNOWN}",
+                id="5xx",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sap_answer_other_than_2xx_is_an_error_without_the_body(
+        self, httpx_mock, status_code: int, error: str
+    ) -> None:
+        httpx_mock.add_response(method="GET", headers={"x-csrf-token": "TOK1"})
+        httpx_mock.add_response(
+            method="POST",
+            url=_SAP_NOTIFICATION_URL,
+            status_code=status_code,
+            json={"error": {"message": {"value": "SECRET-VALUE at sapgw01.corp"}}},
+        )
+        assert await _sap_notify() == {"status_code": status_code, "error": error}
+
+    def test_sap_description_says_when_the_notification_may_exist(self) -> None:
+        doc = " ".join((sap_pm_raw_iw38_notification.__doc__ or "").split())
+        assert "the notification may have been created: check SAP before trying again" in doc
 
     @pytest.mark.parametrize("write", [_maximo_patch, _sap_notify])
     @pytest.mark.asyncio
