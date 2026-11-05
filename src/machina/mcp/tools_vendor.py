@@ -10,6 +10,7 @@ registered conditionally in ``build_server``.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 import structlog
 
 from machina.connectors.base import set_sandbox_mode
+from machina.connectors.cmms._http_errors import rest_errors, status_error, write_outcome_unknown
 from machina.connectors.cmms.maximo import _oslc_resource_path
 from machina.exceptions import ConnectorError, MachinaError, SandboxViolationError
 
@@ -32,6 +34,15 @@ else:
         Context = Any
 
 logger = structlog.get_logger(__name__)
+
+# How each raw write is named in its error messages.
+_SAP_ACTION = "create maintenance notification"
+_MAXIMO_ACTION = "update resource attributes"
+
+_NOT_JSON_ATTRIBUTES = (
+    "Invalid attributes: every value must have a JSON form (NaN and infinity have none), "
+    "so the update was not sent"
+)
 
 
 def _runtime(ctx: Any) -> Any:
@@ -58,40 +69,65 @@ def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
     return None
 
 
-def _write_result(connector: str, operation: str, resp: Any) -> dict[str, Any]:
-    """Report a raw vendor write's response: its status, and its body if JSON.
+def _write_result(
+    connector: str, operation: str, resp: Any, *, vendor: str, action: str
+) -> dict[str, Any]:
+    """Report a raw vendor write's response by the shared REST write contract.
 
-    A body that is not JSON (an empty success, a proxy's error page) is
-    reported as ``{}``, never as an error: the write may have been applied,
-    and the status code says what happened.
+    A 2xx confirms the write: its ``status_code`` and its JSON ``body`` (``{}``
+    when empty) are returned. Any other answer is returned as ``status_code``
+    and ``error``, never with the body, which can carry the vendor's internal
+    URLs and record values: a 4xx is the CMMS refusing the write, and after a
+    3xx (redirects are not followed, and 303 See Other can answer an applied
+    write) or a 5xx the outcome is unknown, and the error says so. So does a
+    2xx whose body is not JSON, which a proxy's login page can be.
 
-    The response is logged at INFO for a 2xx status and at WARNING for any
-    other (a vendor refusal, a gateway error, a redirect to a login page),
-    since the write was most likely not applied. The log names the connector,
-    the operation and the status only: the body and the request can carry
-    record values and credentials.
+    The response is logged as ``vendor_write_completed``, at INFO for a 2xx
+    and at WARNING otherwise. The log names the connector, the operation and
+    the status only: the body and the request can carry record values and
+    credentials.
+
+    Args:
+        connector: The connector class name, for the log.
+        operation: The tool name, for the log.
+        resp: The final httpx response.
+        vendor: Label that opens an error message, e.g. ``"Maximo"``.
+        action: The write, in an error message, e.g.
+            ``"update resource attributes"``.
     """
-    try:
-        body = resp.json() if resp.content else {}
-    except ValueError:
-        body = {}
-    log = logger.info if 200 <= resp.status_code < 300 else logger.warning
-    log(
+    status = resp.status_code
+    error: ConnectorError | None = None
+    body: Any = {}
+    if 200 <= status < 300:
+        try:
+            with rest_errors(vendor, action, write=True):
+                body = resp.json() if resp.content else {}
+        except ConnectorError as exc:
+            error = exc
+    else:
+        error = status_error(vendor, action, status, write=True)
+    (logger.info if error is None else logger.warning)(
         "vendor_write_completed",
         connector=connector,
         operation=operation,
-        status_code=resp.status_code,
+        status_code=status,
     )
-    return {"status_code": resp.status_code, "body": body}
+    if error is not None:
+        return {"status_code": status, "error": str(error)}
+    return {"status_code": status, "body": body}
 
 
-def _write_failure(connector: str, operation: str, exc: Exception) -> dict[str, Any]:
+def _write_failure(
+    connector: str, operation: str, exc: Exception, *, vendor: str, action: str
+) -> dict[str, Any]:
     """Report a raw vendor write that raised, without a foreign exception's text.
 
-    A Machina error's message is written to be shown. Any other exception's
-    text (httpx, h11) can carry the request URL or a header value, such as an
-    API key with a stray newline that h11 refuses to send, so only its type
-    is reported and logged.
+    A Machina error's message is written to be shown: the connector helpers
+    map transport failures to messages that say whether the write request
+    was sent. Any other exception's text can carry the request URL or a
+    header value, so only its type is reported and logged; where it was
+    raised, before or after the request went out, is not known, so the
+    message says the outcome is unknown.
     """
     logger.warning(
         "vendor_write_failed",
@@ -101,7 +137,7 @@ def _write_failure(connector: str, operation: str, exc: Exception) -> dict[str, 
     )
     if isinstance(exc, MachinaError):
         return {"error": str(exc)}
-    return {"error": f"{operation} failed: {type(exc).__name__}"}
+    return {"error": str(write_outcome_unknown(vendor, action, f"raised {type(exc).__name__}"))}
 
 
 async def sap_pm_raw_iw38_notification(
@@ -119,6 +155,16 @@ async def sap_pm_raw_iw38_notification(
         equipment_id: SAP equipment number.
         notification_type: SAP notification type (default M2).
         description: Notification description text.
+
+    Returns:
+        ``status_code`` and the JSON ``body`` of SAP's answer when it is a
+        2xx, which confirms the notification was created. Any other answer,
+        and any failure, is reported as ``error`` (with ``status_code`` when
+        SAP answered), without SAP's response body. After a 4xx, or an error
+        that says the write request was not sent, nothing was created. When
+        the error says the outcome is unknown (a 3xx, a 5xx, a timeout or a
+        broken connection after sending), the notification may have been
+        created: check SAP before trying again.
     """
     from machina.connectors.base import get_sandbox_mode
 
@@ -145,6 +191,7 @@ async def sap_pm_raw_iw38_notification(
             "POST",
             f"{conn.url}/API_MAINTENANCENOTIFICATION/MaintenanceNotification",
             payload,
+            operation=_SAP_ACTION,
         )
     except SandboxViolationError:
         return {
@@ -152,8 +199,16 @@ async def sap_pm_raw_iw38_notification(
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return _write_failure("SapPmConnector", "sap_pm_raw_iw38_notification", exc)
-    return _write_result("SapPmConnector", "sap_pm_raw_iw38_notification", resp)
+        return _write_failure(
+            "SapPmConnector",
+            "sap_pm_raw_iw38_notification",
+            exc,
+            vendor="SAP PM",
+            action=_SAP_ACTION,
+        )
+    return _write_result(
+        "SapPmConnector", "sap_pm_raw_iw38_notification", resp, vendor="SAP PM", action=_SAP_ACTION
+    )
 
 
 async def maximo_raw_attribute_update(
@@ -181,10 +236,15 @@ async def maximo_raw_attribute_update(
         attributes: Dictionary of attribute names to new values.
 
     Returns:
-        ``status_code`` and the JSON ``body`` of Maximo's answer. Only a 2xx
-        status confirms the update (a 204 has an empty body). A 4xx or a
-        redirect means it was not applied; after a 5xx it may or may not
-        have been, so read the resource before trying again.
+        ``status_code`` and the JSON ``body`` of Maximo's answer when it is a
+        2xx, which confirms the update (a 204 has an empty body). Any other
+        answer, and any failure, is reported as ``error`` (with
+        ``status_code`` when Maximo answered), without Maximo's response body.
+        After a 4xx, or an error that says the write request was not sent,
+        the update was not applied. When the error says the outcome is
+        unknown (a redirect or another 3xx, a 5xx, a timeout or a broken
+        connection after sending), it may have been applied: read the
+        resource before trying again.
     """
     from machina.connectors.base import get_sandbox_mode
 
@@ -196,6 +256,12 @@ async def maximo_raw_attribute_update(
         _oslc_resource_path(resource_type, resource_id)
     except ConnectorError as exc:
         return {"error": str(exc)}
+    # httpx would refuse to encode them only when building the request, as an
+    # exception the tool could not tell from a failure after sending.
+    try:
+        json.dumps(attributes, allow_nan=False)
+    except (TypeError, ValueError):
+        return {"error": _NOT_JSON_ATTRIBUTES}
 
     # _runtime re-establishes the sandbox contextvar for this request task;
     # it must run before get_sandbox_mode() is read.
@@ -211,15 +277,29 @@ async def maximo_raw_attribute_update(
     if conn is None:
         return {"error": "No Maximo connector configured"}
     try:
-        resp = await conn._patch_resource(resource_type, resource_id, attributes or {})
+        resp = await conn._patch_resource(
+            resource_type, resource_id, attributes or {}, operation=_MAXIMO_ACTION
+        )
     except SandboxViolationError:
         return {
             "description": "[SANDBOX — no real write performed] Attribute update logged.",
             "metadata": {"sandbox": True},
         }
     except Exception as exc:
-        return _write_failure("MaximoConnector", "maximo_raw_attribute_update", exc)
-    return _write_result("MaximoConnector", "maximo_raw_attribute_update", resp)
+        return _write_failure(
+            "MaximoConnector",
+            "maximo_raw_attribute_update",
+            exc,
+            vendor="Maximo",
+            action=_MAXIMO_ACTION,
+        )
+    return _write_result(
+        "MaximoConnector",
+        "maximo_raw_attribute_update",
+        resp,
+        vendor="Maximo",
+        action=_MAXIMO_ACTION,
+    )
 
 
 VENDOR_TOOLS: list[Callable[..., Any]] = [

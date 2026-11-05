@@ -12,7 +12,10 @@ from structlog.testing import capture_logs
 from machina.connectors.cmms._http_errors import (
     WRITE_NOT_SENT,
     WRITE_OUTCOME_UNKNOWN,
+    WRITE_REQUEST_NOT_SENT,
     rest_errors,
+    status_error,
+    write_not_sent,
     write_outcome_unknown,
 )
 from machina.exceptions import (
@@ -404,6 +407,66 @@ def test_the_unknown_outcome_wording_is_the_approved_contract() -> None:
         "Check the CMMS before retrying."
     )
     assert WRITE_NOT_SENT == "No request was sent to the CMMS."
+    assert WRITE_REQUEST_NOT_SENT == "The write request was not sent to the CMMS."
+
+
+# --- vendor helpers ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [301, 303, 401, 403, 404, 422, 500, 503])
+@pytest.mark.parametrize("write", [False, True], ids=["read", "write"])
+def test_status_error_is_the_error_rest_errors_raises(status: int, write: bool) -> None:
+    """The vendor connectors check statuses themselves; they must answer alike."""
+    with capture_logs(), pytest.raises(ConnectorError) as raised:
+        _raise_inside(_status_error(status), write=write)
+    with capture_logs() as logs:
+        built = status_error("Acme", "create work order", status, write=write)
+    assert type(built) is raised.type
+    assert str(built) == str(raised.value)
+    unknown = write and not 400 <= status < 500
+    assert [e["event"] for e in logs] == (["rest_write_outcome_unknown"] if unknown else [])
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected", "what_happened"),
+    [
+        pytest.param(httpx.ConnectError(""), ConnectorError, "failed: ConnectError", id="connect"),
+        pytest.param(httpx.PoolTimeout(""), ConnectorTimeoutError, "timed out", id="pool-timeout"),
+    ],
+)
+def test_write_can_name_another_not_sent_sentence(
+    exc: httpx.TransportError, expected: type[ConnectorError], what_happened: str
+) -> None:
+    with (
+        pytest.raises(ConnectorError) as info,
+        rest_errors("Acme", "create work order", write=True, not_sent=WRITE_REQUEST_NOT_SENT),
+    ):
+        raise exc
+    assert info.type is expected
+    assert str(info.value) == f"Acme create work order {what_happened}. {WRITE_REQUEST_NOT_SENT}"
+
+
+def test_not_sent_sentence_does_not_change_an_unknown_outcome() -> None:
+    with (
+        pytest.raises(ConnectorError) as info,
+        rest_errors("Acme", "create work order", write=True, not_sent=WRITE_REQUEST_NOT_SENT),
+    ):
+        raise httpx.ReadError("")
+    assert str(info.value).endswith(WRITE_OUTCOME_UNKNOWN)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectorTimeoutError("Acme GET token timed out"),
+        ConnectorAuthError("Acme authentication failed."),
+        ConnectorError("Acme GET token failed: HTTP 500"),
+    ],
+)
+def test_write_not_sent_keeps_the_type_and_adds_one_sentence(error: ConnectorError) -> None:
+    restated = write_not_sent(error)
+    assert type(restated) is type(error)
+    assert str(restated) == f"{str(error).rstrip('.')}. {WRITE_REQUEST_NOT_SENT}"
 
 
 # --- both ------------------------------------------------------------------

@@ -317,6 +317,55 @@ instead of retrying inside the server's window. See
 [Uptime and Resilience](../deployment/uptime.md) for what that means for
 paged reads and startup.
 
+## Errors
+
+SAP PM, Maximo and UpKeep raise `ConnectorError` subclasses, never httpx
+exceptions, as [Generic CMMS](generic_cmms.md#errors) does. The error for an
+HTTP status or a transport failure names the connector, the operation and the
+status or the kind of failure, never the URL, a credential, a token or the
+response body; the original exception is chained as `__cause__`.
+
+This does not cover everything the connectors return or log. An error raised
+while mapping a record that was read can quote a value from it. A raw vendor
+MCP tool returns the body of a 2xx answer as sent, which can name internal
+URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings log the
+request URL.
+
+| Failure | Raises | Message |
+|---------|--------|---------|
+| HTTP 401 | `ConnectorAuthError` | `SAP PM authentication failed` |
+| Other error status | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: HTTP 500` |
+| Timeout, after the retries | `ConnectorTimeoutError` | `SAP PM GET API_EQUIPMENT/Equipment timed out` |
+| Other transport failure | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: ConnectError` |
+| Malformed `url` | `ConnectorConfigError` | `SAP PM health check failed: invalid URL (check 'url' and the endpoint paths)` |
+| 2xx body that is not JSON (an HTML login page from a proxy, say) | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: response is not JSON` |
+
+A failed create or update also says whether the CMMS may have applied it. A
+write request is not sent again once it may have reached the CMMS: only a 429,
+which the CMMS refused unprocessed, and SAP PM's CSRF challenge are re-sent.
+
+| Failure | Message ends with |
+|---------|-------------------|
+| Before the write request was sent: a read the write sends first failed (SAP PM's CSRF token fetch, its read of the order before a status change, Maximo's lookup of the order), or the connection could not be opened (connection refused, connect or pool timeout, unsupported URL scheme, malformed URL, a value httpx cannot encode) | `The write request was not sent to the CMMS.` (`SAP PM create maintenance order failed: ConnectError. The write request was not sent to the CMMS.`) |
+| HTTP 4xx | nothing more: the CMMS refused the write (`SAP PM create maintenance order failed: HTTP 422`; 401 and 403 raise `ConnectorAuthError`) |
+| Any other status (a 5xx, or a 3xx: redirects are not followed, and 303 See Other can answer an applied write), a timeout or a broken connection after sending began, or a 2xx create response that is not JSON or cannot be mapped to a work order | `The write operation's outcome is unknown. It may have been applied. Check the CMMS before retrying.` |
+
+For example, `SAP PM create maintenance order was answered with HTTP 502. The
+write operation's outcome is unknown. It may have been applied. Check the CMMS
+before retrying.` These are logged as `rest_write_outcome_unknown`. Generic
+CMMS ends a failure before sending with `No request was sent to the CMMS.`;
+the vendor connectors send a read before some writes, so they say the write
+request was not sent.
+
+When `update_work_order` changes fields and a status, the field PATCH goes
+first. If SAP acknowledges it and the status change then fails, the PATCH is
+not undone, and the message says so after the status step's own error:
+`SAP PM acknowledged the earlier <fields> update, which stays applied`,
+followed by `; only the later status change failed, and it was not applied`
+when the status change was refused, `; the later status change request was
+not sent to the CMMS` when it failed before its request, or `; the later
+status change may also have been applied` when its outcome is unknown.
+
 ## Known Limitations
 
 - **OData v2 vs v4**: The connector handles both response formats (`d.results` and `value`). Your SAP system may use either depending on the service version.

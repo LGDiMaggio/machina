@@ -129,25 +129,41 @@ again), through the connector helper `update_work_order` also uses (see
 
 A refused value comes back as an error entry before any request, in sandbox
 mode too, so a sandbox run answers as a live run would. The message names the
-rule, never the value.
+rule, never the value. `maximo_raw_attribute_update` refuses `attributes`
+holding NaN or infinity, which have no JSON form, the same way.
 
 Outside sandbox mode, both tools refuse a connector that is not connected
-(one whose `connect()` failed at startup), as the domain write tools do. A
-write that reaches the vendor returns its `status_code` and its JSON `body`;
-a body that is not JSON is reported as `{}`, because the write may have been
-applied. Only a 2xx status confirms the write; a 4xx or a redirect means it
-was not applied, and after a 5xx it may or may not have been, so read the
-resource before trying again. A write that fails returns an error entry: a Machina error keeps its
-message, and any other exception, such as an httpx transport error, is
-reported by its type only (`maximo_raw_attribute_update failed: ConnectError`),
-because its text can carry the request URL or a header value.
+(one whose `connect()` failed at startup), as the domain write tools do.
+
+Results follow the write contract of the CMMS connectors (see
+[SAP PM Connector — Errors](../connectors/sap-pm.md#errors)):
+
+- **A 2xx** confirms the write: the result is its `status_code` and its JSON
+  `body` (`{}` for an empty one), returned as the vendor sent it. It can name
+  internal URLs, such as a Maximo `href` or SAP's `__metadata.uri`.
+- **Any other answer** is returned as `status_code` and `error`, never with
+  the vendor's body, which can carry internal URLs and record values. After a
+  4xx the write was not applied (`Maximo update resource attributes failed:
+  HTTP 400`). After a 3xx (redirects are not followed, and 303 See Other can
+  answer an applied write) or a 5xx, the error says the outcome is unknown:
+  `Maximo update resource attributes was answered with HTTP 502. The write
+  operation's outcome is unknown. It may have been applied. Check the CMMS
+  before retrying.` So does a 2xx whose body is not JSON, which a proxy's
+  sign-in page can be.
+- **A write that fails** returns `error`. A failure before the write request
+  was sent (SAP PM's CSRF token fetch, a connection that could not be opened)
+  ends with `The write request was not sent to the CMMS.`; a timeout or a
+  broken connection after sending began says the outcome is unknown. Any
+  other exception, whose text can carry the request URL or a header value, is
+  reported by its type only, and since where it was raised is not known, as an
+  unknown outcome (`Maximo update resource attributes raised RuntimeError. The
+  write operation's outcome is unknown. …`).
 
 Each write that reaches the vendor is logged as `vendor_write_completed` with
 the connector, the operation and the status code only, never the body or the
-request: at INFO for a 2xx status, at WARNING for any other (a vendor refusal,
-a gateway error, a redirect to a login page), since the write was then most
-likely not applied. A write that raises is logged as `vendor_write_failed`
-(WARNING) with the exception type.
+request: at INFO for a 2xx status, at WARNING for any other. A write that
+raises is logged as `vendor_write_failed` (WARNING) with the exception type,
+and every unknown outcome as `rest_write_outcome_unknown`.
 
 | Tool | Connector | Parameters |
 |------|-----------|------------|

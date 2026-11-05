@@ -229,6 +229,17 @@ After an update the work order is read back:
 All HTTP calls route through a shared retry helper with exponential backoff.
 See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
+## Errors
+
+Failures raise `ConnectorError` subclasses, never httpx exceptions, and a
+write says whether UpKeep may have applied it: see
+[SAP PM Connector — Errors](sap-pm.md#errors), which covers all three vendor
+connectors (`UpKeep GET asset timed out`, `UpKeep update work order was
+answered with HTTP 502. The write operation's outcome is unknown. …`). A
+create response that is JSON but cannot be mapped keeps its own message: the
+work order was created and the create must not be repeated (see
+[Work-order status](#work-order-status)).
+
 ## Known Limitations
 
 - **Asset criticality**: UpKeep does not expose a native criticality field. All assets default to `Criticality.C`.
@@ -236,7 +247,7 @@ See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 - **Spare parts by asset**: `/api/v2/parts` has no asset filter, so `read_spare_parts(asset_id=...)` reads the asset (`GET /api/v2/assets/<ID>`), whose `parts` list holds the IDs of its parts, then fetches each listed part (`GET /api/v2/parts/<ID>`). That is 1 + k requests for k listed parts; the inventory is not paged. A part listed twice is fetched and returned once. An asset that lists no parts returns an empty list after the one request.
     - **Limit**: an asset listing more than 100 parts is refused with `ConnectorError` before any part request.
     - **Agent prefetch budget**: the agent's per-turn context prefetch waits at most 5 seconds for an asset's spare parts from UpKeep. A read still running at the deadline is cancelled where it waits. Its pending request and its HTTP client end with it, and no further part is requested. The prompt then says the parts were not checked because the lookup did not finish in time, and names the `check_spare_parts` tool, which runs the full read. The budget is a policy for the eager per-turn lookup, not a completeness guarantee. Within it the read is the same all-or-none read. The `check_spare_parts` tool, the MCP `machina_list_spare_parts` tool, workflows and direct `read_spare_parts` calls have no such deadline.
-    - **Refusals**: the read returns all of the asset's parts or none. It raises `ConnectorError` when UpKeep has no such asset, or cannot return a part the asset lists (HTTP 404). It raises `ConnectorSchemaError` when UpKeep's answer is not a well-formed record of that asset (a record with another `id`, a body without one, or a malformed `parts` list), when a part record is malformed or has a field the mapping cannot read (a `quantity` or `cost` that is not a number, a negative stock or cost), or when a part request returns a different part. Only the asset's own record can say it lists no parts. A connection error or a timeout that outlasts the retries propagates as the `httpx` error, as on the connector's other reads; the parts already read are not returned. No refusal message repeats a value from UpKeep, and Machina's retry warnings name a retried part request as `/api/v2/parts/<listed part>`, without the part's ID. (`configure_logging()` also keeps httpx's own per-request lines, which carry full URLs, out of the log.)
+    - **Refusals**: the read returns all of the asset's parts or none. It raises `ConnectorError` when UpKeep has no such asset, or cannot return a part the asset lists (HTTP 404). It raises `ConnectorSchemaError` when UpKeep's answer is not a well-formed record of that asset (a record with another `id`, a body without one, or a malformed `parts` list), when a part record is malformed or has a field the mapping cannot read (a `quantity` or `cost` that is not a number, a negative stock or cost), or when a part request returns a different part. Only the asset's own record can say it lists no parts. A connection error or a timeout that outlasts the retries raises `ConnectorError` (`ConnectorTimeoutError` for a timeout, `UpKeep GET part timed out`), as on the connector's other reads; the parts already read are not returned. No refusal message repeats a value from UpKeep, and Machina's retry warnings name a retried part request as `/api/v2/parts/<listed part>`, without the part's ID. (`configure_logging()` also keeps httpx's own per-request lines, which carry full URLs, out of the log.)
     - **SKU**: a `sku` narrows the asset's parts in memory, so both filters hold. Without `asset_id`, the connector pages `/api/v2/parts` and filters by `sku` in memory; a part record the mapping cannot read refuses that read too, with `ConnectorSchemaError`.
     - **Not validated live**: this follows UpKeep's documented API reference and has not been validated against a live UpKeep instance.
 - **Record IDs in paths**: an asset, work-order or part ID is sent as one percent-encoded path segment (`/` becomes `%2F`). An empty ID, or one with an empty, `.` or `..` part between `/` or `\` separators, is refused before any request: with `ConnectorError` for an ID you pass, and with `ConnectorSchemaError`, refusing the whole read, for a part ID in an asset's `parts` list.

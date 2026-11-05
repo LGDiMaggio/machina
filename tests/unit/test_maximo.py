@@ -377,7 +377,9 @@ class TestPatchResource:
     @pytest.mark.asyncio
     async def test_not_connected_is_refused_before_any_request(self, httpx_mock) -> None:
         with pytest.raises(ConnectorError, match="Not connected"):
-            await self._conn(connected=False)._patch_resource("mxwo", "WO-1", {"x": 1})
+            await self._conn(connected=False)._patch_resource(
+                "mxwo", "WO-1", {"x": 1}, operation="update"
+            )
         assert httpx_mock.get_requests() == []
 
     @pytest.mark.parametrize(
@@ -389,7 +391,9 @@ class TestPatchResource:
         self, httpx_mock, object_structure: str, resource_id: str
     ) -> None:
         with pytest.raises(ConnectorError):
-            await self._conn()._patch_resource(object_structure, resource_id, {"x": 1})
+            await self._conn()._patch_resource(
+                object_structure, resource_id, {"x": 1}, operation="update"
+            )
         assert httpx_mock.get_requests() == []
 
     @pytest.mark.asyncio
@@ -398,7 +402,7 @@ class TestPatchResource:
         without ``patchtype: MERGE`` Maximo deletes unlisted child objects."""
         url = "https://maximo.example.com/maximo/oslc/os/mxwo/WO%3F1?lean=1"
         httpx_mock.add_response(method="POST", url=url, status_code=204)
-        resp = await self._conn()._patch_resource("mxwo", "WO?1", {"x": 1})
+        resp = await self._conn()._patch_resource("mxwo", "WO?1", {"x": 1}, operation="update")
         assert resp.status_code == 204
         [request] = httpx_mock.get_requests()
         assert request.url.raw_path == b"/maximo/oslc/os/mxwo/WO%3F1?lean=1"
@@ -417,7 +421,7 @@ class TestPatchResource:
         )
         conn._connected = True
         httpx_mock.add_response(method="POST", status_code=204)
-        await conn._patch_resource("mxwo", "_A", {"x": 1})
+        await conn._patch_resource("mxwo", "_A", {"x": 1}, operation="update")
         [request] = httpx_mock.get_requests()
         assert request.url.raw_path == b"/maximo/oslc/os/mxwo/_A"
 

@@ -333,6 +333,16 @@ Selected attributes that no field takes stay in `metadata`. A spare part's `reor
 All HTTP calls route through a shared retry helper with exponential backoff.
 See [SAP PM Connector — Resilience](sap-pm.md#resilience) for details.
 
+## Errors
+
+Failures raise `ConnectorError` subclasses, never httpx exceptions, and a
+write says whether Maximo may have applied it: see
+[SAP PM Connector — Errors](sap-pm.md#errors), which covers all three vendor
+connectors (`Maximo GET mxwo timed out`, `Maximo create work order was
+answered with HTTP 502. The write operation's outcome is unknown. …`). A
+failed lookup before an update ends with `The write request was not sent to
+the CMMS.`
+
 ## Known Limitations
 
 - **Object structure customisation**: The connector targets standard Maximo object structures (`mxasset`, `mxwo`, `mxinventory`, `mxpm`). Custom object structures require subclassing.

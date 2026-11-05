@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import re
 
+import httpx
 import pytest
 import structlog.testing
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.cmms.retry import DEFAULT_MAX_RETRIES
 from machina.connectors.cmms.upkeep import UpKeepConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -20,6 +22,7 @@ from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
     ConnectorSchemaError,
+    ConnectorTimeoutError,
     ConnectorUnsupportedFilterError,
 )
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
@@ -449,17 +452,30 @@ class TestCreateWorkOrder:
         payload = json.loads(req.content)
         assert payload["priority"] == 2
 
+    @pytest.mark.parametrize(
+        ("content", "error_type"),
+        [
+            pytest.param(
+                b'{"result": {"id": "wo-new", "title": "Replace bearing", "assetId": "a1"}}',
+                "ValueError",
+                id="no-status",
+            ),
+            pytest.param(b'{"result": ["wo-new"]}', "AttributeError", id="not-an-object"),
+            pytest.param(
+                b'{"result": {"id": "wo-new", "status": "open", "priority": 1e999}}',
+                "OverflowError",
+                id="infinite-priority",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
     async def test_a_created_work_order_whose_response_cannot_be_read_is_not_a_failed_create(
-        self, httpx_mock, connector: UpKeepConnector
+        self, httpx_mock, connector: UpKeepConnector, content: bytes, error_type: str
     ) -> None:
         """The work order exists: reported as a failed create, it would be created again."""
         await _connect(httpx_mock, connector)
         httpx_mock.add_response(
-            method="POST",
-            url=f"{BASE}/api/v2/work-orders",
-            status_code=201,
-            json={"result": {"id": "wo-new", "title": "Replace bearing", "assetId": "a1"}},
+            method="POST", url=f"{BASE}/api/v2/work-orders", status_code=201, content=content
         )
         from datetime import UTC, datetime
 
@@ -478,7 +494,7 @@ class TestCreateWorkOrder:
         ):
             await connector.create_work_order(wo)
         (event,) = [e for e in logs if e["event"] == "work_order_create_not_read"]
-        assert event["error_type"] == "ValueError"
+        assert event["error_type"] == error_type
 
     @pytest.mark.asyncio
     async def test_create_work_order_auth_failure(
@@ -1164,9 +1180,10 @@ class TestReadSparePartsByAsset:
     ) -> None:
         """A part request that never gets an answer fails the whole read.
 
-        The transport error propagates as it does from the connector's other
+        The transport error is mapped as it is for the connector's other
         reads, after the retries, and the parts already read are not returned
-        as the asset's list. The retry warnings name no part.
+        as the asset's list. Neither the error nor the retry warnings name a
+        part.
         """
         import httpx
 
@@ -1184,8 +1201,12 @@ class TestReadSparePartsByAsset:
                 exc_type("connection lost"), method="GET", url=f"{PART_URL}/Qm7Tz2XbLp"
             )
 
-        with structlog.testing.capture_logs() as logs, pytest.raises(exc_type):
+        with structlog.testing.capture_logs() as logs, pytest.raises(ConnectorError) as info:
             await connector.read_spare_parts(asset_id=ASSET_ID)
+
+        expected = "failed: ConnectError" if error == "connect" else "timed out"
+        assert str(info.value) == f"UpKeep GET part {expected}"
+        assert isinstance(info.value.__cause__, exc_type)
 
         assert _sent(httpx_mock) == [
             ASSET_URL,
@@ -2054,3 +2075,104 @@ class TestRetryBehaviour:
         assets = await connector.read_assets()
         assert len(assets) == 1
         assert assets[0].id == "a1"
+
+
+# ---------------------------------------------------------------------------
+# Transport errors (httpx raises instead of answering). The writes' outcomes
+# are covered for every vendor in test_cmms_vendor_write_outcomes.py.
+# ---------------------------------------------------------------------------
+
+
+class TestTransportErrors:
+    """A timeout raises ConnectorTimeoutError, any other httpx failure
+    ConnectorError, and no message carries the URL or the API key."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_after_retries(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        url = f"{BASE}/api/v2/users?limit=1"
+        httpx_mock.add_exception(
+            httpx.ReadTimeout(f"timed out on {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorTimeoutError) as info:
+            await connector.connect()
+        assert str(info.value) == "UpKeep health check timed out"
+        assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+        assert not connector._connected
+
+    @pytest.mark.asyncio
+    async def test_read_assets_connect_error_after_retries(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/assets?limit=100&offset=0"
+        httpx_mock.add_exception(
+            httpx.ConnectError(f"no route to {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert info.type is ConnectorError
+        assert str(info.value) == "UpKeep GET /api/v2/assets failed: ConnectError"
+        assert isinstance(info.value.__cause__, httpx.ConnectError)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_read_response_that_is_not_json(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            url=f"{BASE}/api/v2/assets?limit=100&offset=0", text="<html>Sign in</html>"
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert str(info.value) == "UpKeep GET /api/v2/assets failed: response is not JSON"
+
+    @pytest.mark.asyncio
+    async def test_get_asset_timeout(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/assets/a1"
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=url, is_reusable=True)
+        with pytest.raises(ConnectorTimeoutError) as info:
+            await connector.get_asset("a1")
+        assert str(info.value) == "UpKeep GET asset timed out"
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_protocol_error_fails_at_once(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A transport error the retry helper does not retry surfaces on the first attempt."""
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/work-orders/wo1"
+        httpx_mock.add_exception(httpx.RemoteProtocolError(""), url=url)
+        with pytest.raises(ConnectorError) as info:
+            await connector.get_work_order("wo1")
+        assert str(info.value) == "UpKeep GET work order failed: RemoteProtocolError"
+        assert len(httpx_mock.get_requests(url=url)) == 1
+
+    @pytest.mark.asyncio
+    async def test_listed_part_timeout_returns_no_partial_list(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _mock_asset(httpx_mock, _asset_body(parts=["Wuy1TIHIfL"]))
+        httpx_mock.add_exception(
+            httpx.ReadTimeout(""), url=f"{PART_URL}/Wuy1TIHIfL", is_reusable=True
+        )
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConnectorTimeoutError) as info,
+        ):
+            await connector.read_spare_parts(asset_id=ASSET_ID)
+        assert str(info.value) == "UpKeep GET part timed out"
+        # The retry warnings name the endpoint, never the part.
+        assert "Wuy1TIHIfL" not in repr(logs)

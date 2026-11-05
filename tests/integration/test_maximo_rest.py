@@ -12,16 +12,20 @@ import pytest
 import structlog.testing
 
 from machina.connectors.base import ConnectorRegistry
+from machina.connectors.cmms._http_errors import WRITE_OUTCOME_UNKNOWN
 from machina.connectors.cmms.auth import ApiKeyHeaderAuth, BasicAuth
 from machina.connectors.cmms.maximo import MaximoConnector
+from machina.connectors.cmms.retry import DEFAULT_MAX_RETRIES
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import (
     ConnectorAuthError,
+    ConnectorConfigError,
     ConnectorError,
     ConnectorSchemaError,
+    ConnectorTimeoutError,
     ConnectorUnsupportedFilterError,
 )
 from machina.workflows.builtins.alarm_to_workorder import alarm_to_workorder
@@ -1497,7 +1501,7 @@ class TestUpdateWorkOrder:
             pytest.param({"status_code": 404}, "ConnectorError", id="not-found"),
             pytest.param({"status_code": 500}, "ConnectorError", id="server-error"),
             pytest.param({"status_code": 401}, "ConnectorAuthError", id="auth"),
-            pytest.param({"text": "<html>Sign in</html>"}, "JSONDecodeError", id="not-json"),
+            pytest.param({"text": "<html>Sign in</html>"}, "ConnectorError", id="not-json"),
             pytest.param({"json": [{"wonum": "WO-001"}]}, "ConnectorError", id="not-an-object"),
             # parse_datetime expects text; a number raises AttributeError.
             pytest.param(
@@ -1566,8 +1570,11 @@ class TestUpdateRetrySafety:
         await _connect(httpx_mock, connector)
         _add_lookup(httpx_mock, "WO-001", {"href": _INTERNAL_URI})
         httpx_mock.add_exception(httpx.ReadTimeout("timed out"), method="POST", url=_UPDATE_URL)
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(ConnectorTimeoutError) as info:
             await connector.update_work_order("WO-001", description="x")
+        assert str(info.value) == (
+            f"Maximo update work order timed out after sending began. {WRITE_OUTCOME_UNKNOWN}"
+        )
         assert [r.method for r in httpx_mock.get_requests()] == ["GET", "GET", "POST"]
 
     @pytest.mark.asyncio
@@ -2425,7 +2432,9 @@ class TestReadsSelectAttributes:
         )
         wo = await connector.get_work_order("WO-1")
         assert wo is not None
-        await connector._patch_resource("mxwo", wo.metadata["rest_id"], {"description": "x"})
+        await connector._patch_resource(
+            "mxwo", wo.metadata["rest_id"], {"description": "x"}, operation="update work order"
+        )
         post = httpx_mock.get_requests()[-1]
         assert (post.url.host, post.url.path) == (
             "maximo.example.com",
@@ -2964,3 +2973,131 @@ class TestReadSparePartsAssetFilter:
             "asset. Look the part up by sku instead."
         )
         assert _paths(httpx_mock) == _CONNECT_ONLY
+
+
+# ---------------------------------------------------------------------------
+# Transport errors (httpx raises instead of answering). The writes' outcomes
+# are covered for every vendor in test_cmms_vendor_write_outcomes.py.
+# ---------------------------------------------------------------------------
+
+
+class TestTransportErrors:
+    """A timeout raises ConnectorTimeoutError, any other httpx failure
+    ConnectorError, and no message carries the URL."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _no_sleep)
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_after_retries(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        url = f"{OSLC}/whoami"
+        httpx_mock.add_exception(
+            httpx.ReadTimeout(f"timed out on {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorTimeoutError) as info:
+            await connector.connect()
+        assert str(info.value) == "Maximo health check timed out"
+        assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+        assert not connector._connected
+
+    @pytest.mark.asyncio
+    async def test_connect_malformed_url_raises_config_error(self) -> None:
+        conn = MaximoConnector(
+            url="https://maximo.example.com:notaport",
+            auth=ApiKeyHeaderAuth(header_name="apikey", value="test-key"),
+        )
+        with pytest.raises(ConnectorConfigError) as info:
+            await conn.connect()
+        assert str(info.value) == (
+            "Maximo health check failed: invalid URL (check 'url' and the endpoint paths)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_assets_connect_error_after_retries(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        url = _oslc_url("mxasset")
+        httpx_mock.add_exception(
+            httpx.ConnectError(f"no route to {url}"), url=url, is_reusable=True
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert info.type is ConnectorError
+        assert str(info.value) == "Maximo GET mxasset failed: ConnectError"
+        assert isinstance(info.value.__cause__, httpx.ConnectError)
+        assert len(httpx_mock.get_requests(url=url)) == 1 + DEFAULT_MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_get_work_order_protocol_error_fails_at_once(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        url = _oslc_url("mxwo", **{"oslc.pageSize": "1", "oslc.where": 'wonum="WO-001"'})
+        httpx_mock.add_exception(httpx.RemoteProtocolError(""), url=url)
+        with pytest.raises(ConnectorError) as info:
+            await connector.get_work_order("WO-001")
+        assert str(info.value) == "Maximo GET mxwo failed: RemoteProtocolError"
+        assert len(httpx_mock.get_requests(url=url)) == 1
+
+    @pytest.mark.asyncio
+    async def test_read_response_that_is_not_json(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(url=_oslc_url("mxasset"), text="<html>maximo-internal</html>")
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+        assert str(info.value) == "Maximo GET mxasset failed: response is not JSON"
+
+    @pytest.mark.asyncio
+    async def test_resource_read_timeout(self, httpx_mock, connector: MaximoConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_exception(httpx.ReadTimeout(""), url=_UPDATE_URL, is_reusable=True)
+        with pytest.raises(ConnectorTimeoutError) as info:
+            await connector._read_resource("mxwo", _REST_ID)
+        assert str(info.value) == "Maximo GET mxwo resource timed out"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"description": "secret value 4711"}, id="no-wonum"),
+            pytest.param(["WO-4711"], id="not-an-object"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unmappable_create_response_leaves_the_outcome_unknown(
+        self, httpx_mock, connector: MaximoConnector, body: object
+    ) -> None:
+        """Maximo accepted the create: the error must not invite a retry, and
+        must not quote the response."""
+        from datetime import UTC, datetime
+
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="POST", url=f"{OSLC}/os/mxwo", status_code=201, json=body)
+        now = datetime.now(tz=UTC)
+        work_order = WorkOrder(
+            id="TEMP",
+            type=WorkOrderType.CORRECTIVE,
+            priority=Priority.HIGH,
+            asset_id="PUMP-201",
+            description="Replace bearing",
+            created_at=now,
+            updated_at=now,
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.create_work_order(work_order)
+        assert type(info.value) is ConnectorError
+        assert str(info.value) == (
+            "Maximo create work order was answered with a success status, but the response "
+            f"could not be mapped to a work order. {WRITE_OUTCOME_UNKNOWN}"
+        )
+        assert "4711" not in str(info.value)
+        assert len(httpx_mock.get_requests(method="POST")) == 1

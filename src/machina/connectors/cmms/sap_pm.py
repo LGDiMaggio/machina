@@ -47,6 +47,14 @@ from pydantic import Field
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
 from machina.connectors.capabilities import Capability
+from machina.connectors.cmms._http_errors import (
+    WRITE_OUTCOME_UNKNOWN,
+    WRITE_REQUEST_NOT_SENT,
+    rest_errors,
+    status_error,
+    write_not_sent,
+    write_outcome_unknown,
+)
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
 from machina.connectors.cmms.filters import spare_part_filters
 from machina.connectors.cmms.mappers import sap_pm as sap_mapper
@@ -246,20 +254,24 @@ class SapPmConnector:
 
         Raises:
             ConnectorAuthError: If authentication fails.
+            ConnectorTimeoutError: If the gateway or the token endpoint does
+                not answer in time.
+            ConnectorConfigError: If ``url`` is malformed.
             ConnectorError: If the OData gateway is unreachable.
         """
         httpx = _require_httpx()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # Fetch OAuth2 token if needed
-            if isinstance(self._auth, OAuth2ClientCredentials):
-                await self._auth.fetch_token(client)
-
-            resp = await request_with_retry(
-                client,
-                "GET",
-                f"{self.url}/API_EQUIPMENT/$metadata",
-                headers=self._headers(),
-            )
+        with rest_errors("SAP PM", "health check"):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                if isinstance(self._auth, OAuth2ClientCredentials):
+                    # Often another host than the gateway: name its failure apart.
+                    with rest_errors("SAP PM", "OAuth2 token request"):
+                        await self._auth.fetch_token(client)
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/API_EQUIPMENT/$metadata",
+                    headers=self._headers(),
+                )
         if resp.status_code == 401:
             raise ConnectorAuthError("SAP PM authentication failed")
         if resp.status_code not in (200, 204):
@@ -388,6 +400,19 @@ class SapPmConnector:
 
         Returns:
             The created work order with the server-assigned ID.
+
+        Raises:
+            ConnectorAuthError: If SAP answers 401 or a 403 that is not a
+                CSRF challenge.
+            ConnectorError: If SAP refuses the create (another 4xx), or it
+                fails before the order request is sent (the CSRF token fetch
+                included), in which case the message says the write request
+                was not sent. Any other failure (a 3xx or 5xx, a timeout or a
+                broken connection after sending began, a success response
+                that is not JSON or cannot be mapped to an order) leaves the
+                outcome unknown, and the message says to check SAP before
+                retrying; a timeout is a
+                :class:`~machina.exceptions.ConnectorTimeoutError`.
         """
         self._ensure_connected()
         payload: dict[str, Any] = {
@@ -398,27 +423,38 @@ class SapPmConnector:
         }
         if work_order.assigned_to:
             payload["MaintOrdPersonResponsible"] = work_order.assigned_to
+        operation = "create maintenance order"
         resp = await self._write_with_csrf(
             "POST",
             f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder",
             payload,
+            operation=operation,
         )
         if resp.status_code == 401:
             raise ConnectorAuthError("SAP PM authentication failed")
         if resp.status_code not in (200, 201):
-            raise ConnectorError(
-                f"SAP PM create maintenance order failed: HTTP {resp.status_code}"
-            )
-        body = resp.json()
-        result = body.get("d", body)
+            raise status_error("SAP PM", operation, resp.status_code, write=True)
+        with rest_errors("SAP PM", operation, write=True):
+            body = resp.json()
+        # SAP accepted the create: a body that cannot be mapped must not read
+        # as a failed create, and its values must not reach the message.
+        try:
+            created = sap_mapper.parse_work_order(body.get("d", body))
+        except Exception as exc:
+            raise write_outcome_unknown(
+                "SAP PM",
+                operation,
+                "was answered with a success status, but the response could not be mapped "
+                "to a maintenance order",
+            ) from exc
         logger.info(
             "work_order_created",
             connector="SapPmConnector",
             operation="create_work_order",
-            work_order_id=result.get("MaintenanceOrder"),
+            work_order_id=created.id,
             asset_id=work_order.asset_id,
         )
-        return sap_mapper.parse_work_order(result)
+        return created
 
     @sandbox_aware
     async def update_work_order(
@@ -464,9 +500,13 @@ class SapPmConnector:
             ConnectorError: If nothing is to be updated, ``status`` is one SAP
                 sets itself, the order is not found or has no ETag, SAP
                 rejects a request (after a PATCH, the message says the PATCH
-                was applied), the order cannot be read back (the message says
-                the update was applied and must not be repeated), or the order
-                does not show the status afterwards.
+                was applied), a request fails before it is sent (the message
+                says the write request was not sent), the outcome of a write
+                is unknown (a 3xx or 5xx, a timeout or a broken connection
+                after sending began; the message says to check SAP before
+                retrying), the order cannot be read back (the message says
+                the update was applied and must not be repeated), or the
+                order does not show the status afterwards.
         """
         self._ensure_connected()
         function_import = ""
@@ -485,17 +525,17 @@ class SapPmConnector:
         if not payload and not function_import:
             raise ConnectorError("update_work_order requires at least one field to update")
         if payload:
+            operation = "update maintenance order"
             resp = await self._write_with_csrf(
                 "PATCH",
                 f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder({_odata_key(work_order_id)})",
                 payload,
+                operation=operation,
             )
             if resp.status_code == 401:
                 raise ConnectorAuthError("SAP PM authentication failed")
             if resp.status_code not in (200, 204):
-                raise ConnectorError(
-                    f"SAP PM update maintenance order failed: HTTP {resp.status_code}"
-                )
+                raise status_error("SAP PM", operation, resp.status_code, write=True)
         if status is not None:
             try:
                 await self._set_system_status(work_order_id, status, function_import)
@@ -507,11 +547,28 @@ class SapPmConnector:
                     for name, value in (("assigned_to", assigned_to), ("description", description))
                     if value is not None
                 ]
+                # The PATCH was acknowledged and is not undone: the message
+                # names it apart from the status change, the step that failed.
+                acknowledged = (
+                    f"SAP PM acknowledged the earlier {' and '.join(fields)} update, "
+                    "which stays applied"
+                )
+                message = str(exc).rstrip(".")
+                not_sent = WRITE_REQUEST_NOT_SENT.rstrip(".")
+                if message.endswith(WRITE_OUTCOME_UNKNOWN.rstrip(".")):
+                    message += (
+                        f". {acknowledged}; the later status change may also have been applied"
+                    )
+                elif message.endswith(not_sent):
+                    message = message.removesuffix(not_sent).rstrip(". ")
+                    message += f". {acknowledged}; the later status change request was not sent to the CMMS"
+                else:
+                    message += (
+                        f". {acknowledged}; only the later status change failed, "
+                        "and it was not applied"
+                    )
                 # Keep the type (an auth failure stays ConnectorAuthError).
-                raise type(exc)(
-                    f"{exc}. The {' and '.join(fields)} update sent before it was applied; "
-                    "only the status step failed"
-                ) from None
+                raise type(exc)(message) from None
         logger.info(
             "work_order_updated",
             connector="SapPmConnector",
@@ -603,9 +660,13 @@ class SapPmConnector:
         the order's ``LastChangeDateTime`` as a read returns it; it is read
         from the order's OData V2 ``__metadata``
         (:func:`~machina.connectors.cmms.mappers.sap_pm.order_etag`). A
-        ``412`` means the order changed after it was read.
+        ``412`` means the order changed after it was read. A failed read says
+        the write request was not sent.
         """
-        order = await self._read_order(work_order_id)
+        try:
+            order = await self._read_order(work_order_id)
+        except ConnectorError as exc:
+            raise write_not_sent(exc) from exc
         if order is None:
             raise ConnectorError(f"Work order {work_order_id} not found")
         if self._status_is_set(order, status):
@@ -628,6 +689,7 @@ class SapPmConnector:
             f"{self.url}/API_MAINTENANCEORDER/{function_import}",
             params={"MaintenanceOrder": _odata_string(work_order_id)},
             if_match=etag,
+            operation=function_import,
         )
         if resp.status_code == 401:
             raise ConnectorAuthError("SAP PM authentication failed")
@@ -637,7 +699,7 @@ class SapPmConnector:
                 "changed after it was read; read it again before retrying"
             )
         if resp.status_code not in (200, 204):
-            raise ConnectorError(f"SAP PM {function_import} failed: HTTP {resp.status_code}")
+            raise status_error("SAP PM", function_import, resp.status_code, write=True)
 
     @sandbox_aware
     async def close_work_order(self, work_order_id: str) -> WorkOrder:
@@ -758,6 +820,7 @@ class SapPmConnector:
         url: str,
         payload: dict[str, Any] | None = None,
         *,
+        operation: str,
         params: dict[str, str] | None = None,
         if_match: str | None = None,
     ) -> Any:
@@ -783,10 +846,28 @@ class SapPmConnector:
         IW38 MCP vendor tool calls it directly. The guard fires before the CSRF
         fetch.
 
+        Args:
+            method: ``"POST"`` or ``"PATCH"``.
+            url: Target entity (set) or function-import URL.
+            payload: JSON body, or ``None`` for a function import.
+            operation: Names the write in error messages, e.g.
+                ``"create maintenance order"``.
+            params: Query parameters of a function import.
+            if_match: ETag sent as ``If-Match``.
+
+        Returns:
+            The write's final httpx response, its status unchecked, for the
+            caller to report.
+
         Raises:
             ConnectorAuthError: If the CSRF fetch returns 401.
-            ConnectorError: If the connector is not connected, or the CSRF
-                fetch fails or returns no token.
+            ConnectorError: If the connector is not connected; if the CSRF
+                fetch fails or returns no token, or the write fails before
+                its request is sent, in which case the message says the
+                write request was not sent; or, for a timeout or a broken
+                connection after sending began (a write is not retried), with
+                a message that says the outcome is unknown. A timeout is a
+                ``ConnectorTimeoutError``.
         """
         # The domain writes check this themselves; the raw IW38 vendor tool
         # relies on this check, as it does on the sandbox guard.
@@ -795,7 +876,9 @@ class SapPmConnector:
         headers = {"If-Match": if_match} if if_match is not None else {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             token = await self._fetch_csrf_token(client)
-            resp = await self._csrf_write(client, method, url, payload, params, headers, token)
+            resp = await self._csrf_write(
+                client, method, url, payload, params, headers, token, operation
+            )
             if resp.status_code == 403 and _is_csrf_challenge(resp):
                 logger.warning(
                     "sap_csrf_token_refresh",
@@ -803,24 +886,42 @@ class SapPmConnector:
                     method=method,
                 )
                 token = await self._fetch_csrf_token(client)
-                resp = await self._csrf_write(client, method, url, payload, params, headers, token)
+                resp = await self._csrf_write(
+                    client, method, url, payload, params, headers, token, operation
+                )
             return resp
 
     async def _fetch_csrf_token(self, client: Any) -> str:
-        """Fetch a fresh CSRF token (a safe, idempotent GET)."""
-        csrf_resp = await request_with_retry(
-            client,
-            "GET",
-            f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
-            headers={**self._headers(), "X-CSRF-Token": "Fetch"},
-        )
+        """Fetch a fresh CSRF token (a safe, idempotent GET) for a write.
+
+        Every failure here comes before the write request, so its message
+        says the write request was not sent.
+        """
+        try:
+            with rest_errors("SAP PM", "CSRF token fetch"):
+                csrf_resp = await request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.url}/API_MAINTENANCEORDER/MaintenanceOrder?$top=1",
+                    headers={**self._headers(), "X-CSRF-Token": "Fetch"},
+                )
+        except ConnectorError as exc:
+            raise write_not_sent(exc) from exc
         if csrf_resp.status_code == 401:
-            raise ConnectorAuthError("SAP PM authentication failed during CSRF token fetch")
+            raise ConnectorAuthError(
+                f"SAP PM authentication failed during CSRF token fetch. {WRITE_REQUEST_NOT_SENT}"
+            )
         if csrf_resp.status_code not in (200, 204):
-            raise ConnectorError(f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}")
+            raise ConnectorError(
+                f"SAP PM CSRF token fetch failed: HTTP {csrf_resp.status_code}. "
+                f"{WRITE_REQUEST_NOT_SENT}"
+            )
         token = csrf_resp.headers.get("x-csrf-token", "")
         if not token:
-            raise ConnectorError("SAP PM CSRF token fetch did not return an x-csrf-token header")
+            raise ConnectorError(
+                "SAP PM CSRF token fetch did not return an x-csrf-token header. "
+                f"{WRITE_REQUEST_NOT_SENT}"
+            )
         return str(token)
 
     async def _csrf_write(
@@ -832,14 +933,17 @@ class SapPmConnector:
         params: dict[str, str] | None,
         extra_headers: dict[str, str],
         token: str,
+        operation: str,
     ) -> Any:
         """Issue the write with the session's CSRF token (same client/cookies)."""
         headers = {**self._headers(), **extra_headers, "X-CSRF-Token": token}
         if payload is not None:
             headers["Content-Type"] = "application/json"
-        return await request_with_retry(
-            client, method, url, headers=headers, params=params, json=payload
-        )
+        # The token fetch went first, so "no request was sent" would be untrue.
+        with rest_errors("SAP PM", operation, write=True, not_sent=WRITE_REQUEST_NOT_SENT):
+            return await request_with_retry(
+                client, method, url, headers=headers, params=params, json=payload
+            )
 
     async def _odata_get(
         self,
@@ -884,52 +988,53 @@ class SapPmConnector:
         params: dict[str, str] | None = initial_params
         skip = 0
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            while url is not None:
-                if params is not None and skip > 0:
-                    params["$skip"] = str(skip)
-                resp = await request_with_retry(
-                    client,
-                    "GET",
-                    url,
-                    headers=self._headers(),
-                    params=params,
-                )
-                if resp.status_code == 401:
-                    raise ConnectorAuthError("SAP PM authentication failed")
-                if resp.status_code != 200:
-                    raise ConnectorError(
-                        f"SAP PM GET {service}/{entity_set} failed: HTTP {resp.status_code}"
+        with rest_errors("SAP PM", f"GET {service}/{entity_set}"):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                while url is not None:
+                    if params is not None and skip > 0:
+                        params["$skip"] = str(skip)
+                    resp = await request_with_retry(
+                        client,
+                        "GET",
+                        url,
+                        headers=self._headers(),
+                        params=params,
                     )
-                body = resp.json()
-                # OData v2 wraps in "d": {"results": [...]}
-                # OData v4 uses "value": [...]
-                d = body.get("d", body)
-                results = d.get("results", d.get("value", []))
-                if isinstance(results, dict):
-                    # Single entity returned (not a list)
-                    results = [results]
-                all_items.extend(results)
-                if len(all_items) > self._MAX_ODATA_ROWS:
-                    raise ConnectorError(
-                        f"SAP PM GET {service}/{entity_set} exceeded the "
-                        f"{self._MAX_ODATA_ROWS}-row safety cap — refusing to load an "
-                        "unbounded result set into memory. Narrow the query with a $filter."
-                    )
+                    if resp.status_code == 401:
+                        raise ConnectorAuthError("SAP PM authentication failed")
+                    if resp.status_code != 200:
+                        raise ConnectorError(
+                            f"SAP PM GET {service}/{entity_set} failed: HTTP {resp.status_code}"
+                        )
+                    body = resp.json()
+                    # OData v2 wraps in "d": {"results": [...]}
+                    # OData v4 uses "value": [...]
+                    d = body.get("d", body)
+                    results = d.get("results", d.get("value", []))
+                    if isinstance(results, dict):
+                        # Single entity returned (not a list)
+                        results = [results]
+                    all_items.extend(results)
+                    if len(all_items) > self._MAX_ODATA_ROWS:
+                        raise ConnectorError(
+                            f"SAP PM GET {service}/{entity_set} exceeded the "
+                            f"{self._MAX_ODATA_ROWS}-row safety cap — refusing to load an "
+                            "unbounded result set into memory. Narrow the query with a $filter."
+                        )
 
-                # Server-driven pagination
-                next_link = d.get("__next", body.get("@odata.nextLink"))
-                if next_link and (top is None):
-                    url = next_link
-                    params = None  # nextLink includes all query params
-                    skip = 0
-                elif top is not None:
-                    # Single-shot lookup; don't paginate
-                    url = None
-                elif len(results) < page_size:
-                    url = None
-                else:
-                    skip += page_size
+                    # Server-driven pagination
+                    next_link = d.get("__next", body.get("@odata.nextLink"))
+                    if next_link and (top is None):
+                        url = next_link
+                        params = None  # nextLink includes all query params
+                        skip = 0
+                    elif top is not None:
+                        # Single-shot lookup; don't paginate
+                        url = None
+                    elif len(results) < page_size:
+                        url = None
+                    else:
+                        skip += page_size
 
         logger.debug(
             "odata_get",
