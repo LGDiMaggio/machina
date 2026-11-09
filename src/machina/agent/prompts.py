@@ -267,6 +267,16 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     return "\n".join(lines)
 
 
+WorkOrdersUnchecked = Literal["unsupported", "failed"]
+
+_WORK_ORDERS_UNCHECKED: dict[WorkOrdersUnchecked, str] = {
+    "unsupported": (
+        "**Work Orders:** not checked: the connected CMMS cannot look up work orders by asset."
+    ),
+    "failed": "**Work Orders:** not checked: the work-order lookup for this asset failed.",
+}
+
+
 SparePartsUnchecked = Literal["unsupported", "failed", "timed_out"]
 
 _SPARE_PARTS_UNCHECKED: dict[SparePartsUnchecked, str] = {
@@ -1091,6 +1101,7 @@ def build_context_message(
     verdict: _ResolutionVerdict | None = None,
     asset: Asset | None = None,
     work_orders: list[WorkOrder] | None = None,
+    work_orders_unchecked: WorkOrdersUnchecked | None = None,
     alarms: list[Alarm] | None = None,
     spare_parts: list[SparePart] | None = None,
     spare_parts_unchecked: SparePartsUnchecked | None = None,
@@ -1108,7 +1119,14 @@ def build_context_message(
             disambiguation nudge reflects the gate's actual decision rather
             than a second, independent reading of the same candidates.
         asset: The asset the runtime committed to, if any.
-        work_orders: Work orders prefetched for the asset.
+        work_orders: Work orders prefetched for the asset; ``[]`` when the
+            lookup found none.
+        work_orders_unchecked: Why the work-order prefetch has no result:
+            ``"unsupported"`` (the connector cannot filter work orders by
+            asset) or ``"failed"`` (the lookup raised). Rendered as one "not
+            checked" line, only when ``work_orders`` is ``None``, so the model
+            never reads an unchecked lookup as "no work orders"; any other
+            reason renders as ``"failed"``.
         alarms: Active alarms prefetched for the asset.
         spare_parts: Spare parts prefetched for the asset; ``[]`` when the
             lookup found none.
@@ -1134,6 +1152,10 @@ def build_context_message(
 
     if work_orders is not None:
         sections.append(format_work_orders_context(work_orders))
+    elif work_orders_unchecked is not None:
+        sections.append(
+            _WORK_ORDERS_UNCHECKED.get(work_orders_unchecked, _WORK_ORDERS_UNCHECKED["failed"])
+        )
 
     if alarms is not None:
         sections.append(format_alarms_context(alarms))

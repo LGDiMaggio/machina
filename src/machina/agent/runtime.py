@@ -1740,6 +1740,20 @@ class Agent:
                         budget_seconds=_SPARE_PARTS_PREFETCH_BUDGET,
                     )
                     context["spare_parts_unchecked"] = "timed_out"
+                elif name == "work_orders" and isinstance(result, ConnectorUnsupportedFilterError):
+                    # Expected on every turn for such a CMMS, as for spare
+                    # parts: INFO, and the prompt says the work orders were
+                    # not checked instead of implying there are none.
+                    logger.info(
+                        "context_gather_skipped",
+                        agent=self.name,
+                        connector=wo_connectors[0][0],
+                        source=name,
+                        asset_id=asset.id,
+                        operation="gather_context",
+                        reason="unsupported_filter",
+                    )
+                    context["work_orders_unchecked"] = "unsupported"
                 elif isinstance(result, BaseException):
                     logger.warning(
                         "context_gather_error",
@@ -1747,8 +1761,13 @@ class Agent:
                         source=name,
                         error=str(result),
                     )
+                    # Not checked is not "none": without this the section is
+                    # just missing, and the model can answer as if the lookup
+                    # had found nothing.
                     if name == "spare_parts":
                         context["spare_parts_unchecked"] = "failed"
+                    elif name == "work_orders":
+                        context["work_orders_unchecked"] = "failed"
                 else:
                     context[name] = result
 
@@ -2192,6 +2211,7 @@ class Agent:
             verdict=context_data.get("resolution_verdict"),
             asset=context_data.get("asset"),
             work_orders=context_data.get("work_orders"),
+            work_orders_unchecked=context_data.get("work_orders_unchecked"),
             alarms=context_data.get("alarms"),
             spare_parts=context_data.get("spare_parts"),
             spare_parts_unchecked=context_data.get("spare_parts_unchecked"),

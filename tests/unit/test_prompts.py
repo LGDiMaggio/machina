@@ -499,6 +499,44 @@ class TestBuildContextMessage:
             "**Spare Parts (1):**\n  - Bearing 6310 (SKU: SKF-6310) — Qty: 4 | ✅ In stock"
         )
 
+    @pytest.mark.parametrize(
+        ("unchecked", "line"),
+        [
+            (
+                "unsupported",
+                "**Work Orders:** not checked: the connected CMMS cannot look up work orders "
+                "by asset.",
+            ),
+            (
+                "failed",
+                "**Work Orders:** not checked: the work-order lookup for this asset failed.",
+            ),
+        ],
+    )
+    def test_unchecked_work_orders_render_one_line(self, unchecked: str, line: str) -> None:
+        assert build_context_message(work_orders_unchecked=unchecked) == line
+
+    def test_an_unknown_work_orders_reason_still_says_not_checked(self) -> None:
+        """Fail closed: a reason the table lacks renders as a failed lookup, not nothing."""
+        text = build_context_message(work_orders_unchecked="timed_out")  # type: ignore[arg-type]
+        assert text == "**Work Orders:** not checked: the work-order lookup for this asset failed."
+
+    def test_a_checked_empty_work_order_list_is_not_unchecked(self) -> None:
+        """A lookup that found none says so; an unchecked reason is ignored."""
+        text = build_context_message(work_orders=[], work_orders_unchecked="failed")
+        assert text == "No work orders found."
+
+    def test_work_orders_and_spare_parts_report_unchecked_apart(self) -> None:
+        text = build_context_message(
+            work_orders_unchecked="failed", spare_parts_unchecked="unsupported"
+        )
+        assert text.split("\n\n") == [
+            "**Work Orders:** not checked: the work-order lookup for this asset failed.",
+            "**Spare Parts:** not checked: the connected CMMS cannot look up spare parts "
+            "by asset. A specific part can be checked by its SKU with the "
+            "check_spare_parts tool.",
+        ]
+
     def test_with_alarms(self) -> None:
         alarms = [
             Alarm(
