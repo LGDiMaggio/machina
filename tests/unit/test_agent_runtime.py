@@ -37,6 +37,7 @@ from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
 from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
+    ConnectorSchemaError,
     ConnectorTimeoutError,
     ConnectorUnsupportedFilterError,
     LLMError,
@@ -354,6 +355,63 @@ class _FakeErrorConnector:
 
     async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
         raise RuntimeError("Connection timeout")
+
+
+class _WorkOrdersByAssetRefusedConnector:
+    """Work-order provider that cannot filter by asset and refuses the filter."""
+
+    capabilities: ClassVar[list[str]] = ["read_work_orders"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_work_orders(self, *, asset_id: str = "", status: str = "") -> list[WorkOrder]:
+        if asset_id != "":
+            raise ConnectorUnsupportedFilterError("The CMMS cannot filter work orders by asset")
+        return []
+
+
+class _WorkOrdersReadRefusedConnector:
+    """Work-order provider whose answer cannot be returned, as UpKeep refuses a
+    list that holds a work order on hold: a ConnectorError, not a filter refusal."""
+
+    capabilities: ClassVar[list[str]] = ["read_work_orders"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+        raise ConnectorSchemaError("work orders that no Machina status describes")
+
+
+class _NoWorkOrdersConnector:
+    """Work-order provider whose lookup for the asset succeeds and finds none."""
+
+    capabilities: ClassVar[list[str]] = ["read_work_orders"]
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_work_orders(self, **kwargs: Any) -> list[WorkOrder]:
+        return []
 
 
 class _RaisingReadConnector:
@@ -3365,6 +3423,108 @@ class TestGatherContext:
         context = await agent._gather_context("spare parts for P-201", resolved)
 
         messages = agent._build_messages("spare parts for P-201", "chat1", context)
+
+        [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
+        assert shown in retrieved.splitlines()
+        assert not_shown not in retrieved
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "connector",
+        [_FakeErrorConnector, _WorkOrdersReadRefusedConnector],
+        ids=["unexpected-error", "connector-error"],
+    )
+    async def test_failed_work_order_prefetch_is_marked_unchecked(self, connector: type) -> None:
+        """A failed lookup is not "no work orders": the context records why the
+        section is missing, and the failure stays a warning."""
+        from structlog.testing import capture_logs
+
+        agent = Agent(plant=_make_plant(), connectors=[connector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+
+        with capture_logs() as logs:
+            context = await agent._gather_context("work orders for P-201", resolved)
+
+        assert "work_orders" not in context
+        assert context["work_orders_unchecked"] == "failed"
+        assert "spare_parts_unchecked" not in context
+        assert not [e for e in logs if e["event"] == "context_gather_skipped"]
+        [error] = [e for e in logs if e["event"] == "context_gather_error"]
+        assert error["log_level"] == "warning"
+        assert error["source"] == "work_orders"
+
+    @pytest.mark.asyncio
+    async def test_refused_work_order_asset_filter_is_skipped_without_a_warning(self) -> None:
+        """A CMMS that cannot filter work orders by asset refuses on every turn
+        that resolves an asset: INFO, as for spare parts, and not checked."""
+        from structlog.testing import capture_logs
+
+        from machina.connectors.capabilities import Capability
+
+        agent = Agent(plant=_make_plant(), connectors=[_WorkOrdersByAssetRefusedConnector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+
+        with capture_logs() as logs:
+            context = await agent._gather_context("work orders for P-201", resolved)
+
+        assert "work_orders" not in context
+        assert context["work_orders_unchecked"] == "unsupported"
+        [skipped] = [e for e in logs if e["event"] == "context_gather_skipped"]
+        ((wo_connector_name, _),) = agent._registry.find_by_capability(
+            Capability.READ_WORK_ORDERS
+        )[:1]
+        assert skipped == {
+            "event": "context_gather_skipped",
+            "agent": agent.name,
+            "connector": wo_connector_name,
+            "source": "work_orders",
+            "asset_id": "P-201",
+            "operation": "gather_context",
+            "reason": "unsupported_filter",
+            "log_level": "info",
+        }
+        assert not [e for e in logs if e["log_level"] == "warning"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("connector", "shown", "not_shown"),
+        [
+            (
+                _WorkOrdersByAssetRefusedConnector,
+                "**Work Orders:** not checked: the connected CMMS cannot look up work orders "
+                "by asset.",
+                "No work orders found.",
+            ),
+            (
+                _FakeErrorConnector,
+                "**Work Orders:** not checked: the work-order lookup for this asset failed.",
+                "No work orders found.",
+            ),
+            (
+                _WorkOrdersReadRefusedConnector,
+                "**Work Orders:** not checked: the work-order lookup for this asset failed.",
+                "No work orders found.",
+            ),
+            (
+                _NoWorkOrdersConnector,
+                "No work orders found.",
+                "not checked",
+            ),
+        ],
+        ids=["unsupported", "failed", "connector-error", "empty"],
+    )
+    async def test_the_prompt_tells_unchecked_work_orders_from_none_found(
+        self, connector: type, shown: str, not_shown: str
+    ) -> None:
+        """The model must not read "could not check" as "no work orders"."""
+        agent = Agent(plant=_make_plant(), connectors=[connector()])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        context = await agent._gather_context("work orders for P-201", resolved)
+
+        messages = agent._build_messages("work orders for P-201", "chat1", context)
 
         [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
         assert shown in retrieved.splitlines()

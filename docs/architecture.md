@@ -72,8 +72,9 @@ connector. When a message comes in, the runtime:
    asset the runtime takes the *first* connector that declares
    `read_work_orders`, `read_spare_parts` and `search_documents` respectively
    and runs those three queries concurrently (`asyncio.gather`); a source that
-   fails is logged and skipped, and for spare parts the prompt says they were
-   not checked rather than that there are none. A spare-parts read that sends
+   fails is logged and skipped, and for work orders and spare parts the prompt
+   says they were not checked rather than that there are none (a failed
+   document search is still just left out). A spare-parts read that sends
    one request per part (UpKeep) gets a 5-second budget here and is cancelled
    at the deadline; the agent's tools have no such deadline. Nothing else is
    prefetched — alarms and sensor
