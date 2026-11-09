@@ -3531,6 +3531,29 @@ class TestGatherContext:
         assert not_shown not in retrieved
 
     @pytest.mark.asyncio
+    async def test_failed_document_search_marks_no_other_source_unchecked(self) -> None:
+        """A failed search stays a warning and is left out of the context; it
+        must not be reported as an unchecked work-order or spare-parts lookup."""
+        from structlog.testing import capture_logs
+
+        doc_conn = _FakeDocConnector()
+        doc_conn.search = AsyncMock(side_effect=ConnectorError("search backend down"))  # type: ignore[method-assign]
+        agent = Agent(plant=_make_plant(), connectors=[_FakeConnector(), doc_conn])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+
+        with capture_logs() as logs:
+            context = await agent._gather_context("bearing procedure for P-201", resolved)
+
+        assert "document_results" not in context
+        assert "work_orders" in context
+        assert "work_orders_unchecked" not in context
+        assert "spare_parts_unchecked" not in context
+        [error] = [e for e in logs if e["event"] == "context_gather_error"]
+        assert error["log_level"] == "warning"
+        assert error["source"] == "document_results"
+
+    @pytest.mark.asyncio
     async def test_with_documents(self) -> None:
         plant = _make_plant()
         conn = _FakeDocConnector()
