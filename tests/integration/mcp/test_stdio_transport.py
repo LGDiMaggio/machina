@@ -62,3 +62,24 @@ async def test_stdio_server_lists_and_calls_tools(tmp_path: Path) -> None:
         result = await session.call_tool("machina_list_assets", {})
         assert result.isError is False
         assert "P-201" in json.dumps([c.model_dump() for c in result.content])
+
+        # The diagnosis tool the diagnose_asset_failure prompt names is served,
+        # over the sample catalog the CMMS connector provides.
+        assert "machina_diagnose_failure" in names
+        diagnosis = await session.call_tool(
+            "machina_diagnose_failure",
+            {"asset_id": "P-201", "symptoms": ["high vibration"]},
+        )
+        assert diagnosis.isError is False, diagnosis.content
+        payload = diagnosis.structuredContent
+        assert payload is not None
+        assert [f["code"] for f in payload["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        assert payload["probable_failures"][0]["indicator_match_ratio"] == 0.67
+        assert payload["catalog"] == {
+            "providers": ["cmms"],
+            "failed_providers": [],
+            "partial": False,
+        }

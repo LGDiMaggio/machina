@@ -614,6 +614,64 @@ async def machina_get_alarms(
 
 
 # ---------------------------------------------------------------------------
+# Read tools — failure-mode catalog matching
+# ---------------------------------------------------------------------------
+
+
+async def machina_diagnose_failure(
+    ctx: Context,
+    asset_id: str,
+    symptoms: list[str],
+) -> dict[str, Any]:
+    """Match observed symptoms against the configured failure-mode catalog for an asset.
+
+    This is catalog matching, not signal analysis: it lists up to five of the
+    asset's catalog failure modes whose typical indicators share terms with
+    the symptoms, most matched indicators first, with recommended actions.
+    ``indicator_match_ratio`` is the share of a mode's indicators that
+    matched; it is not a probability, likelihood or calibrated confidence.
+    ``match_count`` is the number of matches before the cut. ``catalog``
+    names the failure-mode providers and any that failed; ``partial`` is true
+    when a failed provider's modes are missing. With nothing ranked, ``note``
+    says why (unknown asset, no catalog configured, nothing matched); an
+    ``error`` means the catalog or the asset lookup was unavailable.
+
+    Args:
+        asset_id: The asset experiencing issues.
+        symptoms: Observed symptoms (e.g. "high vibration", "noise").
+    """
+    from machina.agent.diagnosis import diagnose_symptoms, harvest_failure_modes
+
+    runtime = _runtime(ctx)
+    try:
+        asset = await _find_asset(runtime.get_primary_cmms(), asset_id)
+    except ConnectorError as exc:
+        # The CMMS could not answer: not an unknown asset, and its message
+        # (a host, a path, a backend value) stays in the log.
+        logger.warning(
+            "diagnose_failure_asset_lookup_failed",
+            asset_id=asset_id,
+            operation="diagnose_failure",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return {
+            "asset_id": asset_id,
+            "error": (
+                f"Asset lookup on the CMMS failed ({type(exc).__name__}); diagnosis could not run."
+            ),
+        }
+    # Same contract as the agent's diagnose_failure tool: an unknown asset is
+    # answered without a harvest, and the shared module builds the result.
+    harvest = (
+        await harvest_failure_modes(runtime.find_by_capability(Capability.READ_FAILURE_MODES))
+        if asset is not None
+        else None
+    )
+    return diagnose_symptoms(asset_id, asset, harvest, symptoms)
+
+
+# ---------------------------------------------------------------------------
 # Communication tools
 # ---------------------------------------------------------------------------
 
@@ -656,7 +714,10 @@ async def machina_send_message(
 # ---------------------------------------------------------------------------
 
 CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
-    Capability.READ_ASSETS: [machina_list_assets, machina_get_asset],
+    # Diagnosis rides on READ_ASSETS, the capability it cannot work without
+    # (it resolves the asset first); a missing failure-mode catalog is an
+    # answer — the tool's "no catalog" note — not a reason to hide the tool.
+    Capability.READ_ASSETS: [machina_list_assets, machina_get_asset, machina_diagnose_failure],
     Capability.READ_WORK_ORDERS: [machina_list_work_orders],
     Capability.GET_WORK_ORDER: [machina_get_work_order],
     Capability.CREATE_WORK_ORDER: [machina_create_work_order],
@@ -687,9 +748,10 @@ CAPABILITY_TO_TOOL: dict[Capability, list[Callable[..., Any]]] = {
     Capability.READ_CALENDAR_EVENTS: [],
     Capability.CREATE_CALENDAR_EVENT: [],
     Capability.DELETE_CALENDAR_EVENT: [],
-    # * Failure modes (READ_FAILURE_MODES) — the capability drives the
-    #   agent runtime's catalog harvest (``diagnose_failure`` consumes it
-    #   internally); no standalone MCP tool exposes the raw catalog yet.
+    # * Failure modes (READ_FAILURE_MODES) — the capability feeds the
+    #   catalog harvest behind ``machina_diagnose_failure`` (registered
+    #   under READ_ASSETS above) and the agent's ``diagnose_failure``; no
+    #   standalone MCP tool exposes the raw catalog yet.
     Capability.READ_FAILURE_MODES: [],
 }
 
