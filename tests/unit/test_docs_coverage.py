@@ -76,6 +76,7 @@ _ALLOWLIST: dict[str, str] = {
     # ---- Internal protocols / runtime helpers -----------------------------
     "machina.connectors.docs.watcher.RefreshableConnector": "Internal protocol; not part of public connector API.",
     "machina.connectors.docs.watcher.FileWatcher": "Internal helper for file-modified callbacks.",
+    "machina.agent.diagnosis.CatalogHarvest": "Internal harvest result shared by the agent and MCP diagnosis tools; the user-facing contract is the tool result in mcp/tools.md.",
     # ---- Auth helpers (mentioned inline in connector pages) ---------------
     "machina.connectors.cmms.auth.OAuth2ClientCredentials": "Auth scheme; documented inline in connectors/sap-pm.md examples.",
     # ---- IoT internals (configuration types used through MqttConnector) ----

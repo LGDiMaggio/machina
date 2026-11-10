@@ -3,20 +3,26 @@
 Machina registers three prompt templates that MCP clients offer to the user
 (for example in the slash menu). Each one renders a step-by-step instruction
 for the client's model describing what to look up. Only
-`diagnose_asset_failure` names a tool (`machina_get_asset`); its ranking step
-refers to a diagnosis tool that the MCP server does not offer, so the
-capability-honesty guard below has the model say so instead of simulating it.
+`diagnose_asset_failure` names tools: `machina_get_asset` and
+`machina_diagnose_failure`. Both are registered whenever a connector reads
+assets. On a server without one, the capability-honesty guard below has the
+model say a tool is missing instead of simulating it.
 
 ## Available Prompts
 
 ### `diagnose_asset_failure`
 
 Guides a structured fault diagnosis: look up the asset, check recent alarms
-and sensor readings, search the manuals for failure patterns, rank the
-probable failure modes, and recommend corrective actions and spare parts,
-stressing urgency for criticality-A assets. When no failure mode fits, the
-model is told to say so and ask for refined symptoms rather than invent a
-ranking.
+and sensor readings, search the manuals for failure patterns, match the
+symptoms against the failure-mode catalog with
+[`machina_diagnose_failure`](tools.md#failure-mode-catalog-matching), and
+recommend corrective actions and spare parts, stressing urgency for
+criticality-A assets. The model is told to keep the tool's order, not to
+present `indicator_match_ratio` as a probability, likelihood or calibrated
+confidence, to pass on the result's `note`, and to say when
+`catalog.partial` shows an incomplete catalog. When no failure mode fits, it
+relays the `note` (or the `error` of an unavailable catalog) and asks for
+refined symptoms rather than invent a ranking.
 
 **Parameters:**
 
