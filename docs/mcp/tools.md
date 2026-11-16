@@ -9,13 +9,15 @@ store and `machina_search_manuals` stays hidden.
 connector capabilities  →  CAPABILITY_TO_TOOL  →  registered tools
 ```
 
-Each tool talks to one connector: CMMS tools to the primary CMMS (the
+Each tool but one talks to one connector: CMMS tools to the primary CMMS (the
 connector marked `primary: true`, otherwise the first one that reads assets),
 the others to the first connector with the needed capability. Registration
 looks at every configured connector, dispatch only at that one: a CMMS tool
 turned on by a secondary CMMS still calls the primary, and fails when the
-primary cannot serve it. The [capability matrix](../capabilities.md) shows
-which connector declares what.
+primary cannot serve it. The exception is `machina_diagnose_failure`, which
+looks the asset up on the primary CMMS and reads the failure-mode catalog
+from every connector that declares `read_failure_modes`. The
+[capability matrix](../capabilities.md) shows which connector declares what.
 
 ## Domain Tools
 
@@ -33,6 +35,7 @@ which connector declares what.
 | `machina_search_manuals` | `search_documents` | `query`, `top_k=5`, `asset_id=""`, `filters=None` | Matching document chunks with source, page, section and score |
 | `machina_get_sensor_reading` | `get_latest_reading` | `asset_id` | Latest sensor reading |
 | `machina_get_alarms` | `get_latest_reading` | `asset_id=""` | Active alarms |
+| `machina_diagnose_failure` | `read_assets` | `asset_id`, `symptoms` | Catalog failure modes matching the symptoms, with the catalog's completeness (see [below](#failure-mode-catalog-matching)) |
 
 `machina_search_manuals` returns document sources as bare file names, never
 host paths. Its `filters` keys are `asset_id`, `doc_type`,
@@ -50,6 +53,46 @@ instead of a list.
     does not offer the two sensor tools. No shipped connector implements
     `get_alarms()`: `machina_get_alarms` returns an error entry even where the
     tool is registered.
+
+### Failure-mode catalog matching
+
+`machina_diagnose_failure` is the tool the `diagnose_asset_failure` prompt
+names. It gives the same answer as the agent's `diagnose_failure` tool: both
+use `machina.agent.diagnosis`. It compares the symptoms with each catalog
+failure mode's typical indicators by shared terms (`high vibration` matches
+`vibration_velocity_mm_s`). It reads no sensor data and processes no
+signals: the result is a list of catalog entries worth checking, not an
+evidence-based fault diagnosis.
+
+- The asset is looked up on the primary CMMS (`get_asset` when the connector
+  has it, otherwise a scan of `read_assets`). An asset that declares failure
+  modes is matched only against those; one that declares none is matched
+  against the whole catalog, and the `note` says so.
+- `probable_failures` lists up to five matches, most matched indicators
+  first. Each carries `code`, `name`, `category`, `indicator_match_ratio`,
+  `matching_indicators` and `recommended_actions`. `indicator_match_ratio`
+  is the share of the mode's indicators that matched (0 to 1). It is not a
+  probability, a likelihood or a calibrated confidence.
+- `match_count` is the number of matches before the cut to five.
+- `catalog` reports the failure-mode providers: `providers` (every connector
+  declaring `read_failure_modes`), `failed_providers` (each one whose read
+  raised a connector error, by name and error type) and `partial` (true when
+  any failed). The error message stays in the server log, as
+  `failure_mode_harvest_failed`.
+
+The result keeps four catalog states apart:
+
+| State | Result |
+|---|---|
+| No provider configured, or none serving a failure mode | `note`: "No failure-mode data configured on any connector." |
+| At least one provider failed and the others served no failure mode | `error`: "Failure-mode catalog unavailable: provider '…' failed (…)…" |
+| Some providers failed | the ranking from the others, `catalog.partial: true`, and a `note` ending "Partial catalog: …" |
+| Complete catalog, nothing matched | `note` listing the indicators the asset's modes know |
+
+An unknown asset gets a `note` and no catalog read. A CMMS that cannot answer
+the asset lookup gives an `error` naming the error type. Any other exception,
+from the lookup or a provider, is a bug, not an outage: the client receives
+an MCP error result.
 
 ### Write Tools
 
@@ -95,10 +138,12 @@ the client calls it, and which calls happen is up to the MCP client and its
 user. Keep the server in sandbox mode until you trust both.
 
 Capabilities with no tool are not exposed over MCP: the calendar
-capabilities, `read_failure_modes`, `receive_message`, `retrieve_section`,
+capabilities, `receive_message`, `retrieve_section`,
 `get_related_readings`, and the OPC-UA and MQTT capabilities
 (`browse_nodes`, `read_node_value`, `read_node_values`, `subscribe_to_nodes`,
-`subscribe_to_topics`, `publish_message`).
+`subscribe_to_topics`, `publish_message`). `read_failure_modes` has no tool
+of its own either: it feeds `machina_diagnose_failure`, and no tool returns
+the raw catalog.
 
 ## Vendor Tools (opt-in)
 
@@ -204,9 +249,10 @@ result (for example `{"error": "Asset 'P-999' not found"}`), so the client's
 model can read them; so do an invalid `status` in `machina_update_work_order`,
 an invalid `resource_type` or `resource_id` in `maximo_raw_attribute_update`,
 an empty `asset_id` in `machina_get_maintenance_history` (never an empty
-history), an alarm source without `get_alarms()`, and connector failures in
+history), an alarm source without `get_alarms()`, connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
-`machina_send_message`. Any other connector failure — and
+`machina_send_message`, and an unavailable catalog or asset lookup in
+`machina_diagnose_failure` (which names the error type only). Any other connector failure — and
 `machina_create_work_order` on an unknown asset — raises: the client receives
 an MCP error result carrying the exception message; the Python traceback is
 not sent.

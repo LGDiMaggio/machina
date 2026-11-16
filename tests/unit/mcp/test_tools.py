@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
 from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType, Criticality
+from machina.domain.failure_mode import FailureMode
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderType
-from machina.exceptions import AssetNotFoundError, SandboxViolationError
+from machina.exceptions import (
+    AssetNotFoundError,
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorTimeoutError,
+    SandboxViolationError,
+)
 from machina.runtime import MachinaRuntime
 
 
@@ -619,3 +630,399 @@ class TestGetSensorReading:
         runtime = MachinaRuntime(connectors={"iot": iot_conn})
         result = await machina_get_sensor_reading(_make_ctx(runtime), asset_id="P-001")
         assert result["temperature"] == 72.5
+
+
+# ---------------------------------------------------------------------------
+# machina_diagnose_failure — catalog matching over MCP (B9.1)
+# ---------------------------------------------------------------------------
+
+SAMPLE_CMMS = Path(__file__).resolve().parents[3] / "examples" / "sample_data" / "cmms"
+
+DIAG_ASSETS = [
+    Asset(
+        id="P-201",
+        name="Cooling Water Pump",
+        type=AssetType.ROTATING_EQUIPMENT,
+        criticality=Criticality.A,
+        failure_modes=["BEAR-WEAR-01", "SEAL-LEAK-01", "IMP-EROSION-01"],
+    ),
+    Asset(id="HX-101", name="Heat Exchanger", type=AssetType.ROTATING_EQUIPMENT),
+]
+
+
+def _diag_catalog() -> list[FailureMode]:
+    """The pump's declared modes plus a conveyor mode it must never get."""
+    return [
+        FailureMode(
+            code="BEAR-WEAR-01",
+            name="Bearing Wear",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "bearing_temperature_c",
+                "vibration_acceleration_g",
+            ],
+            recommended_actions=["replace_bearing", "check_alignment"],
+        ),
+        FailureMode(
+            code="SEAL-LEAK-01",
+            name="Mechanical Seal Leakage",
+            category="mechanical",
+            typical_indicators=["seal_pressure_bar", "leakage_rate_ml_min"],
+            recommended_actions=["replace_seal"],
+        ),
+        FailureMode(
+            code="IMP-EROSION-01",
+            name="Impeller Erosion",
+            category="mechanical",
+            typical_indicators=[
+                "vibration_velocity_mm_s",
+                "differential_pressure_bar",
+                "flow_rate_m3h",
+            ],
+            recommended_actions=["replace_impeller"],
+        ),
+        FailureMode(
+            code="BELT-WEAR-01",
+            name="Conveyor Belt Wear",
+            category="mechanical",
+            typical_indicators=["belt_speed_m_s", "vibration_velocity_mm_s"],
+            recommended_actions=["replace_belt"],
+        ),
+    ]
+
+
+class _CatalogProvider:
+    """A connector declaring READ_FAILURE_MODES: serves ``modes`` or raises ``error``."""
+
+    capabilities = frozenset({Capability.READ_FAILURE_MODES})
+
+    def __init__(
+        self,
+        error: Exception | None = None,
+        modes: list[FailureMode] | None = None,
+    ) -> None:
+        self._error = error
+        self._modes = _diag_catalog() if modes is None else modes
+        self.reads = 0
+
+    async def read_failure_modes(self) -> list[FailureMode]:
+        self.reads += 1
+        if self._error is not None:
+            raise self._error
+        return list(self._modes)
+
+
+def _diag_runtime(*providers: _CatalogProvider) -> MachinaRuntime:
+    """Primary CMMS serving ``DIAG_ASSETS``, plus the given catalog providers.
+
+    Each provider is registered as ``_CatalogProvider_<i>``, the name the
+    agent's registry gives it, so agent and MCP results compare whole.
+    """
+    cmms = _mock_cmms()
+    cmms.get_asset = AsyncMock(side_effect={a.id: a for a in DIAG_ASSETS}.get)
+    connectors: dict[str, Any] = {"cmms": cmms}
+    for i, provider in enumerate(providers):
+        connectors[f"_CatalogProvider_{i}"] = provider
+    return MachinaRuntime(connectors=connectors)
+
+
+async def _diagnose(runtime: MachinaRuntime, asset_id: str, *symptoms: str) -> dict[str, Any]:
+    from machina.mcp.tools import machina_diagnose_failure
+
+    return await machina_diagnose_failure(
+        _make_ctx(runtime), asset_id=asset_id, symptoms=list(symptoms)
+    )
+
+
+class TestDiagnoseFailure:
+    """machina_diagnose_failure — the agent's ranking, notes and catalog report, over MCP."""
+
+    @pytest.mark.asyncio
+    async def test_ranks_declared_modes_by_matched_indicators(self) -> None:
+        result = await _diagnose(_diag_runtime(_CatalogProvider()), "P-201", "high vibration")
+        # BELT-WEAR-01 lists a vibration indicator too, but the pump does not
+        # declare it.
+        assert [f["code"] for f in result["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        top = result["probable_failures"][0]
+        assert top["indicator_match_ratio"] == 0.67  # 2 of 3 indicators carry "vibration"
+        assert "confidence" not in top
+        assert top["recommended_actions"] == ["replace_bearing", "check_alignment"]
+        assert result["asset_name"] == "Cooling Water Pump"
+        assert result["match_count"] == 2
+        assert result["catalog"] == {
+            "providers": ["_CatalogProvider_0"],
+            "failed_providers": [],
+            "partial": False,
+        }
+        assert "note" not in result
+        assert "error" not in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_asset_note_without_harvest(self) -> None:
+        provider = _CatalogProvider()
+        result = await _diagnose(_diag_runtime(provider), "GHOST-9", "vibration")
+        assert result["probable_failures"] == []
+        assert result["note"] == "Asset 'GHOST-9' not found in the asset registry."
+        assert "asset_name" not in result
+        assert "catalog" not in result  # nothing was harvested
+        assert provider.reads == 0
+
+    @pytest.mark.asyncio
+    async def test_no_catalog_note(self) -> None:
+        result = await _diagnose(_diag_runtime(), "P-201", "vibration")
+        assert result["probable_failures"] == []
+        assert result["note"] == "No failure-mode data configured on any connector."
+        assert result["catalog"] == {"providers": [], "failed_providers": [], "partial": False}
+        assert "error" not in result
+
+    @pytest.mark.asyncio
+    async def test_unreachable_sole_provider_reports_catalog_unavailable(self) -> None:
+        """A catalog connector that failed to connect at startup is an outage,
+        never the "not configured" note."""
+        provider = _CatalogProvider(error=ConnectorError("Not connected"))
+        result = await _diagnose(_diag_runtime(provider), "P-201", "vibration")
+        assert result["error"] == (
+            "Failure-mode catalog unavailable: provider '_CatalogProvider_0' failed "
+            "(ConnectorError). Diagnosis could not run; this is a connector failure, "
+            "not a missing configuration."
+        )
+        assert result["catalog"]["partial"] is True
+        assert result["probable_failures"] == []
+        assert "note" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectorTimeoutError("read timed out after 30s on sql01.plant.local"),
+            ConnectorAuthError("login failed for user 'machina' password=hunter2"),
+            ConnectorSchemaError(r"bad row in C:\Users\jdoe\plant\failure_modes.xlsx"),
+        ],
+        ids=["timeout", "auth", "schema"],
+    )
+    async def test_backend_failure_names_type_not_message(self, exc: ConnectorError) -> None:
+        result = await _diagnose(
+            _diag_runtime(_CatalogProvider(error=exc)), "P-201", "high vibration"
+        )
+        assert f"provider '_CatalogProvider_0' failed ({type(exc).__name__})" in result["error"]
+        assert result["catalog"]["failed_providers"] == [
+            {"name": "_CatalogProvider_0", "error_type": type(exc).__name__}
+        ]
+        dumped = json.dumps(result)
+        for secret in ("sql01", "hunter2", "jdoe", "failure_modes.xlsx", str(exc)):
+            assert secret not in dumped
+
+    @pytest.mark.asyncio
+    async def test_partial_catalog_with_matching_symptoms(self) -> None:
+        runtime = _diag_runtime(
+            _CatalogProvider(error=ConnectorTimeoutError("timed out")),
+            _CatalogProvider(),
+        )
+        result = await _diagnose(runtime, "P-201", "high vibration")
+        assert [f["code"] for f in result["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        assert result["catalog"] == {
+            "providers": ["_CatalogProvider_0", "_CatalogProvider_1"],
+            "failed_providers": [
+                {"name": "_CatalogProvider_0", "error_type": "ConnectorTimeoutError"}
+            ],
+            "partial": True,
+        }
+        assert result["note"] == (
+            "Partial catalog: provider '_CatalogProvider_0' failed (ConnectorTimeoutError). "
+            "Failure modes served by the failed provider(s) are missing from this result."
+        )
+        assert "error" not in result
+
+    @pytest.mark.asyncio
+    async def test_partial_catalog_with_nonmatching_symptoms(self) -> None:
+        runtime = _diag_runtime(_CatalogProvider(error=ConnectorError("down")), _CatalogProvider())
+        result = await _diagnose(runtime, "P-201", "strange smell")
+        assert result["probable_failures"] == []
+        assert result["match_count"] == 0
+        assert result["note"].startswith("No catalog entry matched these symptoms.")
+        assert result["note"].endswith(
+            "Partial catalog: provider '_CatalogProvider_0' failed (ConnectorError). "
+            "Failure modes served by the failed provider(s) are missing from this result."
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_match_note_lists_the_assets_indicators(self) -> None:
+        result = await _diagnose(_diag_runtime(_CatalogProvider()), "P-201", "strange smell")
+        assert result["probable_failures"] == []
+        assert result["note"].startswith("No catalog entry matched these symptoms.")
+        assert "bearing_temperature_c" in result["note"]
+        assert "belt_speed_m_s" not in result["note"]  # not one of the pump's modes
+        assert result["catalog"]["partial"] is False
+
+    @pytest.mark.asyncio
+    async def test_resolves_asset_on_cmms_without_get_asset(self) -> None:
+        """READ_ASSETS guarantees only read_assets(), so a CMMS without
+        get_asset is scanned instead."""
+
+        class _DiagReadAssetsOnlyCmms:
+            capabilities = frozenset({Capability.READ_ASSETS})
+
+            async def read_assets(self) -> list[Asset]:
+                return list(DIAG_ASSETS)
+
+        runtime = MachinaRuntime(
+            connectors={"cmms": _DiagReadAssetsOnlyCmms(), "catalog": _CatalogProvider()}
+        )
+        found = await _diagnose(runtime, "P-201", "high vibration")
+        missing = await _diagnose(runtime, "GHOST-9", "vibration")
+        assert [f["code"] for f in found["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        assert missing["note"] == "Asset 'GHOST-9' not found in the asset registry."
+
+    @pytest.mark.asyncio
+    async def test_asset_lookup_failure_is_an_error_not_an_unknown_asset(self) -> None:
+        """A CMMS that cannot answer the lookup is not "asset not found", and
+        its message stays out of the result; the catalog is not read."""
+        cmms = _mock_cmms()
+        cmms.get_asset = AsyncMock(
+            side_effect=ConnectorTimeoutError(
+                "GET https://cmms.plant.local/assets/P-201 timed out"
+            )
+        )
+        provider = _CatalogProvider()
+        runtime = MachinaRuntime(connectors={"cmms": cmms, "catalog": provider})
+        result = await _diagnose(runtime, "P-201", "vibration")
+        assert result == {
+            "asset_id": "P-201",
+            "error": (
+                "Asset lookup on the CMMS failed (ConnectorTimeoutError); diagnosis could not run."
+            ),
+        }
+        assert provider.reads == 0
+
+    @pytest.mark.asyncio
+    async def test_no_cmms_for_the_asset_lookup_is_an_error(self) -> None:
+        """With no connector that reads assets, the lookup has nowhere to go."""
+        runtime = MachinaRuntime(connectors={"catalog": _CatalogProvider()})
+        result = await _diagnose(runtime, "P-201", "vibration")
+        assert result["error"] == (
+            "Asset lookup on the CMMS failed (ConnectorError); diagnosis could not run."
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_connector_error_propagates(self) -> None:
+        """A bug in a catalog provider or in the lookup is not an outage: it
+        escapes the tool, and FastMCP returns an MCP error result."""
+        runtime = _diag_runtime(_CatalogProvider(error=RuntimeError("programming error")))
+        with pytest.raises(RuntimeError, match="programming error"):
+            await _diagnose(runtime, "P-201", "vibration")
+
+        cmms = _mock_cmms()
+        cmms.get_asset = AsyncMock(side_effect=RuntimeError("lookup bug"))
+        with pytest.raises(RuntimeError, match="lookup bug"):
+            await _diagnose(MachinaRuntime(connectors={"cmms": cmms}), "P-201", "vibration")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("asset_id", "symptoms", "provider_errors"),
+        [
+            ("P-201", ["high vibration"], [None]),  # ranked matches
+            ("HX-101", ["high vibration"], [None]),  # no declared modes: full catalog + note
+            ("P-201", ["strange smell"], [None]),  # nothing matched: known-indicators note
+            ("GHOST-9", ["vibration"], [None]),  # unknown asset
+            ("P-201", ["vibration"], []),  # no provider configured
+            ("P-201", ["high vibration"], [ConnectorError("down"), None]),  # partial
+            ("P-201", ["vibration"], [ConnectorTimeoutError("slow")]),  # unavailable
+        ],
+        ids=["match", "full-catalog", "no-match", "unknown", "none", "partial", "unavailable"],
+    )
+    async def test_matches_agent_diagnose_failure(
+        self,
+        asset_id: str,
+        symptoms: list[str],
+        provider_errors: list[Exception | None],
+    ) -> None:
+        """Over the same assets and catalog, the MCP tool and the agent's
+        diagnose_failure tool give identical answers (B9-D1)."""
+        from machina.agent.runtime import Agent
+        from machina.domain.plant import Plant
+
+        plant = Plant(name="Diag Plant")
+        for asset in DIAG_ASSETS:
+            plant.register_asset(asset)
+        agent = Agent(
+            plant=plant,
+            connectors=[_CatalogProvider(error=err) for err in provider_errors],
+        )
+        agent_result = await agent._execute_tool(
+            "diagnose_failure", {"asset_id": asset_id, "symptoms": symptoms}
+        )
+
+        runtime = _diag_runtime(*(_CatalogProvider(error=err) for err in provider_errors))
+        mcp_result = await _diagnose(runtime, asset_id, *symptoms)
+
+        assert mcp_result == agent_result
+
+    def test_registered_with_asset_reads_not_with_catalog_alone(self) -> None:
+        # The catalog is optional (its absence is the tool's "no catalog"
+        # note); an asset registry is not — the tool resolves the asset first.
+        from machina.mcp.tools import get_tools_for_capabilities
+
+        def names(*caps: Capability) -> set[str]:
+            return {t.__name__ for t in get_tools_for_capabilities(frozenset(caps))}
+
+        assert "machina_diagnose_failure" in names(Capability.READ_ASSETS)
+        assert "machina_diagnose_failure" not in names(Capability.READ_FAILURE_MODES)
+
+    @pytest.mark.asyncio
+    async def test_real_client_call_reports_a_partial_catalog(self, tmp_path: Path) -> None:
+        """End to end through an in-memory MCP client session and the server's
+        own lifespan: a second catalog provider whose connect() failed at
+        startup stays registered, and the diagnosis says the catalog is
+        partial instead of passing the shrunken one off as complete."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.config.schema import ConnectorConfig, MachinaConfig
+        from machina.mcp.server import build_server
+
+        broken = tmp_path / "broken"
+        broken.mkdir()
+        (broken / "failure_modes.json").write_text("not json", encoding="utf-8")
+        config = MachinaConfig(
+            connectors={
+                "cmms": ConnectorConfig(
+                    type="generic_cmms", primary=True, settings={"data_dir": str(SAMPLE_CMMS)}
+                ),
+                "catalog_b": ConnectorConfig(
+                    type="generic_cmms", settings={"data_dir": str(broken)}
+                ),
+            }
+        )
+
+        async with create_connected_server_and_client_session(build_server(config)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            result = await client.call_tool(
+                "machina_diagnose_failure",
+                {"asset_id": "P-201", "symptoms": ["high vibration"]},
+            )
+
+        schema = tools["machina_diagnose_failure"].inputSchema
+        assert set(schema["properties"]) == {"asset_id", "symptoms"}
+        assert result.isError is False, result.content
+        payload = result.structuredContent
+        assert payload is not None
+        assert [f["code"] for f in payload["probable_failures"]] == [
+            "BEAR-WEAR-01",
+            "IMP-EROSION-01",
+        ]
+        assert payload["catalog"] == {
+            "providers": ["cmms", "catalog_b"],
+            "failed_providers": [{"name": "catalog_b", "error_type": "ConnectorError"}],
+            "partial": True,
+        }
+        assert payload["note"].startswith("Partial catalog: provider 'catalog_b' failed")
+        assert str(tmp_path) not in json.dumps(payload)
