@@ -48,12 +48,16 @@ dependencies = [
 
 [project.optional-dependencies]
 litellm = [
-    # <1.106: litellm 1.106.0-1.106.3 import their proxy MCP stack on every
-    # call that passes tools, and that stack needs mcp>=2.2. Neither this
-    # extra nor the mcp extra (<2.0) installs it, so every agent turn failed
-    # (#160). Lift the bound once a litellm release carries
-    # BerriAI/litellm#45961 and the litellm-only CI job passes against it.
-    "litellm>=1.0,<1.106",
+    # litellm 1.106.0-1.106.3 import their proxy MCP stack on every call that
+    # passes tools, and that stack needs mcp>=2.2. Neither this extra nor the
+    # mcp extra (<2.0) installs it, so every agent turn failed (#160). The fix,
+    # BerriAI/litellm#45961, is in 1.109.0 and later and was backported to
+    # 1.108.4 and later; 1.106.x (through 1.106.10), the 1.107 pre-releases
+    # and 1.108.0-1.108.3 lack it. 1.106-1.108 stay excluded because the
+    # litellm-only CI job has run against 1.109 only. 1.104 and 1.105 cap
+    # filelock below 4.0; its 13 advisories are all fixed from 4.2.1 on.
+    # <1.110: widen only after the litellm-only CI job passes against 1.110.
+    "litellm>=1.0,<1.110,!=1.106.*,!=1.107.*,!=1.108.*",
 ]
 sap = ["pyodata>=1.10", "requests>=2.31"]
 opcua = ["asyncua>=1.0"]
