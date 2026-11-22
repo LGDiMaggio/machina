@@ -1392,14 +1392,20 @@ class TestReadToolFailureDegrades:
     async def test_every_connector_read_returns_a_tool_error(
         self, tool: str, args: dict[str, Any]
     ) -> None:
+        # A library error's message can name the backend: the model sees its
+        # type only, on every read tool.
         agent = Agent(
             plant=_make_plant(),
-            connectors=[_RaisingReadConnector(RuntimeError("CMMS unreachable"))],
+            connectors=[
+                _RaisingReadConnector(RuntimeError("http://internal-host:8443/x token=abc"))
+            ],
         )
 
         result = await agent._execute_tool(tool, args)
 
-        assert result == {"error": "CMMS unreachable"}
+        assert result == {
+            "error": "Unexpected error (RuntimeError). The details are in the server log."
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1407,16 +1413,21 @@ class TestReadToolFailureDegrades:
         [
             (ConnectorTimeoutError("SAP PM request timed out"), "SAP PM request timed out"),
             (ConnectorAuthError("Maximo authentication failed"), "Maximo authentication failed"),
+            # A library error is shown by its type: its message can carry the
+            # request URL (httpx puts it in an HTTPStatusError's message).
             (
                 httpx.HTTPStatusError(
-                    "Server error '503 Service Unavailable'",
+                    "Server error '503 Service Unavailable' for url "
+                    "'https://internal-host:8443/work_orders?token=abc'",
                     request=httpx.Request("GET", "https://cmms.example/work_orders"),
                     response=httpx.Response(503),
                 ),
-                "Server error '503 Service Unavailable'",
+                "Unexpected error (HTTPStatusError). The details are in the server log.",
             ),
-            # httpx timeouts often carry no message; the type still says what failed.
-            (httpx.ReadTimeout(""), "ReadTimeout"),
+            (
+                httpx.ReadTimeout(""),
+                "Unexpected error (ReadTimeout). The details are in the server log.",
+            ),
             # Absolute user paths never reach the LLM (LLM-boundary scrubbing).
             (
                 ConnectorError(r"cannot read C:\Users\ops\cmms\export.json"),
@@ -1438,13 +1449,15 @@ class TestReadToolFailureDegrades:
     async def test_off_contract_signature_still_degrades(self) -> None:
         """Safety net, not endorsement: a custom connector whose
         ``read_spare_parts`` takes no ``asset_id`` is off the contract, and the
-        call raises TypeError. The failure reaches the model instead of ending
-        the turn."""
+        call raises TypeError. The failure reaches the model, by its type,
+        instead of ending the turn."""
         agent = Agent(connectors=[_SkuOnlySparePartsConnector()])
 
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
 
-        assert "unexpected keyword argument 'asset_id'" in result["error"]
+        assert result == {
+            "error": "Unexpected error (TypeError). The details are in the server log."
+        }
 
     @pytest.mark.asyncio
     async def test_non_object_arguments_still_yield_a_tool_error(self) -> None:
@@ -1955,7 +1968,7 @@ class TestCollectFailureModes:
 
         class _BuggyProvider(_FakeFailureModeConnector):
             async def read_failure_modes(self) -> list[FailureMode]:
-                raise RuntimeError("programming error")
+                raise RuntimeError("programming error at http://internal-host:8443")
 
         agent = Agent(plant=_make_diag_plant(), connectors=[_BuggyProvider()])
         with pytest.raises(RuntimeError, match="programming error"):
@@ -1965,11 +1978,17 @@ class TestCollectFailureModes:
         with pytest.raises(RuntimeError, match="programming error"):
             await agent._tool_diagnose_failure("P-201", ["vibration"])
         # Through the read-tool boundary it is a tool error, not an outage
-        # report: no catalog block, no "unavailable" wording.
+        # report: no catalog block, no "unavailable" wording, and only the
+        # exception's type (its text stays in the log).
         result = await agent._execute_tool(
             "diagnose_failure", {"asset_id": "P-201", "symptoms": ["vibration"]}
         )
-        assert result == {"error": "programming error"}
+        assert result == {
+            "error": "Unexpected error (RuntimeError). The details are in the server log."
+        }
+        assert "catalog" not in result
+        assert "unavailable" not in json.dumps(result).lower()
+        assert "internal-host" not in json.dumps(result)
 
     @pytest.mark.asyncio
     async def test_unconnected_real_provider_is_skipped_and_reported(self) -> None:

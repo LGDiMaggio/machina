@@ -903,6 +903,129 @@ def _spare_parts_step(**kwargs: Any) -> Step:
     )
 
 
+_SECRET = "http://internal-host:8443/x token=abc"
+_SECRET_NEEDLES = ("internal-host", "8443", "http://", "token=")
+_UNEXPECTED = "Unexpected error (RuntimeError). The details are in the server log."
+
+
+class _LeakingConnector:
+    """A read whose library error names the backend URL and a token."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.READ_MAINTENANCE_HISTORY}
+    )
+
+    async def read_maintenance_history(self, **kwargs: Any) -> None:
+        raise RuntimeError(_SECRET)
+
+
+class TestStepErrorsAreValueFree:
+    """A step's error shows a library exception by its type only.
+
+    The workflow result reaches the model through the agent's
+    ``execute_workflow`` tool, so the message stays in the ``step_error`` log.
+    Only the text changes: every policy decides exactly as before.
+    """
+
+    @staticmethod
+    def _workflow(policy: ErrorPolicy, *, retries: int = 0) -> Workflow:
+        return Workflow(
+            name="Leak",
+            steps=[
+                Step(
+                    "history",
+                    action="cmms.read_maintenance_history",
+                    on_error=policy,
+                    retries=retries,
+                ),
+                Step("after", action=""),
+            ],
+        )
+
+    @staticmethod
+    def _engine(tracer: ActionTracer) -> WorkflowEngine:
+        registry = ConnectorRegistry()
+        registry.register("cmms", _LeakingConnector())
+        return WorkflowEngine(registry=registry, tracer=tracer)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("policy", "success", "skipped", "workflow_success", "steps_run"),
+        [
+            (ErrorPolicy.STOP, False, False, False, 1),
+            (ErrorPolicy.NOTIFY, False, False, False, 2),
+            (ErrorPolicy.SKIP, True, True, True, 2),
+            (ErrorPolicy.RETRY, False, False, False, 2),
+        ],
+    )
+    async def test_each_policy_keeps_its_outcome_with_a_value_free_error(
+        self,
+        tracer: ActionTracer,
+        policy: ErrorPolicy,
+        success: bool,
+        skipped: bool,
+        workflow_success: bool,
+        steps_run: int,
+    ) -> None:
+        result = await self._engine(tracer).execute(self._workflow(policy, retries=1))
+
+        step = result.step_results[0]
+        assert (step.success, step.skipped) == (success, skipped)
+        assert result.success is workflow_success
+        assert len(result.step_results) == steps_run
+        assert step.error == _UNEXPECTED
+        assert not [n for n in _SECRET_NEEDLES if n in json.dumps(str(result))]
+
+    @pytest.mark.asyncio
+    async def test_the_step_error_log_keeps_the_message_and_traceback(
+        self, tracer: ActionTracer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        # A module logger cached by an earlier test would bypass capture_logs.
+        monkeypatch.setattr(
+            "machina.workflows.engine.logger", structlog.get_logger("machina.workflows.engine")
+        )
+        with capture_logs() as logs:
+            await self._engine(tracer).execute(self._workflow(ErrorPolicy.SKIP))
+
+        (event,) = [e for e in logs if e["event"] == "step_error"]
+        assert event["error"] == f"RuntimeError: {_SECRET}"
+        assert "read_maintenance_history" in event["exception"]
+        (skipped,) = [e for e in logs if e["event"] == "step_skipped_error"]
+        assert skipped["error"] == _UNEXPECTED
+
+    @pytest.mark.asyncio
+    async def test_a_machina_error_keeps_its_scrubbed_message(self, tracer: ActionTracer) -> None:
+        from machina.exceptions import ConnectorError
+
+        class _Refusing(_LeakingConnector):
+            async def read_maintenance_history(self, **kwargs: Any) -> None:
+                raise ConnectorError(r"cannot read \\FILESRV01\cmms\history.json")
+
+        registry = ConnectorRegistry()
+        registry.register("cmms", _Refusing())
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+
+        result = await engine.execute(self._workflow(ErrorPolicy.STOP))
+
+        assert result.step_results[0].error == "ConnectorError: cannot read history.json"
+
+    @pytest.mark.asyncio
+    async def test_a_raising_guard_reports_its_type_only(self, tracer: ActionTracer) -> None:
+        def _guard(_ctx: dict[str, Any]) -> bool:
+            raise RuntimeError(_SECRET)
+
+        engine = WorkflowEngine(tracer=tracer)
+        wf = Workflow(name="GuardLeak", steps=[Step("gated", guard=GuardCondition(check=_guard))])
+
+        result = await engine.execute(wf)
+
+        step = result.step_results[0]
+        assert step.skipped is True
+        assert step.error == f"Guard raised {_UNEXPECTED}"
+
+
 class TestSkippedStepErrors:
     """A step skipped after an error keeps the error; a guard skip has none."""
 
@@ -918,9 +1041,8 @@ class TestSkippedStepErrors:
         step = result.step_results[0]
         assert step.skipped is True
         assert step.success is True  # SKIP tolerates the failure
-        assert step.error is not None
-        assert step.error.startswith("TypeError:")
-        assert "asset_id" in step.error
+        # The error stays, by the exception's type: its message is in the log.
+        assert step.error == "Unexpected error (TypeError). The details are in the server log."
 
     @pytest.mark.asyncio
     async def test_guard_skip_has_no_error(self, tracer: ActionTracer) -> None:

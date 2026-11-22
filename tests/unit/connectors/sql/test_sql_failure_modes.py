@@ -177,6 +177,41 @@ class TestReadFailureModes:
         with pytest.raises(ConnectorSchemaError, match="invalid row"):
             await connector.read_failure_modes()
 
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_an_invalid_row_names_fields_never_values(self, mock_connect: MagicMock) -> None:
+        """A workflow step can call read_failure_modes directly, so the error
+        reaches StepResult.error and the agent's execute_workflow result: it
+        names the failing fields, never the row's values or pydantic's input."""
+        from machina.agent.runtime import Agent
+        from machina.workflows.models import ErrorPolicy, Step, Workflow
+
+        secret_name = r"Bearing wear, see \\FILESRV01\fm\token=abc"
+        cursor = _make_smart_cursor(fm_rows=[(None, secret_name, "mechanical", None, None)])
+        mock_connect.return_value = _make_conn(cursor)
+        connector = GenericSqlConnector(config=_config({"failure_modes": _failure_mode_mapping()}))
+        await connector.connect()
+
+        with pytest.raises(ConnectorSchemaError) as raised:
+            await connector.read_failure_modes()
+        workflow = Workflow(
+            name="Catalog",
+            steps=[Step("modes", action="cmms.read_failure_modes", on_error=ErrorPolicy.STOP)],
+        )
+        result = await Agent(connectors=[connector], workflows=[workflow])._tool_execute_workflow(
+            "Catalog"
+        )
+
+        message = str(raised.value)
+        assert message.startswith("FailureMode mapping produced an invalid row: code (")
+        assert result["success"] is False
+        assert result["steps"][0]["error"] == f"ConnectorSchemaError: {message}"
+        for needle in ("FILESRV01", "token=abc", "Bearing wear", "mechanical", "input_value"):
+            assert needle not in message
+            assert needle not in str(result)
+        # The chained pydantic error, which the log keeps, says what is wrong.
+        assert "code cannot be empty" in str(raised.value.__cause__)
+
 
 # ------------------------------------------------------------------
 # Asset ↔ failure-code linkage (R8)

@@ -138,11 +138,14 @@ class MachinaRuntime:
                 await conn.connect()
                 logger.info("runtime_connector_connected", connector=name)
             except Exception as exc:
+                from machina.agent.tool_errors import error_diagnostics
+
                 self.failed_connectors[name] = str(exc)
                 logger.error(
                     "runtime_connector_failed",
                     connector=name,
                     error=str(exc),
+                    **error_diagnostics(exc),  # the chained cause's type
                 )
         if self.failed_connectors:
             logger.warning(

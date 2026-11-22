@@ -1143,3 +1143,93 @@ class TestDocumentStoreRAG:
 
         assert mock_vectorstore.similarity_search_with_score.call_count == 2
         assert len(results) == 1
+
+    @staticmethod
+    async def _connected_store(sample_docs_dir: Path, *search_effects: Any) -> Any:
+        """A RAG-mode store whose vector searches play ``search_effects``."""
+        mock_splitter_cls = MagicMock()
+        mock_splitter_cls.return_value.split_text.side_effect = lambda text: [text[:100]]
+        mock_vectorstore = MagicMock()
+        mock_vectorstore.similarity_search_with_score.side_effect = list(search_effects)
+        mock_chroma_cls = MagicMock()
+        mock_chroma_cls.from_texts.return_value = mock_vectorstore
+        mock_text_splitter = MagicMock()
+        mock_text_splitter.RecursiveCharacterTextSplitter = mock_splitter_cls
+        mock_vectorstores = MagicMock()
+        mock_vectorstores.Chroma = mock_chroma_cls
+        with patch.dict(
+            "sys.modules",
+            {
+                "langchain": MagicMock(),
+                "langchain.text_splitter": mock_text_splitter,
+                "langchain_chroma": mock_vectorstores,
+            },
+        ):
+            conn = DocumentStoreConnector(paths=[sample_docs_dir])
+            await conn.connect()
+        return conn
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fallback", [False, True], ids=["search", "filter_fallback"])
+    async def test_a_failed_search_names_the_library_error_by_type(
+        self, sample_docs_dir: Path, fallback: bool
+    ) -> None:
+        """The library's text (here a model-hub URL and a cache path) stays on
+        the chained cause: the message reaches the model and MCP clients."""
+        planted = OSError(r"http://internal-host:8443/bge-m3 cache C:\Users\ops\.cache\hf")
+        effects = [ValueError("bad where"), planted] if fallback else [planted]
+        conn = await self._connected_store(sample_docs_dir, *effects)
+
+        with pytest.raises(ConnectorError) as raised:
+            await conn.search("bearing", asset_id="P-201")
+
+        assert str(raised.value) == "Vector store search failed (OSError)"
+        assert raised.value.__cause__ is planted
+
+    @pytest.mark.asyncio
+    async def test_the_model_mcp_and_workflow_boundaries_show_the_type(
+        self, sample_docs_dir: Path
+    ) -> None:
+        from machina.agent.runtime import Agent
+        from machina.connectors.base import ConnectorRegistry
+        from machina.workflows.engine import WorkflowEngine
+        from machina.workflows.models import ErrorPolicy, Step, Workflow
+
+        failed = "Vector store search failed (RuntimeError)"
+        secret = "http://internal-host:8443/x token=abc"
+        conn = await self._connected_store(sample_docs_dir, *[RuntimeError(secret)] * 3)
+
+        agent_result = await Agent(connectors=[conn])._execute_tool(
+            "search_documents", {"query": "bearing"}
+        )
+        registry = ConnectorRegistry()
+        registry.register("docs", conn)
+        workflow = Workflow(
+            name="Docs",
+            steps=[
+                Step(
+                    "find",
+                    action="docs.search_documents",
+                    inputs={"query": "bearing"},
+                    on_error=ErrorPolicy.NOTIFY,
+                )
+            ],
+        )
+        step = (await WorkflowEngine(registry=registry).execute(workflow)).step_results[0]
+
+        assert agent_result == {"error": failed}
+        assert (step.success, step.error) == (False, f"ConnectorError: {failed}")
+
+        pytest.importorskip("mcp")
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        from machina.mcp.errors import guard_tool
+        from machina.mcp.tools import machina_search_manuals
+
+        runtime = MagicMock(sandbox_mode=False)
+        runtime.find_by_capability.return_value = [("docs", conn)]
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {"runtime": runtime}
+        with pytest.raises(ToolError) as raised:
+            await guard_tool(machina_search_manuals)(ctx, "bearing")
+        assert str(raised.value) == failed

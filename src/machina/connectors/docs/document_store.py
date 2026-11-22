@@ -771,7 +771,9 @@ class DocumentStoreConnector:
             try:
                 results = self._vectorstore.similarity_search_with_score(query, k=k * 3)
             except Exception as inner_exc:
-                raise ConnectorError(f"Vector store search failed: {inner_exc!r}") from inner_exc
+                raise ConnectorError(
+                    f"Vector store search failed ({type(inner_exc).__name__})"
+                ) from inner_exc
             results = _post_filter_results(results, filters)
         except Exception as exc:
             # Embedding-time failures (HF OSError, CUDA OOM, torch type errors,
@@ -785,7 +787,7 @@ class DocumentStoreConnector:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
-            raise ConnectorError(f"Vector store search failed: {exc!r}") from exc
+            raise ConnectorError(f"Vector store search failed ({type(exc).__name__})") from exc
 
         return [
             (

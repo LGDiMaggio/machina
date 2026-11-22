@@ -99,7 +99,9 @@ async def machina_list_assets(ctx: Context) -> list[dict[str, Any]]:
             for a in assets
         ]
     except ConnectorError as exc:
-        return [{"error": str(exc)}]
+        from machina.mcp.errors import returned_error
+
+        return [{"error": returned_error(exc, tool="machina_list_assets")}]
 
 
 async def machina_get_asset(ctx: Context, asset_id: str) -> dict[str, Any]:
@@ -223,14 +225,29 @@ async def machina_create_work_order(
             f"Asset {asset_id!r} not found — cannot create work order for non-existent asset"
         )
 
+    # A bad value is the caller's to fix: say which values are valid (the
+    # bare ValueError would reach the client only by its type).
+    from machina.exceptions import DomainValidationError
+
+    try:
+        wo_type = WorkOrderType(work_order_type)
+    except ValueError:
+        valid = ", ".join(t.value for t in WorkOrderType)
+        raise DomainValidationError(f"Invalid work_order_type. Valid values: {valid}") from None
+    try:
+        wo_priority = Priority(priority)
+    except ValueError:
+        valid = ", ".join(p.value for p in Priority)
+        raise DomainValidationError(f"Invalid priority. Valid values: {valid}") from None
+
     # Deterministic content-based id (shared with the agent runtime tool and
     # WorkOrderFactory). A fixed "NEW" placeholder collided under the local-mode
     # idempotency guard — every create returned the first record. REST backends
     # assign their own id server-side, so a meaningful client id is harmless there.
     wo = WorkOrder(
         id=auto_work_order_id(asset_id, work_order_type, priority, description),
-        type=WorkOrderType(work_order_type),
-        priority=Priority(priority),
+        type=wo_type,
+        priority=wo_priority,
         asset_id=asset_id,
         description=description,
         failure_mode=failure_mode or None,
@@ -446,7 +463,9 @@ async def machina_get_maintenance_history(
             for wo in work_orders
         ]
     except ConnectorError as exc:
-        return [{"error": str(exc)}]
+        from machina.mcp.errors import returned_error
+
+        return [{"error": returned_error(exc, tool="machina_get_maintenance_history")}]
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +725,9 @@ async def machina_send_message(
             "metadata": {"sandbox": True},
         }
     except ConnectorError as exc:
-        return {"error": str(exc)}
+        from machina.mcp.errors import returned_error
+
+        return {"error": returned_error(exc, tool="machina_send_message")}
 
 
 # ---------------------------------------------------------------------------

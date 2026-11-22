@@ -202,9 +202,10 @@ own payload, not an LLM hallucination.
       user name holds; a value that starts with a bare home directory and
       continues with prose (`/home/<user> has 2 GB free`) also becomes
       `<path>`.
-- **Not yet covered:** the MCP server's tool results (`machina_search_manuals`
-  chunk content, `{"error": str(exc)}` results) do not yet pass through
-  `safe_text`; only the `source` field is sanitised there.
+- **Not yet covered:** the MCP server's `machina_search_manuals` chunk
+  content does not pass through `safe_text`; only the `source` field is
+  sanitised there. MCP errors and `error` entries do (see
+  [Exception text at the boundaries](#exception-text-at-the-model-mcp-and-workflow-boundaries)).
 - The system prompt's Guideline 8 explicitly forbids the LLM from disclosing
   absolute file paths, directory structures, database schemas, or system
   architecture. This is a backstop, not the primary defence — the primary
@@ -213,6 +214,85 @@ own payload, not an LLM hallucination.
   trace files protected separately by `ActionTracer.redacting_dump_json`).
   See [Traces / Redaction](../observability/traces.md#redaction) for the
   parallel mechanism on the trace export side.
+
+### Exception Text at the Model, MCP and Workflow Boundaries
+
+**Risk:** a library exception's message can carry the request URL, the backend
+host and port, a token in a query string, SQL driver text naming the server
+and the user, a file path, or a backend value
+(`invalid literal for int() with base 10: '12.000'`). Passed on, it reaches the
+model and its provider, an MCP client, or a workflow result.
+
+**Rule (always-on):** an exception crosses these boundaries only as
+`machina.agent.tool_errors.public_error_text(exc)`:
+
+- a `MachinaError` shows its message, scrubbed by `safe_text`;
+- any other exception shows its type only:
+  `Unexpected error (<Type>). The details are in the server log.` The wording
+  never reads as an outage, since a bug is not "the backend is down".
+
+The boundaries:
+
+- the agent's read tools, including a failed read replayed later in the turn,
+  and `get_maintenance_schedule`;
+- `StepResult.error` in every `WorkflowResult` (a Machina error as
+  `<Type>: <message>`, a raising guard prefixed `Guard raised`), and the
+  agent's `execute_workflow` tool, for a step and for the workflow's own
+  failure;
+- every MCP tool, domain and vendor, and the two CMMS resource templates. The
+  server registers each one wrapped by `machina.mcp.errors.guard_tool` /
+  `guard_resource`. A failure stays an MCP error result (`isError: true`) or
+  a JSON-RPC error; a write tool's foreign exception adds that the write may
+  have been applied, except in sandbox mode, where no write goes out;
+- the `error` entries that `machina_list_assets`,
+  `machina_get_maintenance_history` and `machina_send_message` return for a
+  connector error.
+
+Every failure stays a failure: an `error` result, an MCP error, or a step with
+`success=False` under its policy. Only the text changes.
+
+**Diagnostics stay in the server log.** The boundary's event
+(`read_tool_failed`, `mcp_tool_failed`, `mcp_resource_failed`, `step_error`,
+`workflow_execution_failed`) records the message, and so does
+`runtime_connector_failed` for a connector that fails to connect. For a
+foreign exception it also records the plain-text traceback (`exception`, no
+frame variables). For a Machina error raised from one it records the cause's
+type (`cause_type`) only: the REST connectors and the mappers chain httpx
+and pydantic errors whose text is the request URL or a record value, which
+the log leaves out as the message does. Tool arguments are not logged.
+
+**Message contract for connector authors:** a `MachinaError` message is shown,
+so it names what failed and, at most, the library exception's type:
+
+```python
+try:
+    rows = cursor.execute(query).fetchall()
+except pyodbc.Error as exc:
+    raise ConnectorError(f"SQL read failed ({type(exc).__name__})") from exc
+```
+
+Never put the library exception's text (`{exc}`, `{exc!r}`, `str(exc)`), a
+URL, a host, a credential, a connection string or a backend value in the
+message. The chained exception carries the detail to the log.
+`tests/unit/test_error_message_contract.py` fails on a new raise site that
+embeds an exception's text.
+
+**Not covered:**
+
+- result content, such as `machina_search_manuals` chunk text and vendor tool
+  response bodies;
+- a "not found" or refusal message that repeats the caller's own value;
+- errors raised while a connector connects, which reach the caller of
+  `Agent.start()` and `MachinaRuntime.failed_connectors`, not the model; the
+  SQL drivers' connect errors keep their driver text, with the DSN password
+  redacted;
+- the library text a connector's message no longer carries is not logged by
+  the boundary either (only its type); connectors that log it themselves
+  (SQL timeouts and retries, DocumentStore search failures, unreadable
+  spreadsheet cells) still do;
+- `LLMError`, raised to the agent's caller when the model call fails;
+- logs, which keep exception text by design (see [Log Output](#log-output)).
+  FastMCP also logs a failed resource read through its own logger.
 
 ### Sandbox Enforcement (Layer-Wide)
 

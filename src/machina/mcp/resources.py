@@ -97,7 +97,14 @@ def _runtime_from_ctx(ctx: Any) -> MachinaRuntime:
 
 
 def register_resources(server: Any) -> None:
-    """Register all MCP resources on the server."""
+    """Register all MCP resources on the server.
+
+    The two CMMS templates are wrapped by
+    :func:`~machina.mcp.errors.guard_resource`, so a failed read shows the
+    client no connector or library exception text. The other two are served
+    from memory.
+    """
+    from machina.mcp.errors import guard_resource
 
     @server.resource(  # type: ignore[misc,untyped-decorator,unused-ignore]
         "machina://v1/assets/{asset_id}",
@@ -106,6 +113,7 @@ def register_resources(server: Any) -> None:
         description="Read a single asset by ID from the configured CMMS.",
         mime_type="application/json",
     )
+    @guard_resource
     async def read_asset(asset_id: str) -> str:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)
@@ -122,6 +130,7 @@ def register_resources(server: Any) -> None:
         description="Read a single work order by ID from the configured CMMS.",
         mime_type="application/json",
     )
+    @guard_resource
     async def read_work_order(wo_id: str) -> str:
         ctx = server.get_context()
         runtime = _runtime_from_ctx(ctx)

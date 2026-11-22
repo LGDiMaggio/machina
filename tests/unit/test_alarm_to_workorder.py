@@ -346,7 +346,7 @@ class TestAlarmToWorkorderWorkflow:
                 self, *, asset_id: str = "", sku: str = ""
             ) -> list[dict[str, Any]]:
                 self.spare_parts_calls.append({"asset_id": asset_id, "sku": sku})
-                raise RuntimeError("CMMS timeout")
+                raise RuntimeError("CMMS timeout at http://internal-host:8443/parts")
 
         engine, cmms, comms = self._build_engine(cmms=_FailingCmms())
         trigger = {"asset_id": "P-201", "severity": "critical"}
@@ -361,9 +361,16 @@ class TestAlarmToWorkorderWorkflow:
         # the method. The skipped step keeps the error.
         assert [sr.step_name for sr in result.step_results if sr.skipped] == ["check_spare_parts"]
         assert cmms.spare_parts_calls == [{"asset_id": "P-201", "sku": ""}]
-        assert "CMMS timeout" in (steps["check_spare_parts"].error or "")
+        spare_parts = steps["check_spare_parts"]
+        assert (spare_parts.success, spare_parts.skipped) == (True, True)  # SKIP policy
+        # The library error is shown by its type; its text stays in the log.
+        assert spare_parts.error == (
+            "Unexpected error (RuntimeError). The details are in the server log."
+        )
+        assert "internal-host" not in str(result)
         # The technician sees that the parts check failed, not a placeholder.
         assert "[check_spare_parts failed]" in comms.messages_sent[0]
+        assert "internal-host" not in comms.messages_sent[0]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

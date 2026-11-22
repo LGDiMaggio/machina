@@ -343,6 +343,32 @@ class TestEmailConnectorGmail:
         assert conn._gmail_service is mock_service
 
     @pytest.mark.asyncio
+    async def test_connect_gmail_failure_names_the_error_type_only(self) -> None:
+        """The OAuth library's text (which can name the client or the secrets
+        file) stays on the chained cause, out of the message."""
+        oauth_error = ValueError(r"client_secret invalid in C:\Users\ops\secrets\creds.json")
+        mock_google_flow = MagicMock()
+        mock_google_flow.InstalledAppFlow.from_client_secrets_file.side_effect = oauth_error
+        conn = EmailConnector(gmail_credentials_file="/path/creds.json")
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "google_auth_oauthlib": MagicMock(),
+                    "google_auth_oauthlib.flow": mock_google_flow,
+                    "googleapiclient": MagicMock(),
+                    "googleapiclient.discovery": MagicMock(),
+                },
+            ),
+            pytest.raises(ConnectorAuthError) as raised,
+        ):
+            await conn.connect()
+
+        assert str(raised.value) == "Gmail authentication failed (ValueError)"
+        assert raised.value.__cause__ is oauth_error
+
+    @pytest.mark.asyncio
     async def test_send_gmail(self) -> None:
         """Send email via Gmail API."""
         mock_execute = MagicMock()

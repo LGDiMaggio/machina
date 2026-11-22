@@ -451,8 +451,14 @@ class GenericSqlConnector:
             try:
                 modes.append(_dict_to_failure_mode(row))
             except ValidationError as exc:
+                # Field names and error types only: the row's values (and
+                # pydantic's input_value) can reach a workflow result.
+                problems = ", ".join(
+                    f"{'.'.join(str(part) for part in error['loc']) or 'row'} ({error['type']})"
+                    for error in exc.errors(include_input=False)
+                )
                 raise ConnectorSchemaError(
-                    f"FailureMode mapping produced an invalid row {row!r}: {exc}"
+                    f"FailureMode mapping produced an invalid row: {problems}"
                 ) from exc
         return modes
 
@@ -600,7 +606,8 @@ class GenericSqlConnector:
                         if _is_timeout(fallback_exc):
                             raise self._schema_check_timeout(name, fallback_exc) from fallback_exc
                         raise ConnectorSchemaError(
-                            f"Query for table mapping '{name}' failed: {fallback_exc}"
+                            f"Query for table mapping '{name}' failed "
+                            f"({type(fallback_exc).__name__})"
                         ) from fallback_exc
 
                 result_columns = [desc[0] for desc in (cursor.description or [])]
@@ -666,7 +673,9 @@ class GenericSqlConnector:
                     # for query_timeout seconds, and a retry would likely wait
                     # on the same lock as long again, with every call queued.
                     self._log_timeout("read", exc)
-                    raise ConnectorTimeoutError(f"SQL read timed out: {exc}") from exc
+                    raise ConnectorTimeoutError(
+                        f"SQL read timed out ({type(exc).__name__})"
+                    ) from exc
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
                         min(
@@ -687,14 +696,17 @@ class GenericSqlConnector:
                     continue
                 if _is_transient(exc):
                     raise ConnectorTransientError(
-                        f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
+                        f"Transient SQL error after {retry_cfg.max_retries} retries "
+                        f"({type(exc).__name__})"
                     ) from exc
                 if isinstance(exc, ConnectorError):
                     raise
                 # Honor the connector contract: callers (e.g. the runtime's
                 # failure-mode harvest) key their degraded-operation handling
                 # on ConnectorError — a raw driver exception must not escape.
-                raise ConnectorError(f"SQL read failed: {exc}") from exc
+                # Its text can name the server, the user and DSN fragments, so
+                # the message names its type only; the cause stays chained.
+                raise ConnectorError(f"SQL read failed ({type(exc).__name__})") from exc
         return []  # unreachable, satisfies mypy
 
     async def _execute_write(self, mapping: TableMapping, data: dict[str, Any]) -> None:
@@ -710,7 +722,9 @@ class GenericSqlConnector:
                     # ID check, and a timeout can come after the row was written
                     # (in commit). A caller's retry goes through that check.
                     self._log_timeout("insert", exc)
-                    raise ConnectorTimeoutError(f"SQL write timed out: {exc}") from exc
+                    raise ConnectorTimeoutError(
+                        f"SQL write timed out ({type(exc).__name__})"
+                    ) from exc
                 if _is_transient(exc) and attempt < retry_cfg.max_retries:
                     backoff = (
                         min(
@@ -732,18 +746,21 @@ class GenericSqlConnector:
                     continue
                 if _is_transient(exc):
                     raise ConnectorTransientError(
-                        f"Transient SQL error after {retry_cfg.max_retries} retries: {exc}"
+                        f"Transient SQL error after {retry_cfg.max_retries} retries "
+                        f"({type(exc).__name__})"
                     ) from exc
                 if isinstance(exc, ConnectorError):
                     raise
                 # Same contract as _execute_read: callers handle ConnectorError,
                 # so a raw driver exception must not escape a write either.
-                raise ConnectorError(f"SQL write failed: {exc}") from exc
+                raise ConnectorError(f"SQL write failed ({type(exc).__name__})") from exc
 
     def _schema_check_timeout(self, name: str, exc: Exception) -> ConnectorTimeoutError:
         """The error for a schema-check statement stopped by a query timeout."""
         self._log_timeout("validate_schemas", exc)
-        return ConnectorTimeoutError(f"SQL schema check for mapping '{name}' timed out: {exc}")
+        return ConnectorTimeoutError(
+            f"SQL schema check for mapping '{name}' timed out ({type(exc).__name__})"
+        )
 
     def _log_timeout(self, operation: str, exc: Exception) -> None:
         # Logged here because callers such as the MCP tools return the error

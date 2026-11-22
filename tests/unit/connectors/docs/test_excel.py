@@ -1775,7 +1775,8 @@ class TestCreateSeesUnreadableRows:
             ),
             (
                 ("WO-7", "P-201", "created", "ieri"),
-                "column 'Data creazione': Invalid isoformat string: 'ieri'",
+                # The cell's text ('ieri') stays out of the message.
+                "column 'Data creazione' cannot be read (ValueError)",
             ),
         ],
         ids=["unknown-status", "empty-required-cell", "unreadable-required-cell"],
@@ -1794,6 +1795,7 @@ class TestCreateSeesUnreadableRows:
 
         assert f"row 3 of {path.name}" in str(refused.value)
         assert why in str(refused.value)
+        assert "ieri" not in str(refused.value)
         assert _ids_in_file(path) == ["WO-1", "WO-7"]  # no second WO-7 row
         assert [wo.id for wo in await conn.read_work_orders()] == ["WO-1"]
 

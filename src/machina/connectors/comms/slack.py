@@ -124,7 +124,7 @@ class SlackConnector:
                 channel=channel,
             )
         except Exception as exc:
-            raise ConnectorError(f"Failed to send Slack message: {exc}") from exc
+            raise ConnectorError(f"Failed to send Slack message ({type(exc).__name__})") from exc
 
     async def listen(self, handler: MessageHandler) -> None:
         """Start listening for incoming Slack messages via Socket Mode.

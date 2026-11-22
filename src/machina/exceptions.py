@@ -2,6 +2,16 @@
 
 All exceptions inherit from MachinaError, enabling callers to catch
 any framework error with a single ``except MachinaError`` clause.
+
+Message contract: a ``MachinaError`` message is shown outside the process.
+The agent's tool results, MCP tool and resource errors and workflow step
+errors carry it (scrubbed of user-home and UNC paths), while any other
+exception is shown by its type only (see
+:func:`machina.agent.tool_errors.public_error_text`). So a message names
+what failed and, at most, the type of the library exception behind it,
+never that exception's text, a URL, a host, a credential, a connection
+string or a backend value. Chain the library exception with
+``raise ... from exc``: its text then stays in the server log.
 """
 
 

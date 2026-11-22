@@ -236,9 +236,9 @@ class EmailConnector:
                 host=self._smtp_host,
             )
         except smtplib.SMTPAuthenticationError as exc:
-            raise ConnectorAuthError(f"SMTP authentication failed: {exc}") from exc
+            raise ConnectorAuthError(f"SMTP authentication failed ({type(exc).__name__})") from exc
         except Exception as exc:
-            raise ConnectorError(f"SMTP connection failed: {exc}") from exc
+            raise ConnectorError(f"SMTP connection failed ({type(exc).__name__})") from exc
 
     async def _send_smtp(self, to: str, text: str, *, subject: str) -> None:
         """Send email via SMTP."""
@@ -254,7 +254,7 @@ class EmailConnector:
         try:
             await asyncio.to_thread(self._smtp.sendmail, self._from_address, [to], msg.as_string())
         except Exception as exc:
-            raise ConnectorError(f"Failed to send email: {exc}") from exc
+            raise ConnectorError(f"Failed to send email ({type(exc).__name__})") from exc
 
     async def _ensure_imap_connected(self) -> Any:
         """Return a connected IMAP client, reusing an existing one if possible."""
@@ -370,7 +370,9 @@ class EmailConnector:
             self._gmail_service = build("gmail", "v1", credentials=creds)
             logger.info("connected", connector="EmailConnector", mode="gmail")
         except Exception as exc:
-            raise ConnectorAuthError(f"Gmail authentication failed: {exc}") from exc
+            raise ConnectorAuthError(
+                f"Gmail authentication failed ({type(exc).__name__})"
+            ) from exc
 
     async def _send_gmail(self, to: str, text: str, *, subject: str) -> None:
         """Send email via Gmail API."""
@@ -392,7 +394,7 @@ class EmailConnector:
                 self._gmail_service.users().messages().send(userId="me", body=body).execute
             )
         except Exception as exc:
-            raise ConnectorError(f"Gmail send failed: {exc}") from exc
+            raise ConnectorError(f"Gmail send failed ({type(exc).__name__})") from exc
 
     async def _fetch_gmail_messages(self) -> list[IncomingMessage]:
         """Fetch unread messages via Gmail API."""

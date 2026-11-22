@@ -123,15 +123,21 @@ async def test_connector_failure_degrades_to_a_scrubbed_tool_error() -> None:
 
 @pytest.mark.asyncio
 async def test_any_provider_failure_degrades_to_a_tool_error() -> None:
-    """A REST backend raises httpx errors, not ConnectorError; the turn survives."""
+    """A REST backend raises httpx errors, not ConnectorError; the turn survives.
+
+    The model sees the exception's type only: its message names the backend
+    URL, and it stays in the log.
+    """
 
     class _BrokenRest(_PlansConnector):
         async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-            raise RuntimeError("503 Service Unavailable from http://cmms.example/plans")
+            raise RuntimeError("503 Service Unavailable from http://internal-host:8443/plans")
 
     result = await get_maintenance_schedule(_registry(_BrokenRest()))
 
-    assert "503 Service Unavailable" in result["error"]
+    assert result == {
+        "error": "Unexpected error (RuntimeError). The details are in the server log."
+    }
 
 
 @pytest.mark.asyncio
