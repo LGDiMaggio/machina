@@ -444,3 +444,5 @@ update was applied (see above).
 ## API Reference
 
 ::: machina.connectors.cmms.sap_pm.SapPmConnector
+
+::: machina.connectors.cmms.mappers.sap_pm.SapFieldError
