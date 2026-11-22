@@ -8,11 +8,16 @@ step failed::
         --exit-code-file pytest-exit-code --out audit-results/result.json
     record.py security --audit core=core.json --audit all=all.json \\
         --out audit-results/result.json
+    record.py security --variant constraints \\
+        --constraints deploy/docker/constraints.txt \\
+        --audit layer-0=layer-0.json --audit layer-1=layer-1.json \\
+        --out audit-results/result.json
 
 A result is ``{schema, check, variant, status, informational, facts,
 findings}``. ``status`` is pass, fail or error (the check could not judge
 what it exists to judge: no test results, a required suite that never ran,
-floors that were not the ones installed, an audit file that is missing).
+floors that were not the ones installed, an audit file that is missing, a
+pinned version that no audit covered).
 ``facts["executed"]`` counts the tests, checks or packages the leg covered;
 the report treats zero as an incomplete run. A suite result also lists every
 skipped test with its reason, so a skip is never counted as coverage. Both
@@ -37,6 +42,8 @@ SCHEMA = "machina-audit-result/1"
 EXIT_CODES = {"pass": 0, "fail": 1, "error": 2}
 MAX_LISTED = 50  # failed tests listed one by one; facts carry the full count
 DETAIL_LIMIT = 3000
+# One exact pin, as uv writes it, with an optional environment marker.
+PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)\s*(;.*)?")
 
 
 def finding(rule: str, message: str, detail: str = "") -> dict[str, str]:
@@ -241,9 +248,60 @@ def _check_pins(pins: Path, findings: list[dict[str, str]], status: str) -> str:
     return status
 
 
+def canonical(name: str) -> str:
+    """A package name as PEP 503 compares it, which is how pip-audit reports it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def read_pins(constraints: Path) -> dict[str, dict[str, str]]:
+    """Every version a constraints file pins, with its environment marker.
+
+    Returns ``{canonical name: {version: marker}}``; the marker is empty for a
+    pin that applies everywhere. A universal file (``uv pip compile
+    --universal``) can pin one package at several versions, one per marker;
+    each is kept, in file order. Comments and blank lines are skipped. Any
+    other line that is not one ``name==version`` pin, with an optional
+    marker, raises ValueError, so no requirement is left out of the audit
+    unnoticed.
+    """
+    pins: dict[str, dict[str, str]] = {}
+    for number, raw in enumerate(constraints.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PIN.fullmatch(line)
+        if match is None:
+            raise ValueError(f"line {number} is not a name==version pin: {line[:100]}")
+        markers = pins.setdefault(canonical(match[1]), {})
+        version, marker = match[2], (match[3] or "").lstrip(";").strip()
+        if version not in markers:
+            markers[version] = marker
+        elif markers[version] and marker:  # the same version on two branches
+            markers[version] = f"({markers[version]}) or ({marker})"
+        else:  # one of them applies everywhere
+            markers[version] = ""
+    if not pins:
+        raise ValueError("no name==version pins")
+    return pins
+
+
 def security(args: argparse.Namespace) -> int:
     status, facts, findings = "pass", {"executed": 0}, []
     advisories: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # With --constraints, every version the file pins must have been audited;
+    # without it, every resolution must contain machina-ai.
+    pinned: dict[tuple[str, str], str] | None = None  # (name, version): marker
+    if args.constraints:
+        try:
+            pins = read_pins(Path(args.constraints))
+            pinned = {(n, v): m for n, markers in pins.items() for v, m in markers.items()}
+        except (OSError, ValueError) as exc:
+            pinned = {}
+            status = "error"
+            message = f"{args.constraints}: no pins to audit"
+            findings.append(finding("constraints-unreadable", message, str(exc)))
+        facts["pinned"] = len(pinned)
+    covered: set[tuple[str, str]] = set()
     for spec in args.audit:
         label, _, path = spec.partition("=")
         try:
@@ -251,6 +309,7 @@ def security(args: argparse.Namespace) -> int:
             audited = [dep for dep in dependencies if "skip_reason" not in dep]
             names = {dep["name"].lower().replace("_", "-") for dep in dependencies}
             found = [((d["name"], d["version"], v["id"]), v) for d in audited for v in d["vulns"]]
+            covered |= {(canonical(dep["name"]), dep["version"]) for dep in audited}
         except (OSError, ValueError, KeyError, TypeError) as exc:
             status = "error"
             findings.append(
@@ -262,24 +321,33 @@ def security(args: argparse.Namespace) -> int:
         facts["executed"] += len(audited)
         # A failed install leaves a venv holding little more than pip, which
         # audits clean; only an environment that contains machina-ai counts.
-        if "machina-ai" not in names:
+        if pinned is None and "machina-ai" not in names:
             status = "error"
             findings.append(finding("audit-incomplete", f"{label}: machina-ai is not installed"))
         for key, vuln in found:
             # pip-audit can list one advisory twice for a dependency.
             entry = advisories.setdefault(key, {"vuln": vuln, "labels": {}})
             entry["labels"][label] = None
+    # A pin that no audit lists, or that pip-audit skipped, is not a clean pin.
+    if pinned and (missing := sorted(set(pinned) - covered)):
+        status = "error"
+        message = f"{len(missing)} of {len(pinned)} pinned versions were not audited"
+        detail = ", ".join(f"{name}=={version}" for name, version in missing)
+        findings.append(finding("audit-incomplete", message, detail))
     for (name, version, vuln_id), entry in sorted(advisories.items()):
         fixes = ", ".join(entry["vuln"].get("fix_versions") or []) or "none yet"
         aliases = ", ".join(entry["vuln"].get("aliases") or []) or "none"
-        detail = (
-            f"resolutions: {', '.join(entry['labels'])}; fixed in: {fixes}; aliases: {aliases}"
-        )
+        if pinned is None:
+            where = f"resolutions: {', '.join(entry['labels'])}"
+        else:  # the marker says where the pin applies, such as below Python 3.11.5
+            marker = pinned.get((canonical(name), version), "")
+            where = f"pinned in {args.constraints}" + (f" for {marker}" if marker else "")
+        detail = f"{where}; fixed in: {fixes}; aliases: {aliases}"
         findings.append(finding("vulnerability", f"{name} {version}: {vuln_id}", detail))
     facts["vulnerabilities"] = len(advisories)
     if status == "pass" and advisories:
         status = "fail"
-    return write_result(args.out, "security", "security", status, facts, findings)
+    return write_result(args.out, "security", args.variant, status, facts, findings)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -298,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     suite_parser.set_defaults(func=suite)
     security_parser = commands.add_parser("security", help="pip-audit JSON files")
     security_parser.add_argument("--audit", action="append", required=True, help="label=path")
+    security_parser.add_argument("--variant", default="security", help="the leg's name")
+    security_parser.add_argument(
+        "--constraints",
+        help="a constraints file each of whose pins an audit must cover, instead of "
+        "each audit containing machina-ai",
+    )
     security_parser.set_defaults(func=security)
     for sub in (suite_parser, security_parser):
         sub.add_argument("--out", type=Path, required=True)
