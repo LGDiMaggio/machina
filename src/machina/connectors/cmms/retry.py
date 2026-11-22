@@ -77,17 +77,19 @@ def _loggable_segment(segment: str) -> str:
     # An OData key predicate (Entity('key'), Entity(42), Entity(K1='a',K2=2),
     # its parentheses possibly percent-encoded) is a record ID: everything from
     # the first opening to the last closing parenthesis becomes "(<key>)", so a
-    # ";" inside a quoted key cannot split it. find/rfind keep this linear in
-    # the segment's length (a regex with backtracking was quadratic).
-    lowered = segment.lower()
-    openings = [i for i in (segment.find("("), lowered.find("%28")) if i != -1]
+    # ";" inside a quoted key cannot split it. It follows the entity name, so
+    # an opening after the first ";" belongs to a matrix parameter's value.
+    # find/rfind keep this linear in the segment's length (a regex with
+    # backtracking was quadratic). "%28"/"%29" have no letters to fold.
+    openings = [i for i in (segment.find("("), segment.find("%28")) if i != -1]
     close, close_end = segment.rfind(")"), 0
-    encoded_close = lowered.rfind("%29")
+    encoded_close = segment.rfind("%29")
     if encoded_close > close:
         close, close_end = encoded_close, encoded_close + 3
     elif close != -1:
         close_end = close + 1
-    if openings:
+    first_parameter = segment.find(";")
+    if openings and (first_parameter == -1 or min(openings) < first_parameter):
         start = min(openings)
         key_start = start + (1 if segment[start] == "(" else 3)
         if close > key_start:

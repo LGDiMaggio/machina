@@ -565,6 +565,10 @@ async def test_a_log_url_is_reduced_the_same_way(events: list[Any], event_name: 
         ("Foo()", "Foo()"),
         ("Foo(", "Foo("),
         ("mxwo;jsessionid=X1", "mxwo;jsessionid=<value>"),
+        # A parenthesis inside a matrix parameter's value is not a key.
+        ("mxwo;jsessionid=AB(CD)EF", "mxwo;jsessionid=<value>"),
+        # Characters whose lowercase is longer must not shift the key's position.
+        ("İ" * 10 + "Foo%28%274000123%27%29", "İ" * 10 + "Foo(<key>)"),
     ],
 )
 def test_a_path_segment_is_reduced_as_one_key(segment: str, logged: str) -> None:
