@@ -11,10 +11,14 @@ RUN python -m venv /opt/machina-venv
 ENV PATH="/opt/machina-venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
-# litellm<1.106: the litellm extra of 0.4.0 has no upper bound, and litellm
-# 1.106 fails every tool call unless mcp 2.x is installed (#160). Drop it once
-# the pin moves to a release whose litellm extra carries the bound.
-RUN pip install --no-cache-dir "machina-ai[excel,litellm]==0.4.0" "litellm<1.106"
+# litellm>=1.109,<1.110: the litellm extra of 0.4.0 requires only litellm>=1.0,
+# with no upper bound or exclusions. litellm 1.106.x and 1.108.0-1.108.3 fail
+# every tool call unless mcp 2.x is installed (#160). 1.105.x, which the previous
+# litellm<1.106 pin resolved, requires filelock<4.0; filelock's 13 advisories
+# are all fixed from 4.2.1 on. 1.109 carries the upstream fix and accepts
+# filelock 4.x. Drop this once the pin moves to a release whose litellm extra
+# carries the bound.
+RUN pip install --no-cache-dir "machina-ai[excel,litellm]==0.4.0" "litellm>=1.109,<1.110"
 
 # The mounted ./data keeps the host's ownership on Linux, so the container user
 # takes the host user's UID/GID (docker-compose.yml passes them; 1000 is the
