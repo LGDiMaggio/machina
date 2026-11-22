@@ -174,15 +174,15 @@ def _write_lock(path: Path) -> Iterator[None]:
     to ``_LOCK_WAIT_SEC``. Runs on the file thread.
 
     The lock file is opened read-only, which both lock calls accept, so a lock
-    file another OS user created can still be locked.
+    file another OS user created can still be locked. The errors below are
+    raised before the block runs, so nothing was written and the caller can
+    repeat the write.
 
     Raises:
         ConnectorLockedError: If another writer still holds the lock after
             ``_LOCK_WAIT_SEC``, or the lock file cannot be created for lack
             of permission.
         ConnectorError: If the lock file cannot be opened or locked otherwise.
-
-        In each case nothing was written, so the caller can repeat the write.
     """
     try:
         fd = os.open(path.with_name(path.name + ".lock"), os.O_RDONLY | os.O_CREAT, 0o666)
@@ -609,7 +609,9 @@ class GenericCmmsConnector:
         processes writing the same file take turns with this one through a
         lock on ``work_orders.json.lock``, held from the re-read to the write;
         a write waiting for that lock has started, so it too finishes after
-        its caller is cancelled.
+        its caller is cancelled. A local write that raises leaves
+        ``work_orders.json`` as it was, and the connector's work orders are
+        those the file holds.
 
         Raises:
             ConnectorLockedError: In local mode, if another writer kept the
@@ -619,9 +621,6 @@ class GenericCmmsConnector:
             ConnectorError: In local mode, if ``work_orders.json`` cannot be
                 read or parsed before the write, or cannot be locked or
                 written otherwise.
-
-            In each case ``work_orders.json`` is left as it was, and the
-            connector's work orders are those the file holds.
         """
         self._ensure_connected()
         if self._data_dir:
