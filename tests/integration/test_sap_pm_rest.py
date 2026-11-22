@@ -6,11 +6,14 @@ All HTTP traffic is intercepted by pytest-httpx — no real SAP API calls.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from machina.agent.runtime import Agent
 from machina.connectors.base import ConnectorRegistry
 from machina.connectors.cmms._http_errors import WRITE_OUTCOME_UNKNOWN, WRITE_REQUEST_NOT_SENT
 from machina.connectors.cmms.auth import BasicAuth, OAuth2ClientCredentials
@@ -18,11 +21,13 @@ from machina.connectors.cmms.retry import DEFAULT_MAX_RETRIES
 from machina.connectors.cmms.sap_pm import SapPmConnector
 from machina.domain.asset import Asset
 from machina.domain.maintenance_plan import MaintenancePlan
+from machina.domain.plant import Plant
 from machina.domain.spare_part import SparePart
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
 from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
+    ConnectorSchemaError,
     ConnectorTimeoutError,
     ConnectorUnsupportedFilterError,
 )
@@ -1976,3 +1981,448 @@ class TestTransportErrors:
         for fragment in ("sap.example.com", "sapuser", "secret", "csrf-ok"):
             assert fragment not in str(info.value)
             assert fragment not in repr(logs)
+
+
+# ---------------------------------------------------------------------------
+# A record that cannot be mapped refuses the read, without its values (SEC-13)
+# ---------------------------------------------------------------------------
+
+_SAP_VALUE = "Q7ZX3"  # Stands for a value from SAP that must not be repeated.
+
+_ORDER_URL = _odata_url(
+    "API_MAINTENANCEORDER",
+    "MaintenanceOrder",
+    **{"$top": "1", "$filter": "MaintenanceOrder eq '4000001'"},
+)
+
+_Read = Callable[[SapPmConnector], Awaitable[Any]]
+
+
+def _refused(entity: str, cause: str) -> str:
+    return (
+        f"SAP PM returned a {entity} record that cannot be mapped ({cause}) "
+        "— refusing to return a partial result"
+    )
+
+
+def _chain(exc: BaseException | None) -> str:
+    """The text of an exception and of every exception chained to it."""
+    texts = []
+    while exc is not None:
+        texts.append(f"{type(exc).__name__}: {exc}")
+        exc = exc.__cause__ or exc.__context__
+    return "\n".join(texts)
+
+
+def _record_refusals(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in entry.items() if k not in ("event", "log_level")}
+        for entry in logs
+        if entry["event"] == "sap_pm_record_refused"
+    ]
+
+
+# (read, URL, records, entity, cause, operation, fields, value): the last record
+# cannot be mapped, and ``value`` is what in it must not be repeated.
+_UNMAPPABLE_READS = [
+    pytest.param(
+        lambda c: c.read_assets(),
+        _odata_url("API_EQUIPMENT", "Equipment"),
+        [
+            {"Equipment": "10000001"},
+            {"Equipment": "10000002", "SuperordinateEquipment": {"Equipment": _SAP_VALUE}},
+        ],
+        "Equipment",
+        "ValidationError: parent",
+        "read_assets",
+        ["parent"],
+        _SAP_VALUE,
+        id="read_assets-validation",
+    ),
+    pytest.param(
+        lambda c: c.read_assets(),
+        _odata_url("API_EQUIPMENT", "Equipment"),
+        [{"Equipment": "10000001"}, f"row-{_SAP_VALUE}"],
+        "Equipment",
+        "AttributeError",
+        "read_assets",
+        None,
+        _SAP_VALUE,
+        id="read_assets-not-an-object",
+    ),
+    pytest.param(
+        lambda c: c.get_asset("10000001"),
+        _odata_url(
+            "API_EQUIPMENT", "Equipment", **{"$top": "1", "$filter": "Equipment eq '10000001'"}
+        ),
+        [{"Equipment": "10000001", "SuperordinateEquipment": [_SAP_VALUE]}],
+        "Equipment",
+        "ValidationError: parent",
+        "get_asset",
+        ["parent"],
+        _SAP_VALUE,
+        id="get_asset",
+    ),
+    pytest.param(
+        lambda c: c.read_work_orders(),
+        _odata_url("API_MAINTENANCEORDER", "MaintenanceOrder"),
+        [
+            _order("4000001", "CRTD"),
+            {**_order("4000002", "CRTD"), "CreationDate": f"/Date({_SAP_VALUE})/"},
+        ],
+        "MaintenanceOrder",
+        "CreationDate is not a date",
+        "read_work_orders",
+        ["CreationDate"],
+        _SAP_VALUE,
+        id="read_work_orders",
+    ),
+    pytest.param(
+        lambda c: c.read_maintenance_history("10000001"),
+        _odata_url(
+            "API_MAINTENANCEORDER", "MaintenanceOrder", **{"$filter": "Equipment eq '10000001'"}
+        ),
+        [
+            _order("4000001", "TECO"),
+            {**_order("4000002", "TECO"), "LastChangeDateTime": f"/Date(1{_SAP_VALUE})/"},
+        ],
+        "MaintenanceOrder",
+        "LastChangeDateTime is not a date",
+        "read_work_orders",
+        ["LastChangeDateTime"],
+        _SAP_VALUE,
+        id="read_maintenance_history",
+    ),
+    pytest.param(
+        lambda c: c.get_work_order("4000001"),
+        _ORDER_URL,
+        [{**_order("4000001", "CRTD"), "MaintOrdPersonResponsible": [_SAP_VALUE]}],
+        "MaintenanceOrder",
+        "ValidationError: assigned_to",
+        "get_work_order",
+        ["assigned_to"],
+        _SAP_VALUE,
+        id="get_work_order",
+    ),
+    pytest.param(
+        lambda c: c.read_spare_parts(),
+        _odata_url("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem"),
+        # An OData V2 Edm.Decimal arrives as a string with its decimals.
+        [
+            {"Material": "MAT-001", "AvailableQuantity": 5},
+            {"Material": "MAT-002", "AvailableQuantity": "12.000"},
+        ],
+        "BillOfMaterialItem",
+        "AvailableQuantity is not a whole number",
+        "read_spare_parts",
+        ["AvailableQuantity"],
+        "12.000",
+        id="read_spare_parts",
+    ),
+    pytest.param(
+        lambda c: c.read_maintenance_plans(),
+        _odata_url("API_MAINTENANCEPLAN", "MaintenancePlan"),
+        [
+            {"MaintenancePlan": "MP-1", "MaintenancePlanCycleValue": 7},
+            {"MaintenancePlan": "MP-2", "MaintenancePlanCycleValue": "7.500"},
+        ],
+        "MaintenancePlan",
+        "MaintenancePlanCycleValue is not a whole number",
+        "read_maintenance_plans",
+        ["MaintenancePlanCycleValue"],
+        "7.500",
+        id="read_maintenance_plans",
+    ),
+]
+
+
+class TestUnmappableRecords:
+    """A record the mapper cannot read refuses the whole read as a
+    ConnectorSchemaError. Neither the message, nor the log, nor any chained
+    exception repeats a value from SAP."""
+
+    @pytest.mark.parametrize(
+        ("read", "url", "records", "entity", "cause", "operation", "fields", "value"),
+        _UNMAPPABLE_READS,
+    )
+    @pytest.mark.asyncio
+    async def test_read_is_refused_without_the_value(
+        self,
+        httpx_mock,
+        connector: SapPmConnector,
+        read: _Read,
+        url: httpx.URL,
+        records: list[Any],
+        entity: str,
+        cause: str,
+        operation: str,
+        fields: list[str] | None,
+        value: str,
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(method="GET", url=url, json={"d": {"results": records}})
+
+        with capture_logs() as logs, pytest.raises(ConnectorSchemaError) as info:
+            await read(connector)
+
+        assert str(info.value) == _refused(entity, cause)
+        # Raised outside the except block: nothing chained carries the value.
+        assert info.value.__cause__ is None
+        assert info.value.__context__ is None
+        if cause.startswith("ValidationError"):
+            error_type = "ValidationError"
+        elif " is not " in cause:
+            error_type = "SapFieldError"
+        else:
+            error_type = cause
+        refusal: dict[str, Any] = {
+            "connector": "SapPmConnector",
+            "operation": operation,
+            "entity": entity,
+            "reason": f"unmappable_{error_type}",
+            "position": len(records) - 1,
+        }
+        if fields is not None:
+            refusal["fields"] = fields
+        assert _record_refusals(logs) == [refusal]
+        assert value not in str(info.value)
+        assert value not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_agent_read_tool_gets_the_refusal_without_the_value(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """What the model sees: the refusal. Searched in the serialized result,
+        whatever shape the tool gives it."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem"),
+            json={"d": {"results": [{"Material": "MAT-001", "AvailableQuantity": "12.000"}]}},
+        )
+        agent = Agent(plant=Plant(name="Test Plant"), connectors=[connector])
+
+        with capture_logs() as logs:
+            result = await agent._execute_tool("check_spare_parts", {})
+
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert _refused("BillOfMaterialItem", "AvailableQuantity is not a whole number") in (
+            serialized
+        )
+        assert "12.000" not in serialized
+        assert "12.000" not in repr(logs)
+
+    @pytest.mark.parametrize("assigned_to", [None, "TECH"], ids=["status", "patch-and-status"])
+    @pytest.mark.asyncio
+    async def test_order_read_before_a_status_import_says_it_was_not_sent(
+        self, httpx_mock, connector: SapPmConnector, assigned_to: str | None
+    ) -> None:
+        """The order read before the function import cannot be mapped: the
+        import is not sent, and the message says so."""
+        await _connect(httpx_mock, connector)
+        if assigned_to:
+            TestUpdateWorkOrder._mock_csrf(httpx_mock, "csrf-1")
+            httpx_mock.add_response(
+                method="PATCH",
+                url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
+                status_code=204,
+            )
+        order = {
+            **_order("4000001", "REL  MANC"),
+            "CreationDate": f"/Date({_SAP_VALUE})/",
+            "__metadata": {"etag": _ETAG},
+        }
+        httpx_mock.add_response(method="GET", url=_ORDER_URL, json={"d": {"results": [order]}})
+
+        with capture_logs() as logs, pytest.raises(ConnectorSchemaError) as info:
+            await connector.update_work_order(
+                "4000001", status=WorkOrderStatus.CLOSED, assigned_to=assigned_to
+            )
+
+        refused = _refused("MaintenanceOrder", "CreationDate is not a date")
+        if assigned_to:
+            assert str(info.value) == (
+                f"{refused}. SAP PM acknowledged the earlier assigned_to update, which stays "
+                "applied; the later status change request was not sent to the CMMS"
+            )
+        else:
+            assert str(info.value) == f"{refused}. {WRITE_REQUEST_NOT_SENT}"
+        assert not httpx_mock.get_requests(method="POST")
+        assert _SAP_VALUE not in _chain(info.value)
+        assert _SAP_VALUE not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_unmappable_read_back_keeps_the_value_out_of_the_chain(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The update was applied; the read-back cannot be mapped. The error says
+        not to repeat the update, and nothing chained to it holds the value."""
+        await _connect(httpx_mock, connector)
+        TestUpdateWorkOrder._mock_read(httpx_mock, "CRTD MANC")
+        TestUpdateWorkOrder._mock_csrf(httpx_mock)
+        TestUpdateWorkOrder._mock_action(httpx_mock, "ReleaseMaintenanceOrder")
+        reread = {**_order("4000001", "REL  MANC"), "CreationDate": f"/Date({_SAP_VALUE})/"}
+        httpx_mock.add_response(method="GET", url=_ORDER_URL, json={"d": {"results": [reread]}})
+
+        with capture_logs() as logs, pytest.raises(ConnectorError) as info:
+            await connector.update_work_order("4000001", status=WorkOrderStatus.ASSIGNED)
+
+        assert "do not repeat the update" in str(info.value)
+        assert _SAP_VALUE not in _chain(info.value)
+        assert _SAP_VALUE not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_unmappable_create_response_keeps_the_value_out_of_the_chain(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        orders_url = f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder"
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{orders_url}?$top=1",
+            headers={"x-csrf-token": "csrf-ok"},
+            json={"d": {"results": []}},
+        )
+        created = {**_order("4000009", "CRTD"), "CreationDate": f"/Date({_SAP_VALUE})/"}
+        httpx_mock.add_response(
+            method="POST", url=orders_url, status_code=201, json={"d": created}
+        )
+
+        with capture_logs() as logs, pytest.raises(ConnectorError) as info:
+            await connector.create_work_order(TestTransportErrors._work_order())
+
+        assert str(info.value).endswith(WRITE_OUTCOME_UNKNOWN)
+        assert _SAP_VALUE not in _chain(info.value)
+        assert _SAP_VALUE not in repr(logs)
+
+
+# ---------------------------------------------------------------------------
+# OData transport metadata reaches neither the model nor MCP clients (SEC-18)
+# ---------------------------------------------------------------------------
+
+# The host a SAP gateway names itself by in __metadata.uri, often internal.
+_INTERNAL_HOST = "sapgw-internal.plant.example:44300"
+
+
+def _with_transport(record: dict[str, Any], path: str) -> dict[str, Any]:
+    """``record`` as an OData V2 entry: its ``__metadata`` and a deferred navigation property."""
+    uri = f"https://{_INTERNAL_HOST}/sap/opu/odata/sap/{path}"
+    return {
+        "__metadata": {"uri": uri, "type": "API.Entity", "etag": _ETAG},
+        **record,
+        "to_Partner": {"__deferred": {"uri": f"{uri}/to_Partner"}},
+    }
+
+
+_TRANSPORT_ORDER = _with_transport(
+    _order("4000001", "REL  MANC"), "API_MAINTENANCEORDER/MaintenanceOrder('4000001')"
+)
+
+
+class TestTransportMetadataStaysOut:
+    """No ``__metadata`` or ``__deferred`` member, nor the host it names, is in
+    what the model or an MCP client receives. Searched in the serialized
+    result, whatever shape the tool or resource gives it."""
+
+    @pytest.mark.asyncio
+    async def test_agent_read_tools(self, httpx_mock, connector: SapPmConnector) -> None:
+        await _connect(httpx_mock, connector)
+        part = _with_transport(
+            {"Material": "MAT-001", "AvailableQuantity": 5},
+            "API_BILL_OF_MATERIAL_SRV/BillOfMaterialItem('1')",
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem"),
+            json={"d": {"results": [part]}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_MAINTENANCEORDER", "MaintenanceOrder"),
+            json={"d": {"results": [_TRANSPORT_ORDER]}},
+        )
+        httpx_mock.add_response(
+            method="GET", url=_ORDER_URL, json={"d": {"results": [_TRANSPORT_ORDER]}}
+        )
+        agent = Agent(plant=Plant(name="Test Plant"), connectors=[connector])
+
+        with capture_logs() as logs:
+            results = [
+                await agent._execute_tool("check_spare_parts", {}),
+                await agent._execute_tool("read_work_orders", {}),
+                await agent._execute_tool("get_work_order", {"work_order_id": "4000001"}),
+            ]
+
+        serialized = json.dumps(results)
+        # The records themselves arrive.
+        assert "MAT-001" in serialized
+        assert serialized.count("4000001") >= 2
+        for fragment in (_INTERNAL_HOST, "__metadata", "__deferred"):
+            assert fragment not in serialized
+        assert _INTERNAL_HOST not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_mcp_resource_templates(self, httpx_mock, connector: SapPmConnector) -> None:
+        # The MCP SDK is the [mcp] extra: the core CI jobs skip this test, and
+        # the optional-extras jobs, which install it, run it.
+        pytest.importorskip("mcp", reason="MCP SDK not installed (pip install machina-ai[mcp])")
+        from unittest.mock import MagicMock, patch
+
+        from machina.config.schema import MachinaConfig
+        from machina.mcp.server import build_server
+        from machina.runtime import MachinaRuntime
+
+        await _connect(httpx_mock, connector)
+        equipment = _with_transport(
+            {"Equipment": "10000001", "EquipmentName": "Pump"},
+            "API_EQUIPMENT/Equipment('10000001')",
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT", "Equipment", **{"$top": "1", "$filter": "Equipment eq '10000001'"}
+            ),
+            json={"d": {"results": [equipment]}},
+        )
+        httpx_mock.add_response(
+            method="GET", url=_ORDER_URL, json={"d": {"results": [_TRANSPORT_ORDER]}}
+        )
+        runtime = MachinaRuntime(connectors={"cmms": connector}, primary_cmms_name="cmms")
+        server = build_server(MachinaConfig())
+
+        with patch.object(server, "get_context") as get_context:
+            get_context.return_value = MagicMock()
+            get_context.return_value.request_context.lifespan_context = {"runtime": runtime}
+            contents = [
+                *await server.read_resource("machina://v1/assets/10000001"),
+                *await server.read_resource("machina://v1/work-orders/4000001"),
+            ]
+
+        serialized = "".join(str(content.content) for content in contents)
+        assert '"id":"10000001"' in serialized
+        assert '"id":"4000001"' in serialized
+        for fragment in (_INTERNAL_HOST, "__metadata", "__deferred"):
+            assert fragment not in serialized
+
+    @pytest.mark.asyncio
+    async def test_status_import_still_sends_the_etag(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """The ETag is read from the order as SAP returned it, not from ``metadata``."""
+        await _connect(httpx_mock, connector)
+        before = _with_transport(
+            _order("4000001", "CRTD MANC"), "API_MAINTENANCEORDER/MaintenanceOrder('4000001')"
+        )
+        httpx_mock.add_response(method="GET", url=_ORDER_URL, json={"d": {"results": [before]}})
+        TestUpdateWorkOrder._mock_csrf(httpx_mock)
+        TestUpdateWorkOrder._mock_action(httpx_mock, "ReleaseMaintenanceOrder")
+        httpx_mock.add_response(
+            method="GET", url=_ORDER_URL, json={"d": {"results": [_TRANSPORT_ORDER]}}
+        )
+
+        updated = await connector.update_work_order("4000001", status=WorkOrderStatus.ASSIGNED)
+
+        [post] = httpx_mock.get_requests(method="POST")
+        assert post.headers["If-Match"] == _ETAG
+        assert "__metadata" not in updated.metadata
+        assert _INTERNAL_HOST not in updated.model_dump_json()
