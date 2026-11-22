@@ -411,7 +411,12 @@ class SapPmConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Return all equipment master records from SAP PM."""
+        """Return all equipment master records from SAP PM.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get("API_EQUIPMENT", "Equipment")
         return _map_records(
@@ -419,7 +424,12 @@ class SapPmConnector:
         )
 
     async def get_asset(self, asset_id: str) -> Asset | None:
-        """Look up a single equipment record by number."""
+        """Look up a single equipment record by number.
+
+        Raises:
+            ConnectorSchemaError: If the record cannot be mapped (see
+                :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get(
             "API_EQUIPMENT",
@@ -453,6 +463,10 @@ class SapPmConnector:
                 value such as ``"closed"``, keeps the orders whose mapped
                 status matches. Any other string is a raw SAP system status
                 code such as ``"REL"``, kept where it is active on the order.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
         """
         self._ensure_connected()
         raw = await self._odata_get(
@@ -479,7 +493,12 @@ class SapPmConnector:
         ]
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
-        """Look up a single maintenance order by number."""
+        """Look up a single maintenance order by number.
+
+        Raises:
+            ConnectorSchemaError: If the record cannot be mapped (see
+                :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._read_order(work_order_id)
         if raw is None:
@@ -874,6 +893,10 @@ class SapPmConnector:
                 parts.
             ConnectorError: If a filter is neither ``""`` nor an ID (see
                 :func:`~machina.connectors.cmms.filters.spare_part_filters`).
+            ConnectorSchemaError: If a record cannot be mapped (a quantity
+                that is not a whole number, an ``Edm.Decimal`` such as
+                ``"12.000"`` included); no partial list is returned (see
+                :func:`_map_records`).
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
@@ -902,7 +925,12 @@ class SapPmConnector:
         )
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-        """Read preventive-maintenance plans from SAP PM."""
+        """Read preventive-maintenance plans from SAP PM.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get("API_MAINTENANCEPLAN", "MaintenancePlan")
         return _map_records(
@@ -925,6 +953,8 @@ class SapPmConnector:
             ConnectorError: If ``asset_id`` is missing or blank. Without an
                 ``Equipment`` filter the read would fetch every order, and a
                 missing ID would be matched as ``'None'``.
+            ConnectorSchemaError: If one of the equipment's orders cannot be
+                mapped, completed or not; no partial list is returned.
         """
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
