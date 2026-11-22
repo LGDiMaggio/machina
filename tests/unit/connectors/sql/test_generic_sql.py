@@ -788,8 +788,11 @@ class TestRetry:
         config.retry.base_backoff = 0.01
         connector = GenericSqlConnector(config=config)
         await connector.connect()
-        with pytest.raises(ConnectorTransientError, match="1205"):
+        with pytest.raises(ConnectorTransientError) as raised:
             await connector.read_assets()
+        # The driver's text stays on the chained cause, out of the message.
+        assert str(raised.value) == "Transient SQL error after 1 retries (Exception)"
+        assert "1205" in str(raised.value.__cause__)
 
 
 class _OverlapDetectingConnection:
@@ -1091,9 +1094,11 @@ class TestStatementTimeout:
         """Not even when the error also reads as transient."""
         connector, cursor = await self._timing_out_reader(mock_connect)
 
-        with pytest.raises(ConnectorTimeoutError, match="Query timeout expired"):
+        with pytest.raises(ConnectorTimeoutError) as raised:
             await connector.read_assets()
 
+        assert str(raised.value) == "SQL read timed out (_FakeOdbcError)"
+        assert "Query timeout expired" in str(raised.value.__cause__)
         # A retry would likely wait on the same lock, holding the connection again.
         assert cursor.execute.call_count == 1
 
@@ -1589,3 +1594,116 @@ class _SharedTableConn:
 
     def close(self) -> None:
         pass
+
+
+# Driver text naming the server and the account, as a real driver error can.
+_DRIVER_TEXT = (
+    "('42S02', \"[42S02] [Microsoft][ODBC Driver 18] server=db-internal.corp:1433;"
+    "user=svc_machina: Invalid object name 'WORK_ORDERS'\")"
+)
+_DRIVER_NEEDLES = ("db-internal", "svc_machina", "1433", "42S02")
+_READ_FAILED = "SQL read failed (_FakeOdbcError)"
+
+
+async def _connector_whose_reads_fail(mock_connect: MagicMock) -> GenericSqlConnector:
+    """A connected SQL connector whose every read raises ``_DRIVER_TEXT``."""
+    validate_cursor = _make_smart_cursor()
+    calls = 0
+
+    def cursor_factory() -> MagicMock:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the schema check at connect()
+            return validate_cursor
+        cursor = MagicMock()
+        cursor.execute.side_effect = _FakeOdbcError(_DRIVER_TEXT)
+        return cursor
+
+    conn = MagicMock()
+    conn.cursor = cursor_factory
+    mock_connect.return_value = conn
+    connector = GenericSqlConnector(config=_basic_config())
+    await connector.connect()
+    return connector
+
+
+def _driver_leaks(*texts: object) -> list[str]:
+    blob = " ".join(str(t) for t in texts)
+    return [needle for needle in _DRIVER_NEEDLES if needle in blob]
+
+
+class TestDriverTextStaysOffTheBoundaries:
+    """A failed read names the driver error's type; its text stays on the
+    chained cause, so it reaches the log but not the model, an MCP client or
+    a workflow result."""
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_the_error_names_the_type_and_chains_the_driver_error(
+        self, mock_connect: MagicMock
+    ) -> None:
+        connector = await _connector_whose_reads_fail(mock_connect)
+
+        with pytest.raises(ConnectorError) as raised:
+            await connector.read_work_orders()
+
+        assert str(raised.value) == _READ_FAILED
+        assert isinstance(raised.value.__cause__, _FakeOdbcError)
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_the_model_and_the_log_see_the_type(self, mock_connect: MagicMock) -> None:
+        from machina.agent.runtime import Agent
+
+        agent = Agent(connectors=[await _connector_whose_reads_fail(mock_connect)])
+
+        with capture_logs() as logs:
+            result = await agent._execute_tool("read_work_orders", {"asset_id": "P-201"})
+
+        assert result == {"error": _READ_FAILED}
+        (event,) = [e for e in logs if e["event"] == "read_tool_failed"]
+        assert event["cause_type"] == "_FakeOdbcError"
+        assert _driver_leaks(event) == []
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_a_workflow_step_shows_the_type(self, mock_connect: MagicMock) -> None:
+        from machina.connectors.base import ConnectorRegistry
+        from machina.workflows.engine import WorkflowEngine
+        from machina.workflows.models import ErrorPolicy, Step, Workflow
+
+        registry = ConnectorRegistry()
+        registry.register("sql", await _connector_whose_reads_fail(mock_connect))
+        workflow = Workflow(
+            name="Orders",
+            steps=[Step("orders", action="cmms.read_work_orders", on_error=ErrorPolicy.STOP)],
+        )
+
+        result = await WorkflowEngine(registry=registry).execute(workflow)
+
+        (step,) = result.step_results
+        assert step.success is False
+        assert step.error == f"ConnectorError: {_READ_FAILED}"
+        assert _driver_leaks(result) == []
+
+    @pytest.mark.asyncio
+    @patch("machina.connectors.sql.generic.connect_odbc")
+    async def test_mcp_tools_show_the_type(self, mock_connect: MagicMock) -> None:
+        pytest.importorskip("mcp")
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        from machina.mcp.errors import guard_tool
+        from machina.mcp.tools import machina_list_assets, machina_list_work_orders
+
+        connector = await _connector_whose_reads_fail(mock_connect)
+        runtime = MagicMock(sandbox_mode=False)
+        runtime.get_primary_cmms.return_value = connector
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {"runtime": runtime}
+
+        # Returned as an error entry ...
+        assert await guard_tool(machina_list_assets)(ctx) == [{"error": _READ_FAILED}]
+        # ... or raised, as an MCP error.
+        with pytest.raises(ToolError) as raised:
+            await guard_tool(machina_list_work_orders)(ctx)
+        assert str(raised.value) == _READ_FAILED

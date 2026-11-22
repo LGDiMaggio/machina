@@ -214,9 +214,11 @@ class MqttConnector:
         except Exception as exc:
             err_msg = str(exc).lower()
             if "auth" in err_msg or "not authorized" in err_msg or "bad user" in err_msg:
-                raise ConnectorAuthError(f"MQTT authentication failed: {exc}") from exc
+                raise ConnectorAuthError(
+                    f"MQTT authentication failed ({type(exc).__name__})"
+                ) from exc
             raise ConnectorError(
-                f"Failed to connect to MQTT broker at {self._broker}:{self._port}: {exc}"
+                f"Failed to connect to the MQTT broker ({type(exc).__name__})"
             ) from exc
 
         self._connected = True
@@ -378,7 +380,7 @@ class MqttConnector:
                 qos=qos,
             )
         except Exception as exc:
-            raise ConnectorError(f"Failed to publish to {topic}: {exc}") from exc
+            raise ConnectorError(f"Failed to publish to {topic} ({type(exc).__name__})") from exc
 
     # ------------------------------------------------------------------
     # Private helpers

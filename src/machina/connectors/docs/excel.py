@@ -316,7 +316,12 @@ def _row_to_dict(
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                raise _UnreadableRowError(f"column '{mapping.column}': {exc}") from exc
+                # The coercer's text quotes the cell, and this reason can reach a
+                # tool result (create_work_order's refusal): name the type only.
+                # The broken_cell log above keeps the text.
+                raise _UnreadableRowError(
+                    f"column '{mapping.column}' cannot be read ({type(exc).__name__})"
+                ) from exc
             logger.debug(
                 "optional_cell_coercion_failed",
                 connector="ExcelCsvConnector",
@@ -559,7 +564,9 @@ def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
             f"Cannot write {path.name}: it is open in another program, "
             "or this process lacks write permission"
         )
-    return ConnectorError(f"Could not write {path.name}: {exc.strerror or exc}")
+    # strerror is the OS's text for the errno ("No space left on device"), with
+    # no path; an OSError without one is reported by its type.
+    return ConnectorError(f"Could not write {path.name}: {exc.strerror or type(exc).__name__}")
 
 
 def _log_failure_after_cancel(log_fields: dict[str, str], future: Future[Any]) -> None:
@@ -1247,7 +1254,9 @@ class ExcelCsvConnector:
         except OSError as exc:
             raise _file_write_error(exc, path) from exc
         except Exception as exc:
-            raise ConnectorError(f"Cannot read {path.name} before writing to it: {exc}") from exc
+            raise ConnectorError(
+                f"Cannot read {path.name} before writing to it ({type(exc).__name__})"
+            ) from exc
 
     @staticmethod
     def _read_file(path: Path, schema: SheetSchema) -> tuple[list[str], list[dict[str, Any]]]:

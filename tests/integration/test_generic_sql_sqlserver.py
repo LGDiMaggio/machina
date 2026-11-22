@@ -194,9 +194,11 @@ class TestSqlServerStatementTimeout:
             blocker.cursor().execute(
                 "UPDATE test_assets SET asset_name = 'locked' WHERE asset_id = 'P-001'"
             )
-            with pytest.raises(ConnectorTimeoutError, match="HYT00"):
+            with pytest.raises(ConnectorTimeoutError, match=r"^SQL read timed out") as timed_out:
                 # wait_for: without the timeout the read would wait forever.
                 await asyncio.wait_for(connector.read_assets(), timeout=30)
+            # The driver's SQLSTATE is on the chained cause, not in the message.
+            assert "HYT00" in str(timed_out.value.__cause__)
             # The timed-out read no longer holds the connection.
             assert (await connector.health_check()).status.value == "healthy"
         finally:

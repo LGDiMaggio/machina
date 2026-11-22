@@ -177,7 +177,9 @@ class OpcUaConnector:
         try:
             await self._configure_security()
         except Exception as exc:
-            raise ConnectorAuthError(f"Security configuration failed: {exc}") from exc
+            raise ConnectorAuthError(
+                f"Security configuration failed ({type(exc).__name__})"
+            ) from exc
 
         # User-token authentication
         if self._username:
@@ -189,9 +191,11 @@ class OpcUaConnector:
         except Exception as exc:
             err_msg = str(exc).lower()
             if "security" in err_msg or "auth" in err_msg or "certificate" in err_msg:
-                raise ConnectorAuthError(f"OPC-UA authentication failed: {exc}") from exc
+                raise ConnectorAuthError(
+                    f"OPC-UA authentication failed ({type(exc).__name__})"
+                ) from exc
             raise ConnectorError(
-                f"Failed to connect to OPC-UA server at {self._endpoint}: {exc}"
+                f"Failed to connect to the OPC-UA server ({type(exc).__name__})"
             ) from exc
 
         self._connected = True
@@ -344,7 +348,7 @@ class OpcUaConnector:
             node = self._client.get_node(node_id)
             return await node.read_value()
         except Exception as exc:
-            raise ConnectorError(f"Failed to read node {node_id}: {exc}") from exc
+            raise ConnectorError(f"Failed to read node {node_id} ({type(exc).__name__})") from exc
 
     async def read_values(self, node_ids: list[str]) -> dict[str, Any]:
         """Read current values of multiple OPC-UA nodes.
@@ -399,7 +403,7 @@ class OpcUaConnector:
                 )
             return nodes
         except Exception as exc:
-            raise ConnectorError(f"Failed to browse nodes: {exc}") from exc
+            raise ConnectorError(f"Failed to browse nodes ({type(exc).__name__})") from exc
 
     # ------------------------------------------------------------------
     # Private helpers
