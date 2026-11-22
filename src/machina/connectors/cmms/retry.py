@@ -23,6 +23,15 @@ domain-specific exceptions. The final response after exhausting retries
 is also returned, allowing the caller to still see the last
 ``status_code`` and headers.
 
+Each retry is logged at WARNING (``http_network_retry``,
+``http_rate_limit_retry``, ``http_retry_after_exceeds_max_backoff``) with the
+method, the attempt and the status or error type. The URL is logged as its
+scheme, host, port and path only (:func:`loggable_url`): a query carries
+filter values and page tokens, user info carries credentials, and an OData
+key predicate carries the record's key. A caller whose path carries a
+record ID in a plain segment passes ``log_url``, a template of the URL with
+the ID replaced.
+
 Example:
     ```python
     import httpx
@@ -43,11 +52,58 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# An OData key predicate closing a path segment: Entity('key'), Entity(42),
+# Entity(Key1='a',Key2='b'). The key is a record ID.
+_KEY_PREDICATE = re.compile(r"^([^()]*)\(.+\)$")
+_KEY_PLACEHOLDER = "<key>"
+UNPARSEABLE_URL = "<unparseable URL>"
+
+
+def loggable_url(url: str) -> str:
+    """Return the part of *url* a log may hold: scheme, host, port and path.
+
+    The query and the fragment are dropped: a query carries filter values,
+    record IDs and page tokens (SAP PM's ``__next`` and Maximo's ``nextPage``
+    links repeat the whole query). User info, which is credentials, is
+    dropped too. In the path, an OData key
+    predicate is replaced, ``MaintenanceOrder('4000123')`` becoming
+    ``MaintenanceOrder(<key>)``. A record ID in a plain path segment
+    (``/work-orders/<ID>``) cannot be told from a resource name here: the
+    caller passes ``log_url`` for it. A URL that cannot be parsed is logged as
+    :data:`UNPARSEABLE_URL`.
+
+    Args:
+        url: An absolute URL, or a path.
+
+    Returns:
+        The reduced URL.
+    """
+    try:
+        parts = urlsplit(url)
+        # .port raises ValueError for a port that is not a number in range.
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return UNPARSEABLE_URL
+    netloc = ""
+    if host is not None:
+        netloc = f"[{host}]" if ":" in host else host
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+    path = "/".join(
+        _KEY_PREDICATE.sub(rf"\1({_KEY_PLACEHOLDER})", segment)
+        for segment in parts.path.split("/")
+    )
+    return urlunsplit((parts.scheme, netloc, path, "", ""))
+
 
 DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_BACKOFF: float = 0.5
@@ -101,9 +157,10 @@ async def request_with_retry(
             retrying a 503, which a gateway can return after the backend
             processed the request; a 429 is retried for every method, since
             the server refused it unprocessed.
-        log_url: What the retry warnings log in place of ``url``, for a URL
-            that carries a value the logs must not hold, such as a vendor
-            record ID. ``None`` (default) logs ``url``.
+        log_url: What the retry warnings log in place of ``url``: a template
+            of the URL whose path carries a record ID in a plain segment,
+            such as ``/api/v2/work-orders/<work order>``. ``None`` (default)
+            logs ``url``. Either is reduced by :func:`loggable_url`.
 
     Returns:
         The final ``httpx.Response``. This is either the first success,
@@ -120,7 +177,7 @@ async def request_with_retry(
 
     if retry_on_network_error is None:
         retry_on_network_error = method.upper() in _IDEMPOTENT_METHODS
-    logged_url = url if log_url is None else log_url
+    logged_url = loggable_url(url if log_url is None else log_url)
 
     transient_exceptions: tuple[type[BaseException], ...] = (
         httpx.TimeoutException,
@@ -153,7 +210,9 @@ async def request_with_retry(
                 backoff=backoff,
                 method=method,
                 url=logged_url,
-                error=str(exc),
+                # The type only: httpx's message can name the host, port and
+                # address it could not reach.
+                error_type=type(exc).__name__,
             )
             await asyncio.sleep(backoff)
             attempt += 1

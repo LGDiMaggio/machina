@@ -418,3 +418,131 @@ async def test_every_retry_warning_logs_log_url_in_place_of_the_url(
     assert warning["url"] == logged
     if log_url is not None:
         assert "SECRET-PART" not in repr(logs)
+
+
+# One event sequence per retry warning: each logs the URL once.
+_WARNINGS = [
+    pytest.param(
+        [httpx.ConnectError("refused"), _FakeResponse(200)], "http_network_retry", id="network"
+    ),
+    pytest.param([_FakeResponse(429), _FakeResponse(200)], "http_rate_limit_retry", id="429"),
+    pytest.param(
+        [_FakeResponse(429, headers={"Retry-After": "300"})],
+        "http_retry_after_exceeds_max_backoff",
+        id="retry-after",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("events", "event_name"), _WARNINGS)
+@pytest.mark.parametrize(
+    ("url", "logged", "secrets"),
+    [
+        pytest.param(
+            "https://maximo.example.com/maximo/oslc/os/mxwo?pageno=2&oslc.pageSize=100"
+            "&oslc.where=assetnum%3D%22P-201%22&_lid=svc&_lpwd=pw123",
+            "https://maximo.example.com/maximo/oslc/os/mxwo",
+            ("P-201", "pageno", "_lpwd", "pw123", "oslc.where"),
+            id="maximo-next-page",
+        ),
+        pytest.param(
+            "https://sap.example.com:44300/sap/opu/odata/sap/API_EQUIPMENT/Equipment"
+            "?$skiptoken=100&$filter=Equipment%20eq%20'10000001'",
+            "https://sap.example.com:44300/sap/opu/odata/sap/API_EQUIPMENT/Equipment",
+            ("10000001", "skiptoken", "$filter"),
+            id="sap-next",
+        ),
+        pytest.param(
+            "https://sap.example.com/sap/opu/odata/sap/API_MAINTENANCEORDER/"
+            "MaintenanceOrder('4000123')",
+            "https://sap.example.com/sap/opu/odata/sap/API_MAINTENANCEORDER/"
+            "MaintenanceOrder(<key>)",
+            ("4000123",),
+            id="odata-key",
+        ),
+        pytest.param(
+            "https://cmms.example.com/odata/Orders(Key1='A-77',Key2=5)/Items?$top=1",
+            "https://cmms.example.com/odata/Orders(<key>)/Items",
+            ("A-77", "Key2", "$top"),
+            id="odata-composite-key",
+        ),
+        pytest.param(
+            "https://svc_machina:s3cr3t@cmms.example.com:8443/api/v2/users?pagesize=1#frag",
+            "https://cmms.example.com:8443/api/v2/users",
+            ("svc_machina", "s3cr3t", "pagesize", "frag"),
+            id="user-info",
+        ),
+        pytest.param(
+            "http://[fd00::5]:9080/maximo/oslc/whoami?token=abc",
+            "http://[fd00::5]:9080/maximo/oslc/whoami",
+            ("token", "abc"),
+            id="ipv6-host",
+        ),
+        pytest.param(
+            "http://[fd00::5:9080/x?token=abc", "<unparseable URL>", ("token", "abc"), id="bad-url"
+        ),
+    ],
+)
+async def test_retry_warnings_log_the_url_without_query_credentials_or_keys(
+    events: list[Any], event_name: str, url: str, logged: str, secrets: tuple[str, ...]
+) -> None:
+    """By default a warning logs scheme, host, port and path: no query (filter
+    values, page tokens, Maximo's _lid/_lpwd), no user info, no fragment, and an
+    OData key predicate as ``(<key>)``. The request itself is sent unchanged."""
+    from structlog.testing import capture_logs
+
+    class _RecordingClient(_SequenceClient):
+        sent: list[str]
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+            self.sent = [*getattr(self, "sent", []), url]
+            return await super().request(method, url, **kwargs)
+
+    client = _RecordingClient(events)
+    with capture_logs() as logs:
+        await request_with_retry(client, "GET", url, max_backoff=8.0)
+
+    (warning,) = [e for e in logs if e["event"] == event_name]
+    assert warning["url"] == logged
+    assert warning["method"] == "GET"
+    for secret in secrets:
+        assert secret not in repr(logs)
+    assert set(client.sent) == {url}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("events", "event_name"), _WARNINGS)
+async def test_a_log_url_is_reduced_the_same_way(events: list[Any], event_name: str) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        await request_with_retry(
+            _SequenceClient(events),
+            "GET",
+            _PART_URL,
+            max_backoff=8.0,
+            log_url="https://u:p@cmms.example.com/api/v2/parts/<listed part>?sku=6205",
+        )
+
+    (warning,) = [e for e in logs if e["event"] == event_name]
+    assert warning["url"] == "https://cmms.example.com/api/v2/parts/<listed part>"
+
+
+@pytest.mark.asyncio
+async def test_a_network_retry_logs_the_error_type_not_its_text() -> None:
+    """httpx's message can name the host, port and address it could not reach."""
+    from structlog.testing import capture_logs
+
+    error = httpx.ConnectError("[Errno 111] Connect call failed ('10.20.0.5', 8443) token=abc")
+    with capture_logs() as logs:
+        await request_with_retry(
+            _SequenceClient([error, _FakeResponse(200)]), "GET", "https://example.com/x"
+        )
+
+    (warning,) = [e for e in logs if e["event"] == "http_network_retry"]
+    assert warning["error_type"] == "ConnectError"
+    assert "error" not in warning
+    for secret in ("10.20.0.5", "8443", "token=abc", "Errno"):
+        assert secret not in repr(logs)
+    assert (warning["attempt"], warning["max_retries"]) == (1, 3)

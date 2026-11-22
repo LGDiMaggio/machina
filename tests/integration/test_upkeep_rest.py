@@ -2176,3 +2176,105 @@ class TestTransportErrors:
         assert str(info.value) == "UpKeep GET part timed out"
         # The retry warnings name the endpoint, never the part.
         assert "Wuy1TIHIfL" not in repr(logs)
+
+
+def _work_order_result(wo_id: str) -> dict[str, object]:
+    return {
+        "result": {
+            "id": wo_id,
+            "title": "Fix pump",
+            "priority": 2,
+            "status": "open",
+            "assetId": "a1",
+            "createdAt": "2025-06-01T10:00:00Z",
+            "updatedAt": "2025-06-01T12:00:00Z",
+        }
+    }
+
+
+class TestRetryWarningsNameNoRecord:
+    """A retried request for one record logs the endpoint, never the record ID."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _sleep(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _sleep)
+
+    @staticmethod
+    def _retries(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [e for e in logs if str(e["event"]).startswith("http_")]
+
+    @pytest.mark.asyncio
+    async def test_a_work_order_read(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/work-orders/Wq7RkS3mZp"
+        httpx_mock.add_response(method="GET", url=url, status_code=429)
+        httpx_mock.add_response(method="GET", url=url, json=_work_order_result("Wq7RkS3mZp"))
+
+        with structlog.testing.capture_logs() as logs:
+            work_order = await connector.get_work_order("Wq7RkS3mZp")
+
+        assert work_order is not None and work_order.id == "Wq7RkS3mZp"
+        (retry,) = self._retries(logs)
+        assert (retry["event"], retry["url"]) == (
+            "http_rate_limit_retry",
+            "/api/v2/work-orders/<work order>",
+        )
+        assert "Wq7RkS3mZp" not in repr(retry)
+
+    @pytest.mark.asyncio
+    async def test_an_asset_read(self, httpx_mock, connector: UpKeepConnector) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_exception(httpx.ConnectError("refused"), method="GET", url=ASSET_URL)
+        _mock_asset(httpx_mock, _asset_body())
+
+        with structlog.testing.capture_logs() as logs:
+            asset = await connector.get_asset(ASSET_ID)
+
+        assert asset is not None
+        (retry,) = self._retries(logs)
+        assert (retry["event"], retry["url"], retry["error_type"]) == (
+            "http_network_retry",
+            "/api/v2/assets/<asset>",
+            "ConnectError",
+        )
+        assert ASSET_ID not in repr(retry)
+
+    @pytest.mark.asyncio
+    async def test_the_asset_read_of_a_spare_parts_read(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _mock_asset(httpx_mock, status_code=429)
+        _mock_asset(httpx_mock, _asset_body(parts=[]))
+
+        with structlog.testing.capture_logs() as logs:
+            assert await connector.read_spare_parts(asset_id=ASSET_ID) == []
+
+        (retry,) = self._retries(logs)
+        assert retry["url"] == "/api/v2/assets/<asset>"
+        assert ASSET_ID not in repr(retry)
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_update_and_its_read_back(
+        self, httpx_mock, connector: UpKeepConnector
+    ) -> None:
+        """A 429 is retried for a PATCH too (UpKeep refused it unprocessed)."""
+        await _connect(httpx_mock, connector)
+        url = f"{BASE}/api/v2/work-orders/Wq7RkS3mZp"
+        httpx_mock.add_response(method="PATCH", url=url, status_code=429)
+        httpx_mock.add_response(method="PATCH", url=url, json=_work_order_result("Wq7RkS3mZp"))
+        httpx_mock.add_response(method="GET", url=url, status_code=429)
+        httpx_mock.add_response(method="GET", url=url, json=_work_order_result("Wq7RkS3mZp"))
+
+        with structlog.testing.capture_logs() as logs:
+            await connector.update_work_order("Wq7RkS3mZp", description="Fix pump")
+
+        assert [(e["method"], e["url"]) for e in self._retries(logs)] == [
+            ("PATCH", "/api/v2/work-orders/<work order>"),
+            ("GET", "/api/v2/work-orders/<work order>"),
+        ]
+        assert "Wq7RkS3mZp" not in repr(self._retries(logs))
+        assert len(httpx_mock.get_requests(method="PATCH")) == 2  # retry count unchanged
