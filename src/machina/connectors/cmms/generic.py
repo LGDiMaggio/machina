@@ -9,15 +9,21 @@ for demos and quickstarts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import errno
 import json
+import os
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar, TypeVarTuple
 from urllib.parse import parse_qsl
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from concurrent.futures import Future
 
     from machina.connectors.cmms.generic_schema import GenericCmmsYamlConfig
 
@@ -64,6 +70,7 @@ from machina.exceptions import (
     ConnectorAuthError,
     ConnectorConfigError,
     ConnectorError,
+    ConnectorLockedError,
     ConnectorSchemaError,
 )
 
@@ -74,6 +81,12 @@ _Ts = TypeVarTuple("_Ts")
 
 # How long disconnect() waits for a local-mode write still running on the file thread.
 _DISCONNECT_WAIT_SEC = 5.0
+
+# How long a local-mode write waits for another writer's lock on
+# work_orders.json before it gives up without writing anything, and how often
+# it tries the lock meanwhile.
+_LOCK_WAIT_SEC = 5.0
+_LOCK_POLL_SEC = 0.02
 
 # Plain unions (not Annotated) for use as runtime type annotations.
 # The Annotated discriminated unions live in auth.py / pagination.py for
@@ -97,6 +110,142 @@ def _require_httpx() -> Any:
             "httpx is required for REST mode. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+# ----------------------------------------------------------------------
+# Local mode: the cross-writer lock of work_orders.json
+# ----------------------------------------------------------------------
+# An OS advisory lock on a sibling file, taken through a handle of its own for
+# each write. Writers holding different handles exclude each other, whether
+# they are connectors of one process or of different processes, and the
+# operating system releases the lock when its handle is closed or its process
+# ends, however it ends, so a lock is never left stale. Programs that do not
+# take the lock (a text editor, an older Machina) are not excluded.
+
+if sys.platform == "win32":  # pragma: no cover - CI runs on Linux; the tests run here on Windows
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        """Lock the first byte of ``fd``'s file, without waiting.
+
+        Returns False when another handle holds it: ``msvcrt.locking`` locks
+        belong to a handle, so another handle of this process is refused too.
+        """
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLOCK):
+                return False
+            raise
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        """Take an exclusive ``flock`` on ``fd``, without waiting.
+
+        Returns False when another open file holds it. ``flock`` locks, unlike
+        ``lockf`` ones, belong to the open file, not to the process, so another
+        connector of this process is refused too.
+        """
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _write_lock(path: Path) -> Iterator[None]:
+    """Hold the cross-writer lock of ``path`` while the block runs.
+
+    The lock is taken on ``<name>.lock`` beside ``path``. That file is created
+    on the first write and never removed: removing it would let two writers
+    lock two different files. A lock held by another writer is waited for, up
+    to ``_LOCK_WAIT_SEC``. Runs on the file thread.
+
+    Raises:
+        ConnectorLockedError: If another writer still holds the lock after
+            ``_LOCK_WAIT_SEC``.
+        ConnectorError: If the lock file cannot be opened or locked.
+
+        In both cases nothing was written, so the caller can repeat the write.
+    """
+    try:
+        fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError as exc:
+        raise _lock_error(exc, path) from exc
+    try:
+        deadline = time.monotonic() + _LOCK_WAIT_SEC
+        try:
+            while not _try_lock(fd):
+                if time.monotonic() >= deadline:
+                    raise ConnectorLockedError(
+                        f"Another connector or process is writing {path.name}: waited "
+                        f"{_LOCK_WAIT_SEC:g} s for it; nothing was written"
+                    )
+                time.sleep(_LOCK_POLL_SEC)
+        except OSError as exc:
+            raise _lock_error(exc, path) from exc
+        try:
+            yield
+        finally:
+            # Closing the handle releases the lock as well, so a failed unlock
+            # must not turn a write that has already replaced the file into an
+            # error.
+            with contextlib.suppress(OSError):
+                _unlock(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _lock_error(exc: OSError, path: Path) -> ConnectorError:
+    """The error for a lock that could not be opened or taken, before any write."""
+    reason = exc.strerror or type(exc).__name__
+    return ConnectorError(f"Could not lock {path.name} for writing: {reason}; nothing was written")
+
+
+def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
+    """Map a write-side OS error onto the connector error contract."""
+    if isinstance(exc, PermissionError):
+        return ConnectorLockedError(
+            f"Cannot write {path.name}: it is open in another program, "
+            "or this process lacks write permission"
+        )
+    # strerror is the OS's text for the errno ("No space left on device"), with
+    # no path; an OSError without one is reported by its type.
+    return ConnectorError(f"Could not write {path.name}: {exc.strerror or type(exc).__name__}")
+
+
+def _log_failure_after_cancel(log_fields: dict[str, str], future: Future[Any]) -> None:
+    """Log the failure of a file-thread call whose caller was cancelled.
+
+    Attached as a done-callback only once the caller is gone, so it runs on
+    the file thread as the call ends (or at once, if it has already ended)
+    and never repeats a failure that a caller received. A call dropped
+    before it ran did nothing, and is not logged.
+    """
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc is not None:
+        logger.error(
+            "failed_after_cancel",
+            connector="GenericCmmsConnector",
+            **log_fields,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
 
 
 class GenericCmmsConnector:
@@ -295,11 +444,12 @@ class GenericCmmsConnector:
         self._spare_parts: list[SparePart] = []
         self._maintenance_plans: list[MaintenancePlan] = []
         self._failure_modes: list[FailureMode] = []
-        # Every local-mode write runs on this one thread, one at a time (see
-        # _run_on_file_thread): a write whose caller was cancelled still
-        # finishes, and the next write waits for it. A write replaces
-        # _work_orders with a new list instead of changing it in place, so
-        # reads on the event loop always see a whole, persisted list.
+        # Every local-mode file access runs on this one thread, one at a time:
+        # the loads of connect() and every write (see _run_on_file_thread). A
+        # write whose caller was cancelled still finishes, and the next access
+        # waits for it. Loads and writes replace the lists instead of changing
+        # them in place, so reads on the event loop always see a whole list.
+        # Writers on other threads or processes are excluded by _write_lock.
         self._file_thread = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="machina-generic-cmms"
         )
@@ -311,6 +461,10 @@ class GenericCmmsConnector:
     async def connect(self) -> None:
         """Establish connection or load local data files.
 
+        In local mode the files are read on the connector's file thread, after
+        any write still running, and the records read replace those loaded
+        before, so connecting again reloads the files.
+
         Raises:
             ConnectorError: If neither ``url`` nor ``data_dir`` is provided,
                 or the REST health check fails.
@@ -320,7 +474,7 @@ class GenericCmmsConnector:
             ConnectorConfigError: If ``url`` is malformed.
         """
         if self._data_dir and self._data_dir.exists():
-            await self._load_local_data()
+            await self._run_on_file_thread(self._load_local_data, operation="connect")
         elif self.url:
             await self._verify_rest_connection()
         else:
@@ -437,11 +591,28 @@ class GenericCmmsConnector:
         still finishes, and the next write waits for it, so a retry after a
         cancellation finds the stored work order. The file is re-read
         first, so records another process wrote to it are kept and count
-        for the idempotency check.
+        for the idempotency check. Other connectors and processes writing the
+        same file take turns with this one through a lock on
+        ``work_orders.json.lock``, held from the re-read to the write.
+
+        Raises:
+            ConnectorLockedError: In local mode, if another writer kept the
+                lock for longer than 5 seconds, or ``work_orders.json`` cannot
+                be written because it is open in another program or not
+                writable. Nothing was written.
+            ConnectorError: In local mode, if ``work_orders.json`` cannot be
+                read before the write, or cannot be locked or written. Nothing
+                was written.
         """
         self._ensure_connected()
         if self._data_dir:
-            return await self._run_on_file_thread(self._create_local_work_order, work_order)
+            return await self._run_on_file_thread(
+                self._create_local_work_order,
+                work_order,
+                operation="create_work_order",
+                work_order_id=work_order.id,
+                asset_id=work_order.asset_id,
+            )
         return await self._rest_create_work_order(work_order)
 
     async def read_spare_parts(
@@ -533,18 +704,28 @@ class GenericCmmsConnector:
         stored work order is updated, written back, and only then replaces
         the stored one, so a failed write leaves it as it was. As with :meth:`create_work_order`,
         a write that has started finishes even if the caller is cancelled,
-        and the next write waits for it. In REST mode the configured
-        endpoint is called and the work order is re-fetched to return fresh
-        state.
+        the next write waits for it, and other writers of the file take turns
+        with it through the lock on ``work_orders.json.lock``. In REST mode
+        the configured endpoint is called and the work order is re-fetched to
+        return fresh state.
 
         Raises:
+            ConnectorLockedError: In local mode, as for
+                :meth:`create_work_order`. Nothing was written.
             ConnectorError: If the work order is not found, or the
-                endpoint is not configured in REST mode.
+                endpoint is not configured in REST mode. In local mode, also
+                as for :meth:`create_work_order`.
         """
         self._ensure_connected()
         if self._data_dir:
             return await self._run_on_file_thread(
-                self._update_local_work_order, work_order_id, status, assigned_to, description
+                self._update_local_work_order,
+                work_order_id,
+                status,
+                assigned_to,
+                description,
+                operation="update_work_order",
+                work_order_id=work_order_id,
             )
         return await self._rest_update_work_order(
             work_order_id,
@@ -576,7 +757,9 @@ class GenericCmmsConnector:
     # Internal: local work-order writes
     # ------------------------------------------------------------------
 
-    async def _run_on_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> _T:
+    async def _run_on_file_thread(
+        self, func: Callable[[*_Ts], _T], /, *args: *_Ts, **log_fields: str
+    ) -> _T:
         """Run ``func(*args)`` on the connector's file thread, after earlier calls.
 
         One thread runs every call, so no two calls overlap, whatever happens
@@ -584,11 +767,40 @@ class GenericCmmsConnector:
         workflow step timeout) cannot stop a call that is already running, and
         the calls behind it wait for it; a call still queued when the
         cancellation reaches the thread pool, on the event loop's next
-        iteration, is dropped.
+        iteration, is dropped. Nobody reads the outcome of a call that
+        outlives its caller, so if that call fails, the failure is logged as
+        ``failed_after_cancel``, with ``log_fields``.
         """
-        loop = asyncio.get_running_loop()
+        future = self._submit_to_file_thread(func, *args)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.add_done_callback(lambda done: _log_failure_after_cancel(log_fields, done))
+            raise
+
+    def _submit_to_file_thread(self, func: Callable[[*_Ts], _T], /, *args: *_Ts) -> Future[_T]:
+        """Queue ``func(*args)`` on the file thread, in a copy of the caller's context."""
         context = contextvars.copy_context()  # as asyncio.to_thread does
-        return await loop.run_in_executor(self._file_thread, context.run, func, *args)
+        return self._file_thread.submit(lambda: context.run(func, *args))
+
+    def _writes_back(self) -> bool:
+        """Whether local writes go back to ``work_orders.json``.
+
+        Only a native-format file is written back; a mapped one (``schema_mapping``
+        / ``yaml_mapping``) is never written, and writes stay in memory (see
+        :meth:`_persist_work_orders`).
+        """
+        return not self._schema_mapping and self._yaml_mapping is None
+
+    def _work_orders_lock(self) -> contextlib.AbstractContextManager[None]:
+        """The cross-writer lock of ``work_orders.json`` (see :func:`_write_lock`).
+
+        Held from the re-read to the replace of the file by each write that
+        writes it back; a write kept in memory needs none.
+        """
+        if self._data_dir is not None and self._writes_back():
+            return _write_lock(self._data_dir / "work_orders.json")
+        return contextlib.nullcontext()
 
     def _create_local_work_order(self, work_order: WorkOrder) -> WorkOrder:
         """Store a work order unless one with its ID is already stored.
@@ -599,23 +811,26 @@ class GenericCmmsConnector:
         and that cancelling the caller does not cut short. The new list
         replaces the stored one only once it is persisted: a WO kept in memory
         but not on disk would be lost on restart, and the ID check would
-        return it as "existing" for a record never durably stored.
+        return it as "existing" for a record never durably stored. The
+        cross-writer lock is held from the re-read to the replace, so no other
+        writer of the file can change it in between.
         """
-        self._reload_work_orders()
-        stored = self._work_orders
-        existing = next((wo for wo in stored if wo.id == work_order.id), None)
-        if existing is not None:
-            logger.info(
-                "work_order_create_idempotent_hit",
-                connector="GenericCmmsConnector",
-                operation="create_work_order",
-                work_order_id=work_order.id,
-                asset_id=work_order.asset_id,
-            )
-            return existing
-        work_orders = [*stored, work_order]
-        self._persist_work_orders(work_orders)
-        self._work_orders = work_orders
+        with self._work_orders_lock():
+            self._reload_work_orders()
+            stored = self._work_orders
+            existing = next((wo for wo in stored if wo.id == work_order.id), None)
+            if existing is not None:
+                logger.info(
+                    "work_order_create_idempotent_hit",
+                    connector="GenericCmmsConnector",
+                    operation="create_work_order",
+                    work_order_id=work_order.id,
+                    asset_id=work_order.asset_id,
+                )
+                return existing
+            work_orders = [*stored, work_order]
+            self._persist_work_orders(work_orders)
+            self._work_orders = work_orders
         logger.info(
             "work_order_created",
             connector="GenericCmmsConnector",
@@ -639,27 +854,29 @@ class GenericCmmsConnector:
         and that cancelling the caller does not cut short. The copy replaces
         the stored work order only once it is persisted, so a failed write
         leaves the stored one as it was, and reads on the event loop never
-        see a half-applied change.
+        see a half-applied change. The cross-writer lock is held from the
+        re-read to the replace, as for a create.
         """
-        self._reload_work_orders()
-        stored = self._work_orders
-        idx = next((i for i, wo in enumerate(stored) if wo.id == work_order_id), None)
-        if idx is None:
-            raise ConnectorError(f"Work order {work_order_id} not found")
-        wo = stored[idx].model_copy(deep=True)
-        if status is not None:
-            try:
-                wo.transition_to(status)
-            except ValueError as exc:
-                raise ConnectorError(str(exc)) from exc
-        if assigned_to is not None:
-            wo.assigned_to = assigned_to
-        if description is not None:
-            wo.description = description
-        work_orders = list(stored)
-        work_orders[idx] = wo
-        self._persist_work_orders(work_orders)
-        self._work_orders = work_orders
+        with self._work_orders_lock():
+            self._reload_work_orders()
+            stored = self._work_orders
+            idx = next((i for i, wo in enumerate(stored) if wo.id == work_order_id), None)
+            if idx is None:
+                raise ConnectorError(f"Work order {work_order_id} not found")
+            wo = stored[idx].model_copy(deep=True)
+            if status is not None:
+                try:
+                    wo.transition_to(status)
+                except ValueError as exc:
+                    raise ConnectorError(str(exc)) from exc
+            if assigned_to is not None:
+                wo.assigned_to = assigned_to
+            if description is not None:
+                wo.description = description
+            work_orders = list(stored)
+            work_orders[idx] = wo
+            self._persist_work_orders(work_orders)
+            self._work_orders = work_orders
         logger.info(
             "work_order_updated",
             connector="GenericCmmsConnector",
@@ -686,7 +903,7 @@ class GenericCmmsConnector:
         """
         if self._data_dir is None:
             return
-        if self._schema_mapping or self._yaml_mapping is not None:
+        if not self._writes_back():
             # INFO (not DEBUG): a create/update in mapped-local mode logs
             # work_order_created at INFO, so the skip must be equally visible —
             # otherwise the write silently never reaches disk.
@@ -702,13 +919,18 @@ class GenericCmmsConnector:
         # Write to a temp sibling then atomically replace, so a crash mid-write
         # cannot truncate work_orders.json and break the next connect(). Clean up
         # the temp file if the write or replace fails (e.g. a Windows replace on
-        # an open handle) so it doesn't linger and confuse the next write.
+        # an open handle) so it doesn't linger and confuse the next write. The
+        # fixed temp name is safe because writers hold the cross-writer lock.
+        # Either step failing leaves work_orders.json as it was.
         tmp = path.with_name(path.name + ".tmp")
         try:
             tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
             tmp.replace(path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            if isinstance(exc, OSError):
+                raise _file_write_error(exc, path) from exc
             raise
 
     def _reload_work_orders(self) -> None:
@@ -726,7 +948,7 @@ class GenericCmmsConnector:
             ConnectorError: If the file cannot be read or parsed. The write
                 is refused rather than replacing a file it could not read.
         """
-        if self._data_dir is None or self._schema_mapping or self._yaml_mapping is not None:
+        if self._data_dir is None or not self._writes_back():
             return
         path = self._data_dir / "work_orders.json"
         try:
@@ -751,7 +973,7 @@ class GenericCmmsConnector:
         # timestamps, spare_parts, requested_skills and metadata survive a
         # write→restart→reload cycle. Fall back to the tolerant parser for
         # hand-written files that omit or mistype fields.
-        native = not self._schema_mapping and self._yaml_mapping is None
+        native = self._writes_back()
         work_orders: list[WorkOrder] = []
         for item in raw:
             if native:
@@ -777,74 +999,73 @@ class GenericCmmsConnector:
     # Internal: local data loading
     # ------------------------------------------------------------------
 
-    async def _load_local_data(self) -> None:
-        """Load assets, work orders, and spare parts from JSON files."""
+    def _load_local_data(self) -> None:
+        """Load the local JSON files, on the file thread (see :meth:`connect`).
+
+        Every collection is built anew and replaces the one loaded before, so
+        a second ``connect()`` reloads the files instead of adding their
+        records again. A file that fails to load leaves all of them as they
+        were.
+        """
         assert self._data_dir is not None
-        assets_file = self._data_dir / "assets.json"
-        work_orders_file = self._data_dir / "work_orders.json"
-        spare_parts_file = self._data_dir / "spare_parts.json"
+        data_dir = self._data_dir
 
+        assets: dict[str, Asset] = {}
+        assets_file = data_dir / "assets.json"
         if assets_file.exists():
-            text = await asyncio.to_thread(assets_file.read_text, encoding="utf-8")
-            raw = json.loads(text)
-            for item in raw:
-                mapped = self._apply_mapping("assets", item)
-                asset = _parse_asset(mapped)
-                self._assets[asset.id] = asset
-            logger.debug(
-                "loaded_assets",
-                connector="GenericCmmsConnector",
-                count=len(self._assets),
-            )
+            for item in json.loads(assets_file.read_text(encoding="utf-8")):
+                asset = _parse_asset(self._apply_mapping("assets", item))
+                assets[asset.id] = asset
+            logger.debug("loaded_assets", connector="GenericCmmsConnector", count=len(assets))
 
+        work_orders: list[WorkOrder] = []
+        work_orders_file = data_dir / "work_orders.json"
         if work_orders_file.exists():
-            text = await asyncio.to_thread(work_orders_file.read_text, encoding="utf-8")
-            self._work_orders.extend(self._parse_local_work_orders(json.loads(text)))
+            text = work_orders_file.read_text(encoding="utf-8")
+            work_orders = self._parse_local_work_orders(json.loads(text))
             logger.debug(
-                "loaded_work_orders",
-                connector="GenericCmmsConnector",
-                count=len(self._work_orders),
+                "loaded_work_orders", connector="GenericCmmsConnector", count=len(work_orders)
             )
 
+        spare_parts: list[SparePart] = []
+        spare_parts_file = data_dir / "spare_parts.json"
         if spare_parts_file.exists():
-            text = await asyncio.to_thread(spare_parts_file.read_text, encoding="utf-8")
-            raw = json.loads(text)
-            for item in raw:
-                mapped = self._apply_mapping("spare_parts", item)
-                self._spare_parts.append(_parse_spare_part(mapped))
+            for item in json.loads(spare_parts_file.read_text(encoding="utf-8")):
+                spare_parts.append(_parse_spare_part(self._apply_mapping("spare_parts", item)))
             logger.debug(
-                "loaded_spare_parts",
-                connector="GenericCmmsConnector",
-                count=len(self._spare_parts),
+                "loaded_spare_parts", connector="GenericCmmsConnector", count=len(spare_parts)
             )
 
-        maintenance_plans_file = self._data_dir / "maintenance_plans.json"
+        maintenance_plans: list[MaintenancePlan] = []
+        maintenance_plans_file = data_dir / "maintenance_plans.json"
         if maintenance_plans_file.exists():
-            text = await asyncio.to_thread(maintenance_plans_file.read_text, encoding="utf-8")
-            raw = json.loads(text)
-            for item in raw:
+            for item in json.loads(maintenance_plans_file.read_text(encoding="utf-8")):
                 mapped = self._apply_mapping("maintenance_plans", item)
-                self._maintenance_plans.append(_parse_maintenance_plan(mapped))
+                maintenance_plans.append(_parse_maintenance_plan(mapped))
             logger.debug(
                 "loaded_maintenance_plans",
                 connector="GenericCmmsConnector",
-                count=len(self._maintenance_plans),
+                count=len(maintenance_plans),
             )
 
-        failure_modes_file = self._data_dir / "failure_modes.json"
+        failure_modes: list[FailureMode] = []
+        failure_modes_file = data_dir / "failure_modes.json"
         # Re-snapshot at load so the declared capability and the loaded
         # catalog stay consistent for the lifetime of the connection.
-        self._has_fm_source = failure_modes_file.exists()
-        if self._has_fm_source:
-            text = await asyncio.to_thread(failure_modes_file.read_text, encoding="utf-8")
-            raw = json.loads(text)
-            for item in raw:
-                self._failure_modes.append(FailureMode(**item))
+        has_fm_source = failure_modes_file.exists()
+        if has_fm_source:
+            for item in json.loads(failure_modes_file.read_text(encoding="utf-8")):
+                failure_modes.append(FailureMode(**item))
             logger.debug(
-                "loaded_failure_modes",
-                connector="GenericCmmsConnector",
-                count=len(self._failure_modes),
+                "loaded_failure_modes", connector="GenericCmmsConnector", count=len(failure_modes)
             )
+
+        self._assets = assets
+        self._work_orders = work_orders
+        self._spare_parts = spare_parts
+        self._maintenance_plans = maintenance_plans
+        self._failure_modes = failure_modes
+        self._has_fm_source = has_fm_source
 
     def _apply_mapping(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
         """Apply schema mapping to a single raw item dict.

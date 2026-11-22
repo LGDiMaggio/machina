@@ -276,13 +276,42 @@ removed in the file are kept as they are on disk; if the file cannot be read,
 the write is refused with `ConnectorError` instead of replacing it. Creating a
 work order whose ID already exists, in memory or in the file, returns the
 existing record. Reads serve the copy loaded at `connect()` or by the last
-write.
+write; calling `connect()` again reloads the files.
 
 Writes run one at a time. Cancelling a create or update (an MCP request
 cancellation, a workflow step timeout) does not stop it once it has started: it
 still finishes, the in-memory work orders follow its outcome, and the next
-write waits for it, so a retried create finds the stored work order.
-`disconnect()` waits for it too, for up to 5 seconds.
+write waits for it, so a retried create finds the stored work order. If that
+write fails, nobody receives its error, so it is logged as
+`failed_after_cancel`. `disconnect()` waits for a write still running, for up
+to 5 seconds, and `connect()` reads the files only after it has finished.
+
+### Several writers on one directory
+
+Connectors that share a `data_dir`, in one process or in several processes on
+the same machine, take turns writing `work_orders.json`. Each create or update
+holds a lock on `work_orders.json.lock`, beside the file, from its re-read to
+its write, so no acknowledged write is lost.
+
+- A write waits up to 5 seconds for another writer's lock. Past that it raises
+  `ConnectorLockedError` and writes nothing, so it can be repeated.
+- The operating system releases the lock when the process holding it ends,
+  however it ends, so a writer that crashes never leaves the directory locked.
+- The lock file is empty. It is created by the first write and left in place.
+- Writes to a mapped file (`schema_mapping` or `yaml_mapping`) stay in memory
+  and take no lock.
+
+The lock is an advisory one (`flock` on Linux and macOS, `msvcrt.locking` on
+Windows). It coordinates Machina connectors only: a program that does not take
+it, such as a text editor saving `work_orders.json` during a write, can still
+overwrite that write or have its own change overwritten. Keep the directory on
+a local file system: whether such locks reach other machines over a network
+file system depends on that file system.
+
+A write that the operating system refuses raises `ConnectorError`, which names
+the file but not its path, and leaves the file and the connector's work orders
+as they were. It is a `ConnectorLockedError` when `work_orders.json` is open in
+another program or cannot be written for lack of permission.
 
 ## Capabilities
 
