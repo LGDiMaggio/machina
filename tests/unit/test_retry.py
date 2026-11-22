@@ -509,6 +509,13 @@ _WARNINGS = [
             ("svc_machina", "pw", "12@"),
             id="user-info-split-by-slash",
         ),
+        pytest.param(
+            # The same with a numeric first half, which urllib takes as a port.
+            "https://svc_machina:1234/abc@cmms.example.com/api/v2/users",
+            "<unparseable URL>",
+            ("svc_machina", "1234", "abc@"),
+            id="user-info-split-by-slash-numeric",
+        ),
     ],
 )
 async def test_retry_warnings_log_the_url_without_query_credentials_or_keys(
