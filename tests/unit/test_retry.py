@@ -482,6 +482,33 @@ _WARNINGS = [
         pytest.param(
             "http://[fd00::5:9080/x?token=abc", "<unparseable URL>", ("token", "abc"), id="bad-url"
         ),
+        pytest.param(
+            "https://maximo.example.com/maximo/oslc/os/mxwo;jsessionid=0000Ab12Cd:-1?pageno=2",
+            "https://maximo.example.com/maximo/oslc/os/mxwo;jsessionid=<value>",
+            ("0000Ab12Cd", "pageno"),
+            id="matrix-parameter",
+        ),
+        pytest.param(
+            "https://sap.example.com/sap/opu/odata/sap/API_MAINTENANCEORDER;v=0002/"
+            "MaintenanceOrder('4000123');jsessionid=S3SS10N;flag",
+            "https://sap.example.com/sap/opu/odata/sap/API_MAINTENANCEORDER;v=<value>/"
+            "MaintenanceOrder(<key>);jsessionid=<value>;<parameter>",
+            ("4000123", "S3SS10N", "0002", "flag"),
+            id="key-then-matrix-parameter",
+        ),
+        pytest.param(
+            "https://sap.example.com/odata/MaintenanceOrder%28%274000123%27%29",
+            "https://sap.example.com/odata/MaintenanceOrder(<key>)",
+            ("4000123",),
+            id="encoded-key",
+        ),
+        pytest.param(
+            # An unencoded "/" in the password: urllib reads "user" as the host.
+            "https://svc_machina:pw/12@cmms.example.com/api/v2/users",
+            "<unparseable URL>",
+            ("svc_machina", "pw", "12@"),
+            id="user-info-split-by-slash",
+        ),
     ],
 )
 async def test_retry_warnings_log_the_url_without_query_credentials_or_keys(
@@ -527,6 +554,19 @@ async def test_a_log_url_is_reduced_the_same_way(events: list[Any], event_name: 
 
     (warning,) = [e for e in logs if e["event"] == event_name]
     assert warning["url"] == "https://cmms.example.com/api/v2/parts/<listed part>"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [5, None, True, {"uri": "https://sap.example.com/x?$skiptoken=1"}, b"https://h/x?t=1"],
+    ids=["int", "none", "bool", "dict", "bytes"],
+)
+def test_loggable_url_never_raises(url: object) -> None:
+    """It only shapes a log line: a vendor's __next value of another type must
+    not turn into an exception before the request (httpx refuses it there)."""
+    from machina.connectors.cmms.retry import UNPARSEABLE_URL, loggable_url
+
+    assert loggable_url(url) == UNPARSEABLE_URL  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

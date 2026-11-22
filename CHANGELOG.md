@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `http_network_retry` also logged httpx's message, which can name the unreachable address.
 
-  `request_with_retry` now logs the URL as its scheme, host, port and path. It drops the query, user info and fragment, and replaces an OData key predicate with `(<key>)`; this also applies to a caller's `log_url`. The UpKeep and Maximo single-record requests pass a `log_url` template (`/api/v2/work-orders/<work order>`, `…/maximo/oslc/os/mxwo/<resource id>`). A network error is logged as `error_type`, replacing `error`.
+  `request_with_retry` now logs the URL as its scheme, host, port and path. It drops the query, user info and fragment, replaces an OData key predicate with `(<key>)` and a matrix parameter's value (such as `;jsessionid=`) with `<value>`; this also applies to a caller's `log_url`. The UpKeep and Maximo single-record requests pass a `log_url` template with the host (`https://api.onupkeep.com/api/v2/work-orders/<work order>`, `…/maximo/oslc/os/mxwo/<resource id>`); UpKeep's listed-part warning, which named only the path, now names the host too. A network error is logged as `error_type`, replacing `error`.
 
   Retries, their counts and the other fields (method, attempt, status, backoff) are unchanged.
 

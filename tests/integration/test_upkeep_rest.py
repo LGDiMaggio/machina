@@ -1215,9 +1215,9 @@ class TestReadSparePartsByAsset:
         ]
         retries = [e for e in logs if e["event"] == "http_network_retry"]
         assert len(retries) == 3
-        # The endpoint is named; the part and the configured host are not.
-        assert {e["url"] for e in retries} == {"/api/v2/parts/<listed part>"}
-        for value in (*listed, BASE):
+        # The host and the endpoint are named; the part is not.
+        assert {e["url"] for e in retries} == {f"{BASE}/api/v2/parts/<listed part>"}
+        for value in listed:
             assert value not in repr(logs)
 
     @pytest.mark.asyncio
@@ -1249,8 +1249,8 @@ class TestReadSparePartsByAsset:
             *[f"{PART_URL}/Qm7Tz2XbLp"] * 4,
         ]
         retries = [e for e in logs if e["event"] == "http_rate_limit_retry"]
-        assert {e["url"] for e in retries} == {"/api/v2/parts/<listed part>"}
-        for value in (*listed, BASE):
+        assert {e["url"] for e in retries} == {f"{BASE}/api/v2/parts/<listed part>"}
+        for value in listed:
             assert value not in repr(logs)
 
     @pytest.mark.asyncio
@@ -1302,9 +1302,8 @@ class TestReadSparePartsByAsset:
 
         assert [p.sku for p in parts] == ["Wuy1TIHIfL"]
         (retry,) = [e for e in logs if e["event"] == "http_rate_limit_retry"]
-        assert retry["url"] == "/api/v2/parts/<listed part>"
-        for value in ("Wuy1TIHIfL", BASE):
-            assert value not in repr(logs)
+        assert retry["url"] == f"{BASE}/api/v2/parts/<listed part>"
+        assert "Wuy1TIHIfL" not in repr(logs)
 
 
 # ---------------------------------------------------------------------------
@@ -2220,7 +2219,7 @@ class TestRetryWarningsNameNoRecord:
         (retry,) = self._retries(logs)
         assert (retry["event"], retry["url"]) == (
             "http_rate_limit_retry",
-            "/api/v2/work-orders/<work order>",
+            f"{BASE}/api/v2/work-orders/<work order>",
         )
         assert "Wq7RkS3mZp" not in repr(retry)
 
@@ -2237,7 +2236,7 @@ class TestRetryWarningsNameNoRecord:
         (retry,) = self._retries(logs)
         assert (retry["event"], retry["url"], retry["error_type"]) == (
             "http_network_retry",
-            "/api/v2/assets/<asset>",
+            f"{BASE}/api/v2/assets/<asset>",
             "ConnectError",
         )
         assert ASSET_ID not in repr(retry)
@@ -2254,7 +2253,7 @@ class TestRetryWarningsNameNoRecord:
             assert await connector.read_spare_parts(asset_id=ASSET_ID) == []
 
         (retry,) = self._retries(logs)
-        assert retry["url"] == "/api/v2/assets/<asset>"
+        assert retry["url"] == f"{BASE}/api/v2/assets/<asset>"
         assert ASSET_ID not in repr(retry)
 
     @pytest.mark.asyncio
@@ -2273,8 +2272,8 @@ class TestRetryWarningsNameNoRecord:
             await connector.update_work_order("Wq7RkS3mZp", description="Fix pump")
 
         assert [(e["method"], e["url"]) for e in self._retries(logs)] == [
-            ("PATCH", "/api/v2/work-orders/<work order>"),
-            ("GET", "/api/v2/work-orders/<work order>"),
+            ("PATCH", f"{BASE}/api/v2/work-orders/<work order>"),
+            ("GET", f"{BASE}/api/v2/work-orders/<work order>"),
         ]
         assert "Wq7RkS3mZp" not in repr(self._retries(logs))
         assert len(httpx_mock.get_requests(method="PATCH")) == 2  # retry count unchanged

@@ -24,13 +24,14 @@ is also returned, allowing the caller to still see the last
 ``status_code`` and headers.
 
 Each retry is logged at WARNING (``http_network_retry``,
-``http_rate_limit_retry``, ``http_retry_after_exceeds_max_backoff``) with the
-method, the attempt and the status or error type. The URL is logged as its
-scheme, host, port and path only (:func:`loggable_url`): a query carries
-filter values and page tokens, user info carries credentials, and an OData
-key predicate carries the record's key. A caller whose path carries a
-record ID in a plain segment passes ``log_url``, a template of the URL with
-the ID replaced.
+``http_rate_limit_retry``) with the method, the attempt and the status or the
+error's type; a ``Retry-After`` too long to wait out is logged as
+``http_retry_after_exceeds_max_backoff``, with the method and status. The URL
+is logged as its scheme, host, port and path only (:func:`loggable_url`): a
+query carries filter values and page tokens, user info carries credentials,
+an OData key predicate carries the record's key, and a matrix parameter can
+carry a session ID. A caller whose path carries a record ID in a plain
+segment passes ``log_url``, a template of the URL with the ID replaced.
 
 Example:
     ```python
@@ -61,10 +62,22 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # An OData key predicate closing a path segment: Entity('key'), Entity(42),
-# Entity(Key1='a',Key2='b'). The key is a record ID.
-_KEY_PREDICATE = re.compile(r"^([^()]*)\(.+\)$")
+# Entity(Key1='a',Key2='b'), also with its parentheses percent-encoded. The
+# key is a record ID.
+_KEY_PREDICATE = re.compile(r"^(.*?)(?:\(|%28).+(?:\)|%29)$", re.IGNORECASE)
 _KEY_PLACEHOLDER = "<key>"
 UNPARSEABLE_URL = "<unparseable URL>"
+
+
+def _loggable_segment(segment: str) -> str:
+    # A matrix parameter (";jsessionid=...", SAP's ";v=0002") keeps its name:
+    # its value can be a session ID.
+    base, *parameters = segment.split(";")
+    base = _KEY_PREDICATE.sub(rf"\1({_KEY_PLACEHOLDER})", base)
+    for parameter in parameters:
+        name, has_value, _value = parameter.partition("=")
+        base += f";{name}=<value>" if has_value else ";<parameter>"
+    return base
 
 
 def loggable_url(url: str) -> str:
@@ -73,12 +86,17 @@ def loggable_url(url: str) -> str:
     The query and the fragment are dropped: a query carries filter values,
     record IDs and page tokens (SAP PM's ``__next`` and Maximo's ``nextPage``
     links repeat the whole query). User info, which is credentials, is
-    dropped too. In the path, an OData key
-    predicate is replaced, ``MaintenanceOrder('4000123')`` becoming
-    ``MaintenanceOrder(<key>)``. A record ID in a plain path segment
-    (``/work-orders/<ID>``) cannot be told from a resource name here: the
-    caller passes ``log_url`` for it. A URL that cannot be parsed is logged as
-    :data:`UNPARSEABLE_URL`.
+    dropped too. In the path, an OData key predicate is replaced,
+    ``MaintenanceOrder('4000123')`` becoming ``MaintenanceOrder(<key>)``, and
+    a matrix parameter's value, such as a ``;jsessionid=`` a server's link
+    can carry, becomes ``<value>``.
+
+    A record ID in a plain path segment (``/work-orders/<ID>``) cannot be told
+    from a resource name here: the caller passes ``log_url`` for it. A URL
+    that cannot be parsed, or whose path holds an ``@`` (user info that a
+    ``/`` in the password split from the host), is logged as
+    :data:`UNPARSEABLE_URL`. This function never raises: it only shapes a log
+    line, and must not turn a retry into a failure.
 
     Args:
         url: An absolute URL, or a path.
@@ -91,18 +109,17 @@ def loggable_url(url: str) -> str:
         # .port raises ValueError for a port that is not a number in range.
         port = parts.port
         host = parts.hostname
-    except ValueError:
+        if "@" in parts.path:
+            return UNPARSEABLE_URL
+        netloc = ""
+        if host is not None:
+            netloc = f"[{host}]" if ":" in host else host
+            if port is not None:
+                netloc = f"{netloc}:{port}"
+        path = "/".join(_loggable_segment(segment) for segment in parts.path.split("/"))
+        return urlunsplit((parts.scheme, netloc, path, "", ""))
+    except Exception:  # a URL of another type, or one urllib cannot parse
         return UNPARSEABLE_URL
-    netloc = ""
-    if host is not None:
-        netloc = f"[{host}]" if ":" in host else host
-        if port is not None:
-            netloc = f"{netloc}:{port}"
-    path = "/".join(
-        _KEY_PREDICATE.sub(rf"\1({_KEY_PLACEHOLDER})", segment)
-        for segment in parts.path.split("/")
-    )
-    return urlunsplit((parts.scheme, netloc, path, "", ""))
 
 
 DEFAULT_MAX_RETRIES: int = 3
