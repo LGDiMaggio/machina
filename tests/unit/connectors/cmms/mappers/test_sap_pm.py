@@ -198,6 +198,13 @@ def _odata_v2(record: dict[str, Any], path: str) -> dict[str, Any]:
                 {"__metadata": {"uri": f"{_SERVICE_ROOT}/Item('1')"}, "Item": "1"},
             ]
         },
+        # An expanded collection with no entries in this page still carries
+        # OData's own __next link (and __count): every "__" name is OData's.
+        "to_Notes": {
+            "results": [],
+            "__next": f"{_SERVICE_ROOT}/{path}/to_Notes?$skiptoken=1",
+            "__count": "0",
+        },
         "Tags": ["critical", "outdoor"],
     }
 

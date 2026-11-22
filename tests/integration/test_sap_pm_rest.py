@@ -2023,8 +2023,9 @@ def _record_refusals(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-# (read, URL, records, entity, cause, operation, fields, value): the last record
-# cannot be mapped, and ``value`` is what in it must not be repeated.
+# (read, URL, records, entity, cause, operation, fields, asset_id, value): the
+# last record cannot be mapped, ``asset_id`` is the asset the read is for (in the
+# log), and ``value`` is what in the record must not be repeated.
 _UNMAPPABLE_READS = [
     pytest.param(
         lambda c: c.read_assets(),
@@ -2037,6 +2038,7 @@ _UNMAPPABLE_READS = [
         "ValidationError: parent",
         "read_assets",
         ["parent"],
+        None,
         _SAP_VALUE,
         id="read_assets-validation",
     ),
@@ -2047,6 +2049,7 @@ _UNMAPPABLE_READS = [
         "Equipment",
         "AttributeError",
         "read_assets",
+        None,
         None,
         _SAP_VALUE,
         id="read_assets-not-an-object",
@@ -2061,6 +2064,7 @@ _UNMAPPABLE_READS = [
         "ValidationError: parent",
         "get_asset",
         ["parent"],
+        "10000001",
         _SAP_VALUE,
         id="get_asset",
     ),
@@ -2075,8 +2079,23 @@ _UNMAPPABLE_READS = [
         "CreationDate is not a date",
         "read_work_orders",
         ["CreationDate"],
+        None,
         _SAP_VALUE,
         id="read_work_orders",
+    ),
+    pytest.param(
+        lambda c: c.read_work_orders(asset_id="10000001"),
+        _odata_url(
+            "API_MAINTENANCEORDER", "MaintenanceOrder", **{"$filter": "Equipment eq '10000001'"}
+        ),
+        [{**_order("4000002", "CRTD"), "CreationDate": f"/Date({_SAP_VALUE})/"}],
+        "MaintenanceOrder",
+        "CreationDate is not a date",
+        "read_work_orders",
+        ["CreationDate"],
+        "10000001",
+        _SAP_VALUE,
+        id="read_work_orders-by-asset",
     ),
     pytest.param(
         lambda c: c.read_maintenance_history("10000001"),
@@ -2089,8 +2108,9 @@ _UNMAPPABLE_READS = [
         ],
         "MaintenanceOrder",
         "LastChangeDateTime is not a date",
-        "read_work_orders",
+        "read_maintenance_history",
         ["LastChangeDateTime"],
+        "10000001",
         _SAP_VALUE,
         id="read_maintenance_history",
     ),
@@ -2102,6 +2122,7 @@ _UNMAPPABLE_READS = [
         "ValidationError: assigned_to",
         "get_work_order",
         ["assigned_to"],
+        None,
         _SAP_VALUE,
         id="get_work_order",
     ),
@@ -2117,6 +2138,7 @@ _UNMAPPABLE_READS = [
         "AvailableQuantity is not a whole number",
         "read_spare_parts",
         ["AvailableQuantity"],
+        None,
         "12.000",
         id="read_spare_parts",
     ),
@@ -2131,6 +2153,7 @@ _UNMAPPABLE_READS = [
         "MaintenancePlanCycleValue is not a whole number",
         "read_maintenance_plans",
         ["MaintenancePlanCycleValue"],
+        None,
         "7.500",
         id="read_maintenance_plans",
     ),
@@ -2143,7 +2166,7 @@ class TestUnmappableRecords:
     exception repeats a value from SAP."""
 
     @pytest.mark.parametrize(
-        ("read", "url", "records", "entity", "cause", "operation", "fields", "value"),
+        ("read", "url", "records", "entity", "cause", "operation", "fields", "asset_id", "value"),
         _UNMAPPABLE_READS,
     )
     @pytest.mark.asyncio
@@ -2158,6 +2181,7 @@ class TestUnmappableRecords:
         cause: str,
         operation: str,
         fields: list[str] | None,
+        asset_id: str | None,
         value: str,
     ) -> None:
         await _connect(httpx_mock, connector)
@@ -2185,6 +2209,8 @@ class TestUnmappableRecords:
         }
         if fields is not None:
             refusal["fields"] = fields
+        if asset_id is not None:
+            refusal["asset_id"] = asset_id
         assert _record_refusals(logs) == [refusal]
         assert value not in str(info.value)
         assert value not in repr(logs)
@@ -2241,6 +2267,43 @@ class TestUnmappableRecords:
             )
 
         refused = _refused("MaintenanceOrder", "CreationDate is not a date")
+        if assigned_to:
+            assert str(info.value) == (
+                f"{refused}. SAP PM acknowledged the earlier assigned_to update, which stays "
+                "applied; the later status change request was not sent to the CMMS"
+            )
+        else:
+            assert str(info.value) == f"{refused}. {WRITE_REQUEST_NOT_SENT}"
+        assert not httpx_mock.get_requests(method="POST")
+        assert _SAP_VALUE not in _chain(info.value)
+        assert _SAP_VALUE not in repr(logs)
+
+    @pytest.mark.parametrize("assigned_to", [None, "TECH"], ids=["status", "patch-and-status"])
+    @pytest.mark.asyncio
+    async def test_order_read_before_a_status_import_that_is_not_an_object(
+        self, httpx_mock, connector: SapPmConnector, assigned_to: str | None
+    ) -> None:
+        """A record that is not an object is refused before its system statuses
+        are looked at, so the error stays a connector error that says the
+        import was not sent (and, after a PATCH, that the PATCH stays applied)."""
+        await _connect(httpx_mock, connector)
+        if assigned_to:
+            TestUpdateWorkOrder._mock_csrf(httpx_mock, "csrf-1")
+            httpx_mock.add_response(
+                method="PATCH",
+                url=f"{BASE}/API_MAINTENANCEORDER/MaintenanceOrder('4000001')",
+                status_code=204,
+            )
+        httpx_mock.add_response(
+            method="GET", url=_ORDER_URL, json={"d": {"results": [f"row-{_SAP_VALUE}"]}}
+        )
+
+        with capture_logs() as logs, pytest.raises(ConnectorSchemaError) as info:
+            await connector.update_work_order(
+                "4000001", status=WorkOrderStatus.CLOSED, assigned_to=assigned_to
+            )
+
+        refused = _refused("MaintenanceOrder", "AttributeError")
         if assigned_to:
             assert str(info.value) == (
                 f"{refused}. SAP PM acknowledged the earlier assigned_to update, which stays "

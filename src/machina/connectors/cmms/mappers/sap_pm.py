@@ -148,11 +148,13 @@ _SPARE_PART_PROPERTIES = frozenset(
     }
 )
 
-# OData V2 members that describe an entry's transport, not the record:
-# ``__metadata`` (``uri``, ``type``, ``etag``) and a deferred navigation
-# property's ``__deferred`` (``uri``). A ``uri`` names the host and service path
-# the SAP gateway sees itself on, often an internal one.
-_TRANSPORT_MEMBERS = frozenset({"__metadata", "__deferred"})
+# OData V2 reserves the names that start with this for its own members, which
+# describe an entry's transport, not the record: ``__metadata`` (``uri``,
+# ``type``, ``etag``), a deferred navigation property's ``__deferred``
+# (``uri``), an expanded collection's ``__next`` and ``__count``. A ``uri`` or
+# link names the host and service path the SAP gateway sees itself on, often
+# an internal one.
+_ODATA_V2_PREFIX = "__"
 
 
 class SapFieldError(ValueError):
@@ -286,10 +288,11 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     members (see :func:`_metadata`).
 
     Raises:
-        SapFieldError: If the quantity is not a whole number (an
-            ``Edm.Decimal`` such as ``"12.000"`` included), the price is
-            not a number, or a property a text field takes holds an object or
-            a list.
+        SapFieldError: If the quantity is text that is not a whole number
+            (an OData V2 ``Edm.Decimal`` such as ``"12.000"`` included) or a
+            value that is neither text nor a number, the price is not a
+            number, or a property a text field takes holds an object or a
+            list. A JSON number is cut to a whole number by ``int()``.
     """
     return SparePart(
         sku=_text(data, ("Material", "MaterialNumber")),
@@ -305,7 +308,8 @@ def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`.
 
     Raises:
-        SapFieldError: If the cycle value is not a whole number, or a
+        SapFieldError: If the cycle value is text that is not a whole
+            number or a value that is neither text nor a number, or a
             property a text field takes holds an object or a list.
     """
     cycle_val = _convert(data, ("MaintenancePlanCycleValue", "CycleValue"), 0, int, _WHOLE_NUMBER)
@@ -514,12 +518,12 @@ def _date(data: dict[str, Any], properties: tuple[str, ...], default: datetime) 
 def _is_transport(name: str) -> bool:
     """Whether a member of an OData JSON object is transport, not a property.
 
-    The OData V2 members in :data:`_TRANSPORT_MEMBERS`, and every OData V4
-    annotation: a name with an ``@``, such as ``@odata.etag``, ``@odata.id``
-    or a navigation property's ``to_Item@odata.navigationLink``. A property
-    name cannot contain one.
+    Every OData V2 member (a name that starts with ``__``, see
+    :data:`_ODATA_V2_PREFIX`), and every OData V4 annotation: a name with an
+    ``@``, such as ``@odata.etag``, ``@odata.id`` or a navigation property's
+    ``to_Item@odata.navigationLink``. A property name cannot contain one.
     """
-    return name in _TRANSPORT_MEMBERS or "@" in name
+    return name.startswith(_ODATA_V2_PREFIX) or "@" in name
 
 
 def _carries_transport(value: Any) -> bool:

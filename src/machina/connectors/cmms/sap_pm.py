@@ -92,6 +92,7 @@ def _map_records(
     *,
     entity: str,
     operation: str,
+    asset_id: str | None = None,
 ) -> list[_Entity]:
     """Map SAP records to domain entities, all or none.
 
@@ -106,13 +107,15 @@ def _map_records(
         parse: The mapper for one record.
         entity: The entity set, for the message and the log.
         operation: The public operation, for the log.
+        asset_id: The asset the read is for, if any, for the log.
 
     Raises:
         ConnectorSchemaError: On the first record refused. The message names
             the entity set and either the SAP property and what it should
             hold, or the error type and, for a value the domain model
             rejects, the fields it rejected. The ``sap_pm_record_refused``
-            warning adds the operation and the record's position. Neither
+            warning adds the operation, the record's position and, where it
+            applies, the asset the read is for. Neither
             repeats a value from SAP, and no exception is chained to it.
     """
     entities: list[_Entity] = []
@@ -135,7 +138,9 @@ def _map_records(
                 fields = sorted({str(e["loc"][0]) for e in errors if e["loc"]})
                 if fields:
                     problem += ": " + ", ".join(fields)
-        context: dict[str, Any] = {"fields": fields} if fields else {}
+        context: dict[str, Any] = {"asset_id": asset_id} if asset_id else {}
+        if fields:
+            context["fields"] = fields
         logger.warning(
             "sap_pm_record_refused",
             connector="SapPmConnector",
@@ -161,9 +166,10 @@ def _map_record(
     *,
     entity: str,
     operation: str,
+    asset_id: str | None = None,
 ) -> _Entity:
     """Map one SAP record (see :func:`_map_records`)."""
-    [mapped] = _map_records([record], parse, entity=entity, operation=operation)
+    [mapped] = _map_records([record], parse, entity=entity, operation=operation, asset_id=asset_id)
     return mapped
 
 
@@ -440,7 +446,11 @@ class SapPmConnector:
         if not raw:
             return None
         return _map_record(
-            raw[0], sap_mapper.parse_asset, entity="Equipment", operation="get_asset"
+            raw[0],
+            sap_mapper.parse_asset,
+            entity="Equipment",
+            operation="get_asset",
+            asset_id=asset_id,
         )
 
     async def read_work_orders(
@@ -469,17 +479,7 @@ class SapPmConnector:
                 list is returned (see :func:`_map_records`).
         """
         self._ensure_connected()
-        raw = await self._odata_get(
-            "API_MAINTENANCEORDER",
-            "MaintenanceOrder",
-            odata_filter=f"Equipment eq {_odata_string(asset_id)}" if asset_id else "",
-        )
-        work_orders = _map_records(
-            raw,
-            sap_mapper.parse_work_order,
-            entity="MaintenanceOrder",
-            operation="read_work_orders",
-        )
+        raw, work_orders = await self._read_orders(asset_id, operation="read_work_orders")
         if not status:
             return work_orders
         wanted = status_filter(status)
@@ -491,6 +491,29 @@ class SapPmConnector:
             for item, wo in zip(raw, work_orders, strict=True)
             if sap_code in sap_mapper.system_status_codes(item)
         ]
+
+    async def _read_orders(
+        self, asset_id: str, *, operation: str
+    ) -> tuple[list[dict[str, Any]], list[WorkOrder]]:
+        """Read the maintenance orders, of one equipment if ``asset_id``, and map them.
+
+        Returns:
+            The orders as SAP returned them and as work orders, in the same
+            order (see :func:`_map_records`: all or none).
+        """
+        raw = await self._odata_get(
+            "API_MAINTENANCEORDER",
+            "MaintenanceOrder",
+            odata_filter=f"Equipment eq {_odata_string(asset_id)}" if asset_id else "",
+        )
+        work_orders = _map_records(
+            raw,
+            sap_mapper.parse_work_order,
+            entity="MaintenanceOrder",
+            operation=operation,
+            asset_id=asset_id or None,
+        )
+        return raw, work_orders
 
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
         """Look up a single maintenance order by number.
@@ -747,15 +770,20 @@ class SapPmConnector:
         status maps to ``status`` anyway: an order closed for business
         (``CLSD``) is closed, so closing it again needs no technical
         completion.
+
+        Raises:
+            ConnectorSchemaError: If the order cannot be mapped. It is mapped
+                before its system statuses are read, so a record that is not
+                an object is refused too (see :func:`_map_records`).
         """
-        if sap_mapper.reverse_status(status) in sap_mapper.system_status_codes(order):
-            return True
         mapped = _map_record(
             order,
             sap_mapper.parse_work_order,
             entity="MaintenanceOrder",
             operation="update_work_order",
         )
+        if sap_mapper.reverse_status(status) in sap_mapper.system_status_codes(order):
+            return True
         return mapped.status == status
 
     @classmethod
@@ -894,9 +922,9 @@ class SapPmConnector:
             ConnectorError: If a filter is neither ``""`` nor an ID (see
                 :func:`~machina.connectors.cmms.filters.spare_part_filters`).
             ConnectorSchemaError: If a record cannot be mapped (a quantity
-                that is not a whole number, an ``Edm.Decimal`` such as
-                ``"12.000"`` included); no partial list is returned (see
-                :func:`_map_records`).
+                given as text that is not a whole number, an OData V2
+                ``Edm.Decimal`` such as ``"12.000"`` included); no partial
+                list is returned (see :func:`_map_records`).
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
@@ -922,6 +950,7 @@ class SapPmConnector:
             sap_mapper.parse_spare_part,
             entity=self._bom_entity_set,
             operation="read_spare_parts",
+            asset_id=asset_id or None,
         )
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
@@ -959,8 +988,10 @@ class SapPmConnector:
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
-        # As text: read_work_orders reads a falsy ID (the number 0) as no filter.
-        work_orders = await self.read_work_orders(asset_id=str(asset_id))
+        # As text: a falsy ID (the number 0) would read as no filter.
+        _, work_orders = await self._read_orders(
+            str(asset_id), operation="read_maintenance_history"
+        )
         return [
             wo
             for wo in work_orders
