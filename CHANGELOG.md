@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `machina_create_work_order` refuses an invalid `priority` or `work_order_type` with a `DomainValidationError` that lists the valid values, instead of a bare `ValueError`.
 
   An MCP client or a caller that parsed an unexpected error's text sees the new wording; result shapes are unchanged. Result content (document chunks, vendor response bodies) and log output are not covered (see "Exception Text at the Model, MCP and Workflow Boundaries" in the deployment security guide).
+- **The deployment security guide lists the four chromadb 1.5.9 advisories, which are unresolved** (GHSA-f4j7-r4q5-qw2c, GHSA-36p7-vc44-83pf, GHSA-2wm9-hf6c-p5cr, GHSA-xph7-9rjv-w5fr): none has a fixed release. All four are in the Chroma server. With chromadb's default settings, `DocumentStoreConnector` uses an ephemeral client inside the Machina process. The guide names the configurations Machina does not support (an external Chroma server through `CHROMA_API_IMPL` and `CHROMA_SERVER_HOST`, `IS_PERSISTENT` with a persist directory others can write, an exposed Chroma server) and the remaining mitigation, a private persist directory. This is a documentation change; no dependency changed and the advisories stay open.
 
 ### Breaking changes
 
@@ -188,6 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Maximo** compares the status code read back with the code sent. On Maximo this covers a server that ignores a plain `status` attribute: IBM documents status changes through `changeStatus`.
   - **UpKeep** compares the status read back with the status UpKeep reports for the value sent. Its `complete` reads back as `completed` for a close.
   - **A failed read-back.** When the read-back itself fails after an applied update, SAP PM and UpKeep now say, as Maximo already did, that the update was applied and must not be repeated. They log `work_order_update_not_read_back`. UpKeep's `create_work_order` does the same when the response to a create it sent cannot be mapped, such as one without a documented status: the message says the work order was created and the create must not be repeated, and the warning `work_order_create_not_read` is logged.
+- **Workflow steps no longer call `asyncio.iscoroutinefunction`, which Python 3.14 deprecates.** The engine used it to decide whether to await a service or connector method, so on Python 3.14 every such step emitted a `DeprecationWarning`, and failed where that warning is turned into an error. The engine now uses `inspect.iscoroutinefunction`. Sync methods are still called, and coroutine methods, including an `AsyncMock`, still awaited. One case changes: a callable that is not a coroutine function and is marked as one only by asyncio's private `_is_coroutine` attribute is now called, not awaited, so its coroutine becomes the step output. Mark such a callable with `inspect.markcoroutinefunction` (Python 3.12 and later) or wrap it in an `async def`.
 
 ## [0.4.0] - 2026-10-04
 
