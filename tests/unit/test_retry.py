@@ -557,6 +557,55 @@ async def test_a_log_url_is_reduced_the_same_way(events: list[Any], event_name: 
 
 
 @pytest.mark.parametrize(
+    ("segment", "logged"),
+    [
+        ("Foo('a;b')", "Foo(<key>)"),
+        ("Foo('a;b');jsessionid=X1", "Foo(<key>);jsessionid=<value>"),
+        ("Foo%28%27a%27%29;v=2", "Foo(<key>);v=<value>"),
+        ("Foo()", "Foo()"),
+        ("Foo(", "Foo("),
+        ("mxwo;jsessionid=X1", "mxwo;jsessionid=<value>"),
+    ],
+)
+def test_a_path_segment_is_reduced_as_one_key(segment: str, logged: str) -> None:
+    """A ";" inside a quoted key does not split it; an empty key is no ID."""
+    from machina.connectors.cmms.retry import loggable_url
+
+    assert loggable_url(f"https://h/svc/{segment}") == f"https://h/svc/{logged}"
+
+
+@pytest.mark.parametrize("opener", ["(", "%28"])
+def test_a_long_segment_is_reduced_in_linear_time(opener: str) -> None:
+    """A server's link can hold a 64k segment of openers with no closer: a
+    backtracking pattern took seconds on it (it runs on each logged retry)."""
+    import time
+
+    from machina.connectors.cmms.retry import loggable_url
+
+    url = f"https://h/svc/Foo{opener * 65_536}"
+    started = time.perf_counter()
+    logged = loggable_url(url)
+    assert time.perf_counter() - started < 0.5
+    assert logged == url
+    assert loggable_url(f"{url}x)") == "https://h/svc/Foo(<key>)"
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_needs_no_retry_reduces_no_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The URL is reduced only for a warning, never on the request path."""
+    import machina.connectors.cmms.retry as retry
+
+    def _boom(_url: str) -> str:
+        raise AssertionError("reduced without a warning")
+
+    monkeypatch.setattr(retry, "loggable_url", _boom)
+    resp = await request_with_retry(_SequenceClient([_FakeResponse(200)]), "GET", _PART_URL)
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize(
     "url",
     [5, None, True, {"uri": "https://sap.example.com/x?$skiptoken=1"}, b"https://h/x?t=1"],
     ids=["int", "none", "bool", "dict", "bytes"],

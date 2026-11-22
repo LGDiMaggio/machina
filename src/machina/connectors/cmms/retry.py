@@ -53,7 +53,6 @@ Example:
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -61,23 +60,40 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# An OData key predicate closing a path segment: Entity('key'), Entity(42),
-# Entity(Key1='a',Key2='b'), also with its parentheses percent-encoded. The
-# key is a record ID.
-_KEY_PREDICATE = re.compile(r"^(.*?)(?:\(|%28).+(?:\)|%29)$", re.IGNORECASE)
-_KEY_PLACEHOLDER = "<key>"
 UNPARSEABLE_URL = "<unparseable URL>"
 
 
-def _loggable_segment(segment: str) -> str:
+def _without_parameter_values(text: str) -> str:
     # A matrix parameter (";jsessionid=...", SAP's ";v=0002") keeps its name:
     # its value can be a session ID.
-    base, *parameters = segment.split(";")
-    base = _KEY_PREDICATE.sub(rf"\1({_KEY_PLACEHOLDER})", base)
+    base, *parameters = text.split(";")
     for parameter in parameters:
         name, has_value, _value = parameter.partition("=")
         base += f";{name}=<value>" if has_value else ";<parameter>"
     return base
+
+
+def _loggable_segment(segment: str) -> str:
+    # An OData key predicate (Entity('key'), Entity(42), Entity(K1='a',K2=2),
+    # its parentheses possibly percent-encoded) is a record ID: everything from
+    # the first opening to the last closing parenthesis becomes "(<key>)", so a
+    # ";" inside a quoted key cannot split it. find/rfind keep this linear in
+    # the segment's length (a regex with backtracking was quadratic).
+    lowered = segment.lower()
+    openings = [i for i in (segment.find("("), lowered.find("%28")) if i != -1]
+    close, close_end = segment.rfind(")"), 0
+    encoded_close = lowered.rfind("%29")
+    if encoded_close > close:
+        close, close_end = encoded_close, encoded_close + 3
+    elif close != -1:
+        close_end = close + 1
+    if openings:
+        start = min(openings)
+        key_start = start + (1 if segment[start] == "(" else 3)
+        if close > key_start:
+            head = _without_parameter_values(segment[:start])
+            return f"{head}(<key>){_without_parameter_values(segment[close_end:])}"
+    return _without_parameter_values(segment)
 
 
 def loggable_url(url: str) -> str:
@@ -194,7 +210,8 @@ async def request_with_retry(
 
     if retry_on_network_error is None:
         retry_on_network_error = method.upper() in _IDEMPOTENT_METHODS
-    logged_url = loggable_url(url if log_url is None else log_url)
+    # Reduced only when a warning is logged: the request itself never waits on it.
+    log_target = url if log_url is None else log_url
 
     transient_exceptions: tuple[type[BaseException], ...] = (
         httpx.TimeoutException,
@@ -226,7 +243,7 @@ async def request_with_retry(
                 max_retries=max_retries,
                 backoff=backoff,
                 method=method,
-                url=logged_url,
+                url=loggable_url(log_target),
                 # The type only: httpx's message can name the host, port and
                 # address it could not reach.
                 error_type=type(exc).__name__,
@@ -262,7 +279,7 @@ async def request_with_retry(
                     max_backoff=max_backoff,
                     status_code=resp.status_code,
                     method=method,
-                    url=logged_url,
+                    url=loggable_url(log_target),
                 )
                 return resp
         else:
@@ -274,7 +291,7 @@ async def request_with_retry(
             backoff=backoff,
             status_code=resp.status_code,
             method=method,
-            url=logged_url,
+            url=loggable_url(log_target),
         )
         await asyncio.sleep(backoff)
         attempt += 1
