@@ -27,6 +27,7 @@ from machina.agent.runtime import (
     _strip_history_note,
     _TurnResolution,
 )
+from machina.agent.spare_parts import SPARE_PARTS_RESULT_LIMIT
 from machina.connectors.docs.document_store import DocumentChunk
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.citation import AgentResponse, Citation
@@ -531,6 +532,46 @@ class _FakeSparePartsOutageConnector:
 
     async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
         raise ConnectorError("Spare-parts backend unavailable: HTTP 503")
+
+
+class _FakeLargeInventoryConnector:
+    """Spare-parts provider holding a whole storeroom's inventory.
+
+    Each part is compatible with P-201, so an asset-scoped read (the context
+    prefetch) returns every one of them, as a CMMS whose BOM lists many parts
+    for one asset does; a ``sku`` read returns the matching part.
+    """
+
+    capabilities: ClassVar[list[str]] = ["read_spare_parts"]
+
+    def __init__(self, size: int) -> None:
+        self.inventory = [
+            SparePart(
+                sku=f"PART-{i:05d}",
+                name=f"Part {i}",
+                stock_quantity=i % 7,
+                compatible_assets=["P-201"],
+            )
+            for i in range(size)
+        ]
+        self.calls = 0
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        self.calls += 1
+        return [
+            p
+            for p in self.inventory
+            if (not asset_id or asset_id in p.compatible_assets) and (not sku or p.sku == sku)
+        ]
 
 
 class _NoPartsForAssetConnector:
@@ -1244,12 +1285,18 @@ class TestExecuteTool:
 
     @pytest.mark.asyncio
     async def test_check_spare_parts_tool(self) -> None:
+        """A lookup within the limit returns every part and says it is complete."""
         conn = _FakeSparePartsConnector()
         agent = Agent(connectors=[conn])
         await agent.start()
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
-        assert isinstance(result, list)
-        assert len(result) >= 1
+        assert (result["total"], result["truncated"]) == (1, False)
+        assert "note" not in result
+        [part] = result["parts"]
+        # The whole record, as before: stock, lead time, location.
+        assert part["sku"] == "SKF-6310"
+        assert (part["stock_quantity"], part["lead_time_days"]) == (4, 5)
+        assert part["warehouse_location"] == "W1"
 
     @pytest.mark.asyncio
     async def test_check_spare_parts_no_connector(self) -> None:
@@ -1269,9 +1316,51 @@ class TestExecuteTool:
             "check_spare_parts", {"asset_id": "", "sku": "SKF-6310"}
         )
 
-        assert [p["sku"] for p in unfiltered] == ["SKF-6310", "FLT-GA55"]
-        assert [p["sku"] for p in by_sku] == ["SKF-6310"]
+        assert [p["sku"] for p in unfiltered["parts"]] == ["SKF-6310", "FLT-GA55"]
+        assert [p["sku"] for p in by_sku["parts"]] == ["SKF-6310"]
         assert conn.read_spare_parts.await_args_list == [call(), call(sku="SKF-6310")]
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_caps_a_large_inventory_and_says_so(self) -> None:
+        """An unfiltered lookup returns the first parts and the real total,
+        flagged as truncated, never the whole inventory passed off as complete."""
+        conn = _FakeLargeInventoryConnector(5_000)
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {})
+        assert (result["total"], result["truncated"]) == (5_000, True)
+        assert [p["sku"] for p in result["parts"]] == [
+            p.sku for p in conn.inventory[:SPARE_PARTS_RESULT_LIMIT]
+        ]
+        assert result["note"].startswith("Showing 50 of 5000 matching spare parts")
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_sku_lookup_in_a_large_inventory_is_complete(self) -> None:
+        conn = _FakeLargeInventoryConnector(5_000)
+        agent = Agent(connectors=[conn])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {"sku": "PART-04999"})
+        assert result == {
+            "parts": [conn.inventory[-1].model_dump(mode="json")],
+            "total": 1,
+            "truncated": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_check_spare_parts_unexpected_failure_shows_only_its_type(self) -> None:
+        """A failure is an error result, never a parts object, and an exception
+        that is not a Machina error reaches the model by its type alone."""
+
+        class _BrokenInventory(_FakeSparePartsConnector):
+            async def read_spare_parts(self, **kwargs: Any) -> list[SparePart]:
+                raise RuntimeError("GET http://internal-host:8443/parts token=abc")
+
+        agent = Agent(connectors=[_BrokenInventory()])
+        await agent.start()
+        result = await agent._execute_tool("check_spare_parts", {"sku": "SKF-6310"})
+        assert result == {
+            "error": "Unexpected error (RuntimeError). The details are in the server log."
+        }
 
     @pytest.mark.asyncio
     async def test_check_spare_parts_refused_asset_filter_is_a_tool_error(self) -> None:
@@ -2454,6 +2543,76 @@ class TestToolResultRecordedOnTrace:
         assert len(recorded) == 65_536 + len("...[truncated]")
         with pytest.raises(json.JSONDecodeError):
             json.loads(recorded)
+
+
+class _LLMChecksStock:
+    """Calls ``check_spare_parts`` with no filter on each of its first *repeats* rounds."""
+
+    model = "fake:model"
+
+    def __init__(self, repeats: int = 1) -> None:
+        self._calls = 0
+        self._repeats = repeats
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        return "Done."
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._calls += 1
+        if self._calls <= self._repeats:
+            tc = MagicMock()
+            tc.function.name = "check_spare_parts"
+            tc.function.arguments = "{}"
+            tc.id = f"call_parts_{self._calls}"
+            return {"content": "", "tool_calls": [tc]}
+        return {"content": "Here is part of the inventory.", "tool_calls": None}
+
+
+class TestSparePartsLookupIsBounded:
+    """An unfiltered spare-part lookup on a large inventory reaches the model,
+    and the trace, as the capped result, not as the whole inventory."""
+
+    @pytest.mark.asyncio
+    async def test_the_model_and_the_trace_get_the_capped_result(self) -> None:
+        agent = Agent(connectors=[_FakeLargeInventoryConnector(5_000)])
+        agent._llm = _LLMChecksStock()  # type: ignore[assignment]
+        await agent.start()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Which spare parts do we have?"}
+        ]
+        await agent._llm_loop(messages, "chat1")
+
+        [tool_message] = [m for m in messages if m.get("role") == "tool"]
+        fed = json.loads(tool_message["content"])
+        assert (fed["total"], fed["truncated"]) == (5_000, True)
+        assert len(fed["parts"]) == SPARE_PARTS_RESULT_LIMIT
+        # The trace records the same capped result, whole and parseable.
+        entry = next(e for e in agent.tracer.entries if e.action == "tool_call")
+        assert json.loads(entry.metadata["result_json"]) == fed
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_lookup_replays_the_same_capped_result(self) -> None:
+        conn = _FakeLargeInventoryConnector(80)
+        agent = Agent(connectors=[conn])
+        agent._llm = _LLMChecksStock(repeats=2)  # type: ignore[assignment]
+        await agent.start()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Which spare parts do we have?"}
+        ]
+        await agent._llm_loop(messages, "chat1")
+
+        first, second = (json.loads(m["content"]) for m in messages if m.get("role") == "tool")
+        assert conn.calls == 1  # served from this turn's read cache
+        assert second["already_retrieved"] is True
+        assert second["result"] == first
+        assert (first["total"], first["truncated"], len(first["parts"])) == (80, True, 50)
 
 
 class TestAvailableTools:
@@ -3803,6 +3962,30 @@ class TestGatherContext:
         assert not_shown not in retrieved
 
     @pytest.mark.asyncio
+    async def test_the_prompt_lists_at_most_fifty_prefetched_parts(self) -> None:
+        """An asset with 120 parts: the prompt shows 50, says there are 120, and
+        says the list is incomplete. The prefetch itself keeps every part."""
+        conn = _FakeLargeInventoryConnector(120)
+        agent = Agent(plant=_make_plant(), connectors=[conn])
+        await agent.start()
+        resolved = agent._resolver.resolve("P-201")
+        context = await agent._gather_context("spare parts for P-201", resolved)
+        assert len(context["spare_parts"]) == 120
+
+        messages = agent._build_messages("spare parts for P-201", "chat1", context)
+
+        [retrieved] = [m["content"] for m in messages if "Retrieved Context" in m["content"]]
+        lines = retrieved.splitlines()
+        assert "**Spare Parts (50 of 120):**" in lines
+        assert len([line for line in lines if "(SKU: PART-" in line]) == SPARE_PARTS_RESULT_LIMIT
+        assert (
+            "  - The list is incomplete: 70 more parts are listed for this asset. Do not "
+            "conclude that a part is missing or out of stock because it is not shown; check "
+            "a specific part with the check_spare_parts tool by its SKU."
+        ) in lines
+        assert "PART-00050" not in retrieved
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "connector",
         [_FakeErrorConnector, _WorkOrdersReadRefusedConnector],
@@ -4071,7 +4254,8 @@ class TestSparePartsPrefetchDeadline:
         agent = Agent(plant=_make_plant(), connectors=[_SlowFanOutSparePartsConnector()])
         await agent.start()
         result = await agent._execute_tool("check_spare_parts", {"asset_id": "P-201"})
-        assert [part["sku"] for part in result] == ["SKF-6310"]
+        assert [part["sku"] for part in result["parts"]] == ["SKF-6310"]
+        assert (result["total"], result["truncated"]) == (1, False)
 
 
 class TestBuildMessages:
