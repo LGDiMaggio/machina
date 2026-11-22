@@ -84,6 +84,26 @@ def _sandbox_placeholder(action: str, resolved_inputs: dict[str, Any]) -> dict[s
     }
 
 
+def _step_error_text(exc: Exception) -> str:
+    """Return the ``StepResult.error`` text for a step or guard that raised.
+
+    :func:`~machina.agent.tool_errors.public_error_text`: a Machina error as
+    ``<Type>: <message>``, its message scrubbed of user-home and UNC paths;
+    any other exception as ``Unexpected error (<Type>). ...``, which names
+    the type already. A workflow result reaches the model through the
+    agent's ``execute_workflow`` tool and any caller that shows it, so a
+    library exception's message (a URL, a host, a token, a backend value)
+    stays in the ``step_error`` / ``guard_exception`` log.
+    """
+    # Imported here: machina.agent imports this module (the agent runs workflows).
+    from machina.agent.tool_errors import public_error_text
+    from machina.exceptions import MachinaError
+
+    if isinstance(exc, MachinaError):
+        return f"{type(exc).__name__}: {public_error_text(exc)}"
+    return public_error_text(exc)
+
+
 class WorkflowEngine:
     """Executes :class:`Workflow` definitions step by step.
 
@@ -223,7 +243,7 @@ class WorkflowEngine:
                     exception=traceback_text(exc),
                 )
                 should_run = False
-                guard_error = f"Guard raised {type(exc).__name__}: {exc}"
+                guard_error = f"Guard raised {_step_error_text(exc)}"
             if not should_run:
                 logger.info(
                     "step_skipped_guard",
@@ -286,13 +306,19 @@ class WorkflowEngine:
                 return self._handle_step_failure(step, error_msg, elapsed)
 
             except Exception as exc:
+                from machina.agent.tool_errors import error_diagnostics
+
                 elapsed = (time.perf_counter() - start) * 1000
-                error_msg = f"{type(exc).__name__}: {exc}"
+                error_msg = _step_error_text(exc)
+                # The step's error shows only the value-free text; the full
+                # message, with the traceback of an exception that is not a
+                # Machina error (or the cause's type for one), stays here.
                 logger.warning(
                     "step_error",
                     step=step.name,
                     attempt=attempt,
-                    error=error_msg,
+                    error=f"{type(exc).__name__}: {exc}",
+                    **error_diagnostics(exc),
                 )
                 # Same idempotency hazard as the timeout branch (U10): a write
                 # that raises *after* the server already applied it (e.g. a SAP

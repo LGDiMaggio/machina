@@ -261,13 +261,19 @@ def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
 
 
 def _register_tools(server: Any, config: MachinaConfig) -> None:
-    """Auto-register domain tools based on connector capabilities."""
+    """Auto-register domain tools based on connector capabilities.
+
+    Every tool, domain and vendor, is registered through
+    :func:`~machina.mcp.errors.guard_tool`, so a failed call shows the client
+    no connector or library exception text.
+    """
+    from machina.mcp.errors import MCP_WRITE_TOOLS, guard_tool
     from machina.mcp.tools import get_tools_for_capabilities
 
     capabilities = _collect_capabilities(config)
     tools = get_tools_for_capabilities(capabilities)
     for tool_fn in tools:
-        server.add_tool(tool_fn)
+        server.add_tool(guard_tool(tool_fn, write=tool_fn.__name__ in MCP_WRITE_TOOLS))
     logger.info(
         "mcp_tools_registered",
         tool_count=len(tools),
@@ -279,7 +285,7 @@ def _register_tools(server: Any, config: MachinaConfig) -> None:
         from machina.mcp.tools_vendor import VENDOR_TOOLS
 
         for tool_fn in VENDOR_TOOLS:
-            server.add_tool(tool_fn)
+            server.add_tool(guard_tool(tool_fn, write=tool_fn.__name__ in MCP_WRITE_TOOLS))
         logger.info(
             "mcp_vendor_tools_registered",
             tool_count=len(VENDOR_TOOLS),

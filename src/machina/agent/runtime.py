@@ -3678,14 +3678,19 @@ class Agent:
                 ],
             }
         except Exception as exc:
+            from machina.agent.tool_errors import error_diagnostics, public_error_text
+
             logger.warning(
                 "workflow_execution_failed",
                 agent=self.name,
                 operation="execute_workflow",
                 workflow=workflow_name,
                 error=str(exc),
+                **error_diagnostics(exc),
             )
-            return {"error": safe_text(str(exc)), "workflow_name": workflow_name}
+            # The model sees a Machina error's message, or only the type of
+            # any other exception: its message stays in the log above.
+            return {"error": public_error_text(exc), "workflow_name": workflow_name}
 
     # ------------------------------------------------------------------
     # Helpers

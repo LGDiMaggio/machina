@@ -271,6 +271,112 @@ class TestReadFailureDegradesToToolError:
         assert event["error"] == str(error)
 
 
+_SECRET = "http://internal-host:8443/x token=abc"
+_SECRET_NEEDLES = ("internal-host", "8443", "http://", "token=")
+_UNEXPECTED = "Unexpected error (RuntimeError). The details are in the server log."
+
+
+def _leaks(sent: Any) -> list[str]:
+    blob = json.dumps(sent, default=str)
+    return [needle for needle in _SECRET_NEEDLES if needle in blob]
+
+
+class _BuggyCatalog:
+    """A failure-mode provider with a bug: its read raises a non-connector error."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_FAILURE_MODES})
+
+    async def connect(self) -> None:  # pragma: no cover
+        pass
+
+    async def disconnect(self) -> None:  # pragma: no cover
+        pass
+
+    async def health_check(self) -> bool:  # pragma: no cover
+        return True
+
+    async def read_failure_modes(self) -> list[Any]:
+        raise RuntimeError(_SECRET)
+
+
+class TestForeignErrorTextNeverReachesTheModel:
+    """A library error's message (here a URL with a token) is never sent to the
+    model: the model sees the exception's type, and the turn still completes."""
+
+    @pytest.mark.asyncio
+    async def test_no_message_of_the_turn_carries_it(self) -> None:
+        """Every message of every completion, the failed-read replay included."""
+        conn = _FailingConnector(Capability.READ_WORK_ORDERS, RuntimeError(_SECRET))
+        agent = Agent(plant=_plant(), connectors=[conn])
+        call = ("read_work_orders", {"asset_id": "P-201"})
+        llm = _ScriptedLLM(call, call, call, _ANSWER)
+        agent._llm = llm  # type: ignore[assignment]
+
+        resp = await agent.handle_message_full("Is anything wrong?")
+
+        assert resp.text.startswith(_ANSWER)  # the turn completes
+        assert _leaks(resp.text) == []
+        assert conn.calls == 2  # first attempt + one retry; the third is replayed
+        first, retried, replayed = llm.tool_results()
+        assert first == retried == {"error": _UNEXPECTED}
+        assert replayed["note"] == _FAILED_READ_REPLAY_NOTE
+        assert replayed["result"] == {"error": _UNEXPECTED}
+        assert [_leaks(messages) for messages in llm.sent] == [[]] * len(llm.sent)
+
+    @pytest.mark.asyncio
+    async def test_a_catalog_bug_is_an_error_not_an_outage(self) -> None:
+        """B9-D4: no catalog block, no "unavailable" — and no foreign text."""
+        agent = Agent(plant=_plant(), connectors=[_BuggyCatalog()])
+
+        result = await agent._execute_tool(
+            "diagnose_failure", {"asset_id": "P-201", "symptoms": ["vibration"]}
+        )
+
+        assert result == {"error": _UNEXPECTED}
+
+    @pytest.mark.asyncio
+    async def test_execute_workflow_shows_step_guard_and_outer_errors_by_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from machina.workflows.models import ErrorPolicy, GuardCondition, Step, Workflow
+
+        def _guard(_ctx: dict[str, Any]) -> bool:
+            raise RuntimeError(_SECRET)
+
+        conn = _FailingConnector(Capability.READ_WORK_ORDERS, RuntimeError(_SECRET))
+        workflow = Workflow(
+            name="Leaky",
+            steps=[
+                Step("orders", action="cmms.read_work_orders", on_error=ErrorPolicy.SKIP),
+                Step("gated", guard=GuardCondition(check=_guard)),
+            ],
+        )
+        agent = Agent(plant=_plant(), connectors=[conn], workflows=[workflow])
+
+        out = await agent._tool_execute_workflow("Leaky")
+
+        assert out["success"] is True  # SKIP and a raising guard still skip
+        assert [(s["step"], s["skipped"], s["error"]) for s in out["steps"]] == [
+            ("orders", True, _UNEXPECTED),
+            ("gated", True, f"Guard raised {_UNEXPECTED}"),
+        ]
+        assert _leaks(out) == []
+
+        async def _engine_bug(*_args: Any, **_kwargs: Any) -> NoReturn:
+            raise RuntimeError(_SECRET)
+
+        monkeypatch.setattr(agent._engine, "execute", _engine_bug)
+        assert await agent._tool_execute_workflow("Leaky") == {
+            "error": _UNEXPECTED,
+            "workflow_name": "Leaky",
+        }
+        # A Machina error keeps its message.
+        assert await agent._tool_execute_workflow("Missing") == {
+            "error": "Workflow 'Missing' not registered",
+            "workflow_name": "Missing",
+        }
+
+
 _FILTER_REFUSAL = "asset_id contains '%', which a Maximo oslc.where value cannot carry"
 
 
