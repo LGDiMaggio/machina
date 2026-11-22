@@ -336,6 +336,62 @@ class TestUnreadableValues:
         _assert_value_free(raised.value, field)
         assert str(raised.value) == f"SAP property {field!r} is not a date"
 
+    @pytest.mark.parametrize(
+        ("parse", "record", "field"),
+        [
+            (parse_asset, {"Equipment": {"__deferred": {"uri": _SERVICE_ROOT}}}, "Equipment"),
+            (parse_asset, {"Equipment": "E", "EquipmentName": [_SECRET]}, "EquipmentName"),
+            (
+                parse_asset,
+                {"Equipment": "E", "FunctionalLocation": {"v": _SECRET}},
+                "FunctionalLocation",
+            ),
+            (parse_asset, {"Equipment": "E", "Manufacturer": [_SECRET]}, "Manufacturer"),
+            (parse_asset, {"Equipment": "E", "ModelNumber": [_SECRET]}, "ModelNumber"),
+            (parse_asset, {"Equipment": "E", "SerialNumber": [_SECRET]}, "SerialNumber"),
+            (parse_work_order, {"MaintenanceOrder": [_SECRET]}, "MaintenanceOrder"),
+            (
+                parse_work_order,
+                {"MaintenanceOrder": "W", "Equipment": {"v": _SECRET}},
+                "Equipment",
+            ),
+            (parse_work_order, {"MaintenanceOrder": "W", "Description": [_SECRET]}, "Description"),
+            (parse_spare_part, {"Material": {"__deferred": {"uri": _SERVICE_ROOT}}}, "Material"),
+            (
+                parse_spare_part,
+                {"Material": "M", "MaterialDescription": [_SECRET]},
+                "MaterialDescription",
+            ),
+            (parse_spare_part, {"Material": "M", "Plant": {"v": _SECRET}}, "Plant"),
+            (parse_maintenance_plan, {"MaintenancePlan": [_SECRET]}, "MaintenancePlan"),
+            (
+                parse_maintenance_plan,
+                {"MaintenancePlan": "P", "Equipment": [_SECRET]},
+                "Equipment",
+            ),
+            (
+                parse_maintenance_plan,
+                {"MaintenancePlan": "P", "Description": [_SECRET]},
+                "Description",
+            ),
+        ],
+    )
+    def test_structured_value_for_a_text_field(
+        self, parse: _Parse, record: dict[str, Any], field: str
+    ) -> None:
+        """An object or list where a field takes text is refused, not turned into
+        text that would carry it (a deferred link's URI, say) into the entity."""
+        with pytest.raises(SapFieldError) as raised:
+            parse(record)
+        _assert_value_free(raised.value, field)
+        assert _INTERNAL_HOST not in str(raised.value)
+        assert str(raised.value) == f"SAP property {field!r} is not text"
+
+    def test_scalar_values_for_text_fields_are_unchanged(self) -> None:
+        asset = parse_asset({"Equipment": 10000001, "EquipmentName": 7, "SerialNumber": True})
+        assert (asset.id, asset.name, asset.serial_number) == ("10000001", "7", "True")
+        assert parse_spare_part({"Material": 42, "Price": 1}).sku == "42"
+
     def test_is_a_value_error(self) -> None:
         """A caller that caught the ValueError a bad number raised still catches it."""
         with pytest.raises(ValueError, match="AvailableQuantity"):

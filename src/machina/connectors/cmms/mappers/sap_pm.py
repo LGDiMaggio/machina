@@ -158,8 +158,9 @@ _TRANSPORT_MEMBERS = frozenset({"__metadata", "__deferred"})
 class SapFieldError(ValueError):
     """A SAP property holds a value the mapper cannot read as its domain field.
 
-    Raised for a number or a date: an OData V2 ``Edm.Decimal`` arrives as text
-    with its decimals (``"12.000"``), which is not a whole number. The message
+    Raised for a number, a date, or text: an OData V2 ``Edm.Decimal`` arrives
+    as text with its decimals (``"12.000"``), which is not a whole number, and
+    an object where a field takes text is not read as its text. The message
     names the property, never its value, and the error is raised with no
     exception chained to it, since the conversion's own error quotes the value.
 
@@ -184,16 +185,20 @@ def parse_asset(data: dict[str, Any]) -> Asset:
 
     Properties no field takes go to ``metadata``, except OData transport
     members (see :func:`_metadata`).
+
+    Raises:
+        SapFieldError: If a property a text field takes holds an object or a
+            list (see :func:`_text`).
     """
     cat = str(data.get("EquipmentCategory", ""))
     return Asset(
-        id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        name=str(data.get("EquipmentName", data.get("Description", ""))),
+        id=_text(data, ("Equipment", "EquipmentNumber")),
+        name=_text(data, ("EquipmentName", "Description")),
         type=SAP_EQUIP_CATEGORY_MAP.get(cat, AssetType.ROTATING_EQUIPMENT),
-        location=str(data.get("FunctionalLocation", "")),
-        manufacturer=str(data.get("Manufacturer", data.get("ManufacturerPartNmbr", ""))),
-        model=str(data.get("ModelNumber", "")),
-        serial_number=str(data.get("SerialNumber", data.get("ManufacturerSerialNumber", ""))),
+        location=_text(data, ("FunctionalLocation",)),
+        manufacturer=_text(data, ("Manufacturer", "ManufacturerPartNmbr")),
+        model=_text(data, ("ModelNumber",)),
+        serial_number=_text(data, ("SerialNumber", "ManufacturerSerialNumber")),
         criticality=_sap_criticality(data.get("ABCIndicator", "")),
         parent=data.get("SuperordinateEquipment") or None,
         equipment_class_code=data.get("EquipmentClassCode") or None,
@@ -212,7 +217,8 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     Raises:
         SapFieldError: If a date property holds a value
             :func:`parse_sap_datetime` cannot read (a ``/Date(...)/`` that is
-            not a number of milliseconds a date can hold, a number).
+            not a number of milliseconds a date can hold, a number), or a
+            property a text field takes holds an object or a list.
     """
     raw_type = str(data.get("MaintenanceOrderType", ""))
     wo_type = SAP_ORDER_TYPE_MAP.get(raw_type, WorkOrderType.CORRECTIVE)
@@ -227,12 +233,12 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     updated_at = _date(data, ("LastChangeDateTime", "MaintOrdBasicEndDate"), now)
 
     return WorkOrder(
-        id=str(data.get("MaintenanceOrder", data.get("MaintenanceOrderNumber", ""))),
+        id=_text(data, ("MaintenanceOrder", "MaintenanceOrderNumber")),
         type=wo_type,
         priority=priority,
         status=status,
-        asset_id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        description=str(data.get("MaintenanceOrderDesc", data.get("Description", ""))),
+        asset_id=_text(data, ("Equipment", "EquipmentNumber")),
+        description=_text(data, ("MaintenanceOrderDesc", "Description")),
         assigned_to=data.get("MaintOrdPersonResponsible") or None,
         failure_mode=data.get("MaintenanceActivityType") or None,
         failure_cause=data.get("MaintenanceCause") or data.get("MaintNotifCause") or None,
@@ -281,15 +287,16 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
 
     Raises:
         SapFieldError: If the quantity is not a whole number (an
-            ``Edm.Decimal`` such as ``"12.000"`` included) or the price is
-            not a number.
+            ``Edm.Decimal`` such as ``"12.000"`` included), the price is
+            not a number, or a property a text field takes holds an object or
+            a list.
     """
     return SparePart(
-        sku=str(data.get("Material", data.get("MaterialNumber", ""))),
-        name=str(data.get("MaterialDescription", data.get("Description", ""))),
+        sku=_text(data, ("Material", "MaterialNumber")),
+        name=_text(data, ("MaterialDescription", "Description")),
         stock_quantity=_convert(data, ("AvailableQuantity", "Quantity"), 0, int, _WHOLE_NUMBER),
         unit_cost=_convert(data, ("StandardPrice", "Price"), 0.0, float, "a number"),
-        warehouse_location=str(data.get("StorageLocation", data.get("Plant", ""))),
+        warehouse_location=_text(data, ("StorageLocation", "Plant")),
         metadata=_metadata(data, _SPARE_PART_PROPERTIES),
     )
 
@@ -298,16 +305,17 @@ def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`.
 
     Raises:
-        SapFieldError: If the cycle value is not a whole number.
+        SapFieldError: If the cycle value is not a whole number, or a
+            property a text field takes holds an object or a list.
     """
     cycle_val = _convert(data, ("MaintenancePlanCycleValue", "CycleValue"), 0, int, _WHOLE_NUMBER)
     cycle_unit = str(data.get("MaintenancePlanCycleUnit", data.get("CycleUnit", "DAY")))
     interval = _sap_cycle_to_interval(cycle_val, cycle_unit)
 
     return MaintenancePlan(
-        id=str(data.get("MaintenancePlan", data.get("MaintenancePlanNumber", ""))),
-        asset_id=str(data.get("Equipment", "")),
-        name=str(data.get("MaintenancePlanDesc", data.get("Description", ""))),
+        id=_text(data, ("MaintenancePlan", "MaintenancePlanNumber")),
+        asset_id=_text(data, ("Equipment",)),
+        name=_text(data, ("MaintenancePlanDesc", "Description")),
         interval=interval,
         active=str(data.get("MaintenancePlanStatus", "")).upper() != "INAC",
     )
@@ -438,6 +446,22 @@ def _first(data: dict[str, Any], properties: tuple[str, ...], default: Any) -> t
         if name in data:
             return name, data[name]
     return properties[0], default
+
+
+def _text(data: dict[str, Any], properties: tuple[str, ...]) -> str:
+    """Return the first of ``properties`` the record holds as text, ``""`` if none.
+
+    A number or boolean becomes its text, as before. An object or a list is
+    refused: as text it would carry whatever it holds into the entity (a
+    deferred navigation link's ``uri``, say) instead of a value.
+
+    Raises:
+        SapFieldError: If the value is an object or a list.
+    """
+    name, value = _first(data, properties, "")
+    if isinstance(value, dict | list):
+        raise SapFieldError(name, "text")
+    return str(value)
 
 
 def _convert(

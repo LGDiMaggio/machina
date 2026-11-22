@@ -219,8 +219,9 @@ order's ETag from the record SAP returned, for the status function imports
 
 A quantity (`AvailableQuantity`, `Quantity`) and a cycle value
 (`MaintenancePlanCycleValue`, `CycleValue`) must be whole numbers, a price
-(`StandardPrice`, `Price`) a number, and a date one of the formats
-`parse_sap_datetime` reads. A record with another value refuses the read (see
+(`StandardPrice`, `Price`) a number, a date one of the formats
+`parse_sap_datetime` reads, and a property mapped to a text field text, a
+number or a boolean. A record with another value refuses the read (see
 [Records that cannot be mapped](#records-that-cannot-be-mapped)).
 
 ## Work-order status
@@ -373,8 +374,10 @@ mapped when:
 
 - a property holds a value its field cannot take: a quantity or cycle value
   that is not a whole number, a price that is not a number, a date
-  `parse_sap_datetime` cannot read. The message names the property and what
-  it should hold, as in `(AvailableQuantity is not a whole number)`;
+  `parse_sap_datetime` cannot read, an object or a list where a field takes
+  text (an ID, a name, a description, a location). The message names the
+  property and what it should hold, as in
+  `(AvailableQuantity is not a whole number)` or `(Equipment is not text)`;
 - the domain model rejects a value: the message names the error type and the
   Machina fields rejected, as in `(ValidationError: assigned_to)`;
 - the record is not a JSON object: the message names the error type, as in

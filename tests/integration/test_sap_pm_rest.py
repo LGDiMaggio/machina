@@ -1999,8 +1999,9 @@ _Read = Callable[[SapPmConnector], Awaitable[Any]]
 
 
 def _refused(entity: str, cause: str) -> str:
+    article = "an" if entity == "Equipment" else "a"
     return (
-        f"SAP PM returned a {entity} record that cannot be mapped ({cause}) "
+        f"SAP PM returned {article} {entity} record that cannot be mapped ({cause}) "
         "— refusing to return a partial result"
     )
 

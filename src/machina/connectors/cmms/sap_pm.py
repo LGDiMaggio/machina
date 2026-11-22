@@ -145,10 +145,11 @@ def _map_records(
             position=position,
             **context,
         )
+        article = "an" if entity[:1].upper() in {"A", "E", "I", "O", "U"} else "a"
         # Raised outside the except block: the mapping error's message quotes
         # the SAP value, and `from None` would still keep it as __context__.
         raise ConnectorSchemaError(
-            f"SAP PM returned a {entity} record that cannot be mapped ({problem}) "
+            f"SAP PM returned {article} {entity} record that cannot be mapped ({problem}) "
             "— refusing to return a partial result"
         )
     return entities
