@@ -152,6 +152,21 @@ class TestGenericCmmsConnectorLocal:
         assert [m.code for m in await conn.read_failure_modes()] == ["BEAR-WEAR-01"]
 
     @pytest.mark.asyncio
+    async def test_a_reconnect_that_cannot_read_a_file_keeps_the_records_loaded_before(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        (sample_data_dir / "assets.json").write_text("[]", encoding="utf-8")
+        (sample_data_dir / "spare_parts.json").write_text("[{not json", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Expecting property name"):
+            await conn.connect()
+
+        assert [a.id for a in await conn.read_assets()] == ["P-201", "COMP-301"]
+        assert [p.sku for p in await conn.read_spare_parts()] == ["SKF-6310", "FILTER-GA55"]
+
+    @pytest.mark.asyncio
     async def test_read_assets(self, sample_data_dir: Path) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
@@ -1352,11 +1367,17 @@ def _lock_held_by_another_process(work_orders: Path) -> Iterator[subprocess.Pope
         text=True,
         env={**os.environ, "PYTHONPATH": str(src)},
     )
+    # A child that never prints (stuck importing, say) is killed, so the read
+    # below ends with "" and the test fails instead of hanging.
+    watchdog = threading.Timer(30, process.kill)
+    watchdog.start()
     try:
         assert process.stdout is not None
         assert process.stdout.readline().strip() == "locked"
+        watchdog.cancel()
         yield process
     finally:
+        watchdog.cancel()
         if process.poll() is None:
             process.kill()
         process.wait(10)
@@ -1579,7 +1600,8 @@ class TestLocalWriteErrors:
                     errno.EACCES, "Access is denied", "/srv/plant-7/work_orders.json.tmp"
                 ),
                 ConnectorLockedError,
-                "Cannot write work_orders.json: it is open in another program",
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
                 id="temp-file-refused",
             ),
             pytest.param(
@@ -1588,7 +1610,8 @@ class TestLocalWriteErrors:
                     errno.EACCES, "Access is denied", "/srv/plant-7/work_orders.json.tmp"
                 ),
                 ConnectorLockedError,
-                "Cannot write work_orders.json: it is open in another program",
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
                 id="replace-refused",
             ),
             pytest.param(
@@ -1597,7 +1620,7 @@ class TestLocalWriteErrors:
                     errno.ENOSPC, "No space left on device", "/srv/plant-7/work_orders.json.tmp"
                 ),
                 ConnectorError,
-                "Could not write work_orders.json: No space left on device",
+                "Could not write work_orders.json (OSError)",
                 id="disk-full",
             ),
         ],
@@ -1622,7 +1645,7 @@ class TestLocalWriteErrors:
             await conn.update_work_order("WO-001", description="changed")
 
         assert type(info.value) is raised
-        assert message in str(info.value)
+        assert str(info.value) == message
         assert "plant-7" not in str(info.value)
         assert (sample_data_dir / "work_orders.json").read_bytes() == before
         assert not (sample_data_dir / "work_orders.json.tmp").exists()
@@ -1631,8 +1654,58 @@ class TestLocalWriteErrors:
         assert stored.description == "Bearing replacement"
 
     @pytest.mark.asyncio
-    async def test_a_write_that_cannot_open_the_lock_file_writes_nothing(
+    async def test_a_write_that_cannot_read_the_file_for_lack_of_permission_is_locked_out(
         self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission error maps to ConnectorLockedError at the re-read as at
+        the write (on Windows: the file open in a program that denies reading)."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = (sample_data_dir / "work_orders.json").read_bytes()
+        real_read_text = Path.read_text
+
+        def refuse(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path.name == "work_orders.json":
+                raise PermissionError(errno.EACCES, "Access is denied", "/srv/plant-7/x")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refuse)
+        with pytest.raises(ConnectorLockedError) as info:
+            await conn.update_work_order("WO-001", description="changed")
+
+        assert str(info.value) == (
+            "Cannot write work_orders.json: it is open in another program, "
+            "or this process lacks write permission"
+        )
+        monkeypatch.undo()
+        assert (sample_data_dir / "work_orders.json").read_bytes() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "raised", "message"),
+        [
+            pytest.param(
+                PermissionError(errno.EACCES, "Access is denied", "/srv/plant-7/x.lock"),
+                ConnectorLockedError,
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
+                id="no-permission",
+            ),
+            pytest.param(
+                OSError(errno.EMFILE, "Too many open files", "/srv/plant-7/x.lock"),
+                ConnectorError,
+                "Could not lock work_orders.json for writing (OSError); nothing was written",
+                id="other",
+            ),
+        ],
+    )
+    async def test_a_write_that_cannot_open_the_lock_file_writes_nothing(
+        self,
+        sample_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: OSError,
+        raised: type[ConnectorError],
+        message: str,
     ) -> None:
         conn = GenericCmmsConnector(data_dir=sample_data_dir)
         await conn.connect()
@@ -1641,7 +1714,7 @@ class TestLocalWriteErrors:
 
         def refuse_lock_file(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
             if Path(path).name == "work_orders.json.lock":
-                raise PermissionError(errno.EACCES, "Access is denied", str(path))
+                raise error
             return real_open(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(os, "open", refuse_lock_file)
@@ -1650,9 +1723,8 @@ class TestLocalWriteErrors:
                 WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
             )
 
-        assert str(info.value) == (
-            "Could not lock work_orders.json for writing: Access is denied; nothing was written"
-        )
+        assert type(info.value) is raised
+        assert str(info.value) == message
         assert (sample_data_dir / "work_orders.json").read_bytes() == before
         assert await conn.get_work_order("WO-003") is None
 
@@ -1671,9 +1743,12 @@ class TestLocalWriteErrors:
         await conn.connect()
         before = (sample_data_dir / "work_orders.json").read_bytes()
 
-        with pytest.raises(ConnectorError, match="No locks available; nothing was written"):
+        with pytest.raises(ConnectorError) as info:
             await conn.update_work_order("WO-001", description="changed")
 
+        assert str(info.value) == (
+            "Could not lock work_orders.json for writing (OSError); nothing was written"
+        )
         assert (sample_data_dir / "work_orders.json").read_bytes() == before
 
     @pytest.mark.skipif(sys.platform != "win32", reason="the Windows lock primitive")

@@ -173,15 +173,19 @@ def _write_lock(path: Path) -> Iterator[None]:
     lock two different files. A lock held by another writer is waited for, up
     to ``_LOCK_WAIT_SEC``. Runs on the file thread.
 
+    The lock file is opened read-only, which both lock calls accept, so a lock
+    file another OS user created can still be locked.
+
     Raises:
         ConnectorLockedError: If another writer still holds the lock after
-            ``_LOCK_WAIT_SEC``.
-        ConnectorError: If the lock file cannot be opened or locked.
+            ``_LOCK_WAIT_SEC``, or the lock file cannot be created for lack
+            of permission.
+        ConnectorError: If the lock file cannot be opened or locked otherwise.
 
-        In both cases nothing was written, so the caller can repeat the write.
+        In each case nothing was written, so the caller can repeat the write.
     """
     try:
-        fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o666)
+        fd = os.open(path.with_name(path.name + ".lock"), os.O_RDONLY | os.O_CREAT, 0o666)
     except OSError as exc:
         raise _lock_error(exc, path) from exc
     try:
@@ -211,20 +215,26 @@ def _write_lock(path: Path) -> Iterator[None]:
 
 def _lock_error(exc: OSError, path: Path) -> ConnectorError:
     """The error for a lock that could not be opened or taken, before any write."""
-    reason = exc.strerror or type(exc).__name__
-    return ConnectorError(f"Could not lock {path.name} for writing: {reason}; nothing was written")
+    if isinstance(exc, PermissionError):
+        return _file_write_error(exc, path)
+    return ConnectorError(
+        f"Could not lock {path.name} for writing ({type(exc).__name__}); nothing was written"
+    )
 
 
 def _file_write_error(exc: OSError, path: Path) -> ConnectorError:
-    """Map a write-side OS error onto the connector error contract."""
+    """Map a write-side OS error onto the connector error contract.
+
+    As Excel's ``_file_write_error``, except that an error other than a
+    permission one is named by its type only, as the error message contract
+    asks of a new site (the OS text stays on the chained exception).
+    """
     if isinstance(exc, PermissionError):
         return ConnectorLockedError(
             f"Cannot write {path.name}: it is open in another program, "
             "or this process lacks write permission"
         )
-    # strerror is the OS's text for the errno ("No space left on device"), with
-    # no path; an OSError without one is reported by its type.
-    return ConnectorError(f"Could not write {path.name}: {exc.strerror or type(exc).__name__}")
+    return ConnectorError(f"Could not write {path.name} ({type(exc).__name__})")
 
 
 def _log_failure_after_cancel(log_fields: dict[str, str], future: Future[Any]) -> None:
@@ -472,6 +482,10 @@ class GenericCmmsConnector:
                 was supplied or the CMMS rejects it (HTTP 401/403).
             ConnectorTimeoutError: If the REST health check times out.
             ConnectorConfigError: If ``url`` is malformed.
+
+        In local mode a file that cannot be read or parsed raises the
+        underlying error (an ``OSError``, a ``ValueError`` such as a JSON or
+        validation error), and the records loaded before are kept.
         """
         if self._data_dir and self._data_dir.exists():
             await self._run_on_file_thread(self._load_local_data, operation="connect")
@@ -585,24 +599,29 @@ class GenericCmmsConnector:
         re-creating a WO whose ID already exists returns the existing
         record rather than appending a duplicate. New work orders are
         persisted back to ``work_orders.json`` so changes survive process
-        restarts (skipped when an inbound ``schema_mapping`` is configured;
-        see :meth:`_persist_work_orders`). Local writes run one at a time:
-        cancelling the caller does not stop a write that has started — it
-        still finishes, and the next write waits for it, so a retry after a
-        cancellation finds the stored work order. The file is re-read
-        first, so records another process wrote to it are kept and count
-        for the idempotency check. Other connectors and processes writing the
-        same file take turns with this one through a lock on
-        ``work_orders.json.lock``, held from the re-read to the write.
+        restarts (skipped when an inbound ``schema_mapping`` or
+        ``yaml_mapping`` is configured; see :meth:`_persist_work_orders`).
+        Local writes run one at a time: cancelling the caller does not stop a
+        write that has started — it still finishes, and the next write waits
+        for it, so a retry after a cancellation finds the stored work order.
+        The file is re-read first, so records another process wrote to it are
+        kept and count for the idempotency check. Other connectors and
+        processes writing the same file take turns with this one through a
+        lock on ``work_orders.json.lock``, held from the re-read to the write;
+        a write waiting for that lock has started, so it too finishes after
+        its caller is cancelled.
 
         Raises:
             ConnectorLockedError: In local mode, if another writer kept the
-                lock for longer than 5 seconds, or ``work_orders.json`` cannot
-                be written because it is open in another program or not
-                writable. Nothing was written.
+                lock for longer than 5 seconds, or ``work_orders.json`` (or
+                its lock file) cannot be read or written because it is open
+                in another program or for lack of permission.
             ConnectorError: In local mode, if ``work_orders.json`` cannot be
-                read before the write, or cannot be locked or written. Nothing
-                was written.
+                read or parsed before the write, or cannot be locked or
+                written otherwise.
+
+            In each case ``work_orders.json`` is left as it was, and the
+            connector's work orders are those the file holds.
         """
         self._ensure_connected()
         if self._data_dir:
@@ -711,15 +730,16 @@ class GenericCmmsConnector:
 
         Raises:
             ConnectorLockedError: In local mode, as for
-                :meth:`create_work_order`. Nothing was written.
-            ConnectorError: If the work order is not found, or the
-                endpoint is not configured in REST mode. In local mode, also
-                as for :meth:`create_work_order`.
+                :meth:`create_work_order`.
+            ConnectorError: If the work order is not found, the status
+                change is not a valid transition, or the endpoint is not
+                configured in REST mode. In local mode, also as for
+                :meth:`create_work_order`.
         """
         self._ensure_connected()
         if self._data_dir:
             return await self._run_on_file_thread(
-                self._update_local_work_order,
+                self._local_update_work_order,
                 work_order_id,
                 status,
                 assigned_to,
@@ -840,7 +860,7 @@ class GenericCmmsConnector:
         )
         return work_order
 
-    def _update_local_work_order(
+    def _local_update_work_order(
         self,
         work_order_id: str,
         status: WorkOrderStatus | None,
@@ -945,8 +965,12 @@ class GenericCmmsConnector:
         missing file keeps the in-memory list.
 
         Raises:
-            ConnectorError: If the file cannot be read or parsed. The write
-                is refused rather than replacing a file it could not read.
+            ConnectorLockedError: If the file is open in another program that
+                does not let it be read, or cannot be read for lack of
+                permission (as for the write itself).
+            ConnectorError: If the file cannot be read or parsed otherwise.
+                The write is refused rather than replacing a file it could
+                not read.
         """
         if self._data_dir is None or not self._writes_back():
             return
@@ -959,6 +983,8 @@ class GenericCmmsConnector:
             work_orders = self._parse_local_work_orders(raw)
         except FileNotFoundError:
             return
+        except PermissionError as exc:
+            raise _file_write_error(exc, path) from exc
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ConnectorError(
                 f"Cannot read work_orders.json before writing it ({type(exc).__name__}); "
