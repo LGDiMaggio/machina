@@ -113,7 +113,9 @@ def guard_tool(fn: Callable[P, Awaitable[R]], *, write: bool = False) -> Callabl
         try:
             return await fn(*args, **kwargs)
         except Exception as exc:
-            from mcp.server.fastmcp.exceptions import ToolError
+            from mcp.server.fastmcp.exceptions import (  # type: ignore[import-not-found,unused-ignore]
+                ToolError,
+            )
 
             _log_failure("mcp_tool_failed", exc, tool=name)
             raise ToolError(_client_text(exc, outcome_unknown=outcome_unknown)) from None
@@ -142,7 +144,9 @@ def guard_resource(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         try:
             return await fn(*args, **kwargs)
         except Exception as exc:
-            from mcp.server.fastmcp.exceptions import ResourceError
+            from mcp.server.fastmcp.exceptions import (  # type: ignore[import-not-found,unused-ignore]
+                ResourceError,
+            )
 
             _log_failure("mcp_resource_failed", exc, resource=name)
             raise ResourceError(public_error_text(exc)) from None
