@@ -350,6 +350,15 @@ REST mocking or VCR for recorded responses.
   `exception=traceback_text(exc)` (from `machina.observability.logging`),
   not `exc_info=True`, which can print your frames' local variables, auth
   headers included (see [Log Output](../deployment/security.md#log-output)).
+- **Raise `MachinaError` messages that can be shown.** The model, MCP
+  clients and workflow results see a Machina error's message; any other
+  exception reaches them by its type only. So name what failed and, at most,
+  the library exception's type, and chain it:
+  `raise ConnectorError(f"Inventory read failed ({type(exc).__name__})") from exc`.
+  Never put the library exception's text (`{exc}`, `{exc!r}`, `str(exc)`), a
+  URL, a host, a credential, a connection string or a backend value in the
+  message: the chained exception carries it to the server log (see
+  [Exception text at the boundaries](../deployment/security.md#exception-text-at-the-model-mcp-and-workflow-boundaries)).
 - **Accept the filters callers pass, and apply or refuse each one.**
   - **Accept them.** The agent runtime, the workflow engine and the MCP tools call capability methods with keyword arguments. For example, the agent's context prefetch and the `alarm_to_workorder` workflow call `read_spare_parts(asset_id=...)` for the asset in play, and the agent tool also passes `sku=...`. So give the method every filter keyword in the table above, defaulting to `""` (no filter). A missing keyword fails every such call with `TypeError`.
   - **Apply each one.** When both filters are given, both must hold.

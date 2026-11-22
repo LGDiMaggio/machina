@@ -92,7 +92,8 @@ The result keeps four catalog states apart:
 An unknown asset gets a `note` and no catalog read. A CMMS that cannot answer
 the asset lookup gives an `error` naming the error type. Any other exception,
 from the lookup or a provider, is a bug, not an outage: the client receives
-an MCP error result.
+an MCP error result that names the exception's type only (see
+[Error Handling](#error-handling)).
 
 ### Write Tools
 
@@ -253,6 +254,30 @@ history), an alarm source without `get_alarms()`, connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
 `machina_send_message`, and an unavailable catalog or asset lookup in
 `machina_diagnose_failure` (which names the error type only). Any other connector failure — and
-`machina_create_work_order` on an unknown asset — raises: the client receives
-an MCP error result carrying the exception message; the Python traceback is
+`machina_create_work_order` on an unknown asset, or with a `priority` or
+`work_order_type` that is not one of the valid values it lists — raises: the
+client receives an MCP error result (`isError: true`); the Python traceback is
 not sent.
+
+What an error shows is the same everywhere, `error` entries included:
+
+- A Machina error (a connector, domain or workflow error) shows its message,
+  with user-home and network-share paths reduced to file names. These messages
+  name what failed, never a URL, credential or backend value.
+- Any other exception, a library error or a bug, shows its type only:
+  `Unexpected error (RuntimeError). The details are in the server log.` Its
+  message can carry the backend URL, a host or a token, so it stays in the
+  server log (event `mcp_tool_failed`, with the traceback), never with the
+  tool arguments. The `error` entries are logged under the same event.
+- A write tool (`machina_create_work_order`, `machina_update_work_order`,
+  `machina_close_work_order`, `machina_cancel_work_order`, the two vendor
+  tools) adds `The write operation's outcome is unknown. It may have been
+  applied. Check the CMMS before retrying.` to such an error, since where it
+  was raised is not known; `machina_send_message` adds `The message may have
+  been sent.` In sandbox mode no write goes out, and neither sentence is
+  added.
+- A failed read of `machina://v1/assets/{asset_id}` or
+  `machina://v1/work-orders/{wo_id}` is a JSON-RPC error with the same text
+  (logged as `mcp_resource_failed`).
+- FastMCP's argument-validation errors run before the tool and are unchanged:
+  they quote the client's own input.
