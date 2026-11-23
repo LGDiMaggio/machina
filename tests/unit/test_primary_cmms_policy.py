@@ -225,6 +225,16 @@ class TestRuntimeFromConfig:
         assert _SECRET not in message
         assert "sap" not in runtime.failed_connectors
 
+    def test_a_non_primary_that_fails_to_build_is_left_out(self) -> None:
+        config = _config(
+            main=ConnectorConfig(type="fake_cmms", primary=True),
+            spare=ConnectorConfig(type="fake_broken", settings={"url": _SECRET}),
+        )
+        runtime = MachinaRuntime.from_config(config)
+
+        assert list(runtime.connectors) == ["main"]
+        assert runtime.get_primary_cmms() is runtime.connectors["main"]
+
     def test_a_marked_primary_that_cannot_be_imported_leaves_the_runtime_degraded(self) -> None:
         config = _config(
             cmms=ConnectorConfig(type="fake_unimportable", primary=True),

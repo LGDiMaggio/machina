@@ -22,7 +22,7 @@ from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType
 from machina.exceptions import ConnectorConfigError, ConnectorError
 from machina.mcp.__main__ import run_serve
-from machina.mcp.server import build_http_app, build_server
+from machina.mcp.server import _collect_capabilities, build_http_app, build_server
 from machina.mcp.tools_vendor import _find_connector_by_type
 from machina.runtime import MachinaRuntime
 
@@ -321,6 +321,12 @@ def test_vendor_lookup_in_a_runtime_built_in_code_keeps_the_first_match() -> Non
     runtime = MachinaRuntime(connectors={"a": first, "b": second})
 
     assert _find_connector_by_type(runtime, "sappm") is first
+
+
+def test_a_non_primary_that_cannot_be_built_adds_no_tools() -> None:
+    config = _config(main=_conn("pmcp_cmms", primary=True), broken=_conn("pmcp_broken"))
+
+    assert _collect_capabilities(config, "main") == _Cmms.capabilities
 
 
 def test_build_http_app_refuses_several_cmms_without_a_primary() -> None:
