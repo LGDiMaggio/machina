@@ -17,6 +17,7 @@ from machina.agent.entity_resolver import (
     _ResolutionVerdict,
     resolution_verdict,
 )
+from machina.agent.spare_parts import SPARE_PARTS_RESULT_LIMIT
 
 if TYPE_CHECKING:
     from machina.agent.entity_resolver import ResolvedEntity
@@ -251,6 +252,11 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     ``[]`` for parts the CMMS does have (a Generic CMMS list endpoint whose
     pagination ``items_path`` matches nothing in the response reads as empty).
 
+    At most :data:`~machina.agent.spare_parts.SPARE_PARTS_RESULT_LIMIT` parts
+    are listed. A longer list is headed "(50 of N)" and ends with a line
+    saying it is incomplete, so the model never reads the first parts as the
+    asset's whole list. The parts past the limit are counted, never shown.
+
     Args:
         parts: List of spare parts.
 
@@ -260,10 +266,20 @@ def format_spare_parts_context(parts: list[SparePart]) -> str:
     if not parts:
         return "**Spare Parts:** the spare-parts lookup for this asset returned none."
 
-    lines = [f"**Spare Parts ({len(parts)}):**"]
-    for part in parts:
+    shown = parts[:SPARE_PARTS_RESULT_LIMIT]
+    hidden = len(parts) - len(shown)
+    count = f"{len(shown)} of {len(parts)}" if hidden else str(len(parts))
+    lines = [f"**Spare Parts ({count}):**"]
+    for part in shown:
         status = "✅ In stock" if part.stock_quantity > 0 else "❌ Out of stock"
         lines.append(f"  - {part.name} (SKU: {part.sku}) — Qty: {part.stock_quantity} | {status}")
+    if hidden:
+        more = "1 more part is" if hidden == 1 else f"{hidden} more parts are"
+        lines.append(
+            f"  - The list is incomplete: {more} listed for this asset. Do not conclude "
+            "that a part is missing or out of stock because it is not shown; check a "
+            "specific part with the check_spare_parts tool by its SKU."
+        )
     return "\n".join(lines)
 
 

@@ -44,6 +44,7 @@ from machina.agent.prompts import (
     safe_source,
     safe_text,
 )
+from machina.agent.spare_parts import bounded_spare_parts
 from machina.agent.tool_errors import read_tool_error
 from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
 from machina.connectors.capabilities import Capability
@@ -3143,7 +3144,8 @@ class Agent:
                     if args.get(key) not in (None, "")
                 }
                 parts = await conn.read_spare_parts(**filters)  # type: ignore[attr-defined]
-                return [p.model_dump(mode="json") for p in parts]
+                # Capped: an unfiltered lookup returns the whole inventory.
+                return bounded_spare_parts(parts, lambda part: part.model_dump(mode="json"))
             return {"error": "No spare parts connector available"}
 
         if name == "diagnose_failure":
