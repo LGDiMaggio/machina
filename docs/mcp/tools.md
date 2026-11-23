@@ -10,7 +10,8 @@ connector capabilities  →  CAPABILITY_TO_TOOL  →  registered tools
 ```
 
 Each tool but one talks to one connector: CMMS tools to the primary CMMS (the
-connector marked `primary: true`, otherwise the first one that reads assets),
+connector marked `primary: true`, or the only enabled connector that reads
+assets; see [the primary CMMS](../yaml-config.md#the-primary-cmms)),
 the others to the first connector with the needed capability. Registration
 looks at every configured connector, dispatch only at that one: a CMMS tool
 turned on by a secondary CMMS still calls the primary, and fails when the
