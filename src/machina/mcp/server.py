@@ -240,7 +240,7 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
 
 
 def _collect_capabilities(
-    config: MachinaConfig, primary_name: str | None = None
+    config: MachinaConfig, primary_name: str | None
 ) -> frozenset[Capability]:
     """Gather the union of all capabilities from enabled connectors.
 
@@ -274,7 +274,7 @@ def _collect_capabilities(
     return frozenset(all_caps)
 
 
-def _register_tools(server: Any, config: MachinaConfig, primary_name: str | None = None) -> None:
+def _register_tools(server: Any, config: MachinaConfig, primary_name: str | None) -> None:
     """Auto-register domain tools based on connector capabilities.
 
     Every tool, domain and vendor, is registered through

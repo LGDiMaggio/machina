@@ -685,9 +685,7 @@ class Agent:
         else:
             self._llm = llm
 
-        # Connector registry. It routes by capability like a plain registry
-        # until from_config scopes its CMMS lookups to the primary CMMS; the
-        # workflow engine shares this object, so the scoping applies there too.
+        # Connector registry
         self._registry = _PrimaryCmmsRegistry()
         _registered_ids: set[int] = set()
         for i, conn in enumerate(connectors or []):
@@ -930,7 +928,6 @@ class Agent:
             try:
                 primary = create_connector(cc.type, cc.settings)
             except Exception as exc:
-                # The type only: the message can carry a setting value.
                 logger.error(
                     "primary_cmms_degraded", connector=name, error_type=type(exc).__name__
                 )
@@ -955,8 +952,6 @@ class Agent:
             sandbox=config.sandbox,
             confirmations=config.confirmations,
         )
-        # Registry names are derived from class names, so find the primary by
-        # identity.
         for registry_name, conn in agent._registry.all().items():
             if conn is primary:
                 agent._registry.route_cmms_to(registry_name)
@@ -1021,9 +1016,7 @@ class Agent:
                 await conn.connect()
             logger.info("connector_ready", connector=name)
 
-        # Auto-load assets from CMMS connectors. A config-built agent reads
-        # assets from the primary CMMS only, so a degraded primary leaves the
-        # plant empty.
+        # Auto-load assets from CMMS connectors
         cmms_connectors = self._registry.find_by_capability(Capability.READ_ASSETS)
         for cname, conn in cmms_connectors:
             if isinstance(conn, _DegradedPrimaryCmms):
@@ -3090,7 +3083,6 @@ class Agent:
     ) -> Any:
         """Route a tool call to its handler (failures: see :meth:`_execute_tool`)."""
         if name in ("search_assets", "get_asset_details", "list_assets"):
-            # These read the plant, which a degraded primary CMMS left empty.
             self._raise_if_primary_cmms_degraded()
 
         if name == "search_assets":
@@ -3694,8 +3686,7 @@ class Agent:
 
         # Resolve the asset first. Catch ONLY the lookup failure — a
         # connector/catalog problem later must not masquerade as "asset not
-        # found". Neither may a degraded primary CMMS, which left the plant
-        # empty.
+        # found".
         self._raise_if_primary_cmms_degraded()
         asset: Asset | None
         try:

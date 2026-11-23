@@ -57,8 +57,6 @@ def _import_class(dotted_path: str) -> type[Any]:
     return getattr(module, class_name)  # type: ignore[no-any-return]
 
 
-# The capabilities a CMMS serves. A connector that reads assets can be the
-# primary CMMS; every CMMS call goes to the primary.
 _CMMS_CAPABILITIES: frozenset[Capability] = frozenset(
     {
         Capability.READ_ASSETS,
@@ -75,9 +73,6 @@ _CMMS_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
-# The failure-mode catalog is read from every provider, the primary included,
-# by the agent and by the MCP diagnose tool alike; every other CMMS call is
-# routed to the primary only.
 _PRIMARY_ROUTED_CAPABILITIES: frozenset[Capability] = _CMMS_CAPABILITIES - {
     Capability.READ_FAILURE_MODES
 }
@@ -258,13 +253,8 @@ class MachinaRuntime:
         self.sandbox_mode = sandbox_mode
         self._primary_cmms_name = primary_cmms_name
         self.failed_connectors: dict[str, str] = {}
-        # Set by from_config: the policy decided the primary, so the lookup
-        # never falls back to another connector.
-        self._primary_cmms_resolved = False
-        # (name, exception type) of a primary that failed to build.
+        self._primary_cmms_policy_applied = False
         self._primary_cmms_failure: tuple[str, str] | None = None
-        # The primary's class name from its factory path, known even when it
-        # failed to build.
         self._primary_cmms_class = ""
 
     @classmethod
@@ -315,7 +305,7 @@ class MachinaRuntime:
             sandbox_mode=config.sandbox,
             primary_cmms_name=primary_name or "",
         )
-        runtime._primary_cmms_resolved = True
+        runtime._primary_cmms_policy_applied = True
         runtime._primary_cmms_failure = primary_failure
         if primary_name is not None:
             factory_path = _CONNECTOR_FACTORIES[config.connectors[primary_name].type]
@@ -374,7 +364,7 @@ class MachinaRuntime:
             conn = self._registry.get(self._primary_cmms_name)
             if conn is not None:
                 return conn
-        if self._primary_cmms_resolved:
+        if self._primary_cmms_policy_applied:
             raise ConnectorError("No CMMS connector configured")
         matches = self._registry.find_by_capability(Capability.READ_ASSETS)
         if not matches:

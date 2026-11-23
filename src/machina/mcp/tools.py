@@ -671,8 +671,6 @@ async def machina_diagnose_failure(
     from machina.agent.diagnosis import diagnose_symptoms, harvest_failure_modes
 
     runtime = _runtime(ctx)
-    # Resolved outside the try: a degraded primary's own error reaches the
-    # client; only a lookup the CMMS could not answer is reported by type.
     cmms = runtime.get_primary_cmms()
     try:
         asset = await _find_asset(cmms, asset_id)
