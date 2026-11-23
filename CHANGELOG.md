@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `request_with_retry` now logs the URL as its scheme, host, port and path. It drops the query, user info and fragment, replaces an OData key predicate with `(<key>)` and a matrix parameter's value (such as `;jsessionid=`) with `<value>`; this also applies to a caller's `log_url`. The UpKeep and Maximo single-record requests pass a `log_url` template with the host (`https://api.onupkeep.com/api/v2/work-orders/<work order>`, `…/maximo/oslc/os/mxwo/<resource id>`); UpKeep's listed-part warning, which named only the path, now names the host too. A network error is logged as `error_type`, replacing `error`.
 
   Retries, their counts and the other fields (method, attempt, status, backoff) are unchanged.
+- **The deployment security guide lists the four chromadb 1.5.9 advisories, which are unresolved** (GHSA-f4j7-r4q5-qw2c, GHSA-36p7-vc44-83pf, GHSA-2wm9-hf6c-p5cr, GHSA-xph7-9rjv-w5fr): none has a fixed release. All four are in the Chroma server. With chromadb's default settings, `DocumentStoreConnector` uses an ephemeral client inside the Machina process. The guide names the configurations Machina does not support (an external Chroma server through `CHROMA_API_IMPL` and `CHROMA_SERVER_HOST`, `IS_PERSISTENT` with a persist directory others can write, an exposed Chroma server) and the remaining mitigation, a private persist directory. This is a documentation change; no dependency changed and the advisories stay open.
 
 ### Breaking changes
 
@@ -218,6 +219,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A file that cannot be read or parsed is no longer replaced: the write raises `ConnectorError` naming `work_orders.json`.
   - Mapped local files (`schema_mapping` / `yaml_mapping`), which are never written back, are unchanged and take no lock.
 - **Generic CMMS local writes that the operating system refuses raise `ConnectorError`**, as the Excel/CSV connector's do, instead of a raw `OSError` that carried the file's full path: `ConnectorLockedError` when `work_orders.json` or its lock file is open in another program or cannot be read or written for lack of permission, otherwise `ConnectorError` naming the file and the error's type. The file is left as it was.
+- **Workflow steps no longer call `asyncio.iscoroutinefunction`, which Python 3.14 deprecates.** The engine used it to decide whether to await a service or connector method, so on Python 3.14 every such step emitted a `DeprecationWarning`, and failed where that warning is turned into an error. The engine now uses `inspect.iscoroutinefunction`. Sync methods are still called, and coroutine methods, including an `AsyncMock`, still awaited. One case changes: a callable that is not a coroutine function and is marked as one only by asyncio's private `_is_coroutine` attribute is now called, not awaited, so its coroutine becomes the step output. Mark such a callable with `inspect.markcoroutinefunction` (Python 3.12 and later) or wrap it in an `async def`.
 
 ## [0.4.0] - 2026-10-04
 

@@ -9,6 +9,7 @@ domain services, and handling errors according to per-step policies.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import time
 from typing import Any
@@ -511,7 +512,7 @@ class WorkflowEngine:
                 f"Step '{step.name}': service '{service_name}' has no method '{method_name}'"
             )
 
-        if asyncio.iscoroutinefunction(method):
+        if inspect.iscoroutinefunction(method):
             return await method(**resolved_inputs)
         return method(**resolved_inputs)
 
@@ -570,7 +571,7 @@ class WorkflowEngine:
                 f"'{method_name}' for capability '{capability}'"
             )
 
-        if asyncio.iscoroutinefunction(method):
+        if inspect.iscoroutinefunction(method):
             return await method(**resolved_inputs)
         return method(**resolved_inputs)
 

@@ -532,6 +532,43 @@ docker scout cves machina:latest
 trivy image machina:latest
 ```
 
+#### Unresolved Advisories: chromadb 1.5.9
+
+A scan of an environment with the `docs-rag` extra (which `docs-rag-pro` and
+`all` include) reports four advisories against chromadb 1.5.9, the version
+`deploy/docker/constraints.txt` pins. They are unresolved: as of 22 November
+2026, OSV lists no fixed version for any of them, and 1.5.9 is the latest
+chromadb release.
+
+| Advisory | Where it applies |
+| --- | --- |
+| [GHSA-f4j7-r4q5-qw2c](https://osv.dev/vulnerability/GHSA-f4j7-r4q5-qw2c) (CVE-2026-45829) | A Chroma server: code execution, without authentication, through its collections endpoint |
+| [GHSA-36p7-vc44-83pf](https://osv.dev/vulnerability/GHSA-36p7-vc44-83pf) (CVE-2026-45833) | A Chroma server: code execution by an authenticated user who holds `UPDATE_COLLECTION` |
+| [GHSA-2wm9-hf6c-p5cr](https://osv.dev/vulnerability/GHSA-2wm9-hf6c-p5cr) (CVE-2026-45830) | A Chroma server: any authenticated user can read, change and delete data in every tenant's collections |
+| [GHSA-xph7-9rjv-w5fr](https://osv.dev/vulnerability/GHSA-xph7-9rjv-w5fr) (CVE-2026-45831) | A Chroma server using `SimpleRBACAuthorizationProvider`: a permission is not limited to its tenant, database or collection |
+
+`DocumentStoreConnector` runs no Chroma server. It creates its vector store
+without a client, host or persist directory, so with chromadb's default
+settings it gets an ephemeral client inside the Machina process that keeps
+the index in memory.
+
+chromadb also reads its settings from environment variables and from a `.env`
+file in the working directory. Machina does not support these configurations:
+
+- `CHROMA_API_IMPL` set to chromadb's HTTP client
+  (`chromadb.api.fastapi.FastAPI`), with `CHROMA_SERVER_HOST`: Machina becomes
+  a client of an external Chroma server. The advisories then apply to that
+  server, and its exposure is that server's deployment, outside Machina.
+- `IS_PERSISTENT`, which keeps the index on disk in `PERSIST_DIRECTORY`
+  (`./chroma` by default), with a directory others can write: whoever can write
+  it can change what the agent retrieves.
+- Running a Chroma server next to Machina and exposing it: that server is what
+  the advisories describe.
+
+If you use a persist directory, make it private to the account Machina runs
+under (for example `chmod 700`). This limits the exposure; it does not fix the
+advisories, which stay open until chromadb publishes a fixed release.
+
 ## Hardening Checklist
 
 - [ ] Use streamable-http transport (not stdio) in multi-user environments
