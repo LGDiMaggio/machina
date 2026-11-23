@@ -30,7 +30,7 @@ from every connector that declares `read_failure_modes`. The
 | `machina_list_work_orders` | `read_work_orders` | `asset_id=""`, `status=""` | Work orders, optionally filtered |
 | `machina_get_work_order` | `get_work_order` | `work_order_id` | One work order |
 | `machina_get_maintenance_history` | `read_maintenance_history` | `asset_id` | Past work orders on the asset |
-| `machina_list_spare_parts` | `read_spare_parts` | `asset_id=""`, `sku=""` | Spare parts with stock, reorder point and unit cost |
+| `machina_list_spare_parts` | `read_spare_parts` | `asset_id=""`, `sku=""` | Up to 50 spare parts with stock, reorder point and unit cost, and the number that matched |
 | `machina_get_maintenance_plan` | `read_maintenance_plans` | — | All preventive-maintenance plans (id, asset, name, interval in days, tasks) |
 | `machina_search_manuals` | `search_documents` | `query`, `top_k=5`, `asset_id=""`, `filters=None` | Matching document chunks with source, page, section and score |
 | `machina_get_sensor_reading` | `get_latest_reading` | `asset_id` | Latest sensor reading |
@@ -44,7 +44,20 @@ host paths. Its `filters` keys are `asset_id`, `doc_type`,
 `machina_list_spare_parts` sends the CMMS only the filters it is given: `sku`
 looks up one part by its part number. A CMMS that cannot filter spare parts
 by `asset_id` refuses the call: the client receives an MCP error result
-instead of a list.
+instead of the result object.
+
+The result is one object, `{"parts": [...], "total": n, "truncated": false}`,
+also for a lookup that found nothing (`"parts": []`, `"total": 0`):
+
+- `parts` holds at most 50 parts, in the order the CMMS returned them.
+- `total` counts every part that matched.
+- A longer result comes back with `"truncated": true` and a `note` saying the
+  list is incomplete, that a part missing from it may still be in stock, and
+  to narrow the lookup with `sku`.
+
+The limit bounds what the tool returns, not what the connector reads: an
+unfiltered lookup still reads the CMMS's whole matching inventory. There is
+no paging.
 
 !!! note "Sensor tools in v0.4"
     No connector type that a config file can create declares
