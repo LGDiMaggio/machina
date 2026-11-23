@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+import machina
 from machina.connectors.cmms.mappers.sap_pm import (
     SapFieldError,
     order_etag,
@@ -458,6 +463,7 @@ class TestWholeNumbers:
             pytest.param("12", 12, id="v2-text"),
             pytest.param("12.000", 12, id="v2-decimal-text"),
             pytest.param("0.000", 0, id="v2-zero"),
+            pytest.param("0E+20", 0, id="zero-with-exponent"),
             pytest.param(" 7 ", 7, id="v2-text-padded"),
             # OData V4 sends it as a JSON number.
             pytest.param(12, 12, id="v4-integer"),
@@ -512,10 +518,6 @@ class TestWholeNumbers:
             pytest.param(1e12, id="thirteen-digits-float"),
             pytest.param(-(10**12), id="negative-thirteen-digits"),
             pytest.param("1" * 5000, id="five-thousand-digits"),
-            # Building these integers would take a megabyte and a gigabyte of
-            # memory: the bound is checked before any integer is built.
-            pytest.param("1E+1000000", id="exponent-million"),
-            pytest.param("9E+999999999", id="exponent-billion"),
         ],
     )
     def test_whole_number_beyond_the_bound_is_refused(
@@ -526,6 +528,33 @@ class TestWholeNumbers:
         _assert_value_free(raised.value, field)
         assert str(raised.value) == f"SAP property {field!r} is not {_BOUND}"
 
+    def test_huge_exponent_is_refused_before_any_integer_is_built(self) -> None:
+        """Building these integers would take a megabyte and a gigabyte of memory
+        and minutes of CPU. They run in a child process with a time limit, so a
+        bound checked after the integer is built fails here instead of hanging."""
+        script = (
+            "from machina.connectors.cmms.mappers.sap_pm import SapFieldError, parse_spare_part\n"
+            "for value in ('1E+1000000', '9E+999999999', '-9E+999999999'):\n"
+            "    try:\n"
+            "        parse_spare_part({'Material': 'M', 'AvailableQuantity': value})\n"
+            "    except SapFieldError as error:\n"
+            "        print(error)\n"
+        )
+        # The child imports the same machina package as this test process.
+        package_root = str(Path(machina.__file__).resolve().parents[1])
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([package_root, *sys.path])}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        expected = f"SAP property 'AvailableQuantity' is not {_BOUND}"
+        assert result.stdout.splitlines() == [expected] * 3
+
     @pytest.mark.parametrize("value", ["-3.000", -3, -3.0])
     def test_negative_quantity_is_still_refused_by_the_domain_model(self, value: Any) -> None:
         """The converter reads a negative whole number; the stock level's own
@@ -533,6 +562,14 @@ class TestWholeNumbers:
         with pytest.raises(ValidationError) as raised:
             parse_spare_part({"Material": "M", "AvailableQuantity": value})
         assert [error["loc"] for error in raised.value.errors()] == [("stock_quantity",)]
+
+    @pytest.mark.parametrize("value", ["-3.000", -3, -3.0])
+    def test_negative_cycle_value_is_still_refused_by_the_domain_model(self, value: Any) -> None:
+        """The converter reads a negative whole number; the interval's own rule
+        (at least zero) refuses it, as before."""
+        with pytest.raises(ValidationError) as raised:
+            parse_maintenance_plan({"MaintenancePlan": "P", "MaintenancePlanCycleValue": value})
+        assert [error["loc"] for error in raised.value.errors()] == [("days",)]
 
     def test_unit_cost_keeps_its_fraction(self) -> None:
         part = parse_spare_part({"Material": "M", "StandardPrice": "35.50", "Quantity": "4.000"})

@@ -527,8 +527,9 @@ def _whole_number(data: dict[str, Any], properties: tuple[str, ...]) -> int:
         # Raised outside any except block, as in _convert.
         raise SapFieldError(name, _WHOLE_NUMBER)
     # Checked on the exponent before the integer is built: "1E+1000000" is a
-    # whole number, and int() of it would build a million-digit integer.
-    if number.adjusted() >= _MAX_WHOLE_NUMBER_DIGITS:
+    # whole number, and int() of it would build a million-digit integer. A zero
+    # has no digits to count, however large its exponent ("0E+20" is 0).
+    if number and number.adjusted() >= _MAX_WHOLE_NUMBER_DIGITS:
         raise SapFieldError(name, _BOUNDED_WHOLE_NUMBER)
     return int(number)
 
