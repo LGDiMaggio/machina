@@ -38,11 +38,11 @@ See also:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar
 from urllib.parse import quote
 
 import structlog
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from machina.connectors._settings import validate_setting
 from machina.connectors.base import ConnectorHealth, ConnectorStatus, sandbox_aware
@@ -65,15 +65,113 @@ from machina.domain.work_order import WorkOrder, WorkOrderStatus
 from machina.exceptions import (
     ConnectorAuthError,
     ConnectorError,
+    ConnectorSchemaError,
     ConnectorUnsupportedFilterError,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from machina.domain.asset import Asset
     from machina.domain.maintenance_plan import MaintenancePlan
     from machina.domain.spare_part import SparePart
 
 logger = structlog.get_logger(__name__)
+
+_Entity = TypeVar("_Entity")
+
+# What a mapper raises for a record it cannot read: pydantic's ValidationError
+# and the mapper's SapFieldError are ValueErrors; a record that is not an
+# object has no get(); ArithmeticError covers an overflow.
+_UNMAPPABLE = (ValueError, TypeError, AttributeError, ArithmeticError)
+
+
+def _map_records(
+    records: list[Any],
+    parse: Callable[[dict[str, Any]], _Entity],
+    *,
+    entity: str,
+    operation: str,
+    asset_id: str | None = None,
+) -> list[_Entity]:
+    """Map SAP records to domain entities, all or none.
+
+    A record the mapper cannot read refuses the whole read: a property it
+    cannot convert (:class:`~machina.connectors.cmms.mappers.sap_pm.SapFieldError`,
+    an ``Edm.Decimal`` quantity such as ``"12.000"`` included), a value the
+    domain model rejects, a record that is not an object. Returning the
+    others would present part of the result as all of it.
+
+    Args:
+        records: The records SAP returned.
+        parse: The mapper for one record.
+        entity: The entity set, for the message and the log.
+        operation: The public operation, for the log.
+        asset_id: The asset the read is for, if any, for the log.
+
+    Raises:
+        ConnectorSchemaError: On the first record refused. The message names
+            the entity set and either the SAP property and what it should
+            hold, or the error type and, for a value the domain model
+            rejects, the fields it rejected. The ``sap_pm_record_refused``
+            warning adds the operation, the record's position and, where it
+            applies, the asset the read is for. Neither
+            repeats a value from SAP, and no exception is chained to it.
+    """
+    entities: list[_Entity] = []
+    for position, record in enumerate(records):
+        try:
+            entities.append(parse(record))
+            continue
+        except _UNMAPPABLE as exc:
+            error_type = type(exc).__name__
+            fields: list[str] = []
+            problem = error_type
+            if isinstance(exc, sap_mapper.SapFieldError):
+                # The mapper's own property name and expectation, never the value.
+                fields = [exc.field]
+                problem = f"{exc.field} is not {exc.expected}"
+            elif isinstance(exc, ValidationError):
+                # The field names only: a deeper location can name a key from
+                # SAP (metadata.<key>), and a model-level check has none.
+                errors = exc.errors(include_url=False, include_context=False, include_input=False)
+                fields = sorted({str(e["loc"][0]) for e in errors if e["loc"]})
+                if fields:
+                    problem += ": " + ", ".join(fields)
+        context: dict[str, Any] = {"asset_id": asset_id} if asset_id else {}
+        if fields:
+            context["fields"] = fields
+        logger.warning(
+            "sap_pm_record_refused",
+            connector="SapPmConnector",
+            operation=operation,
+            entity=entity,
+            reason=f"unmappable_{error_type}",
+            position=position,
+            **context,
+        )
+        article = "an" if entity[:1].upper() in {"A", "E", "I", "O", "U"} else "a"
+        # Raised outside the except block: the mapping error's message quotes
+        # the SAP value, and `from None` would still keep it as __context__.
+        raise ConnectorSchemaError(
+            f"SAP PM returned {article} {entity} record that cannot be mapped ({problem}) "
+            "— refusing to return a partial result"
+        )
+    return entities
+
+
+def _map_record(
+    record: Any,
+    parse: Callable[[dict[str, Any]], _Entity],
+    *,
+    entity: str,
+    operation: str,
+    asset_id: str | None = None,
+) -> _Entity:
+    """Map one SAP record (see :func:`_map_records`)."""
+    [mapped] = _map_records([record], parse, entity=entity, operation=operation, asset_id=asset_id)
+    return mapped
+
 
 _AuthUnion = OAuth2ClientCredentials | BasicAuth
 # The same union keyed by ``type``, for ``auth`` given as a machina.yaml dict.
@@ -319,13 +417,25 @@ class SapPmConnector:
     # ------------------------------------------------------------------
 
     async def read_assets(self) -> list[Asset]:
-        """Return all equipment master records from SAP PM."""
+        """Return all equipment master records from SAP PM.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get("API_EQUIPMENT", "Equipment")
-        return [sap_mapper.parse_asset(item) for item in raw]
+        return _map_records(
+            raw, sap_mapper.parse_asset, entity="Equipment", operation="read_assets"
+        )
 
     async def get_asset(self, asset_id: str) -> Asset | None:
-        """Look up a single equipment record by number."""
+        """Look up a single equipment record by number.
+
+        Raises:
+            ConnectorSchemaError: If the record cannot be mapped (see
+                :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get(
             "API_EQUIPMENT",
@@ -333,7 +443,15 @@ class SapPmConnector:
             odata_filter=f"Equipment eq {_odata_string(asset_id)}",
             top=1,
         )
-        return sap_mapper.parse_asset(raw[0]) if raw else None
+        if not raw:
+            return None
+        return _map_record(
+            raw[0],
+            sap_mapper.parse_asset,
+            entity="Equipment",
+            operation="get_asset",
+            asset_id=asset_id,
+        )
 
     async def read_work_orders(
         self,
@@ -355,14 +473,13 @@ class SapPmConnector:
                 value such as ``"closed"``, keeps the orders whose mapped
                 status matches. Any other string is a raw SAP system status
                 code such as ``"REL"``, kept where it is active on the order.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
         """
         self._ensure_connected()
-        raw = await self._odata_get(
-            "API_MAINTENANCEORDER",
-            "MaintenanceOrder",
-            odata_filter=f"Equipment eq {_odata_string(asset_id)}" if asset_id else "",
-        )
-        work_orders = [sap_mapper.parse_work_order(item) for item in raw]
+        raw, work_orders = await self._read_orders(asset_id, operation="read_work_orders")
         if not status:
             return work_orders
         wanted = status_filter(status)
@@ -375,11 +492,46 @@ class SapPmConnector:
             if sap_code in sap_mapper.system_status_codes(item)
         ]
 
+    async def _read_orders(
+        self, asset_id: str, *, operation: str
+    ) -> tuple[list[dict[str, Any]], list[WorkOrder]]:
+        """Read the maintenance orders, of one equipment if ``asset_id``, and map them.
+
+        Returns:
+            The orders as SAP returned them and as work orders, in the same
+            order (see :func:`_map_records`: all or none).
+        """
+        raw = await self._odata_get(
+            "API_MAINTENANCEORDER",
+            "MaintenanceOrder",
+            odata_filter=f"Equipment eq {_odata_string(asset_id)}" if asset_id else "",
+        )
+        work_orders = _map_records(
+            raw,
+            sap_mapper.parse_work_order,
+            entity="MaintenanceOrder",
+            operation=operation,
+            asset_id=asset_id or None,
+        )
+        return raw, work_orders
+
     async def get_work_order(self, work_order_id: str) -> WorkOrder | None:
-        """Look up a single maintenance order by number."""
+        """Look up a single maintenance order by number.
+
+        Raises:
+            ConnectorSchemaError: If the record cannot be mapped (see
+                :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._read_order(work_order_id)
-        return sap_mapper.parse_work_order(raw) if raw is not None else None
+        if raw is None:
+            return None
+        return _map_record(
+            raw,
+            sap_mapper.parse_work_order,
+            entity="MaintenanceOrder",
+            operation="get_work_order",
+        )
 
     async def _read_order(self, work_order_id: str) -> dict[str, Any] | None:
         """Read one maintenance order as SAP returns it, or ``None`` if there is none."""
@@ -439,7 +591,12 @@ class SapPmConnector:
         # SAP accepted the create: a body that cannot be mapped must not read
         # as a failed create, and its values must not reach the message.
         try:
-            created = sap_mapper.parse_work_order(body.get("d", body))
+            created = _map_record(
+                body.get("d", body),
+                sap_mapper.parse_work_order,
+                entity="MaintenanceOrder",
+                operation="create_work_order",
+            )
         except Exception as exc:
             raise write_outcome_unknown(
                 "SAP PM",
@@ -583,7 +740,12 @@ class SapPmConnector:
             raw = await self._read_order(work_order_id)
             if raw is None:
                 raise ConnectorError("the work order was not found")
-            updated = sap_mapper.parse_work_order(raw)
+            updated = _map_record(
+                raw,
+                sap_mapper.parse_work_order,
+                entity="MaintenanceOrder",
+                operation="update_work_order",
+            )
         except Exception as exc:
             logger.warning(
                 "work_order_update_not_read_back",
@@ -608,10 +770,21 @@ class SapPmConnector:
         status maps to ``status`` anyway: an order closed for business
         (``CLSD``) is closed, so closing it again needs no technical
         completion.
+
+        Raises:
+            ConnectorSchemaError: If the order cannot be mapped. It is mapped
+                before its system statuses are read, so a record that is not
+                an object is refused too (see :func:`_map_records`).
         """
+        mapped = _map_record(
+            order,
+            sap_mapper.parse_work_order,
+            entity="MaintenanceOrder",
+            operation="update_work_order",
+        )
         if sap_mapper.reverse_status(status) in sap_mapper.system_status_codes(order):
             return True
-        return sap_mapper.parse_work_order(order).status == status
+        return mapped.status == status
 
     @classmethod
     def _check_system_status(
@@ -660,16 +833,19 @@ class SapPmConnector:
         the order's ``LastChangeDateTime`` as a read returns it; it is read
         from the order's OData V2 ``__metadata``
         (:func:`~machina.connectors.cmms.mappers.sap_pm.order_etag`). A
-        ``412`` means the order changed after it was read. A failed read says
-        the write request was not sent.
+        ``412`` means the order changed after it was read. A failed read, or
+        an order read that cannot be mapped (a
+        :class:`~machina.exceptions.ConnectorSchemaError`), says the write
+        request was not sent.
         """
         try:
             order = await self._read_order(work_order_id)
+            already_set = order is not None and self._status_is_set(order, status)
         except ConnectorError as exc:
             raise write_not_sent(exc) from exc
         if order is None:
             raise ConnectorError(f"Work order {work_order_id} not found")
-        if self._status_is_set(order, status):
+        if already_set:
             logger.info(
                 "work_order_status_already_set",
                 connector="SapPmConnector",
@@ -745,6 +921,10 @@ class SapPmConnector:
                 parts.
             ConnectorError: If a filter is neither ``""`` nor an ID (see
                 :func:`~machina.connectors.cmms.filters.spare_part_filters`).
+            ConnectorSchemaError: If a record cannot be mapped (a quantity
+                given as text that is not a whole number, an OData V2
+                ``Edm.Decimal`` such as ``"12.000"`` included); no partial
+                list is returned (see :func:`_map_records`).
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
@@ -765,13 +945,29 @@ class SapPmConnector:
             self._bom_entity_set,
             odata_filter=odata_filter,
         )
-        return [sap_mapper.parse_spare_part(item) for item in raw]
+        return _map_records(
+            raw,
+            sap_mapper.parse_spare_part,
+            entity=self._bom_entity_set,
+            operation="read_spare_parts",
+            asset_id=asset_id or None,
+        )
 
     async def read_maintenance_plans(self) -> list[MaintenancePlan]:
-        """Read preventive-maintenance plans from SAP PM."""
+        """Read preventive-maintenance plans from SAP PM.
+
+        Raises:
+            ConnectorSchemaError: If a record cannot be mapped; no partial
+                list is returned (see :func:`_map_records`).
+        """
         self._ensure_connected()
         raw = await self._odata_get("API_MAINTENANCEPLAN", "MaintenancePlan")
-        return [sap_mapper.parse_maintenance_plan(item) for item in raw]
+        return _map_records(
+            raw,
+            sap_mapper.parse_maintenance_plan,
+            entity="MaintenancePlan",
+            operation="read_maintenance_plans",
+        )
 
     async def read_maintenance_history(self, asset_id: str) -> list[WorkOrder]:
         """Return completed/closed maintenance orders for an asset.
@@ -786,12 +982,16 @@ class SapPmConnector:
             ConnectorError: If ``asset_id`` is missing or blank. Without an
                 ``Equipment`` filter the read would fetch every order, and a
                 missing ID would be matched as ``'None'``.
+            ConnectorSchemaError: If one of the equipment's orders cannot be
+                mapped, completed or not; no partial list is returned.
         """
         self._ensure_connected()
         if asset_id is None or not str(asset_id).strip():
             raise ConnectorError("read_maintenance_history requires an asset_id")
-        # As text: read_work_orders reads a falsy ID (the number 0) as no filter.
-        work_orders = await self.read_work_orders(asset_id=str(asset_id))
+        # As text: a falsy ID (the number 0) would read as no filter.
+        _, work_orders = await self._read_orders(
+            str(asset_id), operation="read_maintenance_history"
+        )
         return [
             wo
             for wo in work_orders

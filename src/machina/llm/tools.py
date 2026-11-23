@@ -194,7 +194,11 @@ SEARCH_DOCUMENTS_TOOL = make_tool(
 
 CHECK_SPARE_PARTS_TOOL = make_tool(
     name="check_spare_parts",
-    description=("Check spare part availability and inventory for a given asset or SKU."),
+    description=(
+        "Check spare part availability and inventory for a given asset or SKU. "
+        "Returns at most 50 parts with the total that matched; a truncated "
+        "result is incomplete, so narrow it by SKU."
+    ),
     parameters={
         "type": "object",
         "properties": {

@@ -23,6 +23,16 @@ domain-specific exceptions. The final response after exhausting retries
 is also returned, allowing the caller to still see the last
 ``status_code`` and headers.
 
+Each retry is logged at WARNING (``http_network_retry``,
+``http_rate_limit_retry``) with the method, the attempt and the status or the
+error's type; a ``Retry-After`` too long to wait out is logged as
+``http_retry_after_exceeds_max_backoff``, with the method and status. The URL
+is logged as its scheme, host, port and path only (:func:`loggable_url`): a
+query carries filter values and page tokens, user info carries credentials,
+an OData key predicate carries the record's key, and a matrix parameter can
+carry a session ID. A caller whose path carries a record ID in a plain
+segment passes ``log_url``, a template of the URL with the ID replaced.
+
 Example:
     ```python
     import httpx
@@ -44,10 +54,91 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+UNPARSEABLE_URL = "<unparseable URL>"
+
+
+def _without_parameter_values(text: str) -> str:
+    # A matrix parameter (";jsessionid=...", SAP's ";v=0002") keeps its name:
+    # its value can be a session ID.
+    base, *parameters = text.split(";")
+    for parameter in parameters:
+        name, has_value, _value = parameter.partition("=")
+        base += f";{name}=<value>" if has_value else ";<parameter>"
+    return base
+
+
+def _loggable_segment(segment: str) -> str:
+    # An OData key predicate (Entity('key'), Entity(42), Entity(K1='a',K2=2),
+    # its parentheses possibly percent-encoded) is a record ID: everything from
+    # the first opening to the last closing parenthesis becomes "(<key>)", so a
+    # ";" inside a quoted key cannot split it. It follows the entity name, so
+    # an opening after the first ";" belongs to a matrix parameter's value.
+    # find/rfind keep this linear in the segment's length (a regex with
+    # backtracking was quadratic). "%28"/"%29" have no letters to fold.
+    openings = [i for i in (segment.find("("), segment.find("%28")) if i != -1]
+    close, close_end = segment.rfind(")"), 0
+    encoded_close = segment.rfind("%29")
+    if encoded_close > close:
+        close, close_end = encoded_close, encoded_close + 3
+    elif close != -1:
+        close_end = close + 1
+    first_parameter = segment.find(";")
+    if openings and (first_parameter == -1 or min(openings) < first_parameter):
+        start = min(openings)
+        key_start = start + (1 if segment[start] == "(" else 3)
+        if close > key_start:
+            head = _without_parameter_values(segment[:start])
+            return f"{head}(<key>){_without_parameter_values(segment[close_end:])}"
+    return _without_parameter_values(segment)
+
+
+def loggable_url(url: str) -> str:
+    """Return the part of *url* a log may hold: scheme, host, port and path.
+
+    The query and the fragment are dropped: a query carries filter values,
+    record IDs and page tokens (SAP PM's ``__next`` and Maximo's ``nextPage``
+    links repeat the whole query). User info, which is credentials, is
+    dropped too. In the path, an OData key predicate is replaced,
+    ``MaintenanceOrder('4000123')`` becoming ``MaintenanceOrder(<key>)``, and
+    a matrix parameter's value, such as a ``;jsessionid=`` a server's link
+    can carry, becomes ``<value>``.
+
+    A record ID in a plain path segment (``/work-orders/<ID>``) cannot be told
+    from a resource name here: the caller passes ``log_url`` for it. A URL
+    that cannot be parsed, or whose path holds an ``@`` (user info that a
+    ``/`` in the password split from the host), is logged as
+    :data:`UNPARSEABLE_URL`. This function never raises: it only shapes a log
+    line, and must not turn a retry into a failure.
+
+    Args:
+        url: An absolute URL, or a path.
+
+    Returns:
+        The reduced URL.
+    """
+    try:
+        parts = urlsplit(url)
+        # .port raises ValueError for a port that is not a number in range.
+        port = parts.port
+        host = parts.hostname
+        if "@" in parts.path:
+            return UNPARSEABLE_URL
+        netloc = ""
+        if host is not None:
+            netloc = f"[{host}]" if ":" in host else host
+            if port is not None:
+                netloc = f"{netloc}:{port}"
+        path = "/".join(_loggable_segment(segment) for segment in parts.path.split("/"))
+        return urlunsplit((parts.scheme, netloc, path, "", ""))
+    except Exception:  # a URL of another type, or one urllib cannot parse
+        return UNPARSEABLE_URL
+
 
 DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_BACKOFF: float = 0.5
@@ -101,9 +192,10 @@ async def request_with_retry(
             retrying a 503, which a gateway can return after the backend
             processed the request; a 429 is retried for every method, since
             the server refused it unprocessed.
-        log_url: What the retry warnings log in place of ``url``, for a URL
-            that carries a value the logs must not hold, such as a vendor
-            record ID. ``None`` (default) logs ``url``.
+        log_url: What the retry warnings log in place of ``url``: a template
+            of the URL whose path carries a record ID in a plain segment,
+            such as ``/api/v2/work-orders/<work order>``. ``None`` (default)
+            logs ``url``. Either is reduced by :func:`loggable_url`.
 
     Returns:
         The final ``httpx.Response``. This is either the first success,
@@ -120,7 +212,8 @@ async def request_with_retry(
 
     if retry_on_network_error is None:
         retry_on_network_error = method.upper() in _IDEMPOTENT_METHODS
-    logged_url = url if log_url is None else log_url
+    # Reduced only when a warning is logged: the request itself never waits on it.
+    log_target = url if log_url is None else log_url
 
     transient_exceptions: tuple[type[BaseException], ...] = (
         httpx.TimeoutException,
@@ -152,8 +245,10 @@ async def request_with_retry(
                 max_retries=max_retries,
                 backoff=backoff,
                 method=method,
-                url=logged_url,
-                error=str(exc),
+                url=loggable_url(log_target),
+                # The type only: httpx's message can name the host, port and
+                # address it could not reach.
+                error_type=type(exc).__name__,
             )
             await asyncio.sleep(backoff)
             attempt += 1
@@ -186,7 +281,7 @@ async def request_with_retry(
                     max_backoff=max_backoff,
                     status_code=resp.status_code,
                     method=method,
-                    url=logged_url,
+                    url=loggable_url(log_target),
                 )
                 return resp
         else:
@@ -198,7 +293,7 @@ async def request_with_retry(
             backoff=backoff,
             status_code=resp.status_code,
             method=method,
-            url=logged_url,
+            url=loggable_url(log_target),
         )
         await asyncio.sleep(backoff)
         attempt += 1

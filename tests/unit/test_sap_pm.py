@@ -693,3 +693,40 @@ class TestYamlAuthSettings:
             {"url": self._URL, "auth": {"type": "basic", "username": "svc", "password": "p"}},
         )
         assert isinstance(conn._auth, BasicAuth)
+
+
+class TestMapRecordsModelLevelRejection:
+    """A ValidationError with no field location (a model-level check) is named by
+    its type alone. No SAP entity has such a check today; the guard must not
+    depend on one never being added."""
+
+    def test_message_names_the_type_only(self) -> None:
+        from pydantic import BaseModel, model_validator
+        from structlog.testing import capture_logs
+
+        from machina.connectors.cmms.sap_pm import _map_records
+        from machina.exceptions import ConnectorSchemaError
+
+        class _Checked(BaseModel):
+            value: str
+
+            @model_validator(mode="after")
+            def _refuse(self) -> _Checked:
+                raise ValueError(f"refused {self.value}")
+
+        with capture_logs() as logs, pytest.raises(ConnectorSchemaError) as info:
+            _map_records(
+                [{"value": "Q7ZX3"}],
+                lambda record: _Checked(**record),
+                entity="Equipment",
+                operation="read_assets",
+            )
+
+        assert str(info.value) == (
+            "SAP PM returned an Equipment record that cannot be mapped (ValidationError) "
+            "— refusing to return a partial result"
+        )
+        assert info.value.__context__ is None
+        [refusal] = [e for e in logs if e["event"] == "sap_pm_record_refused"]
+        assert "fields" not in refusal
+        assert "Q7ZX3" not in str(info.value) + repr(logs)

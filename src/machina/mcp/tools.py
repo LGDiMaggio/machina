@@ -477,13 +477,20 @@ async def machina_list_spare_parts(
     ctx: Context,
     asset_id: str = "",
     sku: str = "",
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List spare parts, optionally filtered by compatible asset or by SKU.
+
+    Returns ``{"parts": [...], "total": n, "truncated": bool}``. ``parts``
+    holds at most 50 parts; ``total`` counts every part that matched. A
+    longer result is flagged ``truncated`` and carries a ``note``: the list is
+    incomplete, so narrow it by SKU.
 
     Args:
         asset_id: Filter by compatible asset. A CMMS that cannot filter by asset refuses the call.
         sku: Look up one part by its SKU (part number).
     """
+    from machina.agent.spare_parts import bounded_spare_parts
+
     runtime = _runtime(ctx)
     cmms = runtime.get_primary_cmms()
     kwargs: dict[str, Any] = {}
@@ -492,16 +499,18 @@ async def machina_list_spare_parts(
     if sku:
         kwargs["sku"] = sku
     parts = await cmms.read_spare_parts(**kwargs)
-    return [
-        {
+    # The annotation stays dict[str, Any]: a TypedDict with an optional
+    # "note" makes FastMCP send a null note and fail its own output check.
+    return bounded_spare_parts(
+        parts,
+        lambda p: {
             "sku": p.sku,
             "name": p.name,
             "stock_quantity": p.stock_quantity,
             "reorder_point": p.reorder_point,
             "unit_cost": p.unit_cost,
-        }
-        for p in parts
-    ]
+        },
+    )
 
 
 async def machina_get_maintenance_plan(ctx: Context) -> list[dict[str, Any]]:
