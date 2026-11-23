@@ -498,9 +498,15 @@ class TestListSpareParts:
 
 
 class _SparePartsBackend:
-    """A connector type, registered per test, serving ``parts`` or raising ``failure``."""
+    """A connector type, registered per test, serving ``parts`` or raising ``failure``.
 
-    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_SPARE_PARTS})
+    It declares ``READ_ASSETS`` because only a connector that reads assets can
+    be the primary CMMS.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.READ_ASSETS, Capability.READ_SPARE_PARTS}
+    )
     parts: ClassVar[list[SparePart]] = []
     failure: ClassVar[Exception | None] = None
 
