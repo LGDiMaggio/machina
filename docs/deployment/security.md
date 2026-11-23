@@ -402,10 +402,20 @@ default.
     redaction: for example urllib3 and the Google API client at DEBUG.
   - Machina's own retry warnings (`http_rate_limit_retry`,
     `http_network_retry`, `http_retry_after_exceeds_max_backoff`) log the
-    request URL. They name UpKeep's listed-part requests as
-    `/api/v2/parts/<listed part>`. Other URLs are logged as sent: a record
-    path with its ID, or a Maximo or SAP PM next-page link with its query.
-    First-page filters, sent as query parameters, are not in that URL.
+    method, the status or the error's type (and, for a retry, the attempt),
+    and the request URL reduced to its scheme, host, port and path. The query
+    (filter values, page tokens, and the whole query a Maximo or SAP PM
+    next-page link repeats), user info and fragment are left out, an OData
+    key predicate is logged as `(<key>)`, and a matrix parameter's value
+    (such as a `;jsessionid=`) as `<value>`. A request for one record logs
+    its endpoint, not the record: `<host>/api/v2/assets/<asset>`,
+    `<host>/api/v2/work-orders/<work order>` and
+    `<host>/api/v2/parts/<listed part>` for UpKeep,
+    `<host>/maximo/oslc/os/<object structure>/<resource id>` for Maximo, and
+    `MaintenanceOrder(<key>)` for SAP PM. A network error is logged by its
+    type only, since httpx's message can name the address it could not
+    reach. A record ID in a plain path segment of a link the CMMS sends back
+    (rather than one the connector builds) is not recognized.
 - The Telegram bot token is kept out of log output:
   - The Bot API carries the token in every URL. httpx logs request URLs at INFO, and python-telegram-bot logs its API URLs at DEBUG. `TelegramConnector` replaces its token with `<redacted>` in the records of those loggers. The redaction is in place from `connect()` until the process ends.
   - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.
@@ -521,6 +531,43 @@ docker scout cves machina:latest
 # or
 trivy image machina:latest
 ```
+
+#### Unresolved Advisories: chromadb 1.5.9
+
+A scan of an environment with the `docs-rag` extra (which `docs-rag-pro` and
+`all` include) reports four advisories against chromadb 1.5.9, the version
+`deploy/docker/constraints.txt` pins. They are unresolved: as of 22 November
+2026, OSV lists no fixed version for any of them, and 1.5.9 is the latest
+chromadb release.
+
+| Advisory | Where it applies |
+| --- | --- |
+| [GHSA-f4j7-r4q5-qw2c](https://osv.dev/vulnerability/GHSA-f4j7-r4q5-qw2c) (CVE-2026-45829) | A Chroma server: code execution, without authentication, through its collections endpoint |
+| [GHSA-36p7-vc44-83pf](https://osv.dev/vulnerability/GHSA-36p7-vc44-83pf) (CVE-2026-45833) | A Chroma server: code execution by an authenticated user who holds `UPDATE_COLLECTION` |
+| [GHSA-2wm9-hf6c-p5cr](https://osv.dev/vulnerability/GHSA-2wm9-hf6c-p5cr) (CVE-2026-45830) | A Chroma server: any authenticated user can read, change and delete data in every tenant's collections |
+| [GHSA-xph7-9rjv-w5fr](https://osv.dev/vulnerability/GHSA-xph7-9rjv-w5fr) (CVE-2026-45831) | A Chroma server using `SimpleRBACAuthorizationProvider`: a permission is not limited to its tenant, database or collection |
+
+`DocumentStoreConnector` runs no Chroma server. It creates its vector store
+without a client, host or persist directory, so with chromadb's default
+settings it gets an ephemeral client inside the Machina process that keeps
+the index in memory.
+
+chromadb also reads its settings from environment variables and from a `.env`
+file in the working directory. Machina does not support these configurations:
+
+- `CHROMA_API_IMPL` set to chromadb's HTTP client
+  (`chromadb.api.fastapi.FastAPI`), with `CHROMA_SERVER_HOST`: Machina becomes
+  a client of an external Chroma server. The advisories then apply to that
+  server, and its exposure is that server's deployment, outside Machina.
+- `IS_PERSISTENT`, which keeps the index on disk in `PERSIST_DIRECTORY`
+  (`./chroma` by default), with a directory others can write: whoever can write
+  it can change what the agent retrieves.
+- Running a Chroma server next to Machina and exposing it: that server is what
+  the advisories describe.
+
+If you use a persist directory, make it private to the account Machina runs
+under (for example `chmod 700`). This limits the exposure; it does not fix the
+advisories, which stay open until chromadb publishes a fixed release.
 
 ## Hardening Checklist
 

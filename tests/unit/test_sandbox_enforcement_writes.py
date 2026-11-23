@@ -108,6 +108,24 @@ class TestIdempotentWritesTouchNothingInSandbox:
         conn._run_on_file_thread.assert_not_called()  # the re-read and the write run there
 
     @pytest.mark.asyncio
+    async def test_generic_cmms_create_touches_no_file(self) -> None:
+        from machina.connectors.cmms.generic import GenericCmmsConnector
+
+        conn = MagicMock()
+        with pytest.raises(SandboxViolationError):
+            await GenericCmmsConnector.create_work_order(conn, MagicMock())
+        conn._run_on_file_thread.assert_not_called()  # the ID check and the write run there
+
+    @pytest.mark.asyncio
+    async def test_generic_cmms_update_touches_no_file(self) -> None:
+        from machina.connectors.cmms.generic import GenericCmmsConnector
+
+        conn = MagicMock()
+        with pytest.raises(SandboxViolationError):
+            await GenericCmmsConnector.update_work_order(conn, "WO-1", description="x")
+        conn._run_on_file_thread.assert_not_called()  # the change and the write run there
+
+    @pytest.mark.asyncio
     async def test_sql_create_runs_no_query(self) -> None:
         from machina.connectors.sql.generic import GenericSqlConnector
 
