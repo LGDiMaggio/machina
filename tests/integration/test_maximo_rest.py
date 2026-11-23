@@ -3101,3 +3101,72 @@ class TestTransportErrors:
         )
         assert "4711" not in str(info.value)
         assert len(httpx_mock.get_requests(method="POST")) == 1
+
+
+class TestRetryWarningsNameNoRecord:
+    """Retry warnings log the endpoint: never a rest id or a next-page query."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _sleep(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("machina.connectors.cmms.retry.asyncio.sleep", _sleep)
+
+    @staticmethod
+    def _retries(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [e for e in logs if str(e["event"]).startswith("http_")]
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_update_and_its_read_back(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        _add_lookup(httpx_mock, "WO-001", {"siteid": "HILLTOP", "href": _INTERNAL_URI})
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=429)
+        httpx_mock.add_response(method="POST", url=_UPDATE_URL, status_code=204)
+        httpx_mock.add_response(method="GET", url=_UPDATE_URL, status_code=429)
+        _add_reread(httpx_mock, "CLOSE")
+
+        with structlog.testing.capture_logs() as logs:
+            await connector.update_work_order("WO-001", status=WorkOrderStatus.CLOSED)
+
+        assert [(e["method"], e["url"]) for e in self._retries(logs)] == [
+            ("POST", f"{OSLC}/os/mxwo/<resource id>"),
+            ("GET", f"{OSLC}/os/mxwo/<resource id>"),
+        ]
+        assert _REST_ID not in repr(self._retries(logs))
+        assert len(httpx_mock.get_requests(method="POST")) == 2  # retry count unchanged
+
+    @pytest.mark.asyncio
+    async def test_a_retried_next_page_logs_no_query(
+        self, httpx_mock, connector: MaximoConnector
+    ) -> None:
+        """Maximo's nextPage link repeats the whole query, filter values included."""
+        await _connect(httpx_mock, connector)
+        next_href = (
+            f"{OSLC}/os/mxasset?pageno=2&oslc.pageSize=100&oslc.where=location%3D%22BLD-7%22"
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=_oslc_url("mxasset"),
+            json={
+                "member": [{"assetnum": "A1"}],
+                "responseInfo": {"nextPage": {"href": next_href}},
+            },
+        )
+        httpx_mock.add_exception(httpx.ReadTimeout("timed out"), method="GET", url=next_href)
+        httpx_mock.add_response(method="GET", url=next_href, json={"member": [{"assetnum": "A2"}]})
+
+        with structlog.testing.capture_logs() as logs:
+            assets = await connector.read_assets()
+
+        assert [a.id for a in assets] == ["A1", "A2"]
+        (retry,) = self._retries(logs)
+        assert (retry["event"], retry["url"], retry["error_type"]) == (
+            "http_network_retry",
+            f"{OSLC}/os/mxasset",
+            "ReadTimeout",
+        )
+        for secret in ("BLD-7", "pageno", "oslc.where"):
+            assert secret not in repr(retry)

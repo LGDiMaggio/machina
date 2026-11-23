@@ -402,10 +402,20 @@ default.
     redaction: for example urllib3 and the Google API client at DEBUG.
   - Machina's own retry warnings (`http_rate_limit_retry`,
     `http_network_retry`, `http_retry_after_exceeds_max_backoff`) log the
-    request URL. They name UpKeep's listed-part requests as
-    `/api/v2/parts/<listed part>`. Other URLs are logged as sent: a record
-    path with its ID, or a Maximo or SAP PM next-page link with its query.
-    First-page filters, sent as query parameters, are not in that URL.
+    method, the status or the error's type (and, for a retry, the attempt),
+    and the request URL reduced to its scheme, host, port and path. The query
+    (filter values, page tokens, and the whole query a Maximo or SAP PM
+    next-page link repeats), user info and fragment are left out, an OData
+    key predicate is logged as `(<key>)`, and a matrix parameter's value
+    (such as a `;jsessionid=`) as `<value>`. A request for one record logs
+    its endpoint, not the record: `<host>/api/v2/assets/<asset>`,
+    `<host>/api/v2/work-orders/<work order>` and
+    `<host>/api/v2/parts/<listed part>` for UpKeep,
+    `<host>/maximo/oslc/os/<object structure>/<resource id>` for Maximo, and
+    `MaintenanceOrder(<key>)` for SAP PM. A network error is logged by its
+    type only, since httpx's message can name the address it could not
+    reach. A record ID in a plain path segment of a link the CMMS sends back
+    (rather than one the connector builds) is not recognized.
 - The Telegram bot token is kept out of log output:
   - The Bot API carries the token in every URL. httpx logs request URLs at INFO, and python-telegram-bot logs its API URLs at DEBUG. `TelegramConnector` replaces its token with `<redacted>` in the records of those loggers. The redaction is in place from `connect()` until the process ends.
   - A token the server rejects surfaces as `ConnectorAuthError("Telegram rejected the bot token")`, without python-telegram-bot's message, which contains the token.

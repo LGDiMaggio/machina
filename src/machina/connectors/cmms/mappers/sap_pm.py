@@ -10,7 +10,7 @@ private to this module.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from machina.domain.asset import Asset, AssetType, Criticality
 from machina.domain.maintenance_plan import Interval, MaintenancePlan
@@ -22,12 +22,16 @@ from machina.domain.work_order import (
     WorkOrderType,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 __all__ = [
     "REVERSE_SAP_STATUS",
     "SAP_EQUIP_CATEGORY_MAP",
     "SAP_ORDER_TYPE_MAP",
     "SAP_PRIORITY_MAP",
     "SAP_STATUS_MAP",
+    "SapFieldError",
     "order_etag",
     "parse_asset",
     "parse_maintenance_plan",
@@ -88,6 +92,90 @@ SAP_EQUIP_CATEGORY_MAP: dict[str, AssetType] = {
     "S": AssetType.SAFETY,  # Safety
 }
 
+# The properties each parse function maps to a domain field; the others go to
+# the entity's ``metadata`` (see :func:`_metadata`).
+_ASSET_PROPERTIES = frozenset(
+    {
+        "Equipment",
+        "EquipmentNumber",
+        "EquipmentName",
+        "Description",
+        "EquipmentCategory",
+        "FunctionalLocation",
+        "Manufacturer",
+        "ManufacturerPartNmbr",
+        "ModelNumber",
+        "SerialNumber",
+        "ManufacturerSerialNumber",
+        "ABCIndicator",
+        "SuperordinateEquipment",
+        "EquipmentClassCode",
+    }
+)
+_WORK_ORDER_PROPERTIES = frozenset(
+    {
+        "MaintenanceOrder",
+        "MaintenanceOrderNumber",
+        "MaintenanceOrderType",
+        "MaintPriority",
+        "SystemStatusText",
+        "Equipment",
+        "EquipmentNumber",
+        "MaintenanceOrderDesc",
+        "Description",
+        "MaintOrdPersonResponsible",
+        "MaintenanceActivityType",
+        "MaintenanceCause",
+        "MaintNotifCause",
+        "CreationDate",
+        "MaintOrdBasicStartDate",
+        "LastChangeDateTime",
+        "MaintOrdBasicEndDate",
+    }
+)
+_SPARE_PART_PROPERTIES = frozenset(
+    {
+        "Material",
+        "MaterialNumber",
+        "MaterialDescription",
+        "Description",
+        "AvailableQuantity",
+        "Quantity",
+        "StandardPrice",
+        "Price",
+        "StorageLocation",
+        "Plant",
+    }
+)
+
+# OData V2 reserves the names that start with this for its own members, which
+# describe an entry's transport, not the record: ``__metadata`` (``uri``,
+# ``type``, ``etag``), a deferred navigation property's ``__deferred``
+# (``uri``), an expanded collection's ``__next`` and ``__count``. A ``uri`` or
+# link names the host and service path the SAP gateway sees itself on, often
+# an internal one.
+_ODATA_V2_PREFIX = "__"
+
+
+class SapFieldError(ValueError):
+    """A SAP property holds a value the mapper cannot read as its domain field.
+
+    Raised for a number, a date, or text: an OData V2 ``Edm.Decimal`` arrives
+    as text with its decimals (``"12.000"``), which is not a whole number, and
+    an object where a field takes text is not read as its text. The message
+    names the property, never its value, and the error is raised with no
+    exception chained to it, since the conversion's own error quotes the value.
+
+    Attributes:
+        field: The SAP property, e.g. ``"AvailableQuantity"``.
+        expected: What it should hold, e.g. ``"a whole number"``.
+    """
+
+    def __init__(self, field: str, expected: str) -> None:
+        super().__init__(f"SAP property {field!r} is not {expected}")
+        self.field = field
+        self.expected = expected
+
 
 # ---------------------------------------------------------------------------
 # Public parse functions
@@ -95,40 +183,28 @@ SAP_EQUIP_CATEGORY_MAP: dict[str, AssetType] = {
 
 
 def parse_asset(data: dict[str, Any]) -> Asset:
-    """Convert SAP Equipment OData entity to a Machina :class:`Asset`."""
+    """Convert SAP Equipment OData entity to a Machina :class:`Asset`.
+
+    Properties no field takes go to ``metadata``, except OData transport
+    members (see :func:`_metadata`).
+
+    Raises:
+        SapFieldError: If a property a text field takes holds an object or a
+            list (see :func:`_text`).
+    """
     cat = str(data.get("EquipmentCategory", ""))
     return Asset(
-        id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        name=str(data.get("EquipmentName", data.get("Description", ""))),
+        id=_text(data, ("Equipment", "EquipmentNumber")),
+        name=_text(data, ("EquipmentName", "Description")),
         type=SAP_EQUIP_CATEGORY_MAP.get(cat, AssetType.ROTATING_EQUIPMENT),
-        location=str(data.get("FunctionalLocation", "")),
-        manufacturer=str(data.get("Manufacturer", data.get("ManufacturerPartNmbr", ""))),
-        model=str(data.get("ModelNumber", "")),
-        serial_number=str(data.get("SerialNumber", data.get("ManufacturerSerialNumber", ""))),
+        location=_text(data, ("FunctionalLocation",)),
+        manufacturer=_text(data, ("Manufacturer", "ManufacturerPartNmbr")),
+        model=_text(data, ("ModelNumber",)),
+        serial_number=_text(data, ("SerialNumber", "ManufacturerSerialNumber")),
         criticality=_sap_criticality(data.get("ABCIndicator", "")),
         parent=data.get("SuperordinateEquipment") or None,
         equipment_class_code=data.get("EquipmentClassCode") or None,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "Equipment",
-                "EquipmentNumber",
-                "EquipmentName",
-                "Description",
-                "EquipmentCategory",
-                "FunctionalLocation",
-                "Manufacturer",
-                "ManufacturerPartNmbr",
-                "ModelNumber",
-                "SerialNumber",
-                "ManufacturerSerialNumber",
-                "ABCIndicator",
-                "SuperordinateEquipment",
-                "EquipmentClassCode",
-            }
-        },
+        metadata=_metadata(data, _ASSET_PROPERTIES),
     )
 
 
@@ -136,7 +212,15 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     """Convert SAP MaintenanceOrder OData entity to a :class:`WorkOrder`.
 
     The status is mapped from ``SystemStatusText`` — the order's active
-    system statuses as one line (see :func:`system_status_codes`).
+    system statuses as one line (see :func:`system_status_codes`). Properties
+    no field takes go to ``metadata``, except OData transport members (see
+    :func:`_metadata`).
+
+    Raises:
+        SapFieldError: If a date property holds a value
+            :func:`parse_sap_datetime` cannot read (a ``/Date(...)/`` that is
+            not a number of milliseconds a date can hold, a number), or a
+            property a text field takes holds an object or a list.
     """
     raw_type = str(data.get("MaintenanceOrderType", ""))
     wo_type = SAP_ORDER_TYPE_MAP.get(raw_type, WorkOrderType.CORRECTIVE)
@@ -147,45 +231,22 @@ def parse_work_order(data: dict[str, Any]) -> WorkOrder:
     status = _map_sap_status(str(data.get("SystemStatusText") or ""))
 
     now = datetime.now(tz=UTC)
-    created = data.get("CreationDate", data.get("MaintOrdBasicStartDate", ""))
-    updated = data.get("LastChangeDateTime", data.get("MaintOrdBasicEndDate", ""))
+    created_at = _date(data, ("CreationDate", "MaintOrdBasicStartDate"), now)
+    updated_at = _date(data, ("LastChangeDateTime", "MaintOrdBasicEndDate"), now)
 
     return WorkOrder(
-        id=str(data.get("MaintenanceOrder", data.get("MaintenanceOrderNumber", ""))),
+        id=_text(data, ("MaintenanceOrder", "MaintenanceOrderNumber")),
         type=wo_type,
         priority=priority,
         status=status,
-        asset_id=str(data.get("Equipment", data.get("EquipmentNumber", ""))),
-        description=str(data.get("MaintenanceOrderDesc", data.get("Description", ""))),
+        asset_id=_text(data, ("Equipment", "EquipmentNumber")),
+        description=_text(data, ("MaintenanceOrderDesc", "Description")),
         assigned_to=data.get("MaintOrdPersonResponsible") or None,
         failure_mode=data.get("MaintenanceActivityType") or None,
         failure_cause=data.get("MaintenanceCause") or data.get("MaintNotifCause") or None,
-        created_at=parse_sap_datetime(created) if created else now,
-        updated_at=parse_sap_datetime(updated) if updated else now,
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "MaintenanceOrder",
-                "MaintenanceOrderNumber",
-                "MaintenanceOrderType",
-                "MaintPriority",
-                "SystemStatusText",
-                "Equipment",
-                "EquipmentNumber",
-                "MaintenanceOrderDesc",
-                "Description",
-                "MaintOrdPersonResponsible",
-                "MaintenanceActivityType",
-                "MaintenanceCause",
-                "MaintNotifCause",
-                "CreationDate",
-                "MaintOrdBasicStartDate",
-                "LastChangeDateTime",
-                "MaintOrdBasicEndDate",
-            }
-        },
+        created_at=created_at,
+        updated_at=updated_at,
+        metadata=_metadata(data, _WORK_ORDER_PROPERTIES),
     )
 
 
@@ -221,43 +282,44 @@ def order_etag(data: dict[str, Any]) -> str | None:
 
 
 def parse_spare_part(data: dict[str, Any]) -> SparePart:
-    """Convert SAP material / BOM component data to a :class:`SparePart`."""
+    """Convert SAP material / BOM component data to a :class:`SparePart`.
+
+    Properties no field takes go to ``metadata``, except OData transport
+    members (see :func:`_metadata`).
+
+    Raises:
+        SapFieldError: If the quantity is text that is not a whole number
+            (an OData V2 ``Edm.Decimal`` such as ``"12.000"`` included) or a
+            value that is neither text nor a number, the price is not a
+            number, or a property a text field takes holds an object or a
+            list. A JSON number is cut to a whole number by ``int()``.
+    """
     return SparePart(
-        sku=str(data.get("Material", data.get("MaterialNumber", ""))),
-        name=str(data.get("MaterialDescription", data.get("Description", ""))),
-        stock_quantity=int(data.get("AvailableQuantity", data.get("Quantity", 0))),
-        unit_cost=float(data.get("StandardPrice", data.get("Price", 0.0))),
-        warehouse_location=str(data.get("StorageLocation", data.get("Plant", ""))),
-        metadata={
-            k: v
-            for k, v in data.items()
-            if k
-            not in {
-                "Material",
-                "MaterialNumber",
-                "MaterialDescription",
-                "Description",
-                "AvailableQuantity",
-                "Quantity",
-                "StandardPrice",
-                "Price",
-                "StorageLocation",
-                "Plant",
-            }
-        },
+        sku=_text(data, ("Material", "MaterialNumber")),
+        name=_text(data, ("MaterialDescription", "Description")),
+        stock_quantity=_convert(data, ("AvailableQuantity", "Quantity"), 0, int, _WHOLE_NUMBER),
+        unit_cost=_convert(data, ("StandardPrice", "Price"), 0.0, float, "a number"),
+        warehouse_location=_text(data, ("StorageLocation", "Plant")),
+        metadata=_metadata(data, _SPARE_PART_PROPERTIES),
     )
 
 
 def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
-    """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`."""
-    cycle_val = int(data.get("MaintenancePlanCycleValue", data.get("CycleValue", 0)))
+    """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`.
+
+    Raises:
+        SapFieldError: If the cycle value is text that is not a whole
+            number or a value that is neither text nor a number, or a
+            property a text field takes holds an object or a list.
+    """
+    cycle_val = _convert(data, ("MaintenancePlanCycleValue", "CycleValue"), 0, int, _WHOLE_NUMBER)
     cycle_unit = str(data.get("MaintenancePlanCycleUnit", data.get("CycleUnit", "DAY")))
     interval = _sap_cycle_to_interval(cycle_val, cycle_unit)
 
     return MaintenancePlan(
-        id=str(data.get("MaintenancePlan", data.get("MaintenancePlanNumber", ""))),
-        asset_id=str(data.get("Equipment", "")),
-        name=str(data.get("MaintenancePlanDesc", data.get("Description", ""))),
+        id=_text(data, ("MaintenancePlan", "MaintenancePlanNumber")),
+        asset_id=_text(data, ("Equipment",)),
+        name=_text(data, ("MaintenancePlanDesc", "Description")),
         interval=interval,
         active=str(data.get("MaintenancePlanStatus", "")).upper() != "INAC",
     )
@@ -372,3 +434,130 @@ def _sap_cycle_to_interval(value: int, unit: str) -> Interval:
         return Interval(hours=value)
     # Default to days
     return Interval(days=value)
+
+
+_T = TypeVar("_T")
+
+_WHOLE_NUMBER = "a whole number"
+
+
+def _first(data: dict[str, Any], properties: tuple[str, ...], default: Any) -> tuple[str, Any]:
+    """Return the first of ``properties`` the record holds and its value.
+
+    The first property and ``default`` when it holds none of them.
+    """
+    for name in properties:
+        if name in data:
+            return name, data[name]
+    return properties[0], default
+
+
+def _text(data: dict[str, Any], properties: tuple[str, ...]) -> str:
+    """Return the first of ``properties`` the record holds as text, ``""`` if none.
+
+    A number or boolean becomes its text, as before. An object or a list is
+    refused: as text it would carry whatever it holds into the entity (a
+    deferred navigation link's ``uri``, say) instead of a value.
+
+    Raises:
+        SapFieldError: If the value is an object or a list.
+    """
+    name, value = _first(data, properties, "")
+    if isinstance(value, dict | list):
+        raise SapFieldError(name, "text")
+    return str(value)
+
+
+def _convert(
+    data: dict[str, Any],
+    properties: tuple[str, ...],
+    default: Any,
+    convert: Callable[[Any], _T],
+    expected: str,
+) -> _T:
+    """Convert the first of ``properties`` the record holds, ``default`` if none.
+
+    Raises:
+        SapFieldError: If ``convert`` cannot convert the value, naming the
+            property and ``expected``.
+    """
+    name, value = _first(data, properties, default)
+    try:
+        return convert(value)
+    # int() or float() of text that is not a number, of a value that is not
+    # text or a number, or int() of an infinite float.
+    except (ValueError, TypeError, ArithmeticError):
+        pass
+    # Raised outside the except block: the conversion's message quotes the
+    # value, and `from None` would still keep it as __context__.
+    raise SapFieldError(name, expected)
+
+
+def _date(data: dict[str, Any], properties: tuple[str, ...], default: datetime) -> datetime:
+    """Parse the first of ``properties`` the record holds as a SAP date.
+
+    ``default`` when it holds none of them or an empty value.
+
+    Raises:
+        SapFieldError: If :func:`parse_sap_datetime` cannot read the value.
+    """
+    name, value = _first(data, properties, None)
+    if not value:
+        return default
+    try:
+        return parse_sap_datetime(value)
+    # A value that is not text has no startswith(); a /Date(...)/ that is not
+    # an integer fails int(), and one out of range fails fromtimestamp(), with
+    # OverflowError, ValueError or (on Windows) OSError.
+    except (ValueError, TypeError, AttributeError, ArithmeticError, OSError):
+        pass
+    # Raised outside the except block, as in _convert.
+    raise SapFieldError(name, "a date")
+
+
+def _is_transport(name: str) -> bool:
+    """Whether a member of an OData JSON object is transport, not a property.
+
+    Every OData V2 member (a name that starts with ``__``, see
+    :data:`_ODATA_V2_PREFIX`), and every OData V4 annotation: a name with an
+    ``@``, such as ``@odata.etag``, ``@odata.id`` or a navigation property's
+    ``to_Item@odata.navigationLink``. A property name cannot contain one.
+    """
+    return name.startswith(_ODATA_V2_PREFIX) or "@" in name
+
+
+def _carries_transport(value: Any) -> bool:
+    """Whether a value holds an OData JSON object with a transport member.
+
+    A navigation property is one: deferred, its value is
+    ``{"__deferred": {"uri": ...}}``; expanded, an entry or a ``results`` list
+    of entries, each with its own ``__metadata``. Walked without recursion, so
+    a deeply nested value cannot exhaust the stack.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if any(_is_transport(str(name)) for name in item):
+                return True
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
+
+
+def _metadata(data: dict[str, Any], mapped: frozenset[str]) -> dict[str, Any]:
+    """Return the record's other properties, for an entity's ``metadata``.
+
+    Kept: each property not in ``mapped``, as SAP returned it. Left out: the
+    OData transport members (see :func:`_is_transport`) and every value that
+    carries one (see :func:`_carries_transport`), whose ``uri`` or link would
+    take the SAP gateway's host and service path to the model and MCP
+    clients. The record itself is not changed: :func:`order_etag` still reads
+    the ETag from its ``__metadata``.
+    """
+    return {
+        name: value
+        for name, value in data.items()
+        if name not in mapped and not _is_transport(name) and not _carries_transport(value)
+    }
