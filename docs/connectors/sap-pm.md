@@ -201,6 +201,38 @@ with no filter, work without it. When `bom_equipment_field` is set, an
 (`MaintOrdBasicStartDate`), and `failure_cause` stays empty for orders read
 from it.
 
+The properties no field takes are kept in the entity's `metadata`
+(`Asset`, `WorkOrder`, `SparePart`) as SAP returned them, except the OData
+transport members:
+
+- every OData V2 member, a name that starts with `__`: `__metadata`, with its
+  `uri`, `type` and `etag`;
+- a value that holds such a member at any depth: a navigation property such as
+  `to_Item`, deferred (`{"__deferred": {"uri": ...}}`) or expanded (an entry
+  with its own `__metadata`, or a collection with its `__next` link);
+- every OData V4 annotation: a name with an `@`, such as `@odata.etag`,
+  `@odata.id` or `to_Item@odata.navigationLink`.
+
+A `uri` or link names the host and service path the SAP gateway sees itself
+on, often an internal one, and `metadata` reaches the agent's model and MCP
+clients (the asset and work-order resources). The connector still reads an
+order's ETag from the record SAP returned, for the status function imports
+(see [Work-order status](#work-order-status)).
+
+A record refuses the read (see
+[Records that cannot be mapped](#records-that-cannot-be-mapped)) when:
+
+- a quantity (`AvailableQuantity`, `Quantity`) or a cycle value
+  (`MaintenancePlanCycleValue`, `CycleValue`) is text that is not a whole
+  number, such as `"12.000"`, or a value that is neither text nor a number. A
+  JSON number is cut to a whole number, as before: `12.7` reads as `12`;
+- a price (`StandardPrice`, `Price`) is not a number or numeric text;
+- a date is a `/Date(...)/` that is not a whole number of milliseconds or is
+  out of range, or is not text. Other text that is not a date reads as the
+  current time, as before;
+- a property mapped to a text field (an ID, a name, a description, a
+  location) holds an object or a list. A number or a boolean becomes its text.
+
 ## Work-order status
 
 `API_MAINTENANCEORDER` has no property that holds one status. It lists an
@@ -325,8 +357,7 @@ HTTP status or a transport failure names the connector, the operation and the
 status or the kind of failure, never the URL, a credential, a token or the
 response body; the original exception is chained as `__cause__`.
 
-This does not cover everything the connectors return or log. An error raised
-while mapping a record that was read can quote a value from it. A raw vendor
+This does not cover everything the connectors return or log. A raw vendor
 MCP tool returns the body of a 2xx answer as sent, which can name internal
 URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings log the
 request URL.
@@ -339,6 +370,7 @@ request URL.
 | Other transport failure | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: ConnectError` |
 | Malformed `url` | `ConnectorConfigError` | `SAP PM health check failed: invalid URL (check 'url' and the endpoint paths)` |
 | 2xx body that is not JSON (an HTML login page from a proxy, say) | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: response is not JSON` |
+| A record that cannot be mapped | `ConnectorSchemaError` | `SAP PM returned a BillOfMaterialItem record that cannot be mapped (AvailableQuantity is not a whole number) — refusing to return a partial result` |
 
 A failed create or update also says whether the CMMS may have applied it. A
 write request is not sent again once it may have reached the CMMS: only a 429,
@@ -366,10 +398,43 @@ when the status change was refused, `; the later status change request was
 not sent to the CMMS` when it failed before its request, or `; the later
 status change may also have been applied` when its outcome is unknown.
 
+### Records that cannot be mapped
+
+Every read maps all the records SAP returned or none of them: assets, work
+orders (the maintenance history included), spare parts and maintenance plans,
+and the order a status change or an update reads. A record that cannot be
+mapped refuses the whole read with `ConnectorSchemaError`. Returning the
+others would present part of the result as all of it. A record cannot be
+mapped when:
+
+- a property holds a value its field cannot take (see
+  [Entity Mapping](#entity-mapping) for the rules). The message names the
+  property and what it should hold, as in
+  `(AvailableQuantity is not a whole number)` or `(Equipment is not text)`;
+- the domain model rejects a value: the message names the error type and the
+  Machina fields rejected, as in `(ValidationError: assigned_to)`;
+- the record is not a JSON object: the message names the error type, as in
+  `(AttributeError)`.
+
+Neither the message nor the `sap_pm_record_refused` warning repeats a value
+from SAP. The warning adds the operation, the entity set, the record's
+position in the read, the asset the read is for where there is one, and,
+where known, the property or fields. No exception
+is chained to the error, since the conversion's or the model's own error
+quotes the value.
+
+In a write, the error keeps the write's own wording. When the order read
+before a status function import cannot be mapped, the message ends with
+`The write request was not sent to the CMMS.`, and after a field PATCH it
+says the PATCH stays applied. When a create response or the read-back after
+an update cannot be mapped, the message says the outcome is unknown or the
+update was applied (see above).
+
 ## Known Limitations
 
 - **OData v2 vs v4**: The connector handles both response formats (`d.results` and `value`). Your SAP system may use either depending on the service version.
-- **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`.
+- **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`. OData transport members are left out (see [Entity Mapping](#entity-mapping)).
+- **Decimal quantities**: OData V2 sends an `Edm.Decimal` as text with its decimals, such as `"12.000"`. A quantity or cycle value sent that way is not read as a whole number: the read is refused with `ConnectorSchemaError` (see [Records that cannot be mapped](#records-that-cannot-be-mapped)). OData V4 sends it as a JSON number, which is cut to a whole number (`0.5` reads as `0`).
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Status filters**: applied to the orders read, not on the server (see [Work-order status](#work-order-status)). Combine `status` with `asset_id` on a large system.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.
@@ -379,3 +444,5 @@ status change may also have been applied` when its outcome is unknown.
 ## API Reference
 
 ::: machina.connectors.cmms.sap_pm.SapPmConnector
+
+::: machina.connectors.cmms.mappers.sap_pm.SapFieldError
