@@ -520,9 +520,69 @@ class TestNextPageLinkOrigin:
 
         assert type(info.value) is ConnectorError
         assert str(info.value) == _NO_USABLE_URL
+        # The parsers' own messages can quote the link; none is kept, not even
+        # as implicit context.
+        assert info.value.__cause__ is None
+        assert info.value.__context__ is None
         assert len(httpx_mock.get_requests()) == 2
         for fragment in _LINK_SECRETS:
             assert fragment not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_link_on_a_later_page_is_checked_against_that_page(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_EQUIPMENT", "Equipment"),
+            json=_page("Equipment?$skiptoken=100", v4=True),
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{_EQUIPMENT_PAGE}?$skiptoken=100",
+            json={
+                "value": [{"Equipment": "A2", "EquipmentName": "Asset 2"}],
+                "@odata.nextLink": "https://evil.example.net/leakpath?$skiptoken=leaktoken",
+            },
+        )
+        with pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+
+        assert str(info.value) == _REFUSED_ORIGIN
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 3
+        assert all(r.url.host == "sap.example.com" for r in requests)
+
+    @pytest.mark.asyncio
+    async def test_relative_link_resolves_against_the_page_that_returned_it(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """Not against the first request's URL, which sits on another path here."""
+        other_path = f"{BASE}/API_EQUIPMENT/v2/Equipment"
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_EQUIPMENT", "Equipment"),
+            json=_page(f"{other_path}?$skiptoken=100", v4=True),
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{other_path}?$skiptoken=100",
+            json={
+                "value": [{"Equipment": "A2", "EquipmentName": "Asset 2"}],
+                "@odata.nextLink": "Equipment?$skiptoken=200",
+            },
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{other_path}?$skiptoken=200",
+            json={"value": [{"Equipment": "A3", "EquipmentName": "Asset 3"}]},
+        )
+        assets = await connector.read_assets()
+
+        assert [a.id for a in assets] == ["A1", "A2", "A3"]
+        assert httpx_mock.get_requests()[-1].url == httpx.URL(f"{other_path}?$skiptoken=200")
 
     @pytest.mark.asyncio
     async def test_relative_v4_link_is_resolved_against_the_page(
