@@ -422,6 +422,21 @@ class TestToolResultEmptiness:
         assert tool_result_emptiness('{"query": "pump", "results": []}') is not None
         assert tool_result_emptiness('{"query": "pump", "results": [{"id": 1}]}') is None
 
+    def test_spare_parts_lookup_judged_on_its_parts(self) -> None:
+        # check_spare_parts wraps its parts with a total and a truncated flag,
+        # which keep the dict truthy when the lookup matched nothing.
+        empty = '{"parts": [], "total": 0, "truncated": false}'
+        assert tool_result_emptiness(empty) == "'parts' list is empty"
+        found = '{"parts": [{"sku": "SKF-6310"}], "total": 1, "truncated": false}'
+        assert tool_result_emptiness(found) is None
+        capped = (
+            '{"parts": [{"sku": "SKF-6310"}], "total": 900, "truncated": true, '
+            '"note": "Showing 50 of 900 matching spare parts: the list is incomplete."}'
+        )
+        assert tool_result_emptiness(capped) is None
+        refused = '{"error": "This CMMS cannot filter spare parts by asset_id"}'
+        assert tool_result_emptiness(refused) is not None
+
     def test_dict_without_list_payload_uses_truthiness(self) -> None:
         assert tool_result_emptiness('{"status": "ok"}') is None
 
