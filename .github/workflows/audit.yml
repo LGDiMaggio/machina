@@ -233,9 +233,69 @@ jobs:
           path: audit-results/
           if-no-files-found: error
 
+  constraints:
+    name: Vulnerability audit (committed constraints)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip "pip-audit==2.10.1"
+
+      # The versions deploy/docker/constraints.txt pins for builds with
+      # MACHINA_CONSTRAINTS=constraints.txt, as committed: the fresh
+      # resolutions above never see a pin they no longer pick. Nothing is
+      # resolved or installed (--no-deps --disable-pip). pins.py drops the
+      # environment markers, because pip-audit skips a pin whose marker this
+      # runner does not match, and writes a package pinned at several versions
+      # across layer files, because pip-audit refuses a file that pins one
+      # twice. pip-audit's exit code is only logged, as in the security leg;
+      # a layer it could not audit leaves no JSON, which the record step
+      # reports as an error.
+      - name: Audit the committed pins
+        run: |
+          python scripts/audit/pins.py deploy/docker/constraints.txt --out "$RUNNER_TEMP/pins"
+          for layer in "$RUNNER_TEMP"/pins/layer-*.txt; do
+            pip-audit -r "$layer" --no-deps --disable-pip -f json -o "${layer%.txt}.json" \
+              || echo "pip-audit (${layer##*/}) exited with status $?"
+          done
+
+      # An error unless every pinned version is in an audit, so a failed split
+      # or a skipped pin is never reported as a clean file.
+      - name: Record the result
+        if: always()
+        run: |
+          args=()
+          for layer in "$RUNNER_TEMP"/pins/layer-*.txt; do
+            args+=(--audit "$(basename "$layer" .txt)=${layer%.txt}.json")
+          done
+          python scripts/audit/record.py security --variant constraints \
+            --constraints deploy/docker/constraints.txt "${args[@]}" \
+            --out audit-results/result.json
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: leg-constraints
+          path: audit-results/
+          if-no-files-found: error
+
   report:
     name: Audit report
-    needs: [suite, package-smoke, security]
+    needs: [suite, package-smoke, security, constraints]
     # Runs after failed legs too: a leg without a result makes it incomplete.
     if: always()
     runs-on: ubuntu-24.04
@@ -264,7 +324,7 @@ jobs:
           EXPECTED_LEGS: >-
             newest-py3.11 newest-py3.12 newest-py3.13 newest-py3.14
             floors-py3.11 windows-py3.12 ubuntu-26.04-py3.12 heavy-extras-py3.12
-            package-smoke security
+            package-smoke security constraints
         run: |
           py="$(command -v python || command -v python3)"
           "$py" scripts/audit/report.py --results audit-results \

@@ -1100,6 +1100,7 @@ class MaximoConnector:
                     url,
                     headers=self._headers(),
                     params={"lean": "1"} if self._lean else None,
+                    log_url=self._resource_log_url(object_structure),
                 )
             if resp.status_code == 401:
                 raise ConnectorAuthError("Maximo authentication failed")
@@ -1179,4 +1180,14 @@ class MaximoConnector:
                     headers=headers,
                     params={"lean": "1"} if self._lean else None,
                     json=attributes,
+                    log_url=self._resource_log_url(object_structure),
                 )
+
+    def _resource_log_url(self, object_structure: str) -> str:
+        """What a retry warning logs for one resource's URL: its rest id replaced.
+
+        A rest id encodes the record's key (``_`` plus the base64 of, e.g.,
+        ``WO-001/HILLTOP``). ``object_structure`` has been checked by
+        :func:`_oslc_resource_path`.
+        """
+        return f"{self.url}/maximo/oslc/os/{object_structure}/<resource id>"
