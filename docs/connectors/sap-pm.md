@@ -223,9 +223,12 @@ A record refuses the read (see
 [Records that cannot be mapped](#records-that-cannot-be-mapped)) when:
 
 - a quantity (`AvailableQuantity`, `Quantity`) or a cycle value
-  (`MaintenancePlanCycleValue`, `CycleValue`) is text that is not a whole
-  number, such as `"12.000"`, or a value that is neither text nor a number. A
-  JSON number is cut to a whole number, as before: `12.7` reads as `12`;
+  (`MaintenancePlanCycleValue`, `CycleValue`) is not a whole number: a
+  fraction such as `"12.5"`, `12.7` or `0.5` (never cut to a whole number), a
+  boolean, NaN, infinity, or a value that is neither a number nor numeric
+  text. A whole number of more than 12 digits is refused too. A whole number
+  reads exactly in either OData representation: V2 text such as `"12"` or
+  `"12.000"`, and V4 numbers such as `12` or `12.0`, all read as `12`;
 - a price (`StandardPrice`, `Price`) is not a number or numeric text;
 - a date is a `/Date(...)/` that is not a whole number of milliseconds or is
   out of range, or is not text. Other text that is not a date reads as the
@@ -434,7 +437,7 @@ update was applied (see above).
 
 - **OData v2 vs v4**: The connector handles both response formats (`d.results` and `value`). Your SAP system may use either depending on the service version.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`. OData transport members are left out (see [Entity Mapping](#entity-mapping)).
-- **Decimal quantities**: OData V2 sends an `Edm.Decimal` as text with its decimals, such as `"12.000"`. A quantity or cycle value sent that way is not read as a whole number: the read is refused with `ConnectorSchemaError` (see [Records that cannot be mapped](#records-that-cannot-be-mapped)). OData V4 sends it as a JSON number, which is cut to a whole number (`0.5` reads as `0`).
+- **Decimal quantities**: OData V2 sends an `Edm.Decimal` as text with its decimals (`"12.000"`), OData V4 as a JSON number (`12.0`). A quantity or cycle value is read exactly: a whole number in either form is accepted, and a fraction refuses the read with `ConnectorSchemaError` instead of being cut (see [Records that cannot be mapped](#records-that-cannot-be-mapped)). Whole numbers are limited to 12 digits, above the 10 integer digits typical of SAP quantity fields; below that a V4 number still holds three decimal places, so a fractional quantity cannot reach the mapper as a whole number.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Status filters**: applied to the orders read, not on the server (see [Work-order status](#work-order-status)). Combine `status` with `asset_id` on a large system.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.

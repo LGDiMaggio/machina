@@ -441,8 +441,9 @@ _T = TypeVar("_T")
 _WHOLE_NUMBER = "a whole number"
 
 # A quantity or cycle value has at most this many digits. SAP quantity fields
-# hold at most 10 integer digits, and below 10**12 a float still resolves three
-# decimals, so a fractional OData V4 quantity cannot arrive as a whole number.
+# typically hold at most 10 integer digits (13 digits, 3 of them decimals), and
+# below 10**12 a float still resolves three decimals, so a fractional OData V4
+# quantity cannot arrive as a whole number.
 _MAX_WHOLE_NUMBER_DIGITS = 12
 _BOUNDED_WHOLE_NUMBER = f"a whole number of at most {_MAX_WHOLE_NUMBER_DIGITS} digits"
 
