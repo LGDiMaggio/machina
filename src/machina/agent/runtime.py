@@ -46,7 +46,7 @@ from machina.agent.prompts import (
 )
 from machina.agent.spare_parts import bounded_spare_parts
 from machina.agent.tool_errors import read_tool_error
-from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
+from machina.connectors.base import set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
@@ -55,6 +55,7 @@ from machina.exceptions import ConnectorUnsupportedFilterError, LLMError, Machin
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
+from machina.runtime import _DegradedPrimaryCmms, _PrimaryCmmsRegistry, _resolve_primary_cmms
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
@@ -684,8 +685,10 @@ class Agent:
         else:
             self._llm = llm
 
-        # Connector registry
-        self._registry = ConnectorRegistry()
+        # Connector registry. It routes by capability like a plain registry
+        # until from_config scopes its CMMS lookups to the primary CMMS; the
+        # workflow engine shares this object, so the scoping applies there too.
+        self._registry = _PrimaryCmmsRegistry()
         _registered_ids: set[int] = set()
         for i, conn in enumerate(connectors or []):
             cname = getattr(conn, "__class__", type(conn)).__name__
@@ -882,11 +885,23 @@ class Agent:
         contain Python callables); register them after construction
         with :meth:`register_workflow`.
 
+        The primary CMMS follows the policy :class:`~machina.runtime.MachinaRuntime`
+        follows: the single enabled connector that reads assets, or the one
+        marked ``primary: true``. Every CMMS call goes to it and never to
+        another connector; the failure-mode catalog is still read from every
+        provider. A primary that cannot be built leaves the agent degraded:
+        its CMMS calls and the asset tools report that, and no assets load.
+        Any other connector that cannot be built raises.
+
         Args:
             path: Path to the YAML configuration file.
 
         Returns:
             A fully configured ``Agent`` instance.
+
+        Raises:
+            ConnectorConfigError: The config marks no primary, or an invalid
+                one, where the policy requires one.
 
         Example:
             ```python
@@ -903,11 +918,24 @@ class Agent:
 
         plant = Plant(name=config.plant.name, location=config.plant.location)
 
-        connectors = [
-            create_connector(cc.type, cc.settings)
-            for cc in config.connectors.values()
-            if cc.enabled
-        ]
+        primary_name = _resolve_primary_cmms(config)
+        primary: Any = None
+        connectors: list[Any] = []
+        for name, cc in config.connectors.items():
+            if not cc.enabled:
+                continue
+            if name != primary_name:
+                connectors.append(create_connector(cc.type, cc.settings))
+                continue
+            try:
+                primary = create_connector(cc.type, cc.settings)
+            except Exception as exc:
+                # The type only: the message can carry a setting value.
+                logger.error(
+                    "primary_cmms_degraded", connector=name, error_type=type(exc).__name__
+                )
+                primary = _DegradedPrimaryCmms(name, type(exc).__name__)
+            connectors.append(primary)
 
         if config.channels:
             channels = [create_channel(ch.type, ch.settings) for ch in config.channels]
@@ -916,7 +944,7 @@ class Agent:
 
             channels = [CliChannel()]
 
-        return cls(
+        agent = cls(
             name=config.name,
             description=config.description,
             plant=plant,
@@ -927,6 +955,13 @@ class Agent:
             sandbox=config.sandbox,
             confirmations=config.confirmations,
         )
+        # Registry names are derived from class names, so find the primary by
+        # identity.
+        for registry_name, conn in agent._registry.all().items():
+            if conn is primary:
+                agent._registry.route_cmms_to(registry_name)
+                break
+        return agent
 
     # ------------------------------------------------------------------
     # Public API — workflows
@@ -986,9 +1021,14 @@ class Agent:
                 await conn.connect()
             logger.info("connector_ready", connector=name)
 
-        # Auto-load assets from CMMS connectors
+        # Auto-load assets from CMMS connectors. A config-built agent reads
+        # assets from the primary CMMS only, so a degraded primary leaves the
+        # plant empty.
         cmms_connectors = self._registry.find_by_capability(Capability.READ_ASSETS)
         for cname, conn in cmms_connectors:
+            if isinstance(conn, _DegradedPrimaryCmms):
+                logger.error("assets_not_loaded_primary_cmms_degraded", connector=cname)
+                continue
             with self.tracer.trace("load_assets", connector=cname) as span:
                 assets = await conn.read_assets()  # type: ignore[attr-defined]
                 for asset in assets:
@@ -3049,6 +3089,10 @@ class Agent:
         chat_id: str,
     ) -> Any:
         """Route a tool call to its handler (failures: see :meth:`_execute_tool`)."""
+        if name in ("search_assets", "get_asset_details", "list_assets"):
+            # These read the plant, which a degraded primary CMMS left empty.
+            self._raise_if_primary_cmms_degraded()
+
         if name == "search_assets":
             return self._tool_search_assets(args.get("query", ""))
 
@@ -3179,6 +3223,17 @@ class Agent:
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
+
+    def _raise_if_primary_cmms_degraded(self) -> None:
+        """Raise the degraded error while the primary CMMS failed to build.
+
+        Raises:
+            ConnectorError: The primary CMMS failed to build, so no assets
+                were loaded.
+        """
+        for conn in self._registry.all().values():
+            if isinstance(conn, _DegradedPrimaryCmms):
+                raise conn.error()
 
     def _tool_search_assets(self, query: str) -> list[dict[str, Any]]:
         """Search assets using the entity resolver."""
@@ -3639,7 +3694,9 @@ class Agent:
 
         # Resolve the asset first. Catch ONLY the lookup failure — a
         # connector/catalog problem later must not masquerade as "asset not
-        # found".
+        # found". Neither may a degraded primary CMMS, which left the plant
+        # empty.
+        self._raise_if_primary_cmms_degraded()
         asset: Asset | None
         try:
             asset = self.plant.get_asset(asset_id)
