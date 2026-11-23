@@ -671,8 +671,11 @@ async def machina_diagnose_failure(
     from machina.agent.diagnosis import diagnose_symptoms, harvest_failure_modes
 
     runtime = _runtime(ctx)
+    # Resolved outside the try: a degraded primary's own error reaches the
+    # client; only a lookup the CMMS could not answer is reported by type.
+    cmms = runtime.get_primary_cmms()
     try:
-        asset = await _find_asset(runtime.get_primary_cmms(), asset_id)
+        asset = await _find_asset(cmms, asset_id)
     except ConnectorError as exc:
         # The CMMS could not answer: not an unknown asset, and its message
         # (a host, a path, a backend value) stays in the log.

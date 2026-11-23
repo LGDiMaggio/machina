@@ -62,7 +62,15 @@ def _runtime(ctx: Any) -> Any:
 
 
 def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
-    """Find the first connector whose class name starts with the given prefix."""
+    """Find the connector a raw vendor tool of ``type_prefix`` is meant for.
+
+    A prefix matching the primary CMMS's class name selects the primary, so a
+    second connector of the same vendor is never used in its place; a primary
+    that failed to start raises its degraded error. Any other prefix selects
+    the first connector whose class name starts with it.
+    """
+    if runtime._primary_cmms_class_name().lower().startswith(type_prefix):
+        return runtime.get_primary_cmms()
     for _name, conn in runtime.connectors.items():
         if type(conn).__name__.lower().startswith(type_prefix):
             return conn
