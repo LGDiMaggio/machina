@@ -211,7 +211,8 @@ class TestMaximoRefusesTheAssetFilter:
         result = await agent._execute_tool(
             "check_spare_parts", {"asset_id": "", "sku": "BRG-6205"}
         )
-        assert [part["sku"] for part in result] == ["BRG-6205"]
+        assert [part["sku"] for part in result["parts"]] == ["BRG-6205"]
+        assert (result["total"], result["truncated"]) == (1, False)
 
     @pytest.mark.asyncio
     async def test_mcp_tool_raises_the_refusal(self, httpx_mock, maximo: MaximoConnector) -> None:
@@ -225,8 +226,9 @@ class TestMaximoRefusesTheAssetFilter:
     async def test_mcp_tool_looks_up_a_sku(self, httpx_mock, maximo: MaximoConnector) -> None:
         _mock_maximo_part(httpx_mock, "BRG-6205")
         result = await machina_list_spare_parts(_mcp_ctx(maximo), sku="BRG-6205")
-        assert [part["sku"] for part in result] == ["BRG-6205"]
-        assert result[0]["stock_quantity"] == 3
+        assert [part["sku"] for part in result["parts"]] == ["BRG-6205"]
+        assert result["parts"][0]["stock_quantity"] == 3
+        assert (result["total"], result["truncated"]) == (1, False)
 
     @pytest.mark.asyncio
     async def test_alarm_workflow_step_is_skipped_with_the_refusal(
@@ -301,7 +303,8 @@ class TestUpKeepAppliesTheAssetFilter:
         _mock_upkeep_asset_parts(httpx_mock)
         agent = _agent(upkeep, UPKEEP_PUMP)
         result = await agent._execute_tool("check_spare_parts", {"asset_id": UPKEEP_ASSET_ID})
-        assert [part["sku"] for part in result] == _LISTED
+        assert [part["sku"] for part in result["parts"]] == _LISTED
+        assert (result["total"], result["truncated"]) == (len(_LISTED), False)
 
     @pytest.mark.asyncio
     async def test_mcp_tool_applies_both_filters(
@@ -311,8 +314,9 @@ class TestUpKeepAppliesTheAssetFilter:
         result = await machina_list_spare_parts(
             _mcp_ctx(upkeep), asset_id=UPKEEP_ASSET_ID, sku="Qm7Tz2XbLp"
         )
-        assert [part["sku"] for part in result] == ["Qm7Tz2XbLp"]
-        assert result[0]["name"] == "Oil filter"
+        assert [part["sku"] for part in result["parts"]] == ["Qm7Tz2XbLp"]
+        assert result["parts"][0]["name"] == "Oil filter"
+        assert (result["total"], result["truncated"]) == (1, False)
 
     @pytest.mark.asyncio
     async def test_alarm_workflow_step_reads_the_assets_parts(
@@ -559,5 +563,5 @@ class TestUpKeepPrefetchDeadline:
         tool_result = await agent._execute_tool("check_spare_parts", {"asset_id": UPKEEP_ASSET_ID})
         mcp_result = await machina_list_spare_parts(_mcp_ctx(upkeep), asset_id=UPKEEP_ASSET_ID)
 
-        assert [part["sku"] for part in tool_result] == _LISTED
-        assert [part["sku"] for part in mcp_result] == _LISTED
+        assert [part["sku"] for part in tool_result["parts"]] == _LISTED
+        assert [part["sku"] for part in mcp_result["parts"]] == _LISTED

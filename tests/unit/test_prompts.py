@@ -186,6 +186,42 @@ class TestFormatSpareParts:
         text = format_spare_parts_context(parts)
         assert "Out of stock" in text
 
+    def test_fifty_parts_are_listed_in_full(self) -> None:
+        parts = [SparePart(sku=f"PART-{i:03d}", name=f"Part {i}") for i in range(50)]
+        lines = format_spare_parts_context(parts).splitlines()
+        assert lines[0] == "**Spare Parts (50):**"
+        assert len(lines) == 51
+        assert "incomplete" not in "\n".join(lines)
+
+    @pytest.mark.parametrize(
+        ("size", "notice"),
+        [
+            (
+                51,
+                "  - The list is incomplete: 1 more part is listed for this asset. Do not "
+                "conclude that a part is missing or out of stock because it is not shown; "
+                "check a specific part with the check_spare_parts tool by its SKU.",
+            ),
+            (
+                137,
+                "  - The list is incomplete: 87 more parts are listed for this asset. Do not "
+                "conclude that a part is missing or out of stock because it is not shown; "
+                "check a specific part with the check_spare_parts tool by its SKU.",
+            ),
+        ],
+    )
+    def test_more_than_fifty_parts_are_capped_with_a_notice(self, size: int, notice: str) -> None:
+        """The per-turn context never passes the first 50 parts off as the asset's list."""
+        parts = [SparePart(sku=f"PART-{i:03d}", name=f"Part {i}") for i in range(size)]
+        lines = format_spare_parts_context(parts).splitlines()
+        assert lines[0] == f"**Spare Parts (50 of {size}):**"
+        assert lines[1:51] == [
+            f"  - Part {i} (SKU: PART-{i:03d}) — Qty: 0 | ❌ Out of stock" for i in range(50)
+        ]
+        assert lines[51:] == [notice]
+        # The parts past the cap are counted, never shown.
+        assert "PART-050" not in "\n".join(lines)
+
 
 class TestFormatDocumentResults:
     """Test document results formatting."""
@@ -498,6 +534,13 @@ class TestBuildContextMessage:
         assert text == (
             "**Spare Parts (1):**\n  - Bearing 6310 (SKU: SKF-6310) — Qty: 4 | ✅ In stock"
         )
+
+    def test_a_capped_spare_parts_list_is_flagged_incomplete_not_unchecked(self) -> None:
+        parts = [SparePart(sku=f"PART-{i:03d}", name=f"Part {i}") for i in range(60)]
+        text = build_context_message(spare_parts=parts, spare_parts_unchecked="failed")
+        assert text.startswith("**Spare Parts (50 of 60):**\n")
+        assert "The list is incomplete: 10 more parts are listed for this asset." in text
+        assert "not checked" not in text
 
     @pytest.mark.parametrize(
         ("unchecked", "line"),

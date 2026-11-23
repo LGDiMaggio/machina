@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import json
-from typing import TYPE_CHECKING
+import os
+import subprocess
+import sys
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
+from machina.connectors.base import set_sandbox_mode
+from machina.connectors.cmms import generic
 from machina.connectors.cmms.generic import GenericCmmsConnector
 from machina.domain.work_order import Priority, WorkOrder, WorkOrderStatus, WorkOrderType
-from machina.exceptions import ConnectorAuthError, ConnectorError
+from machina.exceptions import (
+    ConnectorAuthError,
+    ConnectorError,
+    ConnectorLockedError,
+    SandboxViolationError,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture
@@ -117,6 +133,38 @@ class TestGenericCmmsConnectorLocal:
         health = await conn.health_check()
         assert health.status.value == "healthy"
         await conn.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_connect_again_reloads_the_files_instead_of_adding_their_records(
+        self, sample_data_dir: Path
+    ) -> None:
+        modes = [{"code": "BEAR-WEAR-01", "name": "Bearing Wear", "category": "mechanical"}]
+        (sample_data_dir / "failure_modes.json").write_text(json.dumps(modes), encoding="utf-8")
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        await conn.disconnect()
+        await conn.connect()
+
+        assert [a.id for a in await conn.read_assets()] == ["P-201", "COMP-301"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002"]
+        assert [p.sku for p in await conn.read_spare_parts()] == ["SKF-6310", "FILTER-GA55"]
+        assert [p.id for p in await conn.read_maintenance_plans()] == ["MP-001", "MP-002"]
+        assert [m.code for m in await conn.read_failure_modes()] == ["BEAR-WEAR-01"]
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_that_cannot_read_a_file_keeps_the_records_loaded_before(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        (sample_data_dir / "assets.json").write_text("[]", encoding="utf-8")
+        (sample_data_dir / "spare_parts.json").write_text("[{not json", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Expecting property name"):
+            await conn.connect()
+
+        assert [a.id for a in await conn.read_assets()] == ["P-201", "COMP-301"]
+        assert [p.sku for p in await conn.read_spare_parts()] == ["SKF-6310", "FILTER-GA55"]
 
     @pytest.mark.asyncio
     async def test_read_assets(self, sample_data_dir: Path) -> None:
@@ -241,6 +289,181 @@ class TestGenericCmmsConnectorLocal:
         reloaded = await conn2.get_work_order("WO-001")
         assert reloaded is not None
         assert reloaded.status == WorkOrderStatus.ASSIGNED
+
+    @pytest.mark.asyncio
+    async def test_create_keeps_work_order_added_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """A write re-reads work_orders.json, so a record another process
+        added while the connector ran is not overwritten."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        await other.create_work_order(
+            WorkOrder(
+                id="WO-EXT", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="y"
+            )
+        )
+
+        disk = json.loads((sample_data_dir / "work_orders.json").read_text())
+        assert [w["id"] for w in disk] == ["WO-001", "WO-002", "WO-EXT", "WO-NEW"]
+        assert {w.id for w in await conn.read_work_orders()} >= {"WO-EXT", "WO-NEW"}
+
+    @pytest.mark.asyncio
+    async def test_update_keeps_edit_made_by_another_process(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        disk = json.loads(wof.read_text())
+        disk[1]["description"] = "Filter replacement (edited by hand)"
+        wof.write_text(json.dumps(disk))
+
+        await conn.update_work_order("WO-001", status=WorkOrderStatus.ASSIGNED)
+
+        after = {w["id"]: w for w in json.loads(wof.read_text())}
+        assert after["WO-002"]["description"] == "Filter replacement (edited by hand)"
+        assert after["WO-001"]["status"] == "assigned"
+
+    @pytest.mark.asyncio
+    async def test_update_finds_work_order_created_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        await other.create_work_order(
+            WorkOrder(
+                id="WO-EXT", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        updated = await conn.update_work_order("WO-EXT", assigned_to="Mario")
+
+        assert updated.assigned_to == "Mario"
+        disk = {w["id"]: w for w in json.loads((sample_data_dir / "work_orders.json").read_text())}
+        assert disk["WO-EXT"]["assigned_to"] == "Mario"
+
+    @pytest.mark.asyncio
+    async def test_create_is_idempotent_against_work_order_created_elsewhere(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        other = GenericCmmsConnector(data_dir=sample_data_dir)
+        await other.connect()
+        first = await other.create_work_order(
+            WorkOrder(
+                id="WO-DUP", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="first"
+            )
+        )
+        await other.update_work_order("WO-DUP", assigned_to="Mario")
+
+        result = await conn.create_work_order(
+            WorkOrder(
+                id="WO-DUP", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="retry"
+            )
+        )
+
+        assert result.description == "first"
+        assert result.assigned_to == "Mario"
+        assert result.created_at == first.created_at
+        disk = json.loads((sample_data_dir / "work_orders.json").read_text())
+        dup = [w for w in disk if w["id"] == "WO-DUP"]
+        assert len(dup) == 1
+        assert (dup[0]["description"], dup[0]["assigned_to"]) == ("first", "Mario")
+
+    @pytest.mark.asyncio
+    async def test_write_respects_work_order_removed_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """The file is the source of truth: a record removed from it is not
+        written back from the connector's memory."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text(json.dumps([w for w in json.loads(wof.read_text()) if w["id"] != "WO-002"]))
+
+        await conn.update_work_order("WO-001", assigned_to="Mario")
+
+        assert [w["id"] for w in json.loads(wof.read_text())] == ["WO-001"]
+        assert await conn.get_work_order("WO-002") is None
+
+    @pytest.mark.asyncio
+    async def test_write_refuses_to_overwrite_unreadable_file(self, sample_data_dir: Path) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text("[{not json", encoding="utf-8")
+
+        with pytest.raises(ConnectorError, match=r"work_orders\.json"):
+            await conn.create_work_order(
+                WorkOrder(
+                    id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+                )
+            )
+
+        assert wof.read_text(encoding="utf-8") == "[{not json"
+        assert await conn.get_work_order("WO-NEW") is None
+
+    @pytest.mark.asyncio
+    async def test_write_refuses_to_overwrite_file_that_is_not_a_list(
+        self, sample_data_dir: Path
+    ) -> None:
+        """An object would read as no work orders, and the write would replace
+        the file with only the new one."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(ConnectorError, match=r"work_orders\.json"):
+            await conn.update_work_order("WO-001", assigned_to="Mario")
+
+        assert wof.read_text(encoding="utf-8") == "{}"
+
+    @pytest.mark.asyncio
+    async def test_write_recreates_file_removed_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        wof.unlink()
+
+        await conn.create_work_order(
+            WorkOrder(
+                id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="x"
+            )
+        )
+
+        assert [w["id"] for w in json.loads(wof.read_text())] == ["WO-001", "WO-002", "WO-NEW"]
+
+    @pytest.mark.asyncio
+    async def test_write_reads_hand_written_record_added_by_another_process(
+        self, sample_data_dir: Path
+    ) -> None:
+        """A record without the fields the native format writes is read with
+        the tolerant parser, as at connect."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wof = sample_data_dir / "work_orders.json"
+        disk = json.loads(wof.read_text())
+        disk.append({"id": "WO-HAND", "asset_id": "P-201", "description": "written by hand"})
+        wof.write_text(json.dumps(disk))
+
+        updated = await conn.update_work_order("WO-HAND", assigned_to="Mario")
+
+        assert (updated.type, updated.assigned_to) == (WorkOrderType.CORRECTIVE, "Mario")
+        after = {w["id"]: w for w in json.loads(wof.read_text())}
+        assert after["WO-HAND"]["assigned_to"] == "Mario"
 
     @pytest.mark.asyncio
     async def test_local_persist_skipped_with_mapping(self, tmp_path: Path) -> None:
@@ -702,6 +925,846 @@ class TestGenericCmmsConnectorLocal:
         await conn.connect()
         plans = await conn.read_maintenance_plans()
         assert plans == []
+
+
+class _OverlapDetectingWorkOrderFile:
+    """Wraps the writes of ``work_orders.json`` and records two at once.
+
+    Local mode writes the file through a temp sibling: ``write_text`` on
+    ``work_orders.json.tmp``, then ``replace`` onto ``work_orders.json``. Each
+    call uses the temp file from start to end. The first call of the method
+    named by ``hold`` waits for ``release`` instead, with ``held`` set while it
+    waits, so a test can act while that write is mid-flight on its worker
+    thread; set ``fail`` before releasing it to make that call raise instead of
+    running. Calls on any other path run untouched.
+    """
+
+    _TEMP_FILE = "work_orders.json.tmp"
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.hold = ""
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.fail: Exception | None = None
+        self.max_users = 0
+        self._users = 0
+        self._state = threading.Condition()
+        for name in ("write_text", "replace"):
+            monkeypatch.setattr(Path, name, self._wrap(name, getattr(Path, name)))
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until no write of the file is running, on any thread."""
+        with self._state:
+            return self._state.wait_for(lambda: self._users == 0, timeout)
+
+    def _wrap(self, name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path.name != self._TEMP_FILE:
+                return func(path, *args, **kwargs)
+            with self._state:
+                self._users += 1
+                self.max_users = max(self.max_users, self._users)
+                hold = name == self.hold and not self.held.is_set()
+                if hold:
+                    self.held.set()
+            try:
+                if hold:
+                    self.release.wait(timeout=5)
+                    if self.fail is not None:
+                        raise self.fail
+                return func(path, *args, **kwargs)
+            finally:
+                with self._state:
+                    self._users -= 1
+                    self._state.notify_all()
+
+        return wrapper
+
+
+@pytest.fixture()
+def work_order_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[_OverlapDetectingWorkOrderFile]:
+    """The double, released at teardown: a call that a failing test left held
+    would otherwise resume later, inside the next test's wrappers."""
+    double = _OverlapDetectingWorkOrderFile(monkeypatch)
+    yield double
+    double.release.set()
+    assert double.wait_idle(5)
+
+
+def _on_disk(data_dir: Path) -> list[tuple[str, str]]:
+    """The ``(id, description)`` of each work order in ``work_orders.json``."""
+    stored = json.loads((data_dir / "work_orders.json").read_text(encoding="utf-8"))
+    return [(wo["id"], wo["description"]) for wo in stored]
+
+
+class TestLocalWritesTakeTurns:
+    """Local-mode writes use ``work_orders.json`` one at a time, whatever
+    happens to their callers: cancelling a caller cannot stop its write's
+    worker thread."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_create_holds_the_file_until_its_write_ends(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """The same-ID retry waits for the abandoned write, then finds the work
+        order stored, instead of answering from a record that never reached
+        the file."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        wo = WorkOrder(
+            id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+        )
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)  # the write is running
+        first.cancel()  # an MCP request cancellation, a workflow step timeout
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = asyncio.create_task(conn.create_work_order(wo))
+        await asyncio.sleep(0.05)
+        work_order_file.release.set()
+        assert (await retry).description == "new"
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert work_order_file.max_users == 1
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_holds_the_file_until_its_write_ends(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """The next write waits for the abandoned one instead of writing the
+        same temp file alongside it."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        new = WorkOrder(
+            id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="new"
+        )
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        create = asyncio.create_task(conn.create_work_order(new))
+        await asyncio.sleep(0.05)
+        work_order_file.release.set()
+        await create
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        expected = [("WO-001", "changed"), ("WO-002", "Filter replacement"), ("WO-003", "new")]
+        assert _on_disk(sample_data_dir) == expected
+        assert work_order_file.max_users == 1
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_update_whose_write_fails_leaves_the_store_as_it_was(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        work_order_file.fail = PermissionError("work_orders.json open in another program")
+        work_order_file.release.set()
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        expected = [("WO-001", "Bearing replacement"), ("WO-002", "Filter replacement")]
+        assert _on_disk(sample_data_dir) == expected
+        assert [(w.id, w.description) for w in await conn.read_work_orders()] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_ends_after_its_caller_was_cancelled_is_read_back(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The in-memory work orders and the log are updated by the write
+        itself, not by its caller, so reads match the file without waiting for
+        another write, and the write is logged."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+        wo = WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        work_order_file.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the write has finished
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+        assert [c.args[0] for c in log.info.call_args_list] == ["work_order_created"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writes_take_turns(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+
+        await asyncio.gather(
+            *(
+                conn.create_work_order(
+                    WorkOrder(id=f"WO-00{n}", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+                )
+                for n in (3, 4, 5)
+            ),
+            conn.update_work_order("WO-001", description="changed"),
+        )
+
+        on_disk = _on_disk(sample_data_dir)
+        assert [wo_id for wo_id, _ in on_disk] == [
+            "WO-001",
+            "WO-002",
+            "WO-003",
+            "WO-004",
+            "WO-005",
+        ]
+        assert on_disk[0] == ("WO-001", "changed")
+        assert work_order_file.max_users == 1
+
+    @pytest.mark.asyncio
+    async def test_a_write_cancelled_before_its_turn_never_runs(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        wo_3, wo_4 = (
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            for wo_id in ("WO-003", "WO-004")
+        )
+
+        first = asyncio.create_task(conn.create_work_order(wo_3))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        waiting = asyncio.create_task(conn.create_work_order(wo_4))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        work_order_file.release.set()
+        await first
+        assert await asyncio.to_thread(work_order_file.wait_idle, 5)
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_disconnect_waits_for_a_write_in_flight(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """Once disconnect() returns, the connector is not writing to the file,
+        and the write it waited for still returns its result."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        disconnecting = asyncio.create_task(conn.disconnect())
+        await asyncio.sleep(0.05)
+        assert not disconnecting.done()
+        work_order_file.release.set()
+        await disconnecting
+
+        assert work_order_file.wait_idle(0)
+        assert (await update).description == "changed"
+        assert _on_disk(sample_data_dir)[0] == ("WO-001", "changed")
+
+    @pytest.mark.asyncio
+    async def test_disconnect_stops_waiting_for_a_stuck_write(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        monkeypatch.setattr(generic, "_DISCONNECT_WAIT_SEC", 0.05)
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+
+        update = asyncio.create_task(conn.update_work_order("WO-001", description="changed"))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        await conn.disconnect()  # returns while the write is still held
+
+        assert [c.args[0] for c in log.warning.call_args_list] == ["write_still_running"]
+        with pytest.raises(ConnectorError, match="Not connected"):
+            await conn.read_work_orders()
+        work_order_file.release.set()
+        assert (await update).description == "changed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("call", "logged"),
+        [
+            pytest.param(
+                lambda conn: conn.update_work_order("WO-001", description="changed"),
+                {"operation": "update_work_order", "work_order_id": "WO-001"},
+                id="update",
+            ),
+            pytest.param(
+                lambda conn: conn.create_work_order(
+                    WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+                ),
+                {"operation": "create_work_order", "work_order_id": "WO-003", "asset_id": "P-201"},
+                id="create",
+            ),
+        ],
+    )
+    async def test_a_write_that_fails_after_its_caller_was_cancelled_is_logged(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+        call: Callable[[GenericCmmsConnector], Any],
+        logged: dict[str, str],
+    ) -> None:
+        """Nobody reads that write's outcome any more, so its failure is logged
+        where it happens, with what identifies the write."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+
+        task = asyncio.create_task(call(conn))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        work_order_file.fail = PermissionError("work_orders.json open in another program")
+        work_order_file.release.set()
+        await conn._run_on_file_thread(lambda: None)  # the write has failed
+
+        log.error.assert_called_once_with(
+            "failed_after_cancel",
+            connector="GenericCmmsConnector",
+            **logged,
+            error_type="ConnectorLockedError",
+            error=ANY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_connect_that_fails_after_its_caller_was_cancelled_is_logged(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        reading, release = threading.Event(), threading.Event()
+        real_read_text = Path.read_text
+
+        def read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path.name == "assets.json" and not reading.is_set():
+                reading.set()
+                release.wait(5)
+                raise PermissionError("assets.json open in another program")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+
+        task = asyncio.create_task(conn.connect())
+        assert await asyncio.to_thread(reading.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        await conn._run_on_file_thread(lambda: None)  # the load has failed
+
+        log.error.assert_called_once_with(
+            "failed_after_cancel",
+            connector="GenericCmmsConnector",
+            operation="connect",
+            error_type="PermissionError",
+            error=ANY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failure_its_caller_receives_is_not_logged_again(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        work_order_file.fail = PermissionError("work_orders.json open in another program")
+        work_order_file.release.set()
+        log = MagicMock()
+        monkeypatch.setattr(generic, "logger", log)
+
+        with pytest.raises(ConnectorLockedError):
+            await conn.update_work_order("WO-001", description="changed")
+
+        log.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connect_reads_the_files_after_a_write_in_flight(
+        self, sample_data_dir: Path, work_order_file: _OverlapDetectingWorkOrderFile
+    ) -> None:
+        """connect() reads on the file thread too, after the write still
+        running, instead of beside it, and reads that write's result."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        work_order_file.hold = "write_text"
+        wo = WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+        first = asyncio.create_task(conn.create_work_order(wo))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        reconnecting = asyncio.create_task(conn.connect())
+        await asyncio.sleep(0.05)
+        assert not reconnecting.done()
+        work_order_file.release.set()
+        await reconnecting
+
+        assert [w.id for w in await conn.read_work_orders()] == ["WO-001", "WO-002", "WO-003"]
+
+
+_HOLD_LOCK_IN_ANOTHER_PROCESS = """\
+import sys
+from pathlib import Path
+
+from machina.connectors.cmms import generic
+
+with generic._write_lock(Path(sys.argv[1])):
+    print("locked", flush=True)
+    sys.stdin.readline()
+"""
+
+
+@contextmanager
+def _lock_held_by_another_process(work_orders: Path) -> Iterator[subprocess.Popen[str]]:
+    """A Python process that holds the write lock of ``work_orders`` until its
+    stdin is closed or it is killed."""
+    src = Path(generic.__file__).resolve().parents[3]
+    process = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK_IN_ANOTHER_PROCESS, str(work_orders)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(src)},
+    )
+    # A child that never prints (stuck importing, say) is killed, so the read
+    # below ends with "" and the test fails instead of hanging.
+    watchdog = threading.Timer(30, process.kill)
+    watchdog.start()
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "locked"
+        watchdog.cancel()
+        yield process
+    finally:
+        watchdog.cancel()
+        if process.poll() is None:
+            process.kill()
+        process.wait(10)
+        for pipe in (process.stdin, process.stdout):
+            if pipe is not None:
+                pipe.close()
+
+
+class TestWritersOnOneDataDirTakeTurns:
+    """Connectors on one ``data_dir``, in one process or in several, write
+    ``work_orders.json`` one at a time, holding a lock on
+    ``work_orders.json.lock`` from the re-read to the replace: no acknowledged
+    write is lost, and a writer that cannot get the lock in time fails before
+    writing anything."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_write", "first_on_disk"),
+        [
+            pytest.param(
+                lambda conn: conn.create_work_order(
+                    WorkOrder(
+                        id="WO-A", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="a"
+                    )
+                ),
+                ("WO-A", "a"),
+                id="create",
+            ),
+            pytest.param(
+                lambda conn: conn.update_work_order("WO-001", description="changed"),
+                ("WO-001", "changed"),
+                id="update",
+            ),
+        ],
+    )
+    async def test_a_write_waits_for_another_connectors_write_and_keeps_it(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        first_write: Callable[[GenericCmmsConnector], Any],
+        first_on_disk: tuple[str, str],
+    ) -> None:
+        """Both writes are acknowledged and both reach the file. Without the
+        lock, the second write re-read the file before the first replaced it
+        and wrote the shared temp file beside it, so one acknowledged work
+        order was lost."""
+        first_conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        second_conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await first_conn.connect()
+        await second_conn.connect()
+        work_order_file.hold = "replace"  # the first write is about to replace the file
+        wo_b = WorkOrder(
+            id="WO-B", type=WorkOrderType.CORRECTIVE, asset_id="P-201", description="b"
+        )
+
+        first = asyncio.create_task(first_write(first_conn))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        second = asyncio.create_task(second_conn.create_work_order(wo_b))
+        await asyncio.sleep(0.2)
+        assert not second.done()  # waiting for the lock, not writing
+        work_order_file.release.set()
+        await first
+        assert (await second).id == "WO-B"
+
+        on_disk = _on_disk(sample_data_dir)
+        assert first_on_disk in on_disk
+        assert ("WO-B", "b") in on_disk
+        assert work_order_file.max_users == 1
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        assert first_on_disk in [
+            (w.id, w.description) for w in await second_conn.read_work_orders()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_cannot_get_the_lock_in_time_fails_and_writes_nothing(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(generic, "_LOCK_WAIT_SEC", 0.1)
+        first_conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        second_conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await first_conn.connect()
+        await second_conn.connect()
+        work_order_file.hold = "replace"
+        wo_a, wo_b = (
+            WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            for wo_id in ("WO-A", "WO-B")
+        )
+
+        first = asyncio.create_task(first_conn.create_work_order(wo_a))
+        assert await asyncio.to_thread(work_order_file.held.wait, 5)
+        with pytest.raises(ConnectorLockedError, match=r"work_orders\.json.*nothing was written"):
+            await second_conn.create_work_order(wo_b)
+        work_order_file.release.set()
+        await first
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-A"]
+        assert await second_conn.get_work_order("WO-B") is None
+        await second_conn.create_work_order(wo_b)  # the caller's own retry, once the lock is free
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)][-2:] == ["WO-A", "WO-B"]
+
+    @pytest.mark.asyncio
+    async def test_a_write_waits_for_a_writer_in_another_process(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        wo = WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+
+        with _lock_held_by_another_process(sample_data_dir / "work_orders.json") as holder:
+            monkeypatch.setattr(generic, "_LOCK_WAIT_SEC", 0.2)
+            with pytest.raises(ConnectorLockedError):
+                await conn.create_work_order(wo)
+            monkeypatch.setattr(generic, "_LOCK_WAIT_SEC", 10.0)
+            writing = asyncio.create_task(conn.create_work_order(wo))
+            await asyncio.sleep(0.2)
+            assert not writing.done()
+            assert holder.stdin is not None
+            holder.stdin.close()  # the other process releases the lock and ends
+            await writing
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_the_lock_of_a_process_that_died_is_released(
+        self, sample_data_dir: Path
+    ) -> None:
+        """No stale-lock policy is needed: the operating system releases the
+        lock of a process that ends, however it ends."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+
+        with _lock_held_by_another_process(sample_data_dir / "work_orders.json") as holder:
+            holder.kill()
+            holder.wait(10)
+            await conn.create_work_order(
+                WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            )
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)] == ["WO-001", "WO-002", "WO-003"]
+
+    @pytest.mark.asyncio
+    async def test_a_write_whose_lock_release_fails_is_still_reported_as_written(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The file is already replaced by then, and closing the lock file
+        releases the lock anyway, so the next write gets it."""
+
+        def fail_to_unlock(_fd: int) -> None:
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(generic, "_unlock", fail_to_unlock)
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+
+        for wo_id in ("WO-003", "WO-004"):
+            await conn.create_work_order(
+                WorkOrder(id=wo_id, type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            )
+
+        assert [wo_id for wo_id, _ in _on_disk(sample_data_dir)][-2:] == ["WO-003", "WO-004"]
+
+    @pytest.mark.asyncio
+    async def test_a_write_kept_in_memory_takes_no_lock(self, tmp_path: Path) -> None:
+        """Mapped local files are never written back, so writes to them neither
+        wait for the lock nor create its file."""
+        cmms_dir = tmp_path / "mapped"
+        cmms_dir.mkdir()
+        (cmms_dir / "work_orders.json").write_text(
+            json.dumps([{"wo_id": "WO-001", "asset_id": "P-201"}])
+        )
+        conn = GenericCmmsConnector(
+            data_dir=cmms_dir, schema_mapping={"work_orders": {"wo_id": "id"}}
+        )
+        await conn.connect()
+
+        await conn.create_work_order(
+            WorkOrder(id="WO-NEW", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+        )
+        await conn.update_work_order("WO-NEW", description="changed")
+
+        assert [p.name for p in cmms_dir.iterdir()] == ["work_orders.json"]
+
+    @pytest.mark.asyncio
+    async def test_a_sandboxed_write_leaves_the_data_dir_untouched(
+        self, sample_data_dir: Path
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = {p.name: p.read_bytes() for p in sample_data_dir.iterdir()}
+
+        set_sandbox_mode(True)
+        try:
+            with pytest.raises(SandboxViolationError):
+                await conn.create_work_order(
+                    WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+                )
+            with pytest.raises(SandboxViolationError):
+                await conn.update_work_order("WO-001", description="changed")
+        finally:
+            set_sandbox_mode(False)
+
+        assert {p.name: p.read_bytes() for p in sample_data_dir.iterdir()} == before
+
+
+class TestLocalWriteErrors:
+    """A local write that the operating system refuses raises
+    ``ConnectorError``, naming the file but not its path, and changes nothing
+    on disk or in memory."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("hold", "error", "raised", "message"),
+        [
+            pytest.param(
+                "write_text",
+                PermissionError(
+                    errno.EACCES, "Access is denied", "/srv/plant-7/work_orders.json.tmp"
+                ),
+                ConnectorLockedError,
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
+                id="temp-file-refused",
+            ),
+            pytest.param(
+                "replace",
+                PermissionError(
+                    errno.EACCES, "Access is denied", "/srv/plant-7/work_orders.json.tmp"
+                ),
+                ConnectorLockedError,
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
+                id="replace-refused",
+            ),
+            pytest.param(
+                "write_text",
+                OSError(
+                    errno.ENOSPC, "No space left on device", "/srv/plant-7/work_orders.json.tmp"
+                ),
+                ConnectorError,
+                "Could not write work_orders.json (OSError)",
+                id="disk-full",
+            ),
+        ],
+    )
+    async def test_a_write_the_os_refuses_raises_connector_error_and_changes_nothing(
+        self,
+        sample_data_dir: Path,
+        work_order_file: _OverlapDetectingWorkOrderFile,
+        hold: str,
+        error: OSError,
+        raised: type[ConnectorError],
+        message: str,
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = (sample_data_dir / "work_orders.json").read_bytes()
+        work_order_file.hold = hold
+        work_order_file.fail = error
+        work_order_file.release.set()
+
+        with pytest.raises(ConnectorError) as info:
+            await conn.update_work_order("WO-001", description="changed")
+
+        assert type(info.value) is raised
+        assert str(info.value) == message
+        assert "plant-7" not in str(info.value)
+        assert (sample_data_dir / "work_orders.json").read_bytes() == before
+        assert not (sample_data_dir / "work_orders.json.tmp").exists()
+        stored = await conn.get_work_order("WO-001")
+        assert stored is not None
+        assert stored.description == "Bearing replacement"
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_cannot_read_the_file_for_lack_of_permission_is_locked_out(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission error maps to ConnectorLockedError at the re-read as at
+        the write (on Windows: the file open in a program that denies reading)."""
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = (sample_data_dir / "work_orders.json").read_bytes()
+        real_read_text = Path.read_text
+
+        def refuse(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path.name == "work_orders.json":
+                raise PermissionError(errno.EACCES, "Access is denied", "/srv/plant-7/x")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", refuse)
+        with pytest.raises(ConnectorLockedError) as info:
+            await conn.update_work_order("WO-001", description="changed")
+
+        assert str(info.value) == (
+            "Cannot write work_orders.json: it is open in another program, "
+            "or this process lacks write permission"
+        )
+        monkeypatch.undo()
+        assert (sample_data_dir / "work_orders.json").read_bytes() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "raised", "message"),
+        [
+            pytest.param(
+                PermissionError(errno.EACCES, "Access is denied", "/srv/plant-7/x.lock"),
+                ConnectorLockedError,
+                "Cannot write work_orders.json: it is open in another program, "
+                "or this process lacks write permission",
+                id="no-permission",
+            ),
+            pytest.param(
+                OSError(errno.EMFILE, "Too many open files", "/srv/plant-7/x.lock"),
+                ConnectorError,
+                "Could not lock work_orders.json for writing (OSError); nothing was written",
+                id="other",
+            ),
+        ],
+    )
+    async def test_a_write_that_cannot_open_the_lock_file_writes_nothing(
+        self,
+        sample_data_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: OSError,
+        raised: type[ConnectorError],
+        message: str,
+    ) -> None:
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = (sample_data_dir / "work_orders.json").read_bytes()
+        real_open = os.open
+
+        def refuse_lock_file(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path).name == "work_orders.json.lock":
+                raise error
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", refuse_lock_file)
+        with pytest.raises(ConnectorError) as info:
+            await conn.create_work_order(
+                WorkOrder(id="WO-003", type=WorkOrderType.CORRECTIVE, asset_id="P-201")
+            )
+
+        assert type(info.value) is raised
+        assert str(info.value) == message
+        assert (sample_data_dir / "work_orders.json").read_bytes() == before
+        assert await conn.get_work_order("WO-003") is None
+
+    @pytest.mark.asyncio
+    async def test_a_lock_the_os_refuses_is_not_waited_out(
+        self, sample_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An error other than another writer holding the lock (a file system
+        without locks) fails at once."""
+
+        def refuse(_fd: int) -> bool:
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        monkeypatch.setattr(generic, "_try_lock", refuse)
+        conn = GenericCmmsConnector(data_dir=sample_data_dir)
+        await conn.connect()
+        before = (sample_data_dir / "work_orders.json").read_bytes()
+
+        with pytest.raises(ConnectorError) as info:
+            await conn.update_work_order("WO-001", description="changed")
+
+        assert str(info.value) == (
+            "Could not lock work_orders.json for writing (OSError); nothing was written"
+        )
+        assert (sample_data_dir / "work_orders.json").read_bytes() == before
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="the Windows lock primitive")
+    def test_a_windows_lock_error_other_than_contention_is_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def locking(_fd: int, _mode: int, _nbytes: int) -> None:
+            raise OSError(errno.EBADF, "Bad file descriptor")
+
+        monkeypatch.setattr(generic.msvcrt, "locking", locking)  # type: ignore[attr-defined]
+        fd = os.open(tmp_path / "work_orders.json.lock", os.O_RDWR | os.O_CREAT)
+        try:
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                generic._try_lock(fd)
+        finally:
+            os.close(fd)
 
 
 class TestDynamicCapabilities:

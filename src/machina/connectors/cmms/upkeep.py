@@ -53,9 +53,12 @@ logger = structlog.get_logger(__name__)
 # request each: an asset listing more is refused before any part request.
 _MAX_ASSET_PARTS = 100
 
-# What a retry of a listed part's request logs in place of its URL, which
-# carries the part's ID.
-_LISTED_PART_LOG_URL = "/api/v2/parts/<listed part>"
+# What a retry of a single-record request logs in place of its URL's path,
+# which carries the record's ID (request_with_retry's log_url, after the base
+# URL).
+_LISTED_PART_LOG_PATH = "/api/v2/parts/<listed part>"
+_ASSET_LOG_PATH = "/api/v2/assets/<asset>"
+_WORK_ORDER_LOG_PATH = "/api/v2/work-orders/<work order>"
 
 # The errors mapping a vendor value can raise. pydantic's ValidationError is a
 # ValueError; ArithmeticError covers int() of an infinite number.
@@ -268,7 +271,13 @@ class UpKeepConnector:
         url = f"{self.url}/api/v2/assets/{path_segment(asset_id)}"
         with rest_errors("UpKeep", "GET asset"):
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await request_with_retry(client, "GET", url, headers=self._headers())
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    url,
+                    headers=self._headers(),
+                    log_url=f"{self.url}{_ASSET_LOG_PATH}",
+                )
             if resp.status_code == 404:
                 return None
             if resp.status_code != 200:
@@ -322,7 +331,13 @@ class UpKeepConnector:
         url = f"{self.url}/api/v2/work-orders/{path_segment(work_order_id)}"
         with rest_errors("UpKeep", "GET work order"):
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await request_with_retry(client, "GET", url, headers=self._headers())
+                resp = await request_with_retry(
+                    client,
+                    "GET",
+                    url,
+                    headers=self._headers(),
+                    log_url=f"{self.url}{_WORK_ORDER_LOG_PATH}",
+                )
             if resp.status_code == 404:
                 return None
             if resp.status_code != 200:
@@ -468,7 +483,12 @@ class UpKeepConnector:
         with rest_errors("UpKeep", operation, write=True, not_sent=WRITE_REQUEST_NOT_SENT):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await request_with_retry(
-                    client, "PATCH", url, headers=self._headers(), json=payload
+                    client,
+                    "PATCH",
+                    url,
+                    headers=self._headers(),
+                    json=payload,
+                    log_url=f"{self.url}{_WORK_ORDER_LOG_PATH}",
                 )
         if resp.status_code == 401:
             raise ConnectorAuthError("UpKeep API key is invalid")
@@ -661,7 +681,11 @@ class UpKeepConnector:
         async with httpx.AsyncClient(timeout=30.0) as client:
             with rest_errors("UpKeep", "GET asset"):
                 resp = await request_with_retry(
-                    client, "GET", f"{self.url}{asset_path}", headers=self._headers()
+                    client,
+                    "GET",
+                    f"{self.url}{asset_path}",
+                    headers=self._headers(),
+                    log_url=f"{self.url}{_ASSET_LOG_PATH}",
                 )
             if resp.status_code == 404:
                 _log_spare_parts_refused("asset_not_found", asset_id=asset_id)
@@ -696,7 +720,7 @@ class UpKeepConnector:
                         "GET",
                         f"{self.url}{part_path}",
                         headers=self._headers(),
-                        log_url=_LISTED_PART_LOG_URL,
+                        log_url=f"{self.url}{_LISTED_PART_LOG_PATH}",
                     )
                 if resp.status_code == 404:
                     _log_spare_parts_refused(

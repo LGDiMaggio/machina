@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -422,15 +422,58 @@ class TestListSpareParts:
         conn.read_spare_parts = AsyncMock(return_value=parts)
         runtime = MachinaRuntime(connectors={"cmms": conn})
         result = await machina_list_spare_parts(_make_ctx(runtime))
-        assert result == [
-            {
-                "sku": "BRG-6205",
-                "name": "Bearing 6205",
-                "stock_quantity": 12,
-                "reorder_point": 0,
-                "unit_cost": 0.0,
-            }
+        assert result == {
+            "parts": [
+                {
+                    "sku": "BRG-6205",
+                    "name": "Bearing 6205",
+                    "stock_quantity": 12,
+                    "reorder_point": 0,
+                    "unit_cost": 0.0,
+                }
+            ],
+            "total": 1,
+            "truncated": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_caps_a_large_inventory_and_says_so(self) -> None:
+        from machina.agent.spare_parts import SPARE_PARTS_RESULT_LIMIT
+        from machina.mcp.tools import machina_list_spare_parts
+
+        parts = [SparePart(sku=f"PART-{i:05d}", name=f"Part {i}") for i in range(5_000)]
+        conn = _mock_cmms()
+        conn.read_spare_parts = AsyncMock(return_value=parts)
+        runtime = MachinaRuntime(connectors={"cmms": conn})
+        result = await machina_list_spare_parts(_make_ctx(runtime))
+        assert (result["total"], result["truncated"]) == (5_000, True)
+        assert [p["sku"] for p in result["parts"]] == [
+            p.sku for p in parts[:SPARE_PARTS_RESULT_LIMIT]
         ]
+        assert set(result["parts"][0]) == {
+            "sku",
+            "name",
+            "stock_quantity",
+            "reorder_point",
+            "unit_cost",
+        }
+        assert result["note"].startswith("Showing 50 of 5000 matching spare parts")
+
+    def test_the_registered_tool_takes_sku_and_returns_an_object(self) -> None:
+        """MCP clients see a ``sku`` input and the result object itself as the
+        structured output, not a list wrapped under ``result``."""
+        from mcp.server.fastmcp import FastMCP
+
+        from machina.mcp.errors import guard_tool
+        from machina.mcp.tools import machina_list_spare_parts
+
+        server = FastMCP("test")
+        server.add_tool(guard_tool(machina_list_spare_parts))
+        [tool] = server._tool_manager.list_tools()
+        assert set(tool.parameters["properties"]) == {"asset_id", "sku"}
+        assert tool.output_schema is not None
+        assert tool.output_schema["type"] == "object"
+        assert "result" not in tool.output_schema.get("properties", {})
 
     @pytest.mark.asyncio
     async def test_sends_only_the_given_filters(self) -> None:
@@ -452,6 +495,117 @@ class TestListSpareParts:
             call(asset_id="P-001"),
             call(asset_id="P-001", sku="BRG-6205"),
         ]
+
+
+class _SparePartsBackend:
+    """A connector type, registered per test, serving ``parts`` or raising ``failure``."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_SPARE_PARTS})
+    parts: ClassVar[list[SparePart]] = []
+    failure: ClassVar[Exception | None] = None
+
+    def __init__(self, **_settings: Any) -> None:
+        pass
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def read_spare_parts(self, *, asset_id: str = "", sku: str = "") -> list[SparePart]:
+        if type(self).failure is not None:
+            raise type(self).failure
+        return list(type(self).parts)
+
+
+class TestListSparePartsOverARealClient:
+    """What an MCP client receives, through ``build_server``'s own registration
+    (which wraps every tool in the SEC-10 error guard) and a real client session."""
+
+    @pytest.fixture
+    def backend(self, monkeypatch: pytest.MonkeyPatch) -> type[_SparePartsBackend]:
+        from machina import runtime as machina_runtime
+
+        monkeypatch.setitem(
+            machina_runtime._CONNECTOR_FACTORIES, "b92_parts", f"{__name__}._SparePartsBackend"
+        )
+        monkeypatch.setattr(_SparePartsBackend, "parts", [])
+        monkeypatch.setattr(_SparePartsBackend, "failure", None)
+        return _SparePartsBackend
+
+    async def _call(self, arguments: dict[str, Any]) -> tuple[Any, Any]:
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from machina.config.schema import ConnectorConfig, MachinaConfig
+        from machina.mcp.server import build_server
+
+        config = MachinaConfig(
+            connectors={"cmms": ConnectorConfig(type="b92_parts", primary=True)}
+        )
+        async with create_connected_server_and_client_session(build_server(config)) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            result = await client.call_tool("machina_list_spare_parts", arguments)
+        return tools["machina_list_spare_parts"], result
+
+    @pytest.mark.asyncio
+    async def test_an_empty_lookup_is_one_complete_object(
+        self, backend: type[_SparePartsBackend]
+    ) -> None:
+        """Not zero content blocks, as a list return gave: an explicit, complete,
+        empty result. It also has no ``note``, which a ``TypedDict`` return
+        would turn into an output-validation error."""
+        tool, result = await self._call({"sku": "SKF-6310"})
+        assert result.isError is False, result.content
+        assert result.structuredContent == {"parts": [], "total": 0, "truncated": False}
+        (block,) = result.content
+        assert json.loads(block.text) == {"parts": [], "total": 0, "truncated": False}
+        assert tool.outputSchema["type"] == "object"
+        assert "result" not in tool.outputSchema.get("properties", {})
+
+    @pytest.mark.asyncio
+    async def test_a_long_lookup_is_capped_and_flagged(
+        self, backend: type[_SparePartsBackend], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parts = [SparePart(sku=f"SYN-{i:03d}", name=f"Synthetic {i}") for i in range(60)]
+        monkeypatch.setattr(backend, "parts", parts)
+        _, result = await self._call({})
+        assert result.isError is False, result.content
+        assert len(result.content) == 1
+        payload = result.structuredContent
+        assert [p["sku"] for p in payload["parts"]] == [p.sku for p in parts[:50]]
+        assert (payload["total"], payload["truncated"]) == (60, True)
+        assert payload["note"].startswith("Showing 50 of 60 matching spare parts")
+
+    @pytest.mark.asyncio
+    async def test_a_refused_filter_keeps_its_message_and_returns_no_parts(
+        self, backend: type[_SparePartsBackend], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from machina.exceptions import ConnectorUnsupportedFilterError
+
+        refusal = "The connector cannot filter spare parts by asset. Look the part up by sku."
+        monkeypatch.setattr(backend, "failure", ConnectorUnsupportedFilterError(refusal))
+        _, result = await self._call({"asset_id": "P-201"})
+        assert result.isError is True
+        assert result.structuredContent is None
+        (block,) = result.content
+        assert block.text == f"Error executing tool machina_list_spare_parts: {refusal}"
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_failure_shows_its_type_and_returns_no_parts(
+        self, backend: type[_SparePartsBackend], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            backend, "failure", RuntimeError("GET http://internal-host:8443/parts token=abc")
+        )
+        _, result = await self._call({})
+        assert result.isError is True
+        assert result.structuredContent is None
+        (block,) = result.content
+        assert block.text == (
+            "Error executing tool machina_list_spare_parts: Unexpected error (RuntimeError). "
+            "The details are in the server log."
+        )
 
 
 class TestGetMaintenancePlan:

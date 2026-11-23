@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 import logging
 import warnings
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -518,6 +520,135 @@ class TestConnectorDispatch:
         result = await engine.execute(wf)
         assert result.success is False
         assert "no connector" in (result.step_results[0].error or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests — sync and async method dispatch
+# ---------------------------------------------------------------------------
+
+_WORK_ORDERS = [{"id": "WO-001", "status": "open"}]
+
+
+class _SyncWorkOrders:
+    """A connector, also usable as a service, with a plain read method."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_WORK_ORDERS})
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def health_check(self) -> bool:
+        return True
+
+    def read_work_orders(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(kwargs)
+        return [dict(wo) for wo in _WORK_ORDERS]
+
+
+class _AsyncWorkOrders(_SyncWorkOrders):
+    """The same connector with a coroutine read method."""
+
+    async def read_work_orders(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(kwargs)
+        return [dict(wo) for wo in _WORK_ORDERS]
+
+
+def _mocked_work_orders() -> _SyncWorkOrders:
+    """The connector with its read method replaced by an ``AsyncMock``."""
+    target = _SyncWorkOrders()
+
+    def record(**kwargs: Any) -> list[dict[str, Any]]:
+        target.calls.append(kwargs)
+        return [dict(wo) for wo in _WORK_ORDERS]
+
+    target.read_work_orders = AsyncMock(side_effect=record)
+    return target
+
+
+_METHOD_KINDS = {
+    "sync": _SyncWorkOrders,
+    "async": _AsyncWorkOrders,
+    "AsyncMock": _mocked_work_orders,
+}
+
+
+def _warns_like_python_314(real: Any) -> Any:
+    """Wrap ``asyncio.iscoroutinefunction`` to warn as Python 3.14 does."""
+
+    def iscoroutinefunction(func: Any) -> bool:
+        warnings.warn(
+            "'asyncio.iscoroutinefunction' is deprecated and slated for removal in "
+            "Python 3.16; use inspect.iscoroutinefunction() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return bool(real(func))
+
+    return iscoroutinefunction
+
+
+class TestSyncAndAsyncDispatch:
+    """Sync methods are called, coroutine methods awaited, on every Python version.
+
+    ``asyncio.iscoroutinefunction`` is deprecated from Python 3.14, so the
+    dispatch runs with it patched to warn as 3.14 does and with that warning
+    raised as an error.
+    """
+
+    @staticmethod
+    async def _run(engine: WorkflowEngine, action: str) -> Any:
+        wf = Workflow(
+            name="Dispatch",
+            steps=[Step("read_wos", action=action, inputs={"asset_id": "P-201"})],
+        )
+        # getattr and create=True keep the patch working once Python 3.16 removes it.
+        real = getattr(asyncio, "iscoroutinefunction", inspect.iscoroutinefunction)
+        with (
+            patch.object(
+                asyncio, "iscoroutinefunction", _warns_like_python_314(real), create=True
+            ),
+            warnings.catch_warnings(),
+        ):
+            warnings.filterwarnings(
+                "error", message=".*iscoroutinefunction", category=DeprecationWarning
+            )
+            result = await engine.execute(wf)
+        assert result.step_results[0].error is None
+        return result.step_results[0].output
+
+    @pytest.mark.parametrize("kind", list(_METHOD_KINDS))
+    @pytest.mark.asyncio
+    async def test_connector_methods_dispatch_identically(
+        self, kind: str, tracer: ActionTracer
+    ) -> None:
+        conn = _METHOD_KINDS[kind]()
+        registry = ConnectorRegistry()
+        registry.register("cmms", conn)
+        engine = WorkflowEngine(registry=registry, tracer=tracer)
+
+        output = await self._run(engine, "cmms.read_work_orders")
+
+        assert output == _WORK_ORDERS
+        assert conn.calls == [{"asset_id": "P-201"}]
+
+    @pytest.mark.parametrize("kind", list(_METHOD_KINDS))
+    @pytest.mark.asyncio
+    async def test_service_methods_dispatch_identically(
+        self, kind: str, tracer: ActionTracer
+    ) -> None:
+        service = _METHOD_KINDS[kind]()
+        engine = WorkflowEngine(tracer=tracer, services={"wo_service": service})
+
+        output = await self._run(engine, "wo_service.read_work_orders")
+
+        assert output == _WORK_ORDERS
+        assert service.calls == [{"asset_id": "P-201"}]
 
 
 # ---------------------------------------------------------------------------
