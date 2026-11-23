@@ -45,7 +45,7 @@ from machina.agent.prompts import (
     safe_text,
 )
 from machina.agent.spare_parts import bounded_spare_parts
-from machina.agent.tool_errors import read_tool_error
+from machina.agent.tool_errors import public_error_text, read_tool_error
 from machina.connectors.base import set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
@@ -929,6 +929,12 @@ class Agent:
                 primary = create_connector(cc.type, cc.settings)
             except Exception as exc:
                 logger.error(
+                    "connector_instantiation_failed",
+                    connector_name=name,
+                    connector_type=cc.type,
+                    error=public_error_text(exc),
+                )
+                logger.error(
                     "primary_cmms_degraded", connector=name, error_type=type(exc).__name__
                 )
                 primary = _DegradedPrimaryCmms(name, type(exc).__name__)
@@ -1066,8 +1072,8 @@ class Agent:
 
         # Collect maintenance plans from connectors that provide them
         all_plans = []
-        for _name, conn in self._registry.all().items():
-            if hasattr(conn, "_maintenance_plans"):
+        for name, conn in self._registry.all().items():
+            if self._registry.serves_cmms(name) and hasattr(conn, "_maintenance_plans"):
                 all_plans.extend(conn._maintenance_plans)
 
         analyzer = FailureAnalyzer(failure_modes=all_failure_modes)
@@ -2430,7 +2436,9 @@ class Agent:
                 # this loop.
                 write_refusal: dict[str, Any] | None = None
                 if memo_key is not None and func_name in _ASSET_TARGETED_WRITE_TOOLS:
-                    write_refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
+                    write_refusal = self._primary_cmms_degraded_refusal() or (
+                        self._authorize_write_target(args.get("asset_id", ""), chat_id)
+                    )
 
                 with self.tracer.trace(
                     "tool_call",
@@ -3216,6 +3224,13 @@ class Agent:
     # Tool implementations
     # ------------------------------------------------------------------
 
+    def _degraded_primary_cmms(self) -> _DegradedPrimaryCmms | None:
+        """The placeholder holding a primary CMMS that failed to build, if any."""
+        for conn in self._registry.all().values():
+            if isinstance(conn, _DegradedPrimaryCmms):
+                return conn
+        return None
+
     def _raise_if_primary_cmms_degraded(self) -> None:
         """Raise the degraded error while the primary CMMS failed to build.
 
@@ -3223,9 +3238,19 @@ class Agent:
             ConnectorError: The primary CMMS failed to build, so no assets
                 were loaded.
         """
-        for conn in self._registry.all().values():
-            if isinstance(conn, _DegradedPrimaryCmms):
-                raise conn.error()
+        placeholder = self._degraded_primary_cmms()
+        if placeholder is not None:
+            raise placeholder.error()
+
+    def _primary_cmms_degraded_refusal(self) -> dict[str, Any] | None:
+        """The refusal a work-order write returns while the primary CMMS failed to build.
+
+        Returned instead of raised: an exception from a write tool ends the turn.
+        """
+        placeholder = self._degraded_primary_cmms()
+        if placeholder is None:
+            return None
+        return _write_refused("primary_cmms_degraded", str(placeholder.error()))
 
     def _tool_search_assets(self, query: str) -> list[dict[str, Any]]:
         """Search assets using the entity resolver."""
@@ -3606,6 +3631,16 @@ class Agent:
         # the connector lookup) is unreachable in sandbox mode, silently making
         # the refusal conditional on exactly the mode the shipped template
         # defaults to. A refusal is not a mutation; it is not sandbox-exempt.
+        degraded = self._primary_cmms_degraded_refusal()
+        if degraded is not None:
+            logger.warning(
+                "write_refused_primary_cmms_degraded",
+                agent=self.name,
+                asset_id=args.get("asset_id", ""),
+                chat_id=chat_id,
+                operation="create_work_order",
+            )
+            return degraded
         refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
         if refusal is not None:
             logger.warning(

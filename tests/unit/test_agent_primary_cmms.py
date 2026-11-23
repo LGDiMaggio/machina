@@ -8,7 +8,9 @@ another CMMS in its place.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -224,6 +226,190 @@ class TestDegradedPrimary:
         assert "degraded" in message
         assert _SECRET not in message
         assert _CALLS == []
+
+
+class _PlannedCmms(_ReadOnlyCmms):
+    """Holds cached maintenance plans, as a local GenericCmms connector does."""
+
+    def __init__(self, **settings: Any) -> None:
+        super().__init__(**settings)
+        self._maintenance_plans = [settings["plan"]]
+
+
+class _RejectedSettingsCmms(_FullCmms):
+    """Refuses its settings with a value-free ConnectorConfigError."""
+
+    def __init__(self, **settings: Any) -> None:
+        raise ConnectorConfigError("Unknown settings for the CMMS connector: 'tabel'")
+
+
+@pytest.fixture
+def _more_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    for type_name, cls_name in {
+        "fake_planned": "_PlannedCmms",
+        "fake_rejected": "_RejectedSettingsCmms",
+    }.items():
+        monkeypatch.setitem(
+            machina_runtime._CONNECTOR_FACTORIES, type_name, f"{__name__}.{cls_name}"
+        )
+
+
+def _scheduled_plans(agent: Agent) -> list[Any]:
+    return list(agent._engine._services["maintenance_scheduler"]._plans)
+
+
+@pytest.mark.usefixtures("_more_types")
+class TestWorkflowPlans:
+    async def test_workflow_plans_come_from_the_primary_only(self, tmp_path: Path) -> None:
+        agent = _agent(
+            tmp_path,
+            {
+                "backup": {"type": "fake_planned", "settings": {"plan": "plan-of-backup"}},
+                "main": {
+                    "type": "fake_planned",
+                    "primary": True,
+                    "settings": {"plan": "plan-of-main"},
+                },
+            },
+        )
+
+        await agent.start()
+
+        assert _scheduled_plans(agent) == ["plan-of-main"]
+
+    async def test_an_agent_built_in_code_reads_every_connectors_plans(self) -> None:
+        agent = Agent(
+            connectors=[_PlannedCmms(plan="plan-a"), _PlannedCmms(plan="plan-b")],
+            sandbox=False,
+        )
+
+        await agent.start()
+
+        assert sorted(_scheduled_plans(agent)) == ["plan-a", "plan-b"]
+
+
+class _ProposingLLM:
+    """Proposes one create_work_order call, then answers with text."""
+
+    def __init__(self) -> None:
+        self.model = "fake:model"
+        self.seen: list[list[dict[str, Any]]] = []
+
+    async def complete(self, messages: list[dict[str, Any]], **_kwargs: Any) -> str:
+        return "done"
+
+    async def complete_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.seen.append(list(messages))
+        if len(self.seen) == 1:
+            call = MagicMock()
+            call.function.name = "create_work_order"
+            call.function.arguments = json.dumps(
+                {"asset_id": "S-1", "type": "corrective", "priority": "medium", "description": "x"}
+            )
+            call.id = "call_1"
+            return {"content": "", "tool_calls": [call]}
+        return {"content": "The CMMS is down.", "tool_calls": None}
+
+
+class TestDegradedWrites:
+    async def test_create_work_order_reports_the_degraded_primary(self, tmp_path: Path) -> None:
+        agent = _agent(tmp_path, _DEGRADED_PRIMARY)
+        await agent.start()
+
+        result = await agent._execute_tool(
+            "create_work_order",
+            {"asset_id": "S-1", "type": "corrective", "priority": "medium", "description": "x"},
+        )
+
+        assert result["refused"] is True
+        assert result["reason"] == "primary_cmms_degraded"
+        assert "'sap'" in result["error"]
+        assert "degraded" in result["error"]
+        assert _SECRET not in result["error"]
+        assert _CALLS == []
+
+    async def test_a_proposed_work_order_is_refused_as_degraded(self, tmp_path: Path) -> None:
+        agent = _agent(tmp_path, _DEGRADED_PRIMARY)
+        llm = _ProposingLLM()
+        agent._llm = llm  # type: ignore[assignment]
+        # With confirmations on, the proposal itself is refused: nothing is
+        # stored for the user to confirm.
+        agent._confirmations = True
+        await agent.start()
+
+        await agent.handle_message("Open a work order on S-1", chat_id="c1")
+
+        tool_results = [
+            message["content"] for message in llm.seen[-1] if message.get("role") == "tool"
+        ]
+        assert any("primary_cmms_degraded" in str(content) for content in tool_results)
+        assert _CALLS == []
+        assert agent._pending_actions == {}
+
+
+@pytest.mark.usefixtures("_more_types")
+class TestDegradedPrimaryLog:
+    def test_rejected_settings_are_logged_by_their_own_message(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            _agent(
+                tmp_path,
+                {
+                    "cmms": {"type": "fake_rejected", "primary": True},
+                    "registry": {"type": "fake_full"},
+                },
+            )
+
+        (failed,) = [e for e in logs if e["event"] == "connector_instantiation_failed"]
+        assert failed["connector_name"] == "cmms"
+        assert failed["error"] == "Unknown settings for the CMMS connector: 'tabel'"
+
+    def test_a_foreign_build_error_is_logged_by_type_only(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            _agent(tmp_path, _DEGRADED_PRIMARY)
+
+        (failed,) = [e for e in logs if e["event"] == "connector_instantiation_failed"]
+        assert "ValueError" in failed["error"]
+        assert _SECRET not in repr(logs)
+
+
+class TestImplicitAndMissingPrimary:
+    async def test_a_single_cmms_without_the_flag_serves_the_calls(self, tmp_path: Path) -> None:
+        agent = _agent(tmp_path, {"cmms": {"type": "fake_read_only"}})
+
+        result = await agent._execute_tool("read_work_orders", {})
+
+        assert [wo["id"] for wo in result] == ["WO-P-1"]
+
+    async def test_no_cmms_reports_no_connector(self, tmp_path: Path) -> None:
+        agent = _agent(tmp_path, {})
+
+        result = await agent._execute_tool("read_work_orders", {})
+
+        assert result == {"error": "No CMMS connector available"}
+
+
+class TestPerTurnLookups:
+    async def test_the_per_turn_work_orders_come_from_the_primary(self, tmp_path: Path) -> None:
+        agent = _agent(
+            tmp_path,
+            {
+                "backup": {"type": "fake_full"},
+                "main": {"type": "fake_read_only", "primary": True},
+            },
+        )
+        await agent.start()
+        resolved = [
+            ResolvedEntity(
+                asset=agent.plant.assets["P-1"], confidence=1.0, match_reason="exact_id"
+            )
+        ]
+
+        context = await agent._gather_context("P-1 status", resolved)
+
+        assert [wo.id for wo in context["work_orders"]] == ["WO-P-1"]
+        assert ("_FullCmms", "read_work_orders") not in _CALLS
 
 
 class TestNonPrimaryBuildFailure:

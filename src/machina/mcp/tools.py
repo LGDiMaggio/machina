@@ -662,7 +662,9 @@ async def machina_diagnose_failure(
     names the failure-mode providers and any that failed; ``partial`` is true
     when a failed provider's modes are missing. With nothing ranked, ``note``
     says why (unknown asset, no catalog configured, nothing matched); an
-    ``error`` means the catalog or the asset lookup was unavailable.
+    ``error`` means the catalog, or an asset lookup the CMMS could not
+    answer, was unavailable. A primary CMMS that failed to start, or no CMMS
+    at all, raises instead.
 
     Args:
         asset_id: The asset experiencing issues.

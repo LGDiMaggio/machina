@@ -22,7 +22,7 @@ from machina.connectors.capabilities import Capability
 from machina.domain.asset import Asset, AssetType
 from machina.exceptions import ConnectorConfigError, ConnectorError
 from machina.mcp.__main__ import run_serve
-from machina.mcp.server import build_server
+from machina.mcp.server import build_http_app, build_server
 from machina.mcp.tools_vendor import _find_connector_by_type
 from machina.runtime import MachinaRuntime
 
@@ -292,7 +292,7 @@ def test_vendor_lookup_never_returns_another_connector_when_the_primary_is_degra
         _find_connector_by_type(runtime, "sappm")
 
 
-def test_vendor_lookup_of_another_vendor_ignores_the_degraded_primary() -> None:
+def test_vendor_lookup_of_another_vendor_reports_the_degraded_primary() -> None:
     runtime = MachinaRuntime.from_config(
         _config(
             broken=_conn("pmcp_maximo_broken", primary=True),
@@ -300,4 +300,29 @@ def test_vendor_lookup_of_another_vendor_ignores_the_degraded_primary() -> None:
         )
     )
 
-    assert _find_connector_by_type(runtime, "sappm") is runtime.connectors["sap"]
+    with pytest.raises(ConnectorError, match=_DEGRADED):
+        _find_connector_by_type(runtime, "sappm")
+
+
+def test_vendor_lookup_never_reaches_a_connector_that_is_not_the_primary() -> None:
+    runtime = MachinaRuntime.from_config(
+        _config(
+            maximo=_conn("pmcp_maximo", primary=True),
+            sap=_conn("pmcp_sap_first"),
+        )
+    )
+
+    with pytest.raises(ConnectorError, match="primary CMMS"):
+        _find_connector_by_type(runtime, "sappm")
+
+
+def test_vendor_lookup_in_a_runtime_built_in_code_keeps_the_first_match() -> None:
+    first, second = SapPmFirst(), SapPmSecond()
+    runtime = MachinaRuntime(connectors={"a": first, "b": second})
+
+    assert _find_connector_by_type(runtime, "sappm") is first
+
+
+def test_build_http_app_refuses_several_cmms_without_a_primary() -> None:
+    with pytest.raises(ConnectorConfigError):
+        build_http_app(_config(**_AMBIGUOUS))

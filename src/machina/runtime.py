@@ -213,6 +213,13 @@ class _PrimaryCmmsRegistry(ConnectorRegistry):
         """Send every CMMS lookup to the connector registered as ``name``."""
         self._primary_cmms = name
 
+    def serves_cmms(self, name: str) -> bool:
+        """Whether CMMS data may be read from the connector registered as ``name``.
+
+        Every connector may until the registry is scoped; then only the primary.
+        """
+        return self._primary_cmms is None or name == self._primary_cmms
+
     def find_by_capability(self, capability: Capability | str) -> list[tuple[str, BaseConnector]]:
         """Return the providers of ``capability``; see the class docstring."""
         matches = super().find_by_capability(capability)
