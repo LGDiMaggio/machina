@@ -55,7 +55,11 @@ from machina.domain.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
-from machina.exceptions import ConnectorError, ConnectorUnsupportedFilterError
+from machina.exceptions import (
+    ConnectorError,
+    ConnectorSchemaError,
+    ConnectorUnsupportedFilterError,
+)
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -730,3 +734,58 @@ class TestMapRecordsModelLevelRejection:
         [refusal] = [e for e in logs if e["event"] == "sap_pm_record_refused"]
         assert "fields" not in refusal
         assert "Q7ZX3" not in str(info.value) + repr(logs)
+
+
+class TestWholeNumbersThroughReads:
+    """A read returns whole-number quantities and cycle values exactly, whether
+    SAP sends them as OData V2 decimal text or OData V4 numbers, and refuses a
+    fractional record without returning part of the result."""
+
+    @staticmethod
+    def _conn(records: list[dict[str, object]]) -> SapPmConnector:
+        conn = SapPmConnector(
+            url="https://sap.example.com/sap/opu/odata/sap",
+            auth=BasicAuth(username="u", password="p"),
+        )
+        conn._connected = True
+        conn._odata_get = AsyncMock(return_value=records)
+        return conn
+
+    @pytest.mark.parametrize(
+        "quantity", ["12.000", 12.0], ids=["odata-v2-text", "odata-v4-number"]
+    )
+    @pytest.mark.asyncio
+    async def test_spare_part_quantity(self, quantity: object) -> None:
+        conn = self._conn([{"Material": "MAT-001", "AvailableQuantity": quantity}])
+        [part] = await conn.read_spare_parts()
+        assert part.stock_quantity == 12
+
+    @pytest.mark.parametrize("cycle", ["3.000", 3.0], ids=["odata-v2-text", "odata-v4-number"])
+    @pytest.mark.asyncio
+    async def test_maintenance_plan_cycle(self, cycle: object) -> None:
+        conn = self._conn(
+            [
+                {
+                    "MaintenancePlan": "MP-1",
+                    "MaintenancePlanCycleValue": cycle,
+                    "MaintenancePlanCycleUnit": "DAY",
+                }
+            ]
+        )
+        [plan] = await conn.read_maintenance_plans()
+        assert plan.interval.days == 3
+
+    @pytest.mark.asyncio
+    async def test_fractional_quantity_refuses_the_whole_read(self) -> None:
+        conn = self._conn(
+            [
+                {"Material": "MAT-001", "AvailableQuantity": "5.000"},
+                {"Material": "MAT-002", "AvailableQuantity": "12.5"},
+            ]
+        )
+        with pytest.raises(ConnectorSchemaError) as info:
+            await conn.read_spare_parts()
+        assert str(info.value) == (
+            "SAP PM returned a BillOfMaterialItem record that cannot be mapped "
+            "(AvailableQuantity is not a whole number) — refusing to return a partial result"
+        )

@@ -2132,14 +2132,14 @@ _UNMAPPABLE_READS = [
         # An OData V2 Edm.Decimal arrives as a string with its decimals.
         [
             {"Material": "MAT-001", "AvailableQuantity": 5},
-            {"Material": "MAT-002", "AvailableQuantity": "12.000"},
+            {"Material": "MAT-002", "AvailableQuantity": "12.500"},
         ],
         "BillOfMaterialItem",
         "AvailableQuantity is not a whole number",
         "read_spare_parts",
         ["AvailableQuantity"],
         None,
-        "12.000",
+        "12.500",
         id="read_spare_parts",
     ),
     pytest.param(
@@ -2225,7 +2225,7 @@ class TestUnmappableRecords:
         httpx_mock.add_response(
             method="GET",
             url=_odata_url("API_BILL_OF_MATERIAL_SRV", "BillOfMaterialItem"),
-            json={"d": {"results": [{"Material": "MAT-001", "AvailableQuantity": "12.000"}]}},
+            json={"d": {"results": [{"Material": "MAT-001", "AvailableQuantity": "12.500"}]}},
         )
         agent = Agent(plant=Plant(name="Test Plant"), connectors=[connector])
 
@@ -2236,8 +2236,8 @@ class TestUnmappableRecords:
         assert _refused("BillOfMaterialItem", "AvailableQuantity is not a whole number") in (
             serialized
         )
-        assert "12.000" not in serialized
-        assert "12.000" not in repr(logs)
+        assert "12.500" not in serialized
+        assert "12.500" not in repr(logs)
 
     @pytest.mark.parametrize("assigned_to", [None, "TECH"], ids=["status", "patch-and-status"])
     @pytest.mark.asyncio
