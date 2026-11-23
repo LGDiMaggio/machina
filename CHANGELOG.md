@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SAP PM no longer passes OData transport metadata, or a record's values in a mapping error, to the model, MCP clients or the log.**
   - **Transport metadata.** The `metadata` of SAP PM assets, work orders and spare parts copied every property no field took, including OData V2's `__metadata`, whose `uri` names the host and service path the SAP gateway sees itself on, often an internal one. The agent's `check_spare_parts`, `read_work_orders` and `get_work_order` tools and the MCP asset and work-order resources returned it. `metadata` now leaves out every OData V2 member (a name that starts with `__`, such as `__metadata`), every value that carries one at any depth (a `__deferred` link, an expanded entry's own `__metadata`, an expanded collection's `__next`), and every OData V4 annotation (a name with an `@`, such as `@odata.id`). The status function imports still send the order's ETag, read from the record SAP returned.
   - **Mapping errors.** A record whose quantity, price, cycle value or date the mapper could not read, or that the domain model rejected, raised the conversion's own `ValueError` or pydantic's `ValidationError`, whose text quotes the value: an OData V2 `Edm.Decimal` quantity such as `"12.000"` failed `int()`. Every SAP PM read now refuses such a record with a `ConnectorSchemaError` that names the SAP property or the Machina fields, never the value, with no exception chained to it (see Breaking changes).
+- **The CMMS retry warnings no longer log query strings, record IDs or the text of network errors.** `http_network_retry`, `http_rate_limit_retry` and `http_retry_after_exceeds_max_backoff` logged the request URL as sent. That URL carried:
+  - the whole query of a Maximo `nextPage` or SAP PM `__next` link: filter values and page tokens;
+  - the record ID of UpKeep's single-record reads and update;
+  - Maximo's rest IDs, on the read-back and on the update, which a 429 retries;
+  - the order key of SAP PM's `MaintenanceOrder('…')` update.
+
+  `http_network_retry` also logged httpx's message, which can name the unreachable address.
+
+  `request_with_retry` now logs the URL as its scheme, host, port and path. It drops the query, user info and fragment, replaces an OData key predicate with `(<key>)` and a matrix parameter's value (such as `;jsessionid=`) with `<value>`; this also applies to a caller's `log_url`. The UpKeep and Maximo single-record requests pass a `log_url` template with the host (`https://api.onupkeep.com/api/v2/work-orders/<work order>`, `…/maximo/oslc/os/mxwo/<resource id>`); UpKeep's listed-part warning, which named only the path, now names the host too. A network error is logged as `error_type`, replacing `error`.
+
+  Retries, their counts and the other fields (method, attempt, status, backoff) are unchanged.
 
 ### Breaking changes
 
