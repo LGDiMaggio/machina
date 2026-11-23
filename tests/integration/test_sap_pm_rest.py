@@ -350,6 +350,264 @@ class TestReadAssets:
 
 
 # ---------------------------------------------------------------------------
+# Server-driven next-page links stay on the connector's own origin
+# ---------------------------------------------------------------------------
+
+_EQUIPMENT_PAGE = f"{BASE}/API_EQUIPMENT/Equipment"
+_REFUSED_ORIGIN = (
+    "SAP PM GET API_EQUIPMENT/Equipment returned a next-page link to another scheme, "
+    "host or port than the connector URL, or with user info in it; refusing to follow it "
+    "with the connector's credentials"
+)
+_NO_USABLE_URL = (
+    "SAP PM GET API_EQUIPMENT/Equipment returned a next-page link without a usable URL"
+)
+# Parts of a link that neither the error nor the log may repeat.
+_LINK_SECRETS = ("leakpath", "leaktoken", "leakport", "mallory", "hunter2")
+
+
+def _page(link: object, *, v4: bool = False) -> dict[str, Any]:
+    """One page holding a record and the next-page link, in OData V2 or V4 shape."""
+    record = {"Equipment": "A1", "EquipmentName": "Asset 1"}
+    if v4:
+        return {"value": [record], "@odata.nextLink": link}
+    return {"d": {"results": [record], "__next": link}}
+
+
+class TestNextPageLinkOrigin:
+    """Every page carries the connector's credentials, so a next-page link is
+    followed only on the scheme, host and port the read started on."""
+
+    @pytest.mark.parametrize(
+        ("link", "v4", "scheme", "host"),
+        [
+            (
+                "https://evil.example.net/leakpath/Equipment?$skiptoken=leaktoken",
+                False,
+                "https",
+                "evil.example.net",
+            ),
+            (
+                "https://evil.example.net/leakpath/Equipment?$skiptoken=leaktoken",
+                True,
+                "https",
+                "evil.example.net",
+            ),
+            (
+                "http://sap.example.com/leakpath/Equipment?$skiptoken=leaktoken",
+                False,
+                "http",
+                "sap.example.com",
+            ),
+            (
+                "https://sap.example.com:8443/leakpath/Equipment?$skiptoken=leaktoken",
+                False,
+                "https",
+                "sap.example.com",
+            ),
+            (
+                "https://sap.example.com:99999/leakpath/Equipment?$skiptoken=leaktoken",
+                False,
+                "https",
+                "sap.example.com",
+            ),
+            (
+                "https://mallory:hunter2@sap.example.com/leakpath/Equipment?$skiptoken=leaktoken",
+                False,
+                "https",
+                "sap.example.com",
+            ),
+            (
+                "//evil.example.net/leakpath/Equipment?$skiptoken=leaktoken",
+                True,
+                "https",
+                "evil.example.net",
+            ),
+        ],
+        ids=[
+            "another-host",
+            "another-host-v4",
+            "https-to-http",
+            "another-port",
+            "port-out-of-range",
+            "user-info",
+            "protocol-relative",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_link_to_another_origin_is_refused_before_any_request(
+        self,
+        httpx_mock,
+        connector: SapPmConnector,
+        link: str,
+        v4: bool,
+        scheme: str,
+        host: str,
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=_odata_url("API_EQUIPMENT", "Equipment"), json=_page(link, v4=v4)
+        )
+        with capture_logs() as logs, pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+
+        assert type(info.value) is ConnectorError
+        assert str(info.value) == _REFUSED_ORIGIN
+        # Only $metadata and the first page were requested: the link's
+        # destination received nothing, so neither Authorization nor
+        # sap-client reached it.
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 2
+        assert all(r.url.host == "sap.example.com" for r in requests)
+        assert all(r.url.port is None and r.url.scheme == "https" for r in requests)
+        # The refusal names no part of the link; the log names its scheme and
+        # host only.
+        for fragment in (*_LINK_SECRETS, "evil.example.net", "sap.example.com"):
+            assert fragment not in str(info.value)
+        for fragment in _LINK_SECRETS:
+            assert fragment not in repr(logs)
+        refused = [e for e in logs if e["event"] == "sap_pm_next_link_refused"]
+        assert refused == [
+            {
+                "event": "sap_pm_next_link_refused",
+                "log_level": "warning",
+                "connector": "SapPmConnector",
+                "operation": "GET API_EQUIPMENT/Equipment",
+                "link_scheme": scheme,
+                "link_host": host,
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            "",
+            "   ",
+            "https://sap.example.com/leakpath\nleaktoken",
+            "https://sap.example.com/leakpath\x00leaktoken",
+            # Not printable, though httpx would accept it.
+            "https://sap.example.com/leakpath​leaktoken",
+            123,
+            {"uri": "https://sap.example.com/leakpath"},
+            "https://[sap.example.com/leakpath",
+            # urlsplit accepts it; httpx does not.
+            "https://sap.example.com:leakport/leakpath",
+        ],
+        ids=[
+            "empty",
+            "blank",
+            "newline",
+            "nul",
+            "zero-width-space",
+            "number",
+            "object",
+            "unparseable",
+            "non-numeric-port",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_link_without_a_usable_url_is_refused(
+        self, httpx_mock, connector: SapPmConnector, link: object
+    ) -> None:
+        """A present but unusable link fails the read instead of ending it,
+        which would return a partial result as the whole."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=_odata_url("API_EQUIPMENT", "Equipment"), json=_page(link)
+        )
+        with capture_logs() as logs, pytest.raises(ConnectorError) as info:
+            await connector.read_assets()
+
+        assert type(info.value) is ConnectorError
+        assert str(info.value) == _NO_USABLE_URL
+        assert len(httpx_mock.get_requests()) == 2
+        for fragment in _LINK_SECRETS:
+            assert fragment not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_relative_v4_link_is_resolved_against_the_page(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url("API_EQUIPMENT", "Equipment"),
+            json=_page("Equipment?$skiptoken=100", v4=True),
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=f"{_EQUIPMENT_PAGE}?$skiptoken=100",
+            json={"value": [{"Equipment": "A2", "EquipmentName": "Asset 2"}]},
+        )
+        assets = await connector.read_assets()
+
+        assert [a.id for a in assets] == ["A1", "A2"]
+        second = httpx_mock.get_requests()[-1]
+        assert second.url == httpx.URL(f"{_EQUIPMENT_PAGE}?$skiptoken=100")
+        assert "Authorization" in second.headers
+        assert second.headers["sap-client"] == "100"
+
+    @pytest.mark.asyncio
+    async def test_absolute_link_with_the_default_port_is_followed(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        next_url = (
+            "https://sap.example.com:443/sap/opu/odata/sap/API_EQUIPMENT/Equipment?$skiptoken=100"
+        )
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=_odata_url("API_EQUIPMENT", "Equipment"), json=_page(next_url)
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url=next_url,
+            json={"d": {"results": [{"Equipment": "A2", "EquipmentName": "Asset 2"}]}},
+        )
+        assets = await connector.read_assets()
+
+        assert [a.id for a in assets] == ["A1", "A2"]
+
+    @pytest.mark.asyncio
+    async def test_null_link_on_a_short_page_ends_the_read(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET", url=_odata_url("API_EQUIPMENT", "Equipment"), json=_page(None)
+        )
+        assets = await connector.read_assets()
+
+        assert [a.id for a in assets] == ["A1"]
+        assert len(httpx_mock.get_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_single_record_lookup_ignores_the_link(
+        self, httpx_mock, connector: SapPmConnector
+    ) -> None:
+        """A $top lookup never paginates, so it neither follows nor judges a link."""
+        await _connect(httpx_mock, connector)
+        httpx_mock.add_response(
+            method="GET",
+            url=_odata_url(
+                "API_EQUIPMENT",
+                "Equipment",
+                **{"$top": "1", "$filter": "Equipment eq '10000001'"},
+            ),
+            json={
+                "d": {
+                    "results": [{"Equipment": "10000001", "EquipmentName": "Pump"}],
+                    "__next": "https://evil.example.net/leakpath",
+                },
+            },
+        )
+        asset = await connector.get_asset("10000001")
+
+        assert asset is not None
+        assert asset.id == "10000001"
+        assert len(httpx_mock.get_requests()) == 2
+
+
+# ---------------------------------------------------------------------------
 # Read work orders
 # ---------------------------------------------------------------------------
 
