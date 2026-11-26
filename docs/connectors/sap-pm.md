@@ -359,8 +359,13 @@ response body; the original exception is chained as `__cause__`.
 
 This does not cover everything the connectors return or log. A raw vendor
 MCP tool returns the body of a 2xx answer as sent, which can name internal
-URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings log the
-request URL.
+URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings
+(`http_network_retry`, `http_rate_limit_retry`,
+`http_retry_after_exceeds_max_backoff`) log the request URL reduced to its
+scheme, host, port and path: the query, user info and fragment are dropped, an
+OData key predicate is logged as `(<key>)` and a matrix parameter's value as
+`<value>`. A network error is logged by its type (`error_type`), not its
+message.
 
 | Failure | Raises | Message |
 |---------|--------|---------|
