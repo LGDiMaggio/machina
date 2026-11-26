@@ -6,8 +6,8 @@ This is the "Form C" surface of Machina's self-description spine: a packaged bui
 
 ## Commands
 
-- **`/build-machina-agent`** — read the spine, confirm the shape with the user, then assemble a `config.yaml` + entrypoint wiring only capabilities the spine reports as backed.
-- **`/extend-machina`** — add a connector, capability, MCP tool, mapper, or workflow against the seam the spine declares, then regenerate the spine so the addition is reflected (and the CI drift gate stays green).
+- **`/build-machina-agent`** — read the spine, confirm the shape with the user, then draft a `config.yaml`, an entrypoint and a `.env.example` that wire only capabilities the spine reports as backed. The first draft sets `sandbox: true` and `confirmations: true`, credentials appear only as `${VAR}` names (never as values in chat or in files), and nothing is written until you approve the preview. It then runs the checks today's tools support (the spine, loading the config, and a sandbox run if you agree) and states what remains unverified.
+- **`/extend-machina`** — add a connector, capability, MCP tool, mapper, or workflow against the seam the spine declares, showing a diff before writing anything, then regenerate the spine so the addition is reflected (and the CI drift gate stays green).
 
 ## Install
 
