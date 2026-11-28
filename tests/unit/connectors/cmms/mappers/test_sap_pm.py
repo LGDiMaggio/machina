@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+import machina
 from machina.connectors.cmms.mappers.sap_pm import (
     SapFieldError,
     order_etag,
@@ -285,7 +291,7 @@ class TestUnreadableValues:
         ("record", "field", "expected"),
         [
             # An OData V2 Edm.Decimal arrives as a string with decimals.
-            ({"Material": "M", "AvailableQuantity": "12.000"}, "AvailableQuantity", _WHOLE),
+            ({"Material": "M", "AvailableQuantity": "12.500"}, "AvailableQuantity", _WHOLE),
             ({"Material": "M", "AvailableQuantity": f"12.{_SECRET}"}, "AvailableQuantity", _WHOLE),
             ({"Material": "M", "Quantity": f"x{_SECRET}"}, "Quantity", _WHOLE),
             ({"Material": "M", "AvailableQuantity": {"v": _SECRET}}, "AvailableQuantity", _WHOLE),
@@ -304,7 +310,7 @@ class TestUnreadableValues:
         ("record", "field"),
         [
             (
-                {"MaintenancePlan": "P", "MaintenancePlanCycleValue": "3.000"},
+                {"MaintenancePlan": "P", "MaintenancePlanCycleValue": "3.500"},
                 "MaintenancePlanCycleValue",
             ),
             ({"MaintenancePlan": "P", "CycleValue": _SECRET}, "CycleValue"),
@@ -402,7 +408,7 @@ class TestUnreadableValues:
     def test_is_a_value_error(self) -> None:
         """A caller that caught the ValueError a bad number raised still catches it."""
         with pytest.raises(ValueError, match="AvailableQuantity"):
-            parse_spare_part({"Material": "M", "AvailableQuantity": "12.000"})
+            parse_spare_part({"Material": "M", "AvailableQuantity": "12.5"})
 
     def test_readable_values_and_defaults_are_unchanged(self) -> None:
         part = parse_spare_part({"Material": "M", "Quantity": "7", "Price": "35.50"})
@@ -418,3 +424,153 @@ class TestUnreadableValues:
             }
         )
         assert wo.created_at == datetime(2024, 1, 1, tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# Whole-number quantities and cycle values: exact in every representation
+# ---------------------------------------------------------------------------
+
+_BOUND = "a whole number of at most 12 digits"
+
+
+def _spare_part_quantity(record: dict[str, Any]) -> int:
+    return int(parse_spare_part({"Material": "M", **record}).stock_quantity)
+
+
+def _cycle_days(record: dict[str, Any]) -> int:
+    # Without a cycle unit the plan's interval is in days.
+    return int(parse_maintenance_plan({"MaintenancePlan": "P", **record}).interval.days)
+
+
+# The four properties the rule covers, with what reads each one back.
+_WHOLE_NUMBER_FIELDS = [
+    pytest.param("AvailableQuantity", _spare_part_quantity, id="AvailableQuantity"),
+    pytest.param("Quantity", _spare_part_quantity, id="Quantity"),
+    pytest.param("MaintenancePlanCycleValue", _cycle_days, id="MaintenancePlanCycleValue"),
+    pytest.param("CycleValue", _cycle_days, id="CycleValue"),
+]
+
+
+class TestWholeNumbers:
+    """A quantity or cycle value is read exactly: a whole number in any OData
+    representation is accepted, a fraction is refused and never cut."""
+
+    @pytest.mark.parametrize(("field", "read"), _WHOLE_NUMBER_FIELDS)
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # OData V2 sends Edm.Decimal as text with its decimals.
+            pytest.param("12", 12, id="v2-text"),
+            pytest.param("12.000", 12, id="v2-decimal-text"),
+            pytest.param("0.000", 0, id="v2-zero"),
+            pytest.param("0E+20", 0, id="zero-with-exponent"),
+            pytest.param(" 7 ", 7, id="v2-text-padded"),
+            # OData V4 sends it as a JSON number.
+            pytest.param(12, 12, id="v4-integer"),
+            pytest.param(12.0, 12, id="v4-integral-float"),
+            # The largest magnitude the bound accepts.
+            pytest.param("999999999999", 999_999_999_999, id="twelve-digits-text"),
+            pytest.param(999_999_999_999.0, 999_999_999_999, id="twelve-digits-float"),
+        ],
+    )
+    def test_whole_number_is_read_exactly(
+        self, field: str, read: Callable[[dict[str, Any]], int], value: Any, expected: int
+    ) -> None:
+        assert read({field: value}) == expected
+
+    @pytest.mark.parametrize(("field", "read"), _WHOLE_NUMBER_FIELDS)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # A fraction is never truncated or rounded to another whole number.
+            pytest.param("12.5", id="v2-fraction"),
+            pytest.param("12.500", id="v2-decimal-fraction"),
+            pytest.param(12.7, id="v4-fraction"),
+            pytest.param(0.5, id="v4-half"),
+            pytest.param("NaN", id="nan-text"),
+            pytest.param("Infinity", id="infinity-text"),
+            pytest.param("-Infinity", id="minus-infinity-text"),
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="infinity"),
+            pytest.param(True, id="true"),
+            pytest.param(False, id="false"),
+            pytest.param(None, id="null"),
+            pytest.param("", id="empty-text"),
+            pytest.param(f"x{_SECRET}", id="other-text"),
+            pytest.param({"v": _SECRET}, id="object"),
+            pytest.param([_SECRET], id="list"),
+        ],
+    )
+    def test_value_that_is_not_a_whole_number_is_refused(
+        self, field: str, read: Callable[[dict[str, Any]], int], value: Any
+    ) -> None:
+        with pytest.raises(SapFieldError) as raised:
+            read({field: value})
+        _assert_value_free(raised.value, field)
+        assert str(raised.value) == f"SAP property {field!r} is not {_WHOLE}"
+
+    @pytest.mark.parametrize(("field", "read"), _WHOLE_NUMBER_FIELDS)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("1000000000000", id="thirteen-digits-text"),
+            pytest.param(10**12, id="thirteen-digits-integer"),
+            pytest.param(1e12, id="thirteen-digits-float"),
+            pytest.param(-(10**12), id="negative-thirteen-digits"),
+            pytest.param("1" * 5000, id="five-thousand-digits"),
+        ],
+    )
+    def test_whole_number_beyond_the_bound_is_refused(
+        self, field: str, read: Callable[[dict[str, Any]], int], value: Any
+    ) -> None:
+        with pytest.raises(SapFieldError) as raised:
+            read({field: value})
+        _assert_value_free(raised.value, field)
+        assert str(raised.value) == f"SAP property {field!r} is not {_BOUND}"
+
+    def test_huge_exponent_is_refused_before_any_integer_is_built(self) -> None:
+        """Building these integers would take a megabyte and a gigabyte of memory
+        and minutes of CPU. They run in a child process with a time limit, so a
+        bound checked after the integer is built fails here instead of hanging."""
+        script = (
+            "from machina.connectors.cmms.mappers.sap_pm import SapFieldError, parse_spare_part\n"
+            "for value in ('1E+1000000', '9E+999999999', '-9E+999999999'):\n"
+            "    try:\n"
+            "        parse_spare_part({'Material': 'M', 'AvailableQuantity': value})\n"
+            "    except SapFieldError as error:\n"
+            "        print(error)\n"
+        )
+        # The child imports the same machina package as this test process.
+        package_root = str(Path(machina.__file__).resolve().parents[1])
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([package_root, *sys.path])}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        expected = f"SAP property 'AvailableQuantity' is not {_BOUND}"
+        assert result.stdout.splitlines() == [expected] * 3
+
+    @pytest.mark.parametrize("value", ["-3.000", -3, -3.0])
+    def test_negative_quantity_is_still_refused_by_the_domain_model(self, value: Any) -> None:
+        """The converter reads a negative whole number; the stock level's own
+        rule (at least zero) refuses it, as before."""
+        with pytest.raises(ValidationError) as raised:
+            parse_spare_part({"Material": "M", "AvailableQuantity": value})
+        assert [error["loc"] for error in raised.value.errors()] == [("stock_quantity",)]
+
+    @pytest.mark.parametrize("value", ["-3.000", -3, -3.0])
+    def test_negative_cycle_value_is_still_refused_by_the_domain_model(self, value: Any) -> None:
+        """The converter reads a negative whole number; the interval's own rule
+        (at least zero) refuses it, as before."""
+        with pytest.raises(ValidationError) as raised:
+            parse_maintenance_plan({"MaintenancePlan": "P", "MaintenancePlanCycleValue": value})
+        assert [error["loc"] for error in raised.value.errors()] == [("days",)]
+
+    def test_unit_cost_keeps_its_fraction(self) -> None:
+        part = parse_spare_part({"Material": "M", "StandardPrice": "35.50", "Quantity": "4.000"})
+        assert (part.unit_cost, part.stock_quantity) == (35.5, 4)

@@ -99,7 +99,7 @@ def _map_records(
 
     A record the mapper cannot read refuses the whole read: a property it
     cannot convert (:class:`~machina.connectors.cmms.mappers.sap_pm.SapFieldError`,
-    an ``Edm.Decimal`` quantity such as ``"12.000"`` included), a value the
+    a fractional quantity such as ``"12.500"`` or ``12.7`` included), a value the
     domain model rejects, a record that is not an object. Returning the
     others would present part of the result as all of it.
 
@@ -995,9 +995,9 @@ class SapPmConnector:
             ConnectorError: If a filter is neither ``""`` nor an ID (see
                 :func:`~machina.connectors.cmms.filters.spare_part_filters`).
             ConnectorSchemaError: If a record cannot be mapped (a quantity
-                given as text that is not a whole number, an OData V2
-                ``Edm.Decimal`` such as ``"12.000"`` included); no partial
-                list is returned (see :func:`_map_records`).
+                that is not a whole number, such as ``"12.500"`` or
+                ``12.7``, included); no partial list is returned (see
+                :func:`_map_records`).
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
