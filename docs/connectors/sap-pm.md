@@ -223,9 +223,12 @@ A record refuses the read (see
 [Records that cannot be mapped](#records-that-cannot-be-mapped)) when:
 
 - a quantity (`AvailableQuantity`, `Quantity`) or a cycle value
-  (`MaintenancePlanCycleValue`, `CycleValue`) is text that is not a whole
-  number, such as `"12.000"`, or a value that is neither text nor a number. A
-  JSON number is cut to a whole number, as before: `12.7` reads as `12`;
+  (`MaintenancePlanCycleValue`, `CycleValue`) is not a whole number: a
+  fraction such as `"12.5"`, `12.7` or `0.5` (never cut to a whole number), a
+  boolean, NaN, infinity, or a value that is neither a number nor numeric
+  text. A whole number of more than 12 digits is refused too. A whole number
+  reads exactly in either OData representation: V2 text such as `"12"` or
+  `"12.000"`, and V4 numbers such as `12` or `12.0`, all read as `12`;
 - a price (`StandardPrice`, `Price`) is not a number or numeric text;
 - a date is a `/Date(...)/` that is not a whole number of milliseconds or is
   out of range, or is not text. Other text that is not a date reads as the
@@ -359,8 +362,13 @@ response body; the original exception is chained as `__cause__`.
 
 This does not cover everything the connectors return or log. A raw vendor
 MCP tool returns the body of a 2xx answer as sent, which can name internal
-URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings log the
-request URL.
+URLs (a Maximo `href`, SAP's `__metadata.uri`). The retry warnings
+(`http_network_retry`, `http_rate_limit_retry`,
+`http_retry_after_exceeds_max_backoff`) log the request URL reduced to its
+scheme, host, port and path: the query, user info and fragment are dropped, an
+OData key predicate is logged as `(<key>)` and a matrix parameter's value as
+`<value>`. A network error is logged by its type (`error_type`), not its
+message.
 
 | Failure | Raises | Message |
 |---------|--------|---------|
@@ -370,6 +378,8 @@ request URL.
 | Other transport failure | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: ConnectError` |
 | Malformed `url` | `ConnectorConfigError` | `SAP PM health check failed: invalid URL (check 'url' and the endpoint paths)` |
 | 2xx body that is not JSON (an HTML login page from a proxy, say) | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment failed: response is not JSON` |
+| Next-page link to another scheme, host or port, or with user info (see [Known Limitations](#known-limitations)) | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment returned a next-page link to another scheme, host or port than the connector URL, or with user info in it; refusing to follow it with the connector's credentials` |
+| Next-page link with no usable URL | `ConnectorError` | `SAP PM GET API_EQUIPMENT/Equipment returned a next-page link without a usable URL` |
 | A record that cannot be mapped | `ConnectorSchemaError` | `SAP PM returned a BillOfMaterialItem record that cannot be mapped (AvailableQuantity is not a whole number) — refusing to return a partial result` |
 
 A failed create or update also says whether the CMMS may have applied it. A
@@ -433,8 +443,9 @@ update was applied (see above).
 ## Known Limitations
 
 - **OData v2 vs v4**: The connector handles both response formats (`d.results` and `value`). Your SAP system may use either depending on the service version.
+- **Pagination**: Reads page with `$top` and `$skip`, and follow the next-page link SAP returns when a page has one: `__next` in OData V2, `@odata.nextLink` in V4, where a relative link is resolved against the page that returned it. Each page is requested with the connector's credentials and `sap-client`, so a link to another scheme, host or port than the configured `url`, or one with user info in it, raises `ConnectorError` before any request and logs `sap_pm_next_link_refused` with the link's scheme and host. SAP builds its links from the address it sees itself on, so behind a reverse proxy check that it returns the address Machina uses. A link that is present but has no usable URL (empty or blank, not text, not printable, or not parseable) also raises `ConnectorError` instead of ending the read early. `get_asset` and `get_work_order` read one record and never follow a link.
 - **Custom fields**: SAP Z-fields are stored in `metadata` dict; access them via `asset.metadata["ZZ_CUSTOM_FIELD"]`. OData transport members are left out (see [Entity Mapping](#entity-mapping)).
-- **Decimal quantities**: OData V2 sends an `Edm.Decimal` as text with its decimals, such as `"12.000"`. A quantity or cycle value sent that way is not read as a whole number: the read is refused with `ConnectorSchemaError` (see [Records that cannot be mapped](#records-that-cannot-be-mapped)). OData V4 sends it as a JSON number, which is cut to a whole number (`0.5` reads as `0`).
+- **Decimal quantities**: OData V2 sends an `Edm.Decimal` as text with its decimals (`"12.000"`), OData V4 as a JSON number (`12.0`). A quantity or cycle value is read exactly: a whole number in either form is accepted, and a fraction refuses the read with `ConnectorSchemaError` instead of being cut (see [Records that cannot be mapped](#records-that-cannot-be-mapped)). Whole numbers are limited to 12 digits, above the 10 integer digits typical of SAP quantity fields; below that a V4 number still holds three decimal places, so a fractional quantity cannot reach the mapper as a whole number.
 - **CSRF tokens**: Write operations (create, update) automatically fetch a CSRF token within the same HTTP session to ensure cookie-based session affinity.
 - **Status filters**: applied to the orders read, not on the server (see [Work-order status](#work-order-status)). Combine `status` with `asset_id` on a large system.
 - **Functional locations**: Currently read as part of the `Asset.location` field. A dedicated functional-location hierarchy is planned for a future release.

@@ -39,7 +39,7 @@ See also:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit
 
 import structlog
 from pydantic import Field, ValidationError
@@ -71,6 +71,7 @@ from machina.exceptions import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from urllib.parse import SplitResult
 
     from machina.domain.asset import Asset
     from machina.domain.maintenance_plan import MaintenancePlan
@@ -98,7 +99,7 @@ def _map_records(
 
     A record the mapper cannot read refuses the whole read: a property it
     cannot convert (:class:`~machina.connectors.cmms.mappers.sap_pm.SapFieldError`,
-    an ``Edm.Decimal`` quantity such as ``"12.000"`` included), a value the
+    a fractional quantity such as ``"12.500"`` or ``12.7`` included), a value the
     domain model rejects, a record that is not an object. Returning the
     others would present part of the result as all of it.
 
@@ -187,6 +188,78 @@ def _require_httpx() -> Any:
             "httpx is required for SapPmConnector. Install with: pip install machina-ai[cmms-rest]"
         ) from exc
     return httpx
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """The scheme, host and port of ``url``, the port defaulting by scheme."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port
+    return scheme, parts.hostname, port if port is not None else _DEFAULT_PORTS.get(scheme)
+
+
+def _next_page_url(next_link: object, current_url: str, operation: str) -> str:
+    """The URL of the next page, once it is safe to send the credentials there.
+
+    Every page is requested with the connector's credentials and ``sap-client``.
+    So a server-sent ``__next`` or ``@odata.nextLink`` is followed only when,
+    resolved against the page that returned it, it keeps that page's scheme,
+    host and port (80 or 443 when omitted) and carries no user info. A V4
+    link may be relative; surrounding whitespace is stripped.
+
+    Args:
+        next_link: The link SAP returned, not ``None``.
+        current_url: The URL of the page that returned it.
+        operation: ``GET <service>/<entity set>``, for the message and the log.
+
+    Raises:
+        ConnectorError: When the link is not a non-blank printable string or
+            cannot be parsed, which would otherwise end the read early, or
+            when it leaves the page's origin or carries user info. Neither
+            message names the link. The ``sap_pm_next_link_refused`` warning
+            for the second case logs the link's scheme and host only.
+    """
+    no_usable_url = f"SAP PM {operation} returned a next-page link without a usable URL"
+    href = next_link.strip() if isinstance(next_link, str) else ""
+    if not href or not href.isprintable():
+        raise ConnectorError(no_usable_url)
+    httpx = _require_httpx()
+    target: SplitResult | None
+    try:
+        url = urljoin(current_url, href)
+        httpx.URL(url)
+        target = urlsplit(url)
+    except (ValueError, httpx.InvalidURL):
+        target = None
+    # Raised outside the except block: the parser's message can quote part of
+    # the link, and `from None` would still keep it as __context__.
+    if target is None:
+        raise ConnectorError(no_usable_url)
+    try:
+        same_origin = (
+            target.username is None
+            and target.password is None
+            and _origin(url) == _origin(current_url)
+        )
+    except ValueError:  # a numeric port above 65535, which both parsers accept
+        same_origin = False
+    if not same_origin:
+        logger.warning(
+            "sap_pm_next_link_refused",
+            connector="SapPmConnector",
+            operation=operation,
+            link_scheme=target.scheme,
+            link_host=target.hostname,
+        )
+        raise ConnectorError(
+            f"SAP PM {operation} returned a next-page link to another scheme, host or port "
+            "than the connector URL, or with user info in it; refusing to follow it with the "
+            "connector's credentials"
+        )
+    return url
 
 
 def _odata_string(value: object) -> str:
@@ -922,9 +995,9 @@ class SapPmConnector:
             ConnectorError: If a filter is neither ``""`` nor an ID (see
                 :func:`~machina.connectors.cmms.filters.spare_part_filters`).
             ConnectorSchemaError: If a record cannot be mapped (a quantity
-                given as text that is not a whole number, an OData V2
-                ``Edm.Decimal`` such as ``"12.000"`` included); no partial
-                list is returned (see :func:`_map_records`).
+                that is not a whole number, such as ``"12.500"`` or
+                ``12.7``, included); no partial list is returned (see
+                :func:`_map_records`).
         """
         self._ensure_connected()
         asset_id, sku = spare_part_filters(asset_id, sku)
@@ -1158,7 +1231,9 @@ class SapPmConnector:
         """Fetch all pages from a SAP OData entity set.
 
         Uses client-driven ``$top`` / ``$skip`` pagination, with fallback
-        to server-driven ``__next`` (``@odata.nextLink``) when present.
+        to server-driven ``__next`` (``@odata.nextLink``) when present. A
+        link is followed only on the scheme, host and port of the page that
+        returned it (see :func:`_next_page_url`).
 
         Args:
             service: OData service group (e.g. ``API_EQUIPMENT``).
@@ -1224,13 +1299,13 @@ class SapPmConnector:
 
                     # Server-driven pagination
                     next_link = d.get("__next", body.get("@odata.nextLink"))
-                    if next_link and (top is None):
-                        url = next_link
-                        params = None  # nextLink includes all query params
-                        skip = 0
-                    elif top is not None:
+                    if top is not None:
                         # Single-shot lookup; don't paginate
                         url = None
+                    elif next_link is not None:
+                        url = _next_page_url(next_link, url, f"GET {service}/{entity_set}")
+                        params = None  # nextLink includes all query params
+                        skip = 0
                     elif len(results) < page_size:
                         url = None
                     else:

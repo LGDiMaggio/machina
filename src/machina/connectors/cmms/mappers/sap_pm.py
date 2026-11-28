@@ -9,7 +9,9 @@ private to this module.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from machina.domain.asset import Asset, AssetType, Criticality
@@ -160,9 +162,9 @@ _ODATA_V2_PREFIX = "__"
 class SapFieldError(ValueError):
     """A SAP property holds a value the mapper cannot read as its domain field.
 
-    Raised for a number, a date, or text: an OData V2 ``Edm.Decimal`` arrives
-    as text with its decimals (``"12.000"``), which is not a whole number, and
-    an object where a field takes text is not read as its text. The message
+    Raised for a number, a date, or text: a quantity of ``"12.500"`` is not a
+    whole number, and an object where a field takes text is not read as its
+    text. The message
     names the property, never its value, and the error is raised with no
     exception chained to it, since the conversion's own error quotes the value.
 
@@ -288,16 +290,14 @@ def parse_spare_part(data: dict[str, Any]) -> SparePart:
     members (see :func:`_metadata`).
 
     Raises:
-        SapFieldError: If the quantity is text that is not a whole number
-            (an OData V2 ``Edm.Decimal`` such as ``"12.000"`` included) or a
-            value that is neither text nor a number, the price is not a
-            number, or a property a text field takes holds an object or a
-            list. A JSON number is cut to a whole number by ``int()``.
+        SapFieldError: If the quantity is not a whole number (see
+            :func:`_whole_number`), the price is not a number, or a property
+            a text field takes holds an object or a list.
     """
     return SparePart(
         sku=_text(data, ("Material", "MaterialNumber")),
         name=_text(data, ("MaterialDescription", "Description")),
-        stock_quantity=_convert(data, ("AvailableQuantity", "Quantity"), 0, int, _WHOLE_NUMBER),
+        stock_quantity=_whole_number(data, ("AvailableQuantity", "Quantity")),
         unit_cost=_convert(data, ("StandardPrice", "Price"), 0.0, float, "a number"),
         warehouse_location=_text(data, ("StorageLocation", "Plant")),
         metadata=_metadata(data, _SPARE_PART_PROPERTIES),
@@ -308,11 +308,11 @@ def parse_maintenance_plan(data: dict[str, Any]) -> MaintenancePlan:
     """Convert SAP MaintenancePlan OData entity to a :class:`MaintenancePlan`.
 
     Raises:
-        SapFieldError: If the cycle value is text that is not a whole
-            number or a value that is neither text nor a number, or a
-            property a text field takes holds an object or a list.
+        SapFieldError: If the cycle value is not a whole number (see
+            :func:`_whole_number`), or a property a text field takes holds an
+            object or a list.
     """
-    cycle_val = _convert(data, ("MaintenancePlanCycleValue", "CycleValue"), 0, int, _WHOLE_NUMBER)
+    cycle_val = _whole_number(data, ("MaintenancePlanCycleValue", "CycleValue"))
     cycle_unit = str(data.get("MaintenancePlanCycleUnit", data.get("CycleUnit", "DAY")))
     interval = _sap_cycle_to_interval(cycle_val, cycle_unit)
 
@@ -440,6 +440,13 @@ _T = TypeVar("_T")
 
 _WHOLE_NUMBER = "a whole number"
 
+# A quantity or cycle value has at most this many digits. SAP quantity fields
+# typically hold at most 10 integer digits (13 digits, 3 of them decimals), and
+# below 10**12 a float still resolves three decimals, so a fractional OData V4
+# quantity cannot arrive as a whole number.
+_MAX_WHOLE_NUMBER_DIGITS = 12
+_BOUNDED_WHOLE_NUMBER = f"a whole number of at most {_MAX_WHOLE_NUMBER_DIGITS} digits"
+
 
 def _first(data: dict[str, Any], properties: tuple[str, ...], default: Any) -> tuple[str, Any]:
     """Return the first of ``properties`` the record holds and its value.
@@ -491,6 +498,40 @@ def _convert(
     # Raised outside the except block: the conversion's message quotes the
     # value, and `from None` would still keep it as __context__.
     raise SapFieldError(name, expected)
+
+
+def _whole_number(data: dict[str, Any], properties: tuple[str, ...]) -> int:
+    """Read the first of ``properties`` the record holds as an exact whole number, 0 if none.
+
+    OData V2 sends an ``Edm.Decimal`` as text with its decimals (``"12.000"``)
+    and OData V4 as a JSON number (``12.0``): both read as 12. Text and floats
+    are compared as exact :class:`~decimal.Decimal` values, so a fraction is
+    refused, never cut to another number. A negative whole number is read;
+    the domain model decides whether it is allowed.
+
+    Raises:
+        SapFieldError: If the value is a boolean, NaN, infinite, fractional,
+            or neither a number nor numeric text, or a whole number of more
+            than :data:`_MAX_WHOLE_NUMBER_DIGITS` digits.
+    """
+    name, value = _first(data, properties, 0)
+    number: Decimal | None = None
+    # A boolean is an int to Python, but not a quantity.
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        number = Decimal(value)
+    elif isinstance(value, str):
+        # decimal.InvalidOperation (an ArithmeticError): text that is not a number.
+        with suppress(ArithmeticError):
+            number = Decimal(value)
+    if number is None or not number.is_finite() or number != number.to_integral_value():
+        # Raised outside any except block, as in _convert.
+        raise SapFieldError(name, _WHOLE_NUMBER)
+    # Checked on the exponent before the integer is built: "1E+1000000" is a
+    # whole number, and int() of it would build a million-digit integer. A zero
+    # has no digits to count, however large its exponent ("0E+20" is 0).
+    if number and number.adjusted() >= _MAX_WHOLE_NUMBER_DIGITS:
+        raise SapFieldError(name, _BOUNDED_WHOLE_NUMBER)
+    return int(number)
 
 
 def _date(data: dict[str, Any], properties: tuple[str, ...], default: datetime) -> datetime:
