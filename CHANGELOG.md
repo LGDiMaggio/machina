@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Retries, their counts and the other fields (method, attempt, status, backoff) are unchanged.
 - **The deployment security guide lists the four chromadb 1.5.9 advisories, which are unresolved** (GHSA-f4j7-r4q5-qw2c, GHSA-36p7-vc44-83pf, GHSA-2wm9-hf6c-p5cr, GHSA-xph7-9rjv-w5fr): none has a fixed release. All four are in the Chroma server. With chromadb's default settings, `DocumentStoreConnector` uses an ephemeral client inside the Machina process. The guide names the configurations Machina does not support (an external Chroma server through `CHROMA_API_IMPL` and `CHROMA_SERVER_HOST`, `IS_PERSISTENT` with a persist directory others can write, an exposed Chroma server) and the remaining mitigation, a private persist directory. This is a documentation change; no dependency changed and the advisories stay open.
+- **SAP PM follows a next-page link only on the scheme, host and port of the page that returned it.**
+  - **The problem.** A paged read requested the `__next` (OData V2) or `@odata.nextLink` (V4) link SAP returned as it was, with the connector's `Authorization` header and `sap-client`. A link to another host, to plain HTTP or to another port therefore received the credentials. A gateway behind a proxy builds its links from the address it sees itself on, which can be an internal host or plain HTTP.
+  - **The check.** Paged reads now resolve the link against the page that returned it and follow it only when it keeps that page's scheme, host and port and carries no user info. Any other link raises `ConnectorError` before a request is sent and logs `sap_pm_next_link_refused` with the link's scheme and host. The message names no part of the link.
+  - **Other link changes.** A link that is present but has no usable URL raises `ConnectorError` too: empty or blank, not text, not printable, or not parseable. An empty link used to end the read as if it were the last page. A relative V4 link, which used to fail the read, is now followed. Maximo already applied this check to its `nextPage` links.
 
 ### Breaking changes
 
