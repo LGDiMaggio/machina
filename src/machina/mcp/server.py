@@ -94,7 +94,15 @@ def _build_server(
     port: int,
     shared: dict[str, Any] | None,
 ) -> Any:
-    """Build the FastMCP server; ``shared`` carries an app-owned runtime (HTTP)."""
+    """Build the FastMCP server; ``shared`` carries an app-owned runtime (HTTP).
+
+    Raises:
+        ConnectorConfigError: The configuration's primary CMMS is ambiguous or
+            invalid; refused here, before anything is served.
+    """
+    from machina.runtime import _resolve_primary_cmms
+
+    primary_name = _resolve_primary_cmms(config)
     fastmcp_cls = _require_fastmcp()
 
     @asynccontextmanager
@@ -130,7 +138,7 @@ def _build_server(
         kwargs["port"] = port
 
     server = fastmcp_cls("machina", **kwargs)
-    _register_tools(server, config)
+    _register_tools(server, config, primary_name)
     _register_resources(server)
     _register_prompts(server)
     if transport == "streamable-http":
@@ -231,17 +239,21 @@ def _build_http_kwargs(config: MachinaConfig) -> dict[str, Any]:
     }
 
 
-def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
+def _collect_capabilities(
+    config: MachinaConfig, primary_name: str | None
+) -> frozenset[Capability]:
     """Gather the union of all capabilities from enabled connectors.
 
     Reads class-level capabilities where available. For connectors that
     compute capabilities at instance level (e.g. GenericCmmsConnector),
-    falls back to instantiation.
+    falls back to instantiation. When the primary CMMS (``primary_name``) can
+    be neither imported nor instantiated, every CMMS capability is added: its
+    tools stay registered and answer with the degraded error.
     """
-    from machina.runtime import _CONNECTOR_FACTORIES, _import_class
+    from machina.runtime import _CMMS_CAPABILITIES, _CONNECTOR_FACTORIES, _import_class
 
     all_caps: set[Capability] = set()
-    for _name, conn_cfg in config.connectors.items():
+    for name, conn_cfg in config.connectors.items():
         if not conn_cfg.enabled:
             continue
         factory_path = _CONNECTOR_FACTORIES.get(conn_cfg.type)
@@ -256,11 +268,13 @@ def _collect_capabilities(config: MachinaConfig) -> frozenset[Capability]:
                 connector = connector_cls(**conn_cfg.settings)
                 all_caps.update(connector.capabilities)
         except Exception:
+            if name == primary_name:
+                all_caps.update(_CMMS_CAPABILITIES)
             continue
     return frozenset(all_caps)
 
 
-def _register_tools(server: Any, config: MachinaConfig) -> None:
+def _register_tools(server: Any, config: MachinaConfig, primary_name: str | None) -> None:
     """Auto-register domain tools based on connector capabilities.
 
     Every tool, domain and vendor, is registered through
@@ -270,7 +284,7 @@ def _register_tools(server: Any, config: MachinaConfig) -> None:
     from machina.mcp.errors import MCP_WRITE_TOOLS, guard_tool
     from machina.mcp.tools import get_tools_for_capabilities
 
-    capabilities = _collect_capabilities(config)
+    capabilities = _collect_capabilities(config, primary_name)
     tools = get_tools_for_capabilities(capabilities)
     for tool_fn in tools:
         server.add_tool(guard_tool(tool_fn, write=tool_fn.__name__ in MCP_WRITE_TOOLS))

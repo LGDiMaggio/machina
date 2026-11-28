@@ -80,13 +80,42 @@ connectors:
   my_cmms:
     type: generic_cmms
     enabled: true          # default: true
-    primary: true          # the CMMS the MCP tools and resources use
+    primary: true          # the primary CMMS (see below)
     settings:
       data_dir: "./data/cmms"
 ```
 
 Everything the connector needs goes under `settings`; keys placed next to
 `type` are ignored.
+
+#### The primary CMMS
+
+`primary: true` marks the primary CMMS: the connector every CMMS call goes
+to. `machina mcp serve` and `Agent.from_config()` apply the same rule:
+
+- With one enabled connector that reads assets (a CMMS, Excel/CSV or SQL
+  connector), that connector is the primary, and `primary: true` is optional.
+- With more than one, mark exactly one of them `primary: true`.
+- `primary: true` on a disabled connector, on more than one connector, or on
+  a connector that cannot read assets (a sensor, document store or channel)
+  is an error.
+
+An invalid entry stops Machina before it starts, with a `ConnectorConfigError`
+that names the connectors. `machina mcp serve` prints it on one line and exits
+with status 1.
+
+CMMS calls go to the primary only. MCP tools and resources, the agent's tools
+and its per-turn lookups, and workflow steps never use another connector, even
+one that could answer. The agent also loads its plant's assets from the
+primary only. The failure-mode catalog is the exception: it is read from every
+connector that declares it.
+
+If the primary cannot be built, for example because its settings are
+rejected, Machina still starts, but degraded. Every CMMS call fails with an
+error that names the primary and says Machina does not use another CMMS in its
+place. Fix the settings and restart. A primary that is built but cannot
+connect is a different case. The MCP server logs `runtime_connector_failed`,
+and the connector's calls return its own errors. `Agent.start()` raises.
 
 #### Available types
 

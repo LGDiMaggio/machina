@@ -45,8 +45,8 @@ from machina.agent.prompts import (
     safe_text,
 )
 from machina.agent.spare_parts import bounded_spare_parts
-from machina.agent.tool_errors import read_tool_error
-from machina.connectors.base import ConnectorRegistry, set_sandbox_mode
+from machina.agent.tool_errors import public_error_text, read_tool_error
+from machina.connectors.base import set_sandbox_mode
 from machina.connectors.capabilities import Capability
 from machina.connectors.comms.types import is_affirmation, is_decline
 from machina.domain.citation import AgentResponse, Citation
@@ -55,6 +55,7 @@ from machina.exceptions import ConnectorUnsupportedFilterError, LLMError, Machin
 from machina.llm.provider import LLMProvider
 from machina.llm.tools import BUILTIN_TOOLS, MUTATING_TOOLS
 from machina.observability.tracing import ActionTracer
+from machina.runtime import _DegradedPrimaryCmms, _PrimaryCmmsRegistry, _resolve_primary_cmms
 from machina.workflows.engine import WorkflowEngine
 
 if TYPE_CHECKING:
@@ -685,7 +686,7 @@ class Agent:
             self._llm = llm
 
         # Connector registry
-        self._registry = ConnectorRegistry()
+        self._registry = _PrimaryCmmsRegistry()
         _registered_ids: set[int] = set()
         for i, conn in enumerate(connectors or []):
             cname = getattr(conn, "__class__", type(conn)).__name__
@@ -882,11 +883,23 @@ class Agent:
         contain Python callables); register them after construction
         with :meth:`register_workflow`.
 
+        The primary CMMS follows the policy :class:`~machina.runtime.MachinaRuntime`
+        follows: the single enabled connector that reads assets, or the one
+        marked ``primary: true``. Every CMMS call goes to it and never to
+        another connector; the failure-mode catalog is still read from every
+        provider. A primary that cannot be built leaves the agent degraded:
+        its CMMS calls and the asset tools report that, and no assets load.
+        Any other connector that cannot be built raises.
+
         Args:
             path: Path to the YAML configuration file.
 
         Returns:
             A fully configured ``Agent`` instance.
+
+        Raises:
+            ConnectorConfigError: The config marks no primary, or an invalid
+                one, where the policy requires one.
 
         Example:
             ```python
@@ -903,11 +916,29 @@ class Agent:
 
         plant = Plant(name=config.plant.name, location=config.plant.location)
 
-        connectors = [
-            create_connector(cc.type, cc.settings)
-            for cc in config.connectors.values()
-            if cc.enabled
-        ]
+        primary_name = _resolve_primary_cmms(config)
+        primary: Any = None
+        connectors: list[Any] = []
+        for name, cc in config.connectors.items():
+            if not cc.enabled:
+                continue
+            if name != primary_name:
+                connectors.append(create_connector(cc.type, cc.settings))
+                continue
+            try:
+                primary = create_connector(cc.type, cc.settings)
+            except Exception as exc:
+                logger.error(
+                    "connector_instantiation_failed",
+                    connector_name=name,
+                    connector_type=cc.type,
+                    error=public_error_text(exc),
+                )
+                logger.error(
+                    "primary_cmms_degraded", connector=name, error_type=type(exc).__name__
+                )
+                primary = _DegradedPrimaryCmms(name, type(exc).__name__)
+            connectors.append(primary)
 
         if config.channels:
             channels = [create_channel(ch.type, ch.settings) for ch in config.channels]
@@ -916,7 +947,7 @@ class Agent:
 
             channels = [CliChannel()]
 
-        return cls(
+        agent = cls(
             name=config.name,
             description=config.description,
             plant=plant,
@@ -927,6 +958,11 @@ class Agent:
             sandbox=config.sandbox,
             confirmations=config.confirmations,
         )
+        for registry_name, conn in agent._registry.all().items():
+            if conn is primary:
+                agent._registry.route_cmms_to(registry_name)
+                break
+        return agent
 
     # ------------------------------------------------------------------
     # Public API — workflows
@@ -989,6 +1025,9 @@ class Agent:
         # Auto-load assets from CMMS connectors
         cmms_connectors = self._registry.find_by_capability(Capability.READ_ASSETS)
         for cname, conn in cmms_connectors:
+            if isinstance(conn, _DegradedPrimaryCmms):
+                logger.error("assets_not_loaded_primary_cmms_degraded", connector=cname)
+                continue
             with self.tracer.trace("load_assets", connector=cname) as span:
                 assets = await conn.read_assets()  # type: ignore[attr-defined]
                 for asset in assets:
@@ -1033,8 +1072,8 @@ class Agent:
 
         # Collect maintenance plans from connectors that provide them
         all_plans = []
-        for _name, conn in self._registry.all().items():
-            if hasattr(conn, "_maintenance_plans"):
+        for name, conn in self._registry.all().items():
+            if self._registry.serves_cmms(name) and hasattr(conn, "_maintenance_plans"):
                 all_plans.extend(conn._maintenance_plans)
 
         analyzer = FailureAnalyzer(failure_modes=all_failure_modes)
@@ -2397,7 +2436,9 @@ class Agent:
                 # this loop.
                 write_refusal: dict[str, Any] | None = None
                 if memo_key is not None and func_name in _ASSET_TARGETED_WRITE_TOOLS:
-                    write_refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
+                    write_refusal = self._primary_cmms_degraded_refusal() or (
+                        self._authorize_write_target(args.get("asset_id", ""), chat_id)
+                    )
 
                 with self.tracer.trace(
                     "tool_call",
@@ -3049,6 +3090,9 @@ class Agent:
         chat_id: str,
     ) -> Any:
         """Route a tool call to its handler (failures: see :meth:`_execute_tool`)."""
+        if name in ("search_assets", "get_asset_details", "list_assets"):
+            self._raise_if_primary_cmms_degraded()
+
         if name == "search_assets":
             return self._tool_search_assets(args.get("query", ""))
 
@@ -3179,6 +3223,34 @@ class Agent:
     # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
+
+    def _degraded_primary_cmms(self) -> _DegradedPrimaryCmms | None:
+        """The placeholder holding a primary CMMS that failed to build, if any."""
+        for conn in self._registry.all().values():
+            if isinstance(conn, _DegradedPrimaryCmms):
+                return conn
+        return None
+
+    def _raise_if_primary_cmms_degraded(self) -> None:
+        """Raise the degraded error while the primary CMMS failed to build.
+
+        Raises:
+            ConnectorError: The primary CMMS failed to build, so no assets
+                were loaded.
+        """
+        placeholder = self._degraded_primary_cmms()
+        if placeholder is not None:
+            raise placeholder.error()
+
+    def _primary_cmms_degraded_refusal(self) -> dict[str, Any] | None:
+        """The refusal a work-order write returns while the primary CMMS failed to build.
+
+        Returned instead of raised: an exception from a write tool ends the turn.
+        """
+        placeholder = self._degraded_primary_cmms()
+        if placeholder is None:
+            return None
+        return _write_refused("primary_cmms_degraded", str(placeholder.error()))
 
     def _tool_search_assets(self, query: str) -> list[dict[str, Any]]:
         """Search assets using the entity resolver."""
@@ -3559,6 +3631,16 @@ class Agent:
         # the connector lookup) is unreachable in sandbox mode, silently making
         # the refusal conditional on exactly the mode the shipped template
         # defaults to. A refusal is not a mutation; it is not sandbox-exempt.
+        degraded = self._primary_cmms_degraded_refusal()
+        if degraded is not None:
+            logger.warning(
+                "write_refused_primary_cmms_degraded",
+                agent=self.name,
+                asset_id=args.get("asset_id", ""),
+                chat_id=chat_id,
+                operation="create_work_order",
+            )
+            return degraded
         refusal = self._authorize_write_target(args.get("asset_id", ""), chat_id)
         if refusal is not None:
             logger.warning(
@@ -3640,6 +3722,7 @@ class Agent:
         # Resolve the asset first. Catch ONLY the lookup failure — a
         # connector/catalog problem later must not masquerade as "asset not
         # found".
+        self._raise_if_primary_cmms_degraded()
         asset: Asset | None
         try:
             asset = self.plant.get_asset(asset_id)

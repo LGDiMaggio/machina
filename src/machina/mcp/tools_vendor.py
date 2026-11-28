@@ -62,7 +62,27 @@ def _runtime(ctx: Any) -> Any:
 
 
 def _find_connector_by_type(runtime: Any, type_prefix: str) -> Any | None:
-    """Find the first connector whose class name starts with the given prefix."""
+    """Find the connector a raw vendor tool of ``type_prefix`` is meant for.
+
+    A raw vendor tool is a CMMS call, so on a runtime built from config it
+    reaches the primary CMMS only: a prefix matching the primary's class name
+    selects the primary, a primary that failed to start raises its degraded
+    error, and any other prefix is refused rather than sent to another
+    connector. A runtime constructed directly keeps the first connector whose
+    class name starts with the prefix.
+
+    Raises:
+        ConnectorError: The primary CMMS failed to start, or the tool's vendor
+            is not the primary's.
+    """
+    if runtime._primary_cmms_class_name().lower().startswith(type_prefix):
+        return runtime.get_primary_cmms()
+    if runtime._primary_cmms_policy_applied:
+        runtime.get_primary_cmms()
+        raise ConnectorError(
+            "Raw vendor tools reach only the primary CMMS, and the primary CMMS "
+            "connector is of another vendor."
+        )
     for _name, conn in runtime.connectors.items():
         if type(conn).__name__.lower().startswith(type_prefix):
             return conn

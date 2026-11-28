@@ -498,9 +498,15 @@ class TestListSpareParts:
 
 
 class _SparePartsBackend:
-    """A connector type, registered per test, serving ``parts`` or raising ``failure``."""
+    """A connector type, registered per test, serving ``parts`` or raising ``failure``.
 
-    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ_SPARE_PARTS})
+    It declares ``READ_ASSETS`` because only a connector that reads assets can
+    be the primary CMMS.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.READ_ASSETS, Capability.READ_SPARE_PARTS}
+    )
     parts: ClassVar[list[SparePart]] = []
     failure: ClassVar[Exception | None] = None
 
@@ -1060,12 +1066,14 @@ class TestDiagnoseFailure:
 
     @pytest.mark.asyncio
     async def test_no_cmms_for_the_asset_lookup_is_an_error(self) -> None:
-        """With no connector that reads assets, the lookup has nowhere to go."""
+        """With no connector that reads assets, the lookup has nowhere to go.
+
+        Unconfigured is told apart from an unavailable CMMS: the tool raises
+        and the registration guard shows the error's own message.
+        """
         runtime = MachinaRuntime(connectors={"catalog": _CatalogProvider()})
-        result = await _diagnose(runtime, "P-201", "vibration")
-        assert result["error"] == (
-            "Asset lookup on the CMMS failed (ConnectorError); diagnosis could not run."
-        )
+        with pytest.raises(ConnectorError, match="No CMMS connector configured"):
+            await _diagnose(runtime, "P-201", "vibration")
 
     @pytest.mark.asyncio
     async def test_non_connector_error_propagates(self) -> None:

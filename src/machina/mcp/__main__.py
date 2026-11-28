@@ -64,10 +64,12 @@ def run_serve(args: argparse.Namespace) -> int:
 
     Returns:
         Process exit code: ``0`` after a clean shutdown, ``1`` when the
-        configuration file does not exist.
+        configuration file does not exist or the configuration is invalid
+        (for example, several CMMS connectors and no ``primary: true``).
     """
     from machina.config.loader import load_yaml
     from machina.config.schema import MachinaConfig
+    from machina.exceptions import ConnectorConfigError
     from machina.mcp import server
 
     try:
@@ -77,7 +79,11 @@ def run_serve(args: argparse.Namespace) -> int:
         return 1
 
     config = MachinaConfig.model_validate(raw)
-    server.serve(config, transport=args.transport, host=args.host, port=args.port)
+    try:
+        server.serve(config, transport=args.transport, host=args.host, port=args.port)
+    except ConnectorConfigError as exc:
+        print(f"Error: invalid configuration: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

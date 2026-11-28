@@ -14,7 +14,11 @@ class ConnectorConfig(BaseModel):
     enabled: bool = Field(default=True)
     primary: bool = Field(
         default=False,
-        description="Mark as the primary connector for its category (e.g. primary CMMS)",
+        description=(
+            "Mark as the primary CMMS, which every CMMS call goes to. Only an enabled "
+            "connector that reads assets can be primary; required when more than one "
+            "such connector is enabled"
+        ),
     )
     settings: dict[str, Any] = Field(
         default_factory=dict,

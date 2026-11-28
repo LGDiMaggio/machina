@@ -10,7 +10,8 @@ connector capabilities  →  CAPABILITY_TO_TOOL  →  registered tools
 ```
 
 Each tool but one talks to one connector: CMMS tools to the primary CMMS (the
-connector marked `primary: true`, otherwise the first one that reads assets),
+connector marked `primary: true`, or the only enabled connector that reads
+assets; see [the primary CMMS](../yaml-config.md#the-primary-cmms)),
 the others to the first connector with the needed capability. Registration
 looks at every configured connector, dispatch only at that one: a CMMS tool
 turned on by a secondary CMMS still calls the primary, and fails when the
@@ -265,8 +266,9 @@ an invalid `resource_type` or `resource_id` in `maximo_raw_attribute_update`,
 an empty `asset_id` in `machina_get_maintenance_history` (never an empty
 history), an alarm source without `get_alarms()`, connector failures in
 `machina_list_assets`, `machina_get_maintenance_history` and
-`machina_send_message`, and an unavailable catalog or asset lookup in
-`machina_diagnose_failure` (which names the error type only). Any other connector failure — and
+`machina_send_message`, and an unavailable catalog, or an asset lookup the CMMS
+could not answer, in `machina_diagnose_failure` (which names the error type
+only; a primary CMMS that failed to start, or no CMMS at all, raises instead). Any other connector failure — and
 `machina_create_work_order` on an unknown asset, or with a `priority` or
 `work_order_type` that is not one of the valid values it lists — raises: the
 client receives an MCP error result (`isError: true`); the Python traceback is
